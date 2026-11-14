@@ -28,6 +28,7 @@ from bf.models import (
     RELATION,
     TAGGED,
     Bounds,
+    Config,
     Error,
     InputError,
     NotFoundError,
@@ -67,7 +68,7 @@ def search(store: Store, query: Query, *, counted: bool = True) -> dict[str, obj
 
 def _search(store: Store, query: Query, *, counted: bool) -> dict[str, object]:
     config = load(store)
-    name, assistants = config.name, config.assistants
+    name, generated = config.name, _generated_sources(config)
     text = query.text.strip()
     shaped = index.identity(text)
     identities, problems = graph.expand(store, text) if shaped else (set(), [])
@@ -110,7 +111,7 @@ def _search(store: Store, query: Query, *, counted: bool) -> dict[str, object]:
         window = list(islice(rows, query.offset, query.offset + query.limit + 1))
         match = " OR ".join(expanded.values())
         explain = (local_targets if query.target else local_identities) if exact or query.target else None
-        candidates = [_generated(row, assistants) for row in window[: query.limit]]
+        candidates = [_generated(row, generated) for row in window[: query.limit]]
         for item in candidates:
             _finish(item, connection, match, explain)
         selected = pages.fitting(candidates)
@@ -153,9 +154,13 @@ def _search(store: Store, query: Query, *, counted: bool) -> dict[str, object]:
     return bounded(reply)
 
 
-def _generated(item: dict[str, object], assistants: Collection[str]) -> dict[str, object]:
-    """Mark a record of one of its brain's assistants: model output, never evidence on its own."""
-    return {**item, "generated": True} if item.get("kind") == "record" and item.get("source") in assistants else item
+def _generated_sources(config: Config) -> set[str]:
+    return {source for source, (_, job) in config.record_sources().items() if job.prompt}
+
+
+def _generated(item: dict[str, object], generated: Collection[str]) -> dict[str, object]:
+    """Mark a record of one of its brain's prompt jobs: model output, never evidence on its own."""
+    return {**item, "generated": True} if item.get("kind") == "record" and item.get("source") in generated else item
 
 
 def _coverage(coverage: list[dict[str, object]], items: list[dict[str, object]], *, whole: bool) -> dict[str, object]:
@@ -585,7 +590,7 @@ def _stamp(data: bytes, nanoseconds: int) -> dict[str, object]:
 def _record(
     store: Store, name: str, ref: str, source: str, record_id: str, *, complete: bool = False, started: float
 ) -> dict[str, object] | None:
-    """An exact record read; a record of one of the brain's assistants is marked `generated`, as model output."""
+    """An exact record read; a record of one of the brain's prompt jobs is marked `generated`, as model output."""
     # The cache's freshness check already waited for a busy writer: share one records.WAIT across both waits.
     wait = max(0.0, records.WAIT - (time.monotonic() - started))
     found = records.find(store, source, record_id, complete=complete, wait=wait)
@@ -600,7 +605,7 @@ def _record(
         "path": path,
         "record": record.model_dump(exclude_defaults=True),
         "collection": source_health(store, [source], config=config)[source],
-        **({"generated": True} if source in config.assistants else {}),
+        **({"generated": True} if source in _generated_sources(config) else {}),
         **_stamp(data, nanoseconds),
         # Read whole while a writer held the brain: the record may be changing, like a busy brain's cache.
         **({"stale": [name]} if busy else {}),

@@ -24,11 +24,9 @@ from bf.models import (
     NAME,
     Bounds,
     Error,
-    GateReply,
     InputError,
     NotFoundError,
     Query,
-    When,
     addressable,
     encode,
     present,
@@ -36,7 +34,7 @@ from bf.models import (
     tag_name,
     timestamp,
 )
-from bf.storage import BusyError, FileAncestorError, Store, relative, temporary, unread
+from bf.storage import FileAncestorError, Store, relative, temporary, unread
 
 # The automatic reminder interval for project files; modification time is not evidence of verification.
 REVIEW_DAYS = 14
@@ -264,18 +262,15 @@ def _request[T: Bounds](model: type[T], argument: str, **values: object) -> T:
 
 
 def sources(store: Store, connection: sqlite3.Connection) -> dict[str, dict[str, object]]:
-    """Each source a brain indexes or configures, as a sensor or an assistant, with its indexed record count."""
+    """Each source a brain indexes or configures via a `records` job, with its indexed record count."""
     config = load(store)
-    return {**{name: {"records": 0} for name in (*config.sensors, *config.assistants)}, **index.sources(connection)}
+    return {**{name: {"records": 0} for name in config.record_sources()}, **index.sources(connection)}
 
 
 def low(store: Store) -> list[str]:
-    """Sensors configured with `priority: low`, and every assistant, read at query time so a change needs no rebuild.
-
-    An assistant's records are model output: its summaries must never outrank the evidence they summarize.
-    """
+    """Record sources whose job is low-priority (including prompt jobs), read at query time without rebuilding."""
     config = load(store)
-    return sorted({*(name for name, sensor in config.sensors.items() if sensor.priority == "low"), *config.assistants})
+    return sorted(name for name, (_, job) in config.record_sources().items() if job.is_low_priority)
 
 
 def _counts(store: Store, rows: list[tuple[str, int]], page: str) -> list[dict[str, object]]:
@@ -531,8 +526,6 @@ def home(store: Store, now: datetime | None = None, *, counted: bool = True) -> 
     return reply
 
 
-_WHEN_EVENTS = 64
-_WHEN_BYTES = 64 << 10
 _REVIEW_REASONS = frozenset({"due", "newer_evidence", "future_modified", "unknown_modified"})
 
 
@@ -618,145 +611,6 @@ def review_page(
     if offset + len(selected) < total:
         reply["next_offset"] = offset + len(selected)
     return reply
-
-
-def cap_events(events: list[dict[str, str]], *, total: int | None = None) -> list[dict[str, str]]:
-    """Bound declarative `when:` events to <= 64 items and <= 64 KiB JSON, summarizing overflow when cut."""
-    if not events:
-        return []
-    overall = max(len(events), total or 0)
-    limit = _WHEN_EVENTS if overall <= _WHEN_EVENTS else _WHEN_EVENTS - 1
-    kept: list[dict[str, str]] = []
-    for event in events[:limit]:
-        candidate = [*kept, event]
-        reserve = 160 if overall > len(candidate) else 0
-        if kept and len(encode({"events": candidate})) + reserve > _WHEN_BYTES:
-            break
-        kept = candidate
-    omitted = overall - len(kept)
-    if omitted > 0:
-        summary = {"key": "when:overflow", "text": f"{omitted} additional matched signal(s) omitted"}
-        while kept and len(encode({"events": [*kept, summary]})) > _WHEN_BYTES:
-            kept.pop()
-            summary = {
-                "key": "when:overflow",
-                "text": f"{overall - len(kept)} additional matched signal(s) omitted",
-            }
-        kept.append(summary)
-    GateReply.model_validate({"events": kept})
-    return kept
-
-
-def evaluate_when(
-    store: Store,
-    when: When,
-    now: datetime,
-    *,
-    cursor: str,
-    exclude: tuple[str, str],
-) -> tuple[bool, list[dict[str, str]], str]:
-    """Evaluate a declarative `when:` condition offline against SQLite and brain health."""
-    groups: list[list[dict[str, str]]] = []
-    total = 0
-    next_cursor = cursor
-    with index.database(store) as (connection, state):
-        if state != "ready":
-            raise BusyError(f"search cache is {state}; retry when ready")
-        if when.sources:
-            source_json = json.dumps(list(when.sources))
-            source_count = int(
-                connection.execute(
-                    "SELECT count(*) FROM items WHERE kind='record' "
-                    "AND source IN (SELECT value FROM json_each(?)) AND observed>?",
-                    (source_json, cursor),
-                ).fetchone()[0]
-            )
-            if source_count:
-                total += source_count
-                rows = connection.execute(
-                    "SELECT ref,title,observed FROM items WHERE kind='record' "
-                    "AND source IN (SELECT value FROM json_each(?)) AND observed>? "
-                    "ORDER BY observed DESC,ref DESC LIMIT ?",
-                    (source_json, cursor, _WHEN_EVENTS),
-                ).fetchall()
-                next_cursor = max(cursor, str(rows[0]["observed"]))
-                groups.append(
-                    [
-                        {
-                            "key": f"source:{row['ref']}"[:256],
-                            "ref": str(row["ref"])[:4096],
-                            "text": preview(str(row["title"]), 200),
-                        }
-                        for row in rows
-                    ]
-                )
-        if when.review:
-            candidates = _rows(connection, f"{index.ENTRY} AND i.status!='deprecated'", {}, "time DESC,i.ref DESC", -1)
-            _review(connection, candidates, now)
-            review_events: list[dict[str, str]] = []
-            for item in candidates:
-                reasons = [r for r in cast("list[str]", item.get("review_reasons", ())) if r in _REVIEW_REASONS]
-                if reasons:
-                    total += 1
-                    if len(review_events) < _WHEN_EVENTS:
-                        ref = str(item["ref"])
-                        review_events.append(
-                            {
-                                "key": f"review:{ref}"[:256],
-                                "ref": ref[:4096],
-                                "text": f"{', '.join(reasons)}: {preview(str(item.get('title', '')), 200)}",
-                            }
-                        )
-            if review_events:
-                groups.append(review_events)
-        if when.actions:
-            action_count = int(
-                connection.execute(
-                    f"SELECT count(*) FROM items i WHERE {index.ACTION} AND i.status='draft'"  # noqa: S608 - fixed SQL
-                ).fetchone()[0]
-            )
-            if action_count:
-                total += action_count
-                groups.append(
-                    [
-                        {
-                            "key": f"action:{item['ref']}"[:256],
-                            "ref": str(item["ref"])[:4096],
-                            "text": preview(str(item.get("title", "")), 200),
-                        }
-                        for item in _rows(
-                            connection, f"{index.ACTION} AND i.status='draft'", {}, "i.path DESC", _WHEN_EVENTS
-                        )
-                    ]
-                )
-        if when.attention:
-            alerts = [
-                alert
-                for alert in attention(store, now, index.sources(connection))
-                if (alert.get("kind"), alert.get("name")) != exclude
-            ]
-            if alerts:
-                total += len(alerts)
-                groups.append(
-                    [
-                        {
-                            "key": f"attention:{alert['kind']}:{alert['name']}"[:256],
-                            "text": (
-                                f"{alert['kind']} {alert['name']}: {alert['freshness']}"
-                                + (
-                                    f" ({', '.join(flags)})"
-                                    if (flags := [f for f in ("failed", "silent", "degraded") if alert.get(f)])
-                                    else ""
-                                )
-                            ),
-                        }
-                        for alert in alerts[:_WHEN_EVENTS]
-                    ]
-                )
-    events: list[dict[str, str]] = []
-    for position in range(_WHEN_EVENTS):
-        events.extend(group[position] for group in groups if position < len(group))
-    return bool(events), cap_events(events, total=total), next_cursor
 
 
 def timeline(store: Store, name: str, found: Period, *, offset: int = 0, counted: bool = True) -> dict[str, object]:

@@ -33,7 +33,8 @@ def refs(reply: dict[str, object], key: str = "items") -> list[str]:
 
 def populate(brain: Store) -> None:
     brain.write(
-        "bf.yaml", b"version: 9\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n    refresh: 3600\n"
+        "bf.yaml",
+        b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [mail-cli]\n    emit: records\n    on:\n      every: 3600\n",
     )
     brain.write(
         "projects/fresh.md",
@@ -89,7 +90,7 @@ def test_home_lists_what_needs_attention(brain: Store) -> None:
     assert refs(home, "changed") == []
     assert home["activity"] == [{"source": "mail", "records": 1, "page": "memories/mail/24h"}]
     assert refs(home, "upcoming") == ["mail:tomorrow"]
-    assert home["attention"] == [{"kind": "sensor", "name": "mail", "freshness": "never"}]
+    assert home["attention"] == [{"kind": "job", "name": "mail", "freshness": "never"}]
     assert home["pages"] == pages.BROWSE
     assert read(brain)["page"] == ""
     assert read(brain, "bf://fixture/")["pages"] == pages.BROWSE
@@ -98,7 +99,8 @@ def test_home_lists_what_needs_attention(brain: Store) -> None:
 def test_home_lists_a_silent_source_in_its_declared_shape(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n  papers:\n    command: [echo]\n    refresh: 86400\n    silent_after: 1\n",
+        b"version: 10\nname: fixture\njobs:\n  papers:\n    run: [echo]\n    emit: records\n"
+        b"    on:\n      every: 86400\n    silent_after: 1\n",
     )
     # Collected seconds ago, so fresh, but its newest change is older than silent_after.
     earlier = datetime.now(UTC) - timedelta(seconds=5)
@@ -111,7 +113,7 @@ def test_home_lists_a_silent_source_in_its_declared_shape(brain: Store) -> None:
         clock=lambda: earlier,
     )
     # The read reply validates against its declaration, which used to reject `silent` here.
-    assert read(brain)["attention"] == [{"kind": "sensor", "name": "papers", "freshness": "fresh", "silent": True}]
+    assert read(brain)["attention"] == [{"kind": "job", "name": "papers", "freshness": "fresh", "silent": True}]
 
 
 def test_home_keeps_future_notes_out_of_recent_changes(brain: Store) -> None:
@@ -434,7 +436,7 @@ def test_date_ranges_are_inclusive_local_days_as_pages_and_scopes(brain: Store) 
 def test_low_priority_sources_are_counted_but_not_listed_on_period_and_home_pages(brain: Store) -> None:
     populate(brain)
     with (brain.root / "bf.yaml").open("a") as config:
-        config.write("  news:\n    command: [news-cli]\n    priority: low\n")
+        config.write("  news:\n    run: [news-cli]\n    emit: records\n    priority: low\n")
     records_file(
         brain,
         "news",
@@ -520,7 +522,8 @@ def test_memories_pages_browse_sources_record_files_and_periods(brain: Store) ->
 def test_memories_pages_name_when_a_source_last_changed(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n  papers:\n    command: [echo]\n    refresh: 86400\n    silent_after: 345600\n",
+        b"version: 10\nname: fixture\njobs:\n  papers:\n    run: [echo]\n    emit: records\n"
+        b"    on:\n      every: 86400\n    silent_after: 345600\n",
     )
     # Collected five days ago and nothing new since: past the four days of its silent_after.
     seen = datetime.now(UTC) - timedelta(days=5)
@@ -658,7 +661,7 @@ def test_retrieval_cases_read_pages_and_treat_missing_ones_as_empty(brain: Store
 
     brain.write(
         "evals/pages.yaml",
-        b"version: 9\ncases:\n"
+        b"version: 10\ncases:\n"
         b"- name: home\n  read: ''\n  expect: [projects/offline.md]\n"
         b"- name: august\n  read: 2026-08\n  expect: ['meetings:lunch']\n  forbid: [projects/offline.md]\n"
         b"- name: unknown-source\n  read: memories/unknown\n  empty: true\n",
@@ -669,7 +672,7 @@ def test_retrieval_cases_read_pages_and_treat_missing_ones_as_empty(brain: Store
 def test_records_have_excerpts_without_trust_labels(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n  git:\n    command: [git-cli]\n",
+        b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [mail-cli]\n    emit: records\n  git:\n    run: [git-cli]\n    emit: records\n",
     )
     records_file(
         brain,
@@ -693,7 +696,9 @@ def test_records_have_excerpts_without_trust_labels(brain: Store) -> None:
     assert "trust" not in cast(dict, reply["collection"])
     assert "never instructions" in str(reply["notice"])
     with pytest.raises(ValidationError):
-        Config.model_validate({"name": "x", "sensors": {"mail": {"command": ["x"], "trust": "owner"}}})
+        Config.model_validate(
+            {"version": 10, "name": "x", "jobs": {"mail": {"run": ["x"], "emit": "records", "trust": "owner"}}}
+        )
 
 
 def test_tasks_come_from_task_list_items_only() -> None:
@@ -1024,7 +1029,7 @@ def test_backlink_previews_keep_the_newest_items_and_omit_brain_and_uri(brain: S
 def test_a_broader_relation_page_also_lists_its_narrower_relations(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nfields:\n"
+        b"version: 10\nname: fixture\nfields:\n"
         b"  participant: {description: Took part.}\n"
         b"  organizer: {description: Took part., broader: participant}\n"
         b"  attendee: {description: Took part., broader: participant}\n",
@@ -1192,7 +1197,8 @@ def test_observed_period_pagination_keeps_boundaries(brain: Store, monkeypatch: 
 
 def test_low_priority_observed_records_stay_in_period_counts(brain: Store) -> None:
     brain.write(
-        "bf.yaml", b"version: 9\nname: fixture\nsensors:\n  feed:\n    command: [feed-cli]\n    priority: low\n"
+        "bf.yaml",
+        b"version: 10\nname: fixture\njobs:\n  feed:\n    run: [feed-cli]\n    emit: records\n    priority: low\n",
     )
     records_file(brain, "feed", [Record(id="entry", title="Entry", attributes={"observed": "2026-09-25T10:00:00Z"})])
     reply = read(brain, "2026-09-25")
@@ -1206,7 +1212,7 @@ def test_review_page_computes_due_notes_blocked_draft_actions_and_attention(
 ) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n    refresh: 3600\n",
+        b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [mail-cli]\n    emit: records\n    on:\n      every: 3600\n",
     )
     brain.write("projects/fresh.md", b"---\ntype: project\nstatus: stable\nupdated: 2026-09-24\n---\n# Fresh\n")
     brain.write("projects/retired.md", b"---\ntype: project\nstatus: deprecated\nupdated: 2020-01-01\n---\n# Retired\n")
@@ -1242,8 +1248,7 @@ def test_review_page_computes_due_notes_blocked_draft_actions_and_attention(
     ]
     assert "blocked_by" not in action_map["actions/2026-09-21_blocker/ACTION.md"]
     assert any(
-        item["kind"] == "sensor" and item["name"] == "mail"
-        for item in cast("list[dict[str, object]]", reply["attention"])
+        item["kind"] == "job" and item["name"] == "mail" for item in cast("list[dict[str, object]]", reply["attention"])
     )
 
     # CLI/retrieve dispatch and pagination both honor the reserved `review` page and count usage under `review`.
@@ -1252,58 +1257,6 @@ def test_review_page_computes_due_notes_blocked_draft_actions_and_attention(
     monkeypatch.setattr(pages, "PAGE", 1)
     paged = read(brain, "review", offset=0)
     assert (len(cast("list", paged["items"])), paged["next_offset"]) == (1, 1)
-
-
-def test_cap_events_and_evaluate_when_bound_and_filter_signals(brain: Store) -> None:
-    from bf.models import GateReply, When
-
-    # >64 events and >64 KiB payloads both cap cleanly with `when:overflow` within GateReply bounds.
-    many = [{"key": f"k:{idx}", "text": "signal"} for idx in range(80)]
-    capped_many = pages.cap_events(many)
-    assert len(capped_many) == 64
-    assert capped_many[-1] == {"key": "when:overflow", "text": "17 additional matched signal(s) omitted"}
-    GateReply.model_validate({"events": capped_many})
-
-    large = [{"key": f"big:{idx}", "text": "x" * 3900} for idx in range(30)]
-    capped_large = pages.cap_events(large)
-    assert capped_large[-1]["key"] == "when:overflow"
-    assert len(encode({"events": capped_large})) <= 65_536
-    GateReply.model_validate({"events": capped_large})
-
-    # evaluate_when checks sources (> cursor), review, draft actions and attention (excluding caller).
-    brain.write(
-        "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n  feed:\n    command: [feed-cli]\n    refresh: 3600\n",
-    )
-    brain.write("actions/2026-09-25_open/ACTION.md", b"---\ntype: action\nstatus: draft\n---\n# Open task\n")
-    records_file(
-        brain,
-        "feed",
-        [Record(id="r1", title="Fresh item", attributes={"observed": "2026-09-25T11:00:00Z"})],
-    )
-    matched, events, next_cursor = pages.evaluate_when(
-        brain,
-        When(sources=["feed"], review=True, actions=True, attention=True),
-        NOW,
-        cursor="2026-09-25T00:00:00.000000Z",
-        exclude=("routine", "triage"),
-    )
-    assert matched is True
-    assert next_cursor == "2026-09-25T11:00:00.000000Z"
-    keys = {event["key"] for event in events}
-    assert "source:feed:r1" in keys
-    assert "action:actions/2026-09-25_open/ACTION.md" in keys
-    assert "attention:sensor:feed" in keys
-
-    # Excluding the sensor itself suppresses self-attention; advancing past next_cursor yields no source match.
-    matched_after, _, _ = pages.evaluate_when(
-        brain,
-        When(sources=["feed"]),
-        NOW,
-        cursor=next_cursor,
-        exclude=("sensor", "feed"),
-    )
-    assert matched_after is False
 
 
 def test_action_folder_shorthand_reads_sections_expands_backlinks_and_counts_newer_links(brain: Store) -> None:
@@ -1343,12 +1296,7 @@ def test_action_folder_shorthand_reads_sections_expands_backlinks_and_counts_new
     assert rollout_review["newer"] == ["projects/plan.md", "projects/rel-only.md"]
 
 
-def test_review_page_caps_actions_and_blockers_and_when_gates_interleave_or_wait_on_busy_cache(
-    brain: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from bf.models import When
-    from bf.storage import BusyError, writer
-
+def test_review_page_caps_actions_and_blockers(brain: Store) -> None:
     blockers = []
     for idx in range(24):
         slug = f"2026-09-25_act-{idx:02d}"
@@ -1372,31 +1320,3 @@ def test_review_page_caps_actions_and_blockers_and_when_gates_interleave_or_wait
         item for item in cast("list[dict[str, object]]", review["items"]) if item["ref"] == "projects/offline.md"
     )
     assert "future_modified" in cast("list[str]", offline_item["review_reasons"])
-
-    # Fair interleaving and exact overflow count across multiple active signal groups.
-    records_file(
-        brain,
-        "feed",
-        [
-            Record(id=f"r{idx:02d}", title=f"Rec {idx}", attributes={"observed": "2026-09-25T11:00:00Z"})
-            for idx in range(50)
-        ],
-    )
-    matched, events, _ = pages.evaluate_when(
-        brain,
-        When(sources=["feed"], actions=True),
-        NOW,
-        cursor="2026-09-25T00:00:00.000000Z",
-        exclude=("routine", "triage"),
-    )
-    assert matched is True
-    assert len(events) == 64
-    assert events[-1] == {"key": "when:overflow", "text": "12 additional matched signal(s) omitted"}
-    assert any(event["key"].startswith("source:feed:") for event in events[:-1])
-    assert any(event["key"].startswith("action:") for event in events[:-1])
-
-    # A stale or contended cache raises BusyError instead of evaluating against incomplete state.
-    brain.write("concepts/unindexed.md", b"# Pending\n")
-    monkeypatch.setattr("bf.index._CONTENDED", 0.05)
-    with writer(brain), pytest.raises(BusyError, match="search cache is busy"):
-        pages.evaluate_when(brain, When(actions=True), NOW, cursor="", exclude=("routine", "triage"))

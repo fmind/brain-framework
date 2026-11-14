@@ -21,14 +21,13 @@ from typer.core import TyperGroup
 from typer.main import get_command
 from typer.testing import CliRunner
 
-from bf import __version__, assistants, index, links, pages, records, retrieve
+from bf import __version__, index, links, pages, records, retrieve
 from bf.cli import app, main
 from bf.config import load, user_config
 from bf.mcp import server
-from bf.messages import Message, Outgoing
-from bf.models import CACHE_ERROR, Error, NotFoundError, Record, Send, timestamp
+from bf.models import CACHE_ERROR, Error, NotFoundError, Record, timestamp
 from bf.retrieve import read
-from bf.runtime import Queue
+from bf.runtime import Message, Outgoing, Queue
 from bf.storage import Store, writer
 from conftest import plain, records_file
 
@@ -87,34 +86,45 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
     }
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 9\ncases:\n  - name: decision\n    query: retention decision\n    expect: [projects/offline.md]\n",
+        b"version: 10\ncases:\n  - name: decision\n    query: retention decision\n    expect: [projects/offline.md]\n",
     )
     assert invoke("eval", "--brain", "fixture")["passed"]
-    brain.write("evals/retrieval.yaml", b"version: 9\ncases:\n  - name: missing\n    query: lunch\n    empty: true\n")
+    brain.write("evals/retrieval.yaml", b"version: 10\ncases:\n  - name: missing\n    query: lunch\n    empty: true\n")
     failed = invoke("eval", "--brain", "fixture", code=1)
     assert failed["cases"][0]["returned"] == ["meetings:lunch"]
     other = tmp_path / "clone"
     other.mkdir()
-    (other / "bf.yaml").write_text("version: 9\nname: clone\n")
+    (other / "bf.yaml").write_text("version: 10\nname: clone\n")
     assert invoke("register", str(other))["brain"] == "clone"
-    assert invoke("update", "--brain", "clone", "--dry-run")["sensors"] == []
+    assert invoke("update", "--brain", "clone", "--dry-run")["jobs"] == []
     brain.write("projects/bad.md", b"# Bad [x](missing.md)\n")
     assert not invoke("validate", "--brain", "fixture", code=1)["valid"]
     assert invoke("schema")["title"] == "Config"
 
 
 def test_status_check_fails_on_overdue_sources(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 9\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n")
+    brain.write(
+        "bf.yaml",
+        b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n",
+    )
     report = invoke("status", "--brain", "fixture", "--check", code=1)
     assert report["sources"]["mail"]["freshness"] == "never"
-    brain.write("bf.yaml", b"version: 9\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n")
+    brain.write(
+        "bf.yaml", b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [sh, -c, exit 3]\n    emit: records\n"
+    )
     assert invoke("collect", "mail", "--brain", "fixture", "--since", "2d", code=1) == {}
-    # A failed manual sensor is reported with its log, but only scheduled programs fail the check.
-    entry = invoke("status", "--brain", "fixture", "--check", code=0)["sources"]["mail"]
+    # A failed manual job reports its error, log and attention entry and fails --check while enabled.
+    entry = invoke("status", "--brain", "fixture", "--check", code=1)["jobs"]["mail"]
     assert "status 3" in entry["error"]
     assert entry["log"].endswith("mail.log")
     brain.write(
-        "bf.yaml", b"version: 9\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n    refresh: 60\n"
+        "bf.yaml",
+        b"version: 10\nname: fixture\njobs:\n  mail:\n    enabled: false\n    run: [sh, -c, exit 3]\n    emit: records\n",
+    )
+    assert invoke("status", "--brain", "fixture", "--check", code=0)["healthy"] is True
+    brain.write(
+        "bf.yaml",
+        b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [sh, -c, exit 3]\n    emit: records\n    on: {every: 60}\n",
     )
     assert invoke("status", "--brain", "fixture", "--check", code=1)["healthy"] is False
 
@@ -122,25 +132,26 @@ def test_status_check_fails_on_overdue_sources(brain: Store) -> None:
 def test_status_and_queue_state_every_instant_with_the_local_offset(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nchannels:\n  chat:\n    send: {command: [send-chat]}\n"
-        b"    stream: {command: [receive-chat]}\nassistants:\n  personal:\n    prompt: prompts/personal.md\n"
-        b"    command: [harness]\n    inputs:\n      - channel: {name: chat, mode: stream}\n"
-        b"    schedules:\n      review: {every: 1800}\n",
+        b"version: 10\nname: fixture\njobs:\n  chat:\n    run: [receive-chat]\n    emit: messages\n"
+        b"    on: {daemon: true}\n    send: [send-chat]\n  personal:\n    prompt: prompts/personal.md\n"
+        b"    harness: [harness]\n    emit: message\n    post: chat\n"
+        b"    on:\n      - {every: 1800}\n      - {event: {kind: channel.received, source: chat}}\n",
     )
-    brain.write("prompts/personal.md", b"Answer {{input}}.\n")
+    brain.write("prompts/personal.md", b"Answer {{context}}.\n")
     at = datetime.now(UTC).isoformat()
     message = Message(id="m-1", sender="owner", conversation="thread-1", time=timestamp(at), text="Why?")
-    assistants.accept(brain, "chat", [message], {"personal"})
-    Queue(brain).send("chat", Send(command=["send-chat"]), Outgoing(id="delivery-1", text="Hello"))
+    Queue(brain).admit("chat", [message])
+    Queue(brain).enqueue_delivery("chat", Outgoing(id="delivery-1", text="Hello"), ["send-chat"])
+    Queue(brain).request_wake("personal", reason="Follow up")
     entry = invoke("status", "--brain", "fixture")
     replies = [
-        entry["assistants"],
-        entry["messaging"],
+        entry["jobs"],
+        entry["queue"],
         invoke("queue", "--brain", "fixture"),
         invoke("queue", "delivery-1", "--brain", "fixture"),
     ]
     instants = re.findall(r'"(\d{4}-\d\d-\d\dT[^"]*)"', json.dumps(replies))
-    # A schedule's next run, a job's creation and a delivery's due time, like every other reply time.
+    # A schedule's next run, a wake's due time and a delivery's due time, like every other reply time.
     assert len(instants) >= 4
     assert all(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00", instant) for instant in instants), instants
 
@@ -414,7 +425,7 @@ def test_encoding_failures_name_the_note_and_replies_stay_utf8(brain: Store) -> 
 def test_eval_rejects_malformed_cases_before_any_retrieval(brain: Store, case: str, location: str, reason: str) -> None:
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 9\ncases:\n  - name: valid\n    query: offline\n    expect: [projects/offline.md]\n"
+        b"version: 10\ncases:\n  - name: valid\n    query: offline\n    expect: [projects/offline.md]\n"
         b"  - name: malformed\n" + case.encode(),
     )
     result = CliRunner().invoke(app, ["eval", "--brain", "fixture"])
@@ -428,7 +439,7 @@ def test_eval_rejects_malformed_cases_before_any_retrieval(brain: Store, case: s
 def test_eval_reports_ranks_and_compares_them_with_a_baseline(brain: Store, tmp_path: Path) -> None:
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 9\ncases:\n"
+        b"version: 10\ncases:\n"
         b"  - name: decision\n    query: retention decision\n    expect: [projects/offline.md#decision]\n"
         b"  - name: rollout\n    query: rollout checklist\n    expect: [bf://fixture/projects/rollout.md]\n"
         b"  - name: unknown-source\n    query: x\n    scope: memories/absent\n    expect: [absent:x]\n"
@@ -482,7 +493,7 @@ def test_eval_reads_every_page_of_a_long_note(brain: Store) -> None:
     assert "Closing marker" not in first["text"]
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 9\ncases:\n  - name: long\n    read: concepts/long.md\n    text: [Closing marker]\n",
+        b"version: 10\ncases:\n  - name: long\n    read: concepts/long.md\n    text: [Closing marker]\n",
     )
     assert invoke("eval", "--brain", "fixture")["score"] == "1/1"
 
@@ -544,53 +555,46 @@ def test_new_brains_point_editors_at_the_schemas_of_their_release(tmp_path: Path
     ("config", "expected"),
     [
         (
-            "sensors:\n  brief:\n    command: [python3]\n    refesh: 60\n",
-            "sensors.brief.refesh: unknown key; did you mean refresh?",
+            "jobs:\n  brief:\n    run: [python3]\n    reconcil: 60\n",
+            "jobs.brief.reconcil: unknown key; did you mean reconcile?",
         ),
-        ("sensor:\n  brief:\n    command: [python3]\n", "sensor: unknown key; did you mean sensors?"),
-        # A map entry name and a discriminated union's tag lead to the settings allowed there.
+        ("job:\n  brief:\n    run: [python3]\n", "job: unknown key; did you mean jobs?"),
+        # Map entries and nested specs lead to the settings allowed there.
         (
-            (
-                "channels:\n  chat: {send: {command: [python3]}, read: {command: [python3]}}\nassistants:\n  helper:\n"
-                "    command: [python3]\n    prompt: prompts/helper.md\n"
-                "    inputs: [{channel: {name: chat, mode: read, every: 60, evry: 60}}]\n"
-            ),
-            "assistants.helper.inputs.0.channel.read.evry: unknown key; did you mean every?",
+            "jobs:\n  helper:\n    run: [python3]\n    emit: records\n    map: {items: /items, id: /id, creted: /created}\n",
+            "jobs.helper.map.creted: unknown key; did you mean created?",
         ),
         (
-            (
-                "assistants:\n  helper:\n    command: [python3]\n    prompt: prompts/helper.md\n"
-                "    schedules: {morning: {at: '25:61'}}\n"
-            ),
-            "assistants.helper.schedules.morning.at: expected HH:MM such as 08:00",
+            "jobs:\n  helper:\n    harness: [python3]\n    prompt: prompts/helper.md\n    on: [{at: '25:61'}]\n",
+            "at: expected HH:MM such as 08:00",
         ),
         (
             "fields:\n  owner:\n    descripton: Owner.\n",
             "fields.owner.descripton: unknown key; did you mean description?",
         ),
         (
-            (
-                "assistants:\n  helper:\n    command: [python3]\n    prompt: prompts/helper.md\n"
-                "    reply: {path: structured_output}\n"
-            ),
-            "assistants.helper.reply.path: expected a JSON pointer starting with /, or empty for the whole stdout",
+            "jobs:\n  helper:\n    harness: [python3]\n    prompt: prompts/helper.md\n    extract: structured_output\n",
+            "jobs.helper.extract: expected a JSON pointer starting with /",
         ),
         (
-            "sensors:\n  brief:\n    command: python3 sensors/brief.py\n",
-            "sensors.brief.command: expected an argv list, one string per argument, such as [python3, script.py]",
+            "jobs:\n  brief:\n    run: python3 sensors/brief.py\n",
+            "jobs.brief.run: expected an argv list, one string per argument, such as [python3, script.py]",
         ),
         # Other reasons keep their wording.
         ("watch: {interval: 1}\n", "watch.interval: Input should be greater than or equal to 5"),
     ],
-    ids=["setting", "section", "union-tag", "at", "relation-key", "reply-path", "command", "other"],
+    ids=["setting", "section", "nested-spec", "at", "relation-key", "extract-path", "command", "other"],
 )
 def test_bf_yaml_mistakes_get_plain_reasons_and_the_closest_allowed_key(
     brain: Store, config: str, expected: str
 ) -> None:
-    brain.write("bf.yaml", b"version: 9\nname: fixture\n" + config.encode())
+    brain.write("bf.yaml", b"version: 10\nname: fixture\n" + config.encode())
     with pytest.raises(Error) as caught:
         load(brain)
-    assert str(caught.value) == f"invalid bf.yaml: {expected}"
+    if config.endswith("25:61'}]\n"):
+        assert str(caught.value).endswith(expected)
+    else:
+        assert str(caught.value) == f"invalid bf.yaml: {expected}"
     # Values are never quoted.
     assert not {"25:61", "structured_output", "sensors/brief.py"} & set(str(caught.value).split())
 
@@ -703,7 +707,7 @@ def text(result: object) -> str:
 def test_typed_tag_links_validate_and_read_through_cli_and_mcp(brain: Store, tag: str) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nfields:\n  depends-on:\n    description: Explicit dependency.\n",
+        b"version: 10\nname: fixture\nfields:\n  depends-on:\n    description: Explicit dependency.\n",
     )
     brain.write("projects/member.md", f"---\ntype: project\ntags: [{json.dumps(tag)}]\n---\n# Tagged\n".encode())
     target = links.address("fixture", f"tags/{tag}")
@@ -1023,7 +1027,7 @@ def test_export_scope_selects_the_items_search_would_search_without_pages(brain:
 
 
 def test_errors_name_what_exists(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 9\nname: fixture\nsensors:\n  briefs:\n    command: [echo]\n")
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  briefs:\n    run: [echo]\n    emit: records\n")
     runner = CliRunner()
     # A mistyped page or note path names its closest existing ones.
     for ref, hint in (("project", "projects"), ("projects/ofline.md", "projects/offline.md")):
@@ -1034,7 +1038,7 @@ def test_errors_name_what_exists(brain: Store) -> None:
     result = runner.invoke(app, ["read", "projects/offline.md#context", "--brain", "fixture"])
     assert "heading #context does not exist; its sections: #offline-retrieval, #decision" in str(result.exception)
     result = runner.invoke(app, ["collect", "brief", "--brain", str(brain.root)])
-    assert "unknown sensor brief; check names in bf.yaml; did you mean briefs?" in str(result.exception)
+    assert "unknown job brief; check jobs in bf.yaml; did you mean briefs?" in str(result.exception)
 
 
 @pytest.mark.parametrize("kind", ["permission", "encoding", "argument", "cache"])
@@ -1097,7 +1101,7 @@ def test_diagnostics_escape_terminal_controls_in_brain_file_names(
     assert isinstance(missing, CallToolResult)
     assert shown in text(missing)
     # A bf.yaml key reaches every command's failure through its validation message.
-    brain.write("bf.yaml", b'version: 9\nname: fixture\n"\\e]0;K\\a": 1\n')
+    brain.write("bf.yaml", b'version: 10\nname: fixture\n"\\e]0;K\\a": 1\n')
     monkeypatch.setattr(sys, "argv", ["bf", "read", "--brain", str(brain.root)])
     with pytest.raises(SystemExit):
         main()
@@ -1119,7 +1123,7 @@ def test_tag_pages_and_eval_folders_accept_a_trailing_slash(brain: Store) -> Non
         "search", "retention", "--scope", "2026-09", "--brain", "fixture"
     )
     brain.write(
-        "evals/retrieval.yaml", b"version: 9\ncases:\n- name: d\n  query: retention\n  expect: [projects/offline.md]\n"
+        "evals/retrieval.yaml", b"version: 10\ncases:\n- name: d\n  query: retention\n  expect: [projects/offline.md]\n"
     )
     assert invoke("eval", "--path", "evals/", "--brain", "fixture")["score"] == "1/1"
 

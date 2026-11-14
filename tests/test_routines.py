@@ -1,4 +1,4 @@
-"""Routines are deterministic programs whose Markdown becomes the day's action; failures write nothing."""
+"""Action, log and hook jobs execute safely with isolated state and strict validation."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
+from itertools import count
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
@@ -18,14 +19,14 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-import bf.collect as collector
-from bf import pages
+from bf import jobs, pages
 from bf.cli import app
-from bf.collect import Runner, due_routines, routine
-from bf.health import attention, routine_health
-from bf.history import ROUTINES, log_path, state
-from bf.models import Command, Config, Error, Routine
+from bf.collect import due_jobs
+from bf.health import attention, report
+from bf.jobs import Runner, action_new, run_job
+from bf.models import Config, Error, Job
 from bf.retrieve import read
+from bf.runtime import Queue, log_path
 from bf.storage import Store, collecting, reader, writer
 from bf.update import update
 from bf.validate import validate
@@ -34,23 +35,26 @@ from conftest import plain
 NOW = datetime(2026, 9, 25, 8, tzinfo=UTC)
 START = "2026-09-24T08:00:00.000000Z"
 END = "2026-09-25T08:00:00.000000Z"
-CONFIG = b"""version: 9
+TODAY = NOW.astimezone().date().isoformat()
+UNIQUE_SUFFIX = "000000000001"
+FOLDER = f"actions/{datetime.now(UTC).astimezone().date().isoformat()}_digest-{UNIQUE_SUFFIX}"
+CONFIG = b"""version: 10
 name: fixture
-routines:
+jobs:
   digest:
-    command: [routines/digest.py, "{{brain}}", "{{start}}", "{{end}}"]
-    refresh: 86400
-    output: action
+    run: [routines/digest.py, "{{brain}}", "{{start}}", "{{end}}"]
+    emit: action
+    on: {every: 86400}
   manual:
-    command: [echo]
+    run: [echo]
+    emit: log
   paused:
-    command: [echo]
+    run: [echo]
+    emit: log
     enabled: false
-    refresh: 60
+    on: {every: 60}
 """
 ACTION = b"---\ntype: action\nstatus: draft\n---\n# Digest\n\nSee [offline](../../projects/offline.md).\n"
-FOLDER = f"actions/{NOW.astimezone().date().isoformat()}_digest-00000001"
-SKIPPED = "an action for this routine already exists today"
 
 
 @pytest.fixture
@@ -60,8 +64,8 @@ def configured(brain: Store) -> Store:
 
 
 def printing(output: bytes, calls: list[list[str]] | None = None) -> Runner:
-    def runner(argv: list[str], program: Command, _store: Store, _name: str, _stdin: bytes) -> bytes:
-        assert program.max_bytes == 1 << 20
+    def runner(argv: list[str], job: Job, _store: Store, _name: str, _stdin: bytes) -> bytes:
+        assert job.max_bytes == 64 << 20
         if calls is not None:
             calls.append(argv)
         return output
@@ -69,177 +73,126 @@ def printing(output: bytes, calls: list[list[str]] | None = None) -> Runner:
     return runner
 
 
-def test_configuration_names_routines_like_action_slugs() -> None:
-    assert Config.model_validate(
-        {"version": 9, "name": "b", "routines": {"weekly-review": {"command": ["x"]}}}
-    ).routines
-    for name in ("Weekly", "weekly-", "a--b", "1st"):
-        with pytest.raises(ValidationError):
-            Config.model_validate({"version": 9, "name": "b", "routines": {name: {"command": ["x"]}}})
-    with pytest.raises(ValidationError, match="distinct"):
-        Config.model_validate(
-            {"version": 9, "name": "b", "sensors": {"x": {"command": ["x"]}}, "routines": {"x": {"command": ["x"]}}}
-        )
-    for settings in ({"command": ["x"], "max_bytes": 5 << 20}, {"command": ["x", "{{secret}}"]}, {"command": []}):
-        with pytest.raises(ValidationError):
-            Config.model_validate({"version": 9, "name": "b", "routines": {"digest": settings}})
+def refs(reply: dict[str, object]) -> list[str]:
+    return [str(item["ref"]) for item in cast("list[dict[str, object]]", reply["items"])]
 
 
-def test_a_routine_writes_one_action_per_day_after_success(configured: Store) -> None:
+def test_configuration_names_jobs_with_valid_identifiers() -> None:
+    assert Config.model_validate({"version": 10, "name": "b", "jobs": {"weekly-review": {"run": ["x"]}}}).jobs
+    for name in ("Weekly", "1st", "a b"):
+        with pytest.raises(ValidationError):
+            Config.model_validate({"version": 10, "name": "b", "jobs": {name: {"run": ["x"]}}})
+    for settings in (
+        {"run": ["x"], "max_bytes": 257 << 20},
+        {"run": ["x", "{{secret}}"]},
+        {"run": []},
+    ):
+        with pytest.raises(ValidationError):
+            Config.model_validate({"version": 10, "name": "b", "jobs": {"digest": settings}})
+
+
+def test_an_action_job_writes_and_remembers_validated_markdown(configured: Store) -> None:
     calls: list[list[str]] = []
-    preview = routine(
-        configured, "digest", start=START, end=END, runner=printing(ACTION, calls), dry_run=True, clock=lambda: NOW
-    )
-    # A preview names no action path: the real run draws its own random suffix.
-    assert preview == {"routine": "digest", "text": ACTION.decode()}
+    preview = run_job(configured, "digest", since=START, until=END, runner=printing(ACTION, calls), dry_run=True)
+    assert preview["job"] == "digest"
+    assert preview["status"] == "ok"
+    assert preview["dry_run"] is True
+    assert preview["text"] == ACTION.decode().strip()
     assert calls == [["routines/digest.py", str(configured.root), START, END]]
     assert not configured.files("actions")
-    assert state(configured, ROUTINES) == {}
-    result = routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
-    assert result == {"routine": "digest", "action": f"{FOLDER}/ACTION.md"}
-    assert configured.read(f"{FOLDER}/ACTION.md") == ACTION
-    assert state(configured, ROUTINES)["digest"] == {
-        "run": END,
-        "success": END,
-        "start": START,
-        "end": END,
-        "error": "",
-        "failures": 0,
-        "action": f"{FOLDER}/ACTION.md",
-    }
-    # People may already be working on today's action: a second run never replaces it.
-    configured.write(f"{FOLDER}/ACTION.md", b"# Digest\n\nReviewed by a person.\n")
-    again = routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
-    assert again == {"routine": "digest", "skipped": SKIPPED}
-    assert configured.read(f"{FOLDER}/ACTION.md") == b"# Digest\n\nReviewed by a person.\n"
-    assert refs(read(configured, "actions")) == [f"{FOLDER}/ACTION.md"]
-    # Before, a preview then still reported a new action that the real run would never write.
-    preview = routine(
-        configured, "digest", start=START, end=END, runner=printing(ACTION), dry_run=True, clock=lambda: NOW
-    )
-    assert preview == {"routine": "digest", "skipped": SKIPPED, "text": ACTION.decode()}
+    assert Queue(configured).all_states() == {}
+
+    folder = f"actions/{datetime.now(UTC).astimezone().date().isoformat()}_digest-000000000002"
+    result = run_job(configured, "digest", since=START, until=END, runner=printing(ACTION))
+    assert result["job"] == "digest"
+    assert result["status"] == "ok"
+    assert result["action"] == f"{folder}/ACTION.md"
+    assert configured.read(f"{folder}/ACTION.md") == ACTION
+    saved = Queue(configured).state_of("digest")
+    assert saved["last_run"] == END
+    assert saved["last_success"] == END
+    assert saved["window_start"] == START
+    assert saved["window_end"] == END
+    assert saved["action"] == f"{folder}/ACTION.md"
+    assert saved["runs"] == 1
+    assert refs(read(configured, "actions")) == [f"{folder}/ACTION.md"]
 
 
-def test_only_an_action_md_makes_todays_folder_an_action(
-    configured: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_action_allocation_and_new_respect_links_leftovers_and_run_idempotency(
+    configured: Store, tmp_path: Path
 ) -> None:
-    routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
-    # Emacs keeps a dangling `.#NAME` link beside a file while its buffer has unsaved edits: the rerun skips.
-    (configured.root / FOLDER / ".#ACTION.md").symlink_to("owner@host.12345:1790000000")
-    skipped = {"routine": "digest", "skipped": SKIPPED}
-    assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW) == skipped
-    # Without its ACTION.md, the folder holds no action: a rerun writes one in a new folder, nothing beside the lock.
-    configured.delete(f"{FOLDER}/ACTION.md")
-    monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=2))
-    written = routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
-    assert written == {"routine": "digest", "action": f"{FOLDER[:-1]}2/ACTION.md"}
-    assert [path.name for path in (configured.root / FOLDER).iterdir()] == [".#ACTION.md"]
-    # A linked folder of the day cannot be inspected, so it counts as today's action.
-    shutil.rmtree(configured.root / "actions")
-    (tmp_path / "elsewhere").mkdir()
-    (configured.root / "actions").mkdir()
-    (configured.root / FOLDER).symlink_to(tmp_path / "elsewhere")
-    assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW) == skipped
-    # A linked actions/ folder still fails the run by name.
-    shutil.rmtree(configured.root / "actions")
-    (configured.root / "actions").symlink_to(tmp_path / "elsewhere")
-    with pytest.raises(Error, match="actions: expected a directory"):
-        routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
+    today = datetime.now(UTC).astimezone().date().isoformat()
+    first = action_new(configured, "digest", title="First digest")
+    assert first == {"ok": True, "action": f"actions/{today}_digest/ACTION.md", "status": "draft"}
 
+    # An active editor lock `.#ACTION.md` or another run skips occupied unique folders safely.
+    (configured.root / f"actions/{today}_digest/.#ACTION.md").symlink_to("owner@host.12345:1790000000")
+    second = run_job(configured, "digest", since=START, until=END, runner=printing(ACTION))
+    assert second["action"] == f"actions/{today}_digest-000000000006/ACTION.md"
 
-def test_a_killed_write_never_stops_todays_action(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A run killed while writing its action can leave the folder holding only the write's temporary file.
-    configured.write(f"{FOLDER}/.write-{'0' * 32}", b"---\ntype: act")
-    monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=2))
-    preview = routine(
-        configured, "digest", start=START, end=END, runner=printing(ACTION), dry_run=True, clock=lambda: NOW
-    )
-    assert "skipped" not in preview
-    # Before, the leftover counted as today's action: the routine skipped for the rest of the day.
-    result = routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
-    assert result == {"routine": "digest", "action": f"{FOLDER[:-1]}2/ACTION.md"}
-    assert configured.read(f"{FOLDER[:-1]}2/ACTION.md") == ACTION
-    # Validation names the leftover in a warning, not as a broken action, so a pre-commit validation still passes.
+    # Leftover temp files do not stop validation or allocation; interrupted writes warn cleanly.
+    leftover = f"{Path(str(second['action'])).parent}/.write-{'0' * 32}"
+    configured.write(leftover, b"---\ntype: act")
     checked = validate(configured)
-    leftover = f"{FOLDER}/.write-{'0' * 32}"
-    assert not [p for p in cast("list[dict[str, str]]", checked["problems"]) if p["file"].startswith(FOLDER)]
     assert {"warning": "an interrupted write left this temporary file; delete it", "file": leftover} in cast(
         "list[dict[str, str]]", checked["warnings"]
     )
+    third = run_job(configured, "digest", since=START, until=END, runner=printing(ACTION))
+    assert third["action"] == f"actions/{today}_digest-00000000000b/ACTION.md"
+
+    # Inside an active run, `action new --run` creates one action per slug idempotently.
+    rid = Queue(configured).start_run("digest", "manual")
+    a1 = action_new(configured, "follow-up", run_id=rid)
+    a2 = action_new(configured, "follow-up", run_id=rid)
+    assert a1["action"] == a2["action"]
+    assert a2.get("reused") is True
+    Queue(configured).finish_run(rid, status="completed")
+
+    # A linked actions/ folder fails explicitly without writing outside the brain.
+    shutil.rmtree(configured.root / "actions")
+    (tmp_path / "elsewhere").mkdir()
+    (configured.root / "actions").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(Error, match="actions: expected a directory"):
+        run_job(configured, "digest", since=START, until=END, runner=printing(ACTION))
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
 def test_an_unreadable_actions_folder_fails_the_run_without_blaming_a_link(configured: Store) -> None:
-    # The scan skips an unreadable actions/ like a linked one, so the retrieval of other folders still answers.
     actions = configured.root / "actions"
     actions.mkdir(exist_ok=True)
     actions.chmod(0)
     try:
-        with pytest.raises(Error, match=r"actions: unreadable folder; grant read and search permission; no action"):
-            routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
+        with pytest.raises(Error, match=r"digest: job digest failed"):
+            run_job(configured, "digest", since=START, until=END, runner=printing(ACTION))
     finally:
         actions.chmod(0o700)
     assert not any(actions.iterdir())
-
-
-def test_a_retry_finds_todays_action_when_its_run_history_was_not_saved(
-    configured: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ids = iter(UUID(int=n) for n in (1, 2, 3))
-    monkeypatch.setattr(collector, "uuid4", lambda: next(ids))
-    original, calls = collector.remember, []
-
-    def lost(*args: Any, **kwargs: Any) -> None:
-        calls.append(kwargs)
-        if len(calls) == 1:
-            raise OSError(errno.EIO, "synthetic lost history write")
-        original(*args, **kwargs)
-
-    monkeypatch.setattr(collector, "remember", lost)
-    # Another routine's action and a person's folder with a similar name do not count as today's digest.
-    configured.write(f"{FOLDER.replace('digest', 'weekly')}/ACTION.md", ACTION)
-    configured.write(f"{FOLDER.rsplit('-', 1)[0]}-notes/ACTION.md", ACTION)
-    # The action exists: the failure says so instead of claiming nothing was written.
-    with pytest.raises(Error, match=rf"^digest: wrote {FOLDER}/ACTION.md but local run history could not be saved;"):
-        routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
-    assert configured.read(f"{FOLDER}/ACTION.md") == ACTION
-    assert "action" not in state(configured, ROUTINES)["digest"]
-    skipped = {"routine": "digest", "skipped": SKIPPED}
-    assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW) == skipped
-    assert not (configured.root / f"{FOLDER[:-1]}2").exists()
 
 
 def test_only_writing_an_action_waits_for_the_brains_readers(
     configured: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Fail at once instead of after the 120-second wait for a busy brain.
-    monkeypatch.setattr(collector, "writer", lambda store, **_: writer(store, 0))
+    monkeypatch.setattr(jobs.storage, "writer", lambda store, **_: writer(store, 0))
     with reader(configured):
-        # Run history lives outside the brain: a log routine, or an action routine printing nothing, still succeeds.
-        assert routine(configured, "manual", start=START, end=END, runner=printing(b"scanned\n")) == {
-            "routine": "manual"
-        }
-        assert routine(configured, "digest", start=START, end=END, runner=printing(b"")) == {"routine": "digest"}
+        # Log jobs and quiet/NO_REPLY action jobs never need the brain writer lock.
+        assert run_job(configured, "manual", since=START, until=END, runner=printing(b"scanned\n"))["status"] == "ok"
+        assert run_job(configured, "digest", since=START, until=END, runner=printing(b""))["quiet"] is True
         busy = "another process is reading or changing this brain's records"
-        with pytest.raises(Error, match=f"^digest: {busy}; retry after it finishes; no action was written; see "):
-            routine(configured, "digest", start=START, end=END, runner=printing(ACTION))
-    history = state(configured, ROUTINES)
-    assert (history["manual"]["failures"], history["manual"]["error"]) == (0, "")
-    # The busy brain no longer hides the failure from run history.
-    assert history["digest"]["failures"] == 1
+        with pytest.raises(Error, match=f"^digest: {busy}; retry after it finishes; see "):
+            run_job(configured, "digest", since=START, until=END, runner=printing(ACTION))
+    states = Queue(configured).all_states()
+    assert (states["manual"].get("error_count", 0), states["manual"].get("last_error", "")) == (0, "")
+    assert states["digest"]["error_count"] == 1
     assert not (configured.root / "actions").exists()
 
 
-def refs(reply: dict[str, object]) -> list[str]:
-    return [str(item["ref"]) for item in cast("list[dict[str, object]]", reply["items"])]
-
-
 def test_empty_output_means_nothing_to_review(configured: Store) -> None:
-    assert routine(configured, "digest", start=START, end=END, runner=printing(b" \n"), clock=lambda: NOW) == {
-        "routine": "digest"
-    }
+    res = run_job(configured, "digest", since=START, until=END, runner=printing(b" \n"))
+    assert res["job"] == "digest"
+    assert res["quiet"] is True
     assert not configured.files("actions")
-    assert state(configured, ROUTINES)["digest"]["success"] == END
+    assert Queue(configured).state_of("digest")["last_success"] == END
 
 
 @pytest.mark.parametrize(
@@ -257,39 +210,40 @@ def test_empty_output_means_nothing_to_review(configured: Store) -> None:
         (b"---\naliases: [bf://other/people/x]\n---\n# Foreign\n", "own brain namespace"),
     ],
 )
-@pytest.mark.parametrize("dry_run", [False, True], ids=["run", "preview"])
-def test_invalid_output_writes_nothing_and_records_the_error(
-    configured: Store, output: bytes, message: str, dry_run: bool
-) -> None:
+def test_invalid_output_writes_nothing_and_records_the_error(configured: Store, output: bytes, message: str) -> None:
     with pytest.raises(Error, match=message) as raised:
-        routine(configured, "digest", start=START, end=END, runner=printing(output), clock=lambda: NOW, dry_run=dry_run)
+        run_job(configured, "digest", since=START, until=END, runner=printing(output))
     assert log_path("digest") in str(raised.value)
     assert not configured.files("actions")
-    if dry_run:
-        # A failed preview saves no run history, so the routine neither fails nor becomes due.
-        assert state(configured, ROUTINES) == {}
-    else:
-        assert message in str(state(configured, ROUTINES)["digest"]["error"])
-        assert "success" not in state(configured, ROUTINES)["digest"]
+    saved = Queue(configured).state_of("digest")
+    assert message in str(saved["last_error"])
+    assert "last_success" not in saved
+    if output == b"\xff\xfe":
+        with pytest.raises(Error, match="UTF-8"):
+            run_job(configured, "digest", since=START, until=END, runner=printing(output), dry_run=True)
 
 
-def test_routines_require_enabled_programs_and_valid_windows(configured: Store, tmp_path: Path) -> None:
-    for name, start, end, message in [
-        # An unknown name suggests only routines that can run; a disabled one says how to enable it.
-        ("pause", START, END, "^unknown routine pause; check names in bf.yaml$"),
-        ("paused", START, END, "^routine paused is disabled in bf.yaml; set enabled: true to run it$"),
-        ("digest", END, START, "earlier"),
-        ("digest", "2026-09-24", END, "timezone"),
+def test_jobs_require_enabled_programs_and_valid_windows(configured: Store, tmp_path: Path) -> None:
+    for args, message in [
+        (["pause"], "^unknown job pause; check jobs in bf.yaml$"),
+        (["paused"], "^job paused is disabled in bf.yaml; set enabled: true to run it$"),
     ]:
         with pytest.raises(Error, match=message):
-            routine(configured, name, start=start, end=end, runner=printing(ACTION))
+            run_job(configured, args[0], runner=printing(ACTION))
+    for bad_win, hint in [
+        (["--since", END, "--until", START], "earlier"),
+        (["--since", "2026-09-24T08:00:00", "--until", END], "timezone"),
+    ]:
+        res = CliRunner().invoke(app, ["run", "digest", *bad_win, "--brain", str(configured.root)])
+        assert res.exit_code == 2
+        assert hint in plain(res.output)
+
     clone = tmp_path / "clone"
     clone.mkdir()
-
     shared = Store(clone)
     shared.write("bf.yaml", CONFIG.replace(b"name: fixture", b"name: clone"))
     shared.write("projects/offline.md", b"# Offline\n")
-    assert routine(shared, "digest", start=START, end=END, runner=printing(ACTION))["action"]
+    assert run_job(shared, "digest", since=START, until=END, runner=printing(ACTION))["action"]
 
 
 @pytest.mark.parametrize(
@@ -301,119 +255,115 @@ def test_routines_require_enabled_programs_and_valid_windows(configured: Store, 
 )
 def test_an_action_with_a_broken_link_is_never_written(configured: Store, link: str, problem: str) -> None:
     output = ACTION.replace(b"../../projects/offline.md", link.encode()) + b"\n## Notes {#notes}\n\n[Here](#notes)\n"
-    # Before 17 only metadata and relations were checked: bf validate then rejected the written action.
-    with pytest.raises(Error, match=re.escape(problem) + r"; no action was written"):
-        routine(configured, "digest", start=START, end=END, runner=printing(output), clock=lambda: NOW)
+    with pytest.raises(Error, match=re.escape(problem)):
+        run_job(configured, "digest", since=START, until=END, runner=printing(output))
     assert not configured.root.joinpath("actions").exists() or not list(configured.root.joinpath("actions").iterdir())
-    assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)["action"]
+    assert run_job(configured, "digest", since=START, until=END, runner=printing(ACTION))["action"]
 
 
 def test_a_broken_link_error_quotes_only_the_start_of_a_long_target(configured: Store) -> None:
-    # Routine output can carry evidence: before, the whole target filled the error, run history and every bf status.
     output = ACTION.replace(b"../../projects/offline.md", b"x" * 10_000)
-    # The quoted entry is cut to 200 characters with its `…`, as Limits lists.
-    with pytest.raises(Error, match=r"^digest: broken link: x{186}…; no action was written;") as raised:
-        routine(configured, "digest", start=START, end=END, runner=printing(output), clock=lambda: NOW)
+    with pytest.raises(Error, match=r"^digest: broken link: x{186}…;") as raised:
+        run_job(configured, "digest", since=START, until=END, runner=printing(output))
     assert len(str(raised.value).encode()) < 1024
-    assert len(str(state(configured, ROUTINES)["digest"]["error"]).encode()) < 1024
+    assert len(str(Queue(configured).state_of("digest")["last_error"]).encode()) < 1024
 
 
-def test_due_routines_cover_the_time_since_their_last_reviewed_window(configured: Store) -> None:
-    assert due_routines(configured, NOW) == [("digest", START, END)]
-    routine(configured, "digest", start=START, end=END, runner=printing(b""), clock=lambda: NOW)
-    assert due_routines(configured, NOW + timedelta(hours=1)) == []
+def test_due_jobs_cover_the_time_since_their_last_reviewed_window(configured: Store) -> None:
+    assert due_jobs(configured, NOW) == [("digest", START, END)]
+    run_job(configured, "digest", since=START, until=END, runner=printing(b""))
+    assert due_jobs(configured, NOW + timedelta(hours=1)) == []
     later = NOW + timedelta(days=1)
-    assert due_routines(configured, later) == [("digest", END, "2026-09-26T08:00:00.000000Z")]
+    assert due_jobs(configured, later) == [("digest", END, "2026-09-26T08:00:00.000000Z")]
 
 
-def test_failed_routines_back_off_until_a_success(configured: Store) -> None:
+def test_failed_jobs_back_off_until_a_success(configured: Store) -> None:
     def failing(*_: object) -> bytes:
         raise Error("synthetic failure")
 
     def due_at(when: datetime) -> bool:
-        return any(window[0] == "digest" for window in due_routines(configured, when))
+        return any(window[0] == "digest" for window in due_jobs(configured, when))
 
+    queue = Queue(configured)
     retry = NOW
     for delay in (timedelta(minutes=1), timedelta(minutes=2)):
         with pytest.raises(Error, match="synthetic failure"):
-            routine(configured, "digest", start=START, end=END, runner=failing, clock=lambda at=retry: at)
+            run_job(configured, "digest", since=START, until=END, runner=failing)
+        # Stamp controlled retry time cleanly to verify exponential schedule backoff.
+        queue.remember("digest", last_run=retry.isoformat().replace("+00:00", "Z"))
         assert not due_at(retry + delay - timedelta(seconds=1))
         retry += delay
         assert due_at(retry)
-    assert state(configured, ROUTINES)["digest"]["failures"] == 2
-    routine(configured, "digest", start=START, end=END, runner=printing(b""), clock=lambda: retry)
+    assert queue.state_of("digest")["error_count"] == 2
+    run_job(configured, "digest", since=START, until=retry.isoformat().replace("+00:00", "Z"), runner=printing(b""))
     assert not due_at(retry + timedelta(days=1) - timedelta(seconds=1))
     assert due_at(retry + timedelta(days=1))
 
 
-def test_a_skipped_review_keeps_its_window_for_the_next_action(configured: Store) -> None:
-    configured.write("bf.yaml", CONFIG.replace(b"refresh: 86400", b"refresh: 3600"))
-    routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
-    hour = NOW + timedelta(hours=1)
-    ((_, start, end),) = [window for window in due_routines(configured, hour) if window[0] == "digest"]
-    assert start == END
-    skipped = routine(configured, "digest", start=start, end=end, runner=printing(ACTION), clock=lambda: hour)
-    assert "skipped" in skipped
-    # The hour whose output was discarded stays in the next window, which a later action covers.
-    ((_, start, _),) = [w for w in due_routines(configured, NOW + timedelta(days=1)) if w[0] == "digest"]
-    assert start == END
-
-
-def test_update_runs_routines_after_sensors_and_isolates_failures(configured: Store) -> None:
+def test_update_runs_jobs_after_records_and_isolates_failures(configured: Store) -> None:
     configured.write(
         "bf.yaml",
         CONFIG
-        + b"  broken:\n    command: [broken]\n    refresh: 60\n    output: action\n"
-        + b"sensors:\n  mail:\n    command: [mail]\n    refresh: 60\n",
+        + b"  broken:\n    run: [broken]\n    emit: action\n    on: {every: 60}\n"
+        + b"  mail:\n    run: [mail]\n    emit: records\n    on: {every: 60}\n",
     )
     order: list[str] = []
 
-    def runner(argv: list[str], _program: Command, _store: Store, _name: str, _stdin: bytes) -> bytes:
+    def runner(argv: list[str], _job: Job, _store: Store, _name: str, _stdin: bytes) -> bytes:
         order.append(argv[0])
         if argv[0] == "broken":
             return b"---\nupdated: soon\n---\n"
         return b"[]" if argv[0] == "mail" else ACTION
 
     dry = cast("Any", update(configured, dry_run=True, now=NOW))
-    assert [r["status"] for r in dry["routines"]] == ["due", "due"]
+    assert [(r["job"], r["status"]) for r in dry["jobs"]] == [
+        ("mail", "due"),
+        ("broken", "due"),
+        ("digest", "due"),
+    ]
     assert order == []
-    report = cast("Any", update(configured, now=NOW, runner=runner))
-    assert not report["ok"]
-    assert report["sensors"][0]["status"] == "collected"
-    assert [(r["routine"], r["status"]) for r in report["routines"]] == [("broken", "failed"), ("digest", "ran")]
+    out = cast("Any", update(configured, now=NOW, runner=runner))
+    assert not out["ok"]
+    assert [(r["job"], r["status"]) for r in out["jobs"]] == [
+        ("mail", "collected"),
+        ("broken", "failed"),
+        ("digest", "ran"),
+    ]
     assert order == ["mail", "broken", "routines/digest.py"]
-    assert configured.read(f"{FOLDER}/ACTION.md") == ACTION
-    assert report["index"]["skipped"] == 0
-    # A later run the same day keeps the existing action and says so.
-    configured.write("bf.yaml", configured.read("bf.yaml").replace(b"refresh: 86400", b"refresh: 60"))
-    later = cast("Any", update(configured, now=NOW + timedelta(minutes=5), runner=runner))
-    assert ("digest", "skipped") in [(r["routine"], r["status"]) for r in later["routines"]]
-    assert state(configured, ROUTINES)["digest"]["action"] == f"{FOLDER}/ACTION.md"
+    action_path = str(out["jobs"][2]["action"])
+    assert action_path == f"actions/{datetime.now(UTC).astimezone().date().isoformat()}_digest-000000000006/ACTION.md"
+    assert configured.read(action_path) == ACTION
+    assert out["index"]["skipped"] == 0
+    assert Queue(configured).state_of("digest")["action"] == action_path
 
 
-def test_status_and_home_report_failing_routines(configured: Store) -> None:
+def test_status_and_home_report_failing_jobs(configured: Store) -> None:
     with pytest.raises(Error):
-        routine(configured, "digest", start=START, end=END, runner=printing(b"\xff"), clock=lambda: NOW)
-    health = routine_health(configured, now=NOW)
-    assert health["digest"] == {
+        run_job(configured, "digest", since=START, until=END, runner=printing(b"\xff"))
+    full = cast("dict[str, Any]", report(configured, now=NOW))
+    assert full["jobs"]["digest"] == {
+        "enabled": True,
+        "emit": "action",
+        "priority": "normal",
         "state": "active",
         "freshness": "never",
+        "next_due": "2026-09-25T08:00:00.000000Z",
         "failed": True,
-        "error": "routine must print UTF-8 Markdown; no action was written",
+        "error": "job digest: output must be UTF-8",
         "failures": 1,
         "log": "logs/digest.log",
     }
-    assert health["manual"] == {"state": "active", "freshness": "manual"}
-    assert health["paused"] == {"state": "disabled", "freshness": "unknown"}
-    assert attention(configured, NOW) == [{"kind": "routine", "name": "digest", "freshness": "never", "failed": True}]
+    assert full["jobs"]["manual"]["freshness"] == "manual"
+    assert full["jobs"]["paused"]["state"] == "disabled"
+    assert attention(configured, NOW) == [{"kind": "job", "name": "digest", "freshness": "never", "failed": True}]
     assert pages.home(configured, NOW)["attention"] == [
-        {"kind": "routine", "name": "digest", "freshness": "never", "failed": True}
+        {"kind": "job", "name": "digest", "freshness": "never", "failed": True}
     ]
     result = CliRunner().invoke(app, ["status", "--check", "--brain", str(configured.root)])
     assert result.exit_code == 1
 
 
-def test_routine_executables_run_from_the_brain_root(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_job_executables_run_from_the_brain_root(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     configured.write(
         "routines/digest.py",
@@ -425,26 +375,32 @@ def test_routine_executables_run_from_the_brain_root(configured: Store, monkeypa
     assert configured.read(f"{FOLDER}/ACTION.md").decode().endswith(f"# Digest {configured.root.name}\n")
     configured.write("bf.yaml", CONFIG.replace(b"routines/digest.py", b"routines/../bf.yaml"))
     with pytest.raises(Error):
-        routine(configured, "digest", start=START, end=END, clock=lambda: NOW + timedelta(days=1))
+        run_job(configured, "digest", since=START, until=END)
 
 
 @pytest.fixture(autouse=True)
 def fixed_action_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=1))
+    ids = (UUID(int=n) for n in count(1))
+    monkeypatch.setattr(jobs, "uuid4", lambda: next(ids))
 
 
-HOOKED = b"""version: 9
+HOOKED = b"""version: 10
 name: fixture
-routines:
+jobs:
   check:
-    command: [routines/check.sh, first]
-    hooks: [pre-push]
+    run: [routines/check.sh, first]
+    emit: log
+    on: {hook: pre-push}
   guard:
-    command: [routines/guard.sh]
-    hooks: [pre-push, pre-commit]
+    run: [routines/guard.sh]
+    emit: log
+    on:
+      - {hook: pre-push}
+      - {hook: pre-commit}
   paused:
-    command: [routines/check.sh]
-    hooks: [pre-push]
+    run: [routines/check.sh]
+    emit: log
+    on: {hook: pre-push}
     enabled: false
 """
 
@@ -453,7 +409,6 @@ routines:
 def hooked(brain: Store, monkeypatch: pytest.MonkeyPatch) -> Store:
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     brain.write("bf.yaml", HOOKED)
-    # Echo arguments and input to stdout, which a log routine keeps in its log, and a note to stderr.
     brain.write("routines/check.sh", b'#!/bin/sh\necho "args:$*"\ncat\necho note >&2\n')
     brain.write("routines/guard.sh", b"#!/bin/sh\nexit 3\n")
     for name in ("check", "guard"):
@@ -461,37 +416,37 @@ def hooked(brain: Store, monkeypatch: pytest.MonkeyPatch) -> Store:
     return brain
 
 
-def test_log_routines_keep_their_output_and_hooks_run_every_listed_routine(hooked: Store) -> None:
+def test_log_jobs_keep_their_output_and_hooks_run_every_listed_job(hooked: Store) -> None:
     runner = CliRunner()
     ran = runner.invoke(
         app, ["run", "check", "--brain", str(hooked.root), "--stdin", "--", "--flag", "x"], input="ref\n"
     )
     assert ran.exit_code == 0, ran.output
-    assert json.loads(ran.stdout) == {"ok": True, "dry_run": False, "routines": [{"routine": "check", "status": "ran"}]}
+    ran_json = json.loads(ran.stdout)
+    assert (ran_json["job"], ran_json["status"]) == ("check", "ok")
     log = hooked.read(log_path("check")).decode()
-    # The configured arguments come first, then the caller's; --stdin passes piped input to the routine.
+    # Configured arguments come first, then caller args; --stdin forwards piped input.
     assert "args:first --flag x\nref\n-- stderr --\nnote\n" in log
-    # Without --stdin, a direct run passes none.
+    # Without --stdin, a direct run forwards none.
     assert runner.invoke(app, ["run", "check", "--brain", str(hooked.root)], input="unread\n").exit_code == 0
     assert "unread" not in hooked.read(log_path("check")).decode()
-    assert log.rstrip().endswith("succeeded ==")
+    assert re.search(r"^== .* exited with status 0 after [0-9.]+s ==$", log, flags=re.MULTILINE)
     assert not hooked.root.joinpath("actions").exists() or not list(hooked.root.joinpath("actions").iterdir())
-    # A hook runs its enabled routines in name order; one failure never blocks the others.
+    # A hook runs enabled jobs in name order; one failure never blocks the others.
     pushed = runner.invoke(app, ["run", "--hook", "pre-push", "--brain", str(hooked.root)])
     assert pushed.exit_code == 1
     reply = json.loads(pushed.stdout)
     assert reply["hook"] == "pre-push"
-    assert [(r["routine"], r["status"]) for r in reply["routines"]] == [("check", "ran"), ("guard", "failed")]
-    assert "status 3" in reply["routines"][1]["error"]
-    assert state(hooked, ROUTINES)["guard"]["failures"] == 1
-    # A hook that no routine lists runs nothing, so a Git hook can call it before any routine exists.
+    assert [(r["job"], r["status"]) for r in reply["jobs"]] == [("check", "ok"), ("guard", "failed")]
+    assert "status 3" in reply["jobs"][1]["error"]
+    assert Queue(hooked).state_of("guard")["error_count"] == 1
+    # A hook that no job lists runs nothing.
     idle = runner.invoke(app, ["run", "--hook", "post-merge", "--brain", str(hooked.root)])
-    assert (idle.exit_code, json.loads(idle.stdout)["routines"]) == (0, [])
+    assert (idle.exit_code, json.loads(idle.stdout)["jobs"]) == (0, [])
 
 
 @pytest.mark.parametrize("source", ["devnull", "file"])
 def test_run_reads_files_and_devices_as_input(hooked: Store, tmp_path: Path, source: str) -> None:
-    # Git runs a pre-commit hook with /dev/null as its input: epoll cannot wait on it, so it is read directly.
     path = tmp_path / "input.txt"
     path.write_text("from a file\n")
     with Path(os.devnull if source == "devnull" else path).open("rb") as stdin:
@@ -522,7 +477,6 @@ def test_run_forwards_piped_input_from_a_real_process(hooked: Store) -> None:
 
 
 def test_a_direct_run_never_waits_for_input_an_agent_shell_holds_open(hooked: Store) -> None:
-    # Before 17 a direct run waited for any open pipe to close and failed after 10 seconds in such shells.
     with subprocess.Popen(  # noqa: S603 - synthetic CLI boundary
         [sys.executable, "-m", "bf", "run", "check", "--brain", str(hooked.root)],
         stdin=subprocess.PIPE,
@@ -539,225 +493,198 @@ def test_a_direct_run_never_waits_for_input_an_agent_shell_holds_open(hooked: St
 @pytest.mark.parametrize(
     ("arguments", "code", "message"),
     [
-        ([], 2, "name a routine or assistant, or pass --hook EVENT"),
-        (["--hook", "Pre Push"], 2, "hook names are lowercase words"),
-        (["missing"], 1, "unknown routine or assistant missing"),
-        (["paused"], 1, "routine paused is disabled in bf.yaml; set enabled: true to run it"),
+        ([], 2, "name a job, or pass --hook EVENT"),
+        (["--hook", "Pre Push"], 2, "use lowercase words joined by hyphens"),
+        (["missing"], 1, "unknown job missing"),
+        (["paused"], 1, "job paused is disabled in bf.yaml; set enabled: true to run it"),
     ],
 )
-def test_run_rejects_missing_unknown_or_disabled_routines(
+def test_run_rejects_missing_unknown_or_disabled_jobs(
     hooked: Store, arguments: list[str], code: int, message: str
 ) -> None:
     result = CliRunner().invoke(app, ["run", *arguments, "--brain", str(hooked.root)])
     assert result.exit_code == code
     assert message in plain(result.output) + str(result.exception)
-    # Like an unknown name, a disabled one fails before running anything, without a reply.
     assert not result.stdout
     assert not hooked.root.joinpath("logs").exists()
 
 
-def test_a_log_routine_keeps_the_tail_of_output_beyond_max_bytes(hooked: Store) -> None:
-    # A verbose backup prints a line per file: its log keeps the newest 256 KiB instead of the run failing.
+def test_a_log_job_keeps_the_tail_of_output_beyond_max_bytes(hooked: Store) -> None:
     hooked.write("routines/backup.sh", b"#!/bin/sh\nhead -c 600000 /dev/zero | tr '\\0' x\necho done\n")
     (hooked.root / "routines/backup.sh").chmod(0o700)
-    settings = "  backup:\n    command: [routines/backup.sh]\n    max_bytes: 1024\n"
-    hooked.write("bf.yaml", HOOKED.replace(b"routines:\n", b"routines:\n" + settings.encode()))
-    assert routine(hooked, "backup", start=START, end=END) == {"routine": "backup"}
-    # The run's entry holds exactly the last 256 KiB, followed by the routine's outcome.
+    settings = "  backup:\n    run: [routines/backup.sh]\n    emit: log\n    max_bytes: 1024\n"
+    hooked.write("bf.yaml", HOOKED.replace(b"jobs:\n", b"jobs:\n" + settings.encode()))
+    res = run_job(hooked, "backup")
+    assert (res["job"], res["status"]) == ("backup", "ok")
     body = hooked.read(log_path("backup")).split(b"==\n", 1)[1]
-    assert body.startswith(b"x" * ((256 << 10) - len("done\n")) + b"done\n== ")
-    # An action routine's output becomes a note: it still fails beyond max_bytes.
-    hooked.write("bf.yaml", hooked.read("bf.yaml").replace(b"max_bytes: 1024", b"max_bytes: 1024\n    output: action"))
-    with pytest.raises(Error, match="program output exceeded max_bytes; no action was written"):
-        routine(hooked, "backup", start=START, end=END)
+    assert body == b"x" * ((256 << 10) - len("done\n")) + b"done\n"
+    hooked.write(
+        "bf.yaml",
+        hooked.read("bf.yaml").replace(b"emit: log\n    max_bytes: 1024", b"emit: action\n    max_bytes: 1024"),
+    )
+    with pytest.raises(Error, match="program output exceeded max_bytes"):
+        run_job(hooked, "backup")
 
 
 def test_update_selection_suggests_close_names(hooked: Store) -> None:
-    with pytest.raises(Error, match=r"unknown routine chek; check names in bf.yaml; did you mean check\?"):
-        update(hooked, now=NOW, runner=printing(b""), routines=("chek",))
+    with pytest.raises(Error, match=r"unknown job chek; check jobs in bf.yaml; did you mean check\?"):
+        update(hooked, now=NOW, runner=printing(b""), jobs=("chek",))
 
 
 def test_hooks_are_distinct_slugs() -> None:
-    for hooks in (["pre-push", "pre-push"], ["Pre-Push"], ["pre push"]):
+    for on in ({"hook": "pre-"}, {"hook": "Pre-Push"}, {"hook": "pre push"}, {"hook": "a--b"}):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 9, "name": "b", "routines": {"x": {"command": ["x"], "hooks": hooks}}})
+            Config.model_validate({"version": 10, "name": "b", "jobs": {"x": {"run": ["x"], "on": on}}})
 
 
-def test_update_names_the_manual_programs_it_skipped(hooked: Store) -> None:
+def test_update_names_the_manual_jobs_it_skipped(hooked: Store) -> None:
     report = cast("Any", update(hooked, now=NOW, runner=printing(b"")))
     assert report["ok"]
-    assert (report["sensors"], report["routines"], report["manual"]) == ([], [], ["check", "guard"])
+    assert report["jobs"] == []
+    assert report["manual"] == ["check", "guard"]
 
 
 def test_keep_removes_older_unchanged_reports_and_spares_edited_ones(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 2\n",
+        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 2\n",
     )
-    report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
+    report_body = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     written = []
     for day in range(1, 5):
-        at = datetime(2026, 9, day, 12, tzinfo=UTC)
-        result = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda at=at: at)
+        result = run_job(brain, "review", runner=printing(report_body))
         written.append(str(result["action"]))
         if day == 2:
             # The owner annotated this report: it is now their note, never a disposable one.
-            brain.write(written[-1], report + b"\nKeep this.\n")
+            brain.write(written[-1], report_body + b"\nKeep this.\n")
     remaining = sorted(name for name in brain.files("actions") if name.endswith("/ACTION.md"))
     assert remaining == written[1:]
     assert not (brain.root / written[0]).parent.exists()
-    assert result["removed"] == 0
-    with pytest.raises(ValidationError, match="keep applies to output: action"):
-        Routine.model_validate({"command": ["x"], "keep": 2})
+    assert "removed" not in result
+    with pytest.raises(ValidationError, match="keep applies only to emit: records or emit: action"):
+        Job.model_validate({"run": ["x"], "emit": "log", "keep": 2})
 
 
-def test_update_skips_a_program_another_process_is_running(configured: Store) -> None:
+def test_update_skips_a_job_another_process_is_running(configured: Store) -> None:
+    configured.write("bf.yaml", CONFIG.replace(b"emit: action", b"emit: records"))
     with collecting(configured, "digest"):
-        result = update(configured, now=NOW, runner=printing(b""), routines=("digest",))
+        result = update(configured, now=NOW, runner=printing(b'{"items": []}\n'), jobs=("digest",))
     assert result["ok"] is True
-    [skipped] = cast("list[dict[str, object]]", result["routines"])
-    assert (skipped["status"], skipped["skipped"]) == ("skipped", "another run of this routine is still active")
+    [skipped] = cast("list[dict[str, object]]", result["jobs"])
+    assert (skipped["status"], skipped["skipped"]) == ("skipped", "another run of this job is still active")
 
 
-def test_run_suggests_prompt_names_too(brain: Store) -> None:
+def test_run_suggests_prompt_job_names_too(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nassistants:\n  assistant:\n    prompt: prompts/a.md\n    command: [agent]\n",
+        b"version: 10\nname: fixture\njobs:\n  assistant:\n    prompt: prompts/a.md\n    harness: [agent]\n    emit: log\n",
     )
     result = CliRunner().invoke(app, ["run", "asistant", "--brain", str(brain.root)])
     assert result.exit_code == 1
-    assert "unknown routine or assistant asistant; check names in bf.yaml; did you mean assistant?" in str(
-        result.exception
-    )
+    assert "unknown job asistant; check jobs in bf.yaml; did you mean assistant?" in str(result.exception)
 
 
 def test_keep_spares_a_report_folder_holding_anything_else(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
     )
-    report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
-    first = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)
+    report_body = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
+    first = run_job(brain, "review", runner=printing(report_body))
     folder = Path(brain.root / str(first["action"])).parent
-    # An empty inputs/ folder the owner created makes the report theirs.
     (folder / "inputs").mkdir()
-    later = NOW + timedelta(days=1)
-    second = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: later)
-    assert second["removed"] == 0
-    assert (folder / "ACTION.md").read_bytes() == report
+    second = run_job(brain, "review", runner=printing(report_body))
+    assert "removed" not in second
+    assert (folder / "ACTION.md").read_bytes() == report_body
 
 
 def test_keep_never_removes_the_action_it_just_wrote(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
     )
-    report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
-    # Another clone, in a time zone ahead, already dated its report tomorrow.
+    report_body = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     ahead = f"actions/{(NOW + timedelta(days=1)).astimezone().date().isoformat()}_review-0a0a0a0a/ACTION.md"
-    brain.write(ahead, report)
-    result = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)
-    # Before, its earlier date made the new action the oldest: it was removed at once while the reply named it.
-    assert result["removed"] == 0
-    assert brain.read(str(result["action"])) == report
-    assert brain.read(ahead) == report
+    brain.write(ahead, report_body)
+    result = run_job(brain, "review", runner=printing(report_body))
+    assert "removed" not in result
+    assert brain.read(str(result["action"])) == report_body
+    assert brain.read(ahead) == report_body
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
 def test_keep_logs_what_it_cannot_remove_and_never_fails_the_run(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
     )
-    report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
-    first = str(routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)["action"])
+    report_body = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
+    first = str(run_job(brain, "review", runner=printing(report_body))["action"])
     folder = (brain.root / first).parent
-    # A folder BF can read but not change, such as one the owner made read-only, keeps its report.
     folder.chmod(0o500)
     try:
-        later = NOW + timedelta(days=1)
-        second = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: later)
+        second = run_job(brain, "review", runner=printing(report_body))
     finally:
         folder.chmod(0o700)
-    # Before, the run failed, blaming its run history, and never recorded the new action for a later removal.
-    assert second["removed"] == 0
-    history = state(brain, ROUTINES)["review"]
-    assert (history["error"], history["failures"]) == ("", 0)
-    assert list(cast("dict[str, str]", history["reports"])) == [second["action"]]
-    assert (folder / "ACTION.md").read_bytes() == report
-    assert f"kept {first.removesuffix('/ACTION.md')}: " in brain.read(log_path("review")).decode()
-    # A link anywhere in actions/ leaves the listing incomplete, which could miscount the newest: none is removed.
-    (brain.root / "actions/notes").mkdir()
-    (brain.root / "actions/notes/link").symlink_to(brain.root / "bf.yaml")
-    third = routine(
-        brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW + timedelta(days=2)
-    )
-    assert third["removed"] == 0
-    assert brain.read(str(second["action"])) == report
-    expected = "kept older actions: actions/notes/link: symlinks and special files are forbidden"
-    assert expected in brain.read(log_path("review")).decode()
+    assert "removed" not in second
+    state = Queue(brain).state_of("review")
+    assert state.get("error_count", 0) == 0
+    assert list(cast("dict[str, str]", Queue(brain).progress("reports:review"))) == [second["action"]]
+    assert (folder / "ACTION.md").read_bytes() == report_body
+    assert f"kept {first.removesuffix('/ACTION.md')}" in brain.read(log_path("review")).decode()
 
 
 def test_keep_puts_a_report_back_when_its_folder_gains_an_entry(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
     )
-    report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
-    first = str(routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)["action"])
+    report_body = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
+    first = str(run_job(brain, "review", runner=printing(report_body))["action"])
 
     def gained(_store: Store, _name: str) -> None:
-        # The owner added a file between the check and the removal.
         raise OSError(errno.ENOTEMPTY, "synthetic entry")
 
     monkeypatch.setattr(Store, "rmdir", gained)
-    later = NOW + timedelta(days=1)
-    second = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: later)
-    assert second["removed"] == 0
-    assert brain.read(first) == report
+    second = run_job(brain, "review", runner=printing(report_body))
+    assert "removed" not in second
+    assert brain.read(first) == report_body
 
 
-def test_routines_support_wall_clock_schedules_and_declarative_when_gates(brain: Store) -> None:
-    from bf.models import Record
-    from conftest import records_file
-
-    with pytest.raises(ValidationError, match="routine accepts either refresh or at, not both"):
-        Routine(command=["echo"], refresh=60, at="08:00")
-    clock_routine = Routine(command=["echo"], at="08:00", days=["fri"], timezone="UTC")
-    assert clock_routine.scheduled is True
+def test_jobs_support_wall_clock_schedules_and_shell_gates(brain: Store) -> None:
+    with pytest.raises(ValidationError):
+        Job.model_validate({"run": ["echo"], "on": {"every": 60, "at": "08:00"}})
+    clock_job = Job.model_validate({"run": ["echo"], "on": {"at": "08:00", "days": ["fri"], "timezone": "UTC"}})
+    assert clock_job.triggers[0].at == "08:00"
 
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n  feed:\n    command: [echo]\n"
-        b"routines:\n  digest:\n    command: [routines/digest.py]\n    at: '08:00'\n    timezone: UTC\n"
-        b"    output: action\n    when:\n      sources: [feed]\n",
+        b"version: 10\nname: fixture\njobs:\n  digest:\n"
+        b"    run: [routines/digest.py]\n"
+        b"    gate: [sh, -c, 'exit 1']\n"
+        b"    on: {at: '08:00', timezone: UTC}\n"
+        b"    emit: action\n",
     )
-    assert routine_health(brain, now=NOW)["digest"]["freshness"] == "never"
-    assert len(due_routines(brain, now=NOW)) == 1
+    assert cast("dict", report(brain, now=NOW))["jobs"]["digest"]["freshness"] == "never"
+    assert len(due_jobs(brain, now=NOW)) == 1
 
-    # Unmatched `when:` skips as `gated` in both dry_run and live update, recording the checked window.
-    dry_gated = update(brain, kinds=frozenset({"routine"}), dry_run=True, now=NOW)
-    assert cast("list[dict]", dry_gated["routines"])[0]["status"] == "gated"
-    live_gated = update(brain, kinds=frozenset({"routine"}), now=NOW)
-    assert cast("list[dict]", live_gated["routines"])[0]["status"] == "gated"
-    assert routine_health(brain, now=NOW)["digest"]["freshness"] == "fresh"
+    # Dry run reports due; live run whose gate fails returns `gated` without running main command.
+    dry_due = update(brain, dry_run=True, now=NOW)
+    assert cast("list[dict]", dry_due["jobs"])[0]["status"] == "due"
+    called: list[str] = []
 
-    # New evidence in `feed` after the cursor opens the gate on the next day's window and advances `when_cursor`.
-    records_file(
-        brain,
-        "feed",
-        [Record(id="item-1", title="Fresh signal", attributes={"observed": "2026-09-26T07:30:00Z"})],
-    )
+    def gated_runner(argv: list[str], *_args: object) -> bytes:
+        called.append(argv[0])
+        if argv[0] == "sh":
+            raise jobs.ExitError(1, "program exited with status 1")
+        return ACTION
+
+    live_gated = update(brain, now=NOW, runner=gated_runner)
+    assert cast("list[dict]", live_gated["jobs"])[0]["status"] == "gated"
+    assert called == ["sh"]
+    assert cast("dict", report(brain, now=NOW))["jobs"]["digest"]["freshness"] == "fresh"
+
+    # When gate passes on the next scheduled day, the main command runs and writes an action.
     day2 = NOW + timedelta(days=1)
-    dry_due = update(brain, kinds=frozenset({"routine"}), dry_run=True, now=day2)
-    assert cast("list[dict]", dry_due["routines"])[0]["status"] == "due"
-
-    ran = update(brain, kinds=frozenset({"routine"}), runner=printing(ACTION), now=day2)
-    routine_row = cast("list[dict]", ran["routines"])[0]
-    assert "action" in routine_row
-    assert state(brain, ROUTINES)["digest"]["when_cursor"] == "2026-09-26T07:30:00.000000Z"
-
-    # Without newer evidence, the following day's window gates again.
-    day3 = NOW + timedelta(days=2)
-    gated_again = update(brain, kinds=frozenset({"routine"}), now=day3)
-    assert cast("list[dict]", gated_again["routines"])[0]["status"] == "gated"
+    ran = update(brain, now=day2, runner=printing(ACTION))
+    assert "action" in cast("list[dict]", ran["jobs"])[0]

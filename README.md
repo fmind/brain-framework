@@ -11,11 +11,11 @@
 
 **🧠 Brain Framework: from information to informed actions.**
 
-Brain Framework (BF) is a local-first brain for you and your AI agents. It collects evidence from your tools into plain files you own, connects them through an explicit ontology, lets any agent harness search and read offline, and wakes your harness when declarative `when:` rules or reviewed gates spot new evidence.
+Brain Framework (BF) is a local-first brain for you and your AI agents. It collects evidence from your tools into plain files you own, connects them through an explicit ontology, lets any agent harness search and read offline, and wakes your harness when triggers or reviewed gates spot new evidence.
 
 - **Plain files you own, open to any agent.** Markdown notes (`projects/`, `concepts/`, `actions/`) and JSON records (`memories/`), reached through the `bf` CLI, [MCP](https://fmind.github.io/brain-framework/docs/mcp/), [Agent Skills](https://agentskills.io/specification) and `AGENTS.md`.
-- **Explicit graph and provenance.** `bf.yaml` maps provider fields into shared relations once at collection. Every claim keeps its source record, and `newer_evidence` flags notes when upstream evidence changes.
-- **Controlled autonomy.** Built-in `when:` gates (`sources`, `review`, `actions`, `attention`) wake your harness offline with zero wasted model runs, and `propose: true` lets read-only assistants draft validated `ACTION.md` proposals.
+- **Explicit graph and provenance.** `bf.yaml` `map:` rules or scripts map provider fields into shared relations once at collection. Every claim keeps its source record, and `newer_evidence` flags notes when upstream evidence changes.
+- **Controlled autonomy.** Scheduled or event-triggered jobs (`jobs:`) with reviewed `gate:` scripts wake your harness only when needed and deliver answers via `bf post` or validated `ACTION.md` drafts.
 
 [![CI](https://github.com/fmind/brain-framework/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fmind/brain-framework/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/brain-framework?color=174EA6)](https://pypi.org/project/brain-framework/) [![Python](https://img.shields.io/pypi/pyversions/brain-framework)](https://pypi.org/project/brain-framework/) [![License: MIT](https://img.shields.io/badge/license-MIT-174EA6)](https://github.com/fmind/brain-framework/blob/main/LICENSE)
 
@@ -24,7 +24,7 @@ Brain Framework (BF) is a local-first brain for you and your AI agents. It colle
 <a href="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-loop.svg">
   <img
     src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-loop.svg"
-    alt="The Brain Framework loop: sensors gather evidence into a brain folder; bf.yaml declares the ontology, sensors, routines, assistants, channels and watch settings; memories, projects, concepts and actions form a knowledge graph; agents read context, act and compile outcomes back."
+    alt="The Brain Framework loop: jobs gather evidence into a brain folder; bf.yaml declares the ontology, jobs and watch settings; memories, projects, concepts and actions form a knowledge graph; agents read context, act and compile outcomes back."
     width="960"
   >
 </a>
@@ -79,10 +79,10 @@ Five steps run in one loop: **gather → normalize → organize and connect → 
 | `projects/` | Project state (`Now`), decisions (`Decision`) and open tasks (`Next actions`)                           |
 | `concepts/` | Durable reusable patterns and reference syntheses                                                       |
 | `actions/`  | Tracked work sessions (`draft` open, `stable` settled, `deprecated` retired)                            |
-| `sensors/`  | Stdlib scripts (built on `_sensor.py`) printing JSON or JSONL from your tools                           |
-| `routines/` | Deterministic scripts (built on `_bf.py`) run on intervals, `at` or Git hooks                           |
+| `sensors/`  | Standalone scripts printing JSON/JSONL or raw exports shaped by `bf.yaml` `map:`                        |
+| `routines/` | Deterministic scripts (like `weekly-review.py`) run on intervals, `at`, events or Git hooks             |
 
-`bf.yaml` declares shared [fields and mappings](https://fmind.github.io/brain-framework/docs/schema/#shared-fields-and-sensor-mappings), [sensors](https://fmind.github.io/brain-framework/docs/sensors/), [routines](https://fmind.github.io/brain-framework/docs/routines/) and [assistants](https://fmind.github.io/brain-framework/docs/prompts/). A disposable SQLite cache in `.bf/` powers offline BM25 search, graph backlinks (`bf read project:new-website`), triage (`bf read review`) and JSONL exports (`bf export --kind items`). See the [directory reference](https://fmind.github.io/brain-framework/docs/brain/#directory-reference).
+`bf.yaml` declares shared [fields and mappings](https://fmind.github.io/brain-framework/docs/schema/#shared-fields-and-sensor-mappings) and unified [`jobs:`](https://fmind.github.io/brain-framework/docs/prompts/) covering [sensors](https://fmind.github.io/brain-framework/docs/sensors/), [routines](https://fmind.github.io/brain-framework/docs/routines/) and [channels](https://fmind.github.io/brain-framework/docs/channels/). A disposable SQLite cache in `.bf/` powers offline BM25 search, graph backlinks (`bf read project:new-website`), triage (`bf read review`) and JSONL exports (`bf export --kind items`). See the [directory reference](https://fmind.github.io/brain-framework/docs/brain/#directory-reference).
 
 ## Open your agent in your brain
 
@@ -98,13 +98,13 @@ The `/bf` router connects your harness to built-in offline documentation via `bf
 - **`bf guide retrieval`**: orient with `bf read review`, verify and cite `SOURCE:ID` refs and export graph claims.
 - **`bf guide authoring`**: update owning `projects/` and `concepts/`, manage tracked `actions/` (`bf action new`, `bf action status`) and connect entities.
 - **`bf guide getting-started` / `bf guide operations`**: initialize or register brains, run [MCP](https://fmind.github.io/brain-framework/docs/mcp/), validate, evaluate and troubleshoot.
-- **`bf guide jobs` / `bf guide events`**: configure sensors, routines, assistants and `bf watch`, recover queues and use Git hooks.
+- **`bf guide jobs` / `bf guide events`**: configure `jobs:`, `map:`, `bf watch` triggers, recover queues and use Git hooks.
 
 See [agent workflows](https://fmind.github.io/brain-framework/docs/agents/) and optional repository [hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks).
 
 ## Bring your tools
 
-Copy a reviewed stdlib sensor into `sensors/` alongside [`_sensor.py`](https://github.com/fmind/brain-framework/blob/main/examples/sensors/_sensor.py): [local documents](https://github.com/fmind/brain-framework/blob/main/examples/sensors/local-documents.py), [highlights](https://github.com/fmind/brain-framework/blob/main/examples/sensors/highlights.py), [Git history](https://github.com/fmind/brain-framework/blob/main/examples/sensors/git-history.py), [GitHub history](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md), [Google Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py), [Gmail headers](https://github.com/fmind/brain-framework/blob/main/examples/sensors/gmail-headers.py), [Drive folders](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py), or [any source you can script](https://fmind.github.io/brain-framework/docs/sensors/#any-source-you-can-script). Keep them fresh in a terminal or [background service](https://fmind.github.io/brain-framework/docs/schedule/) with `bf watch` ([offline demo](https://github.com/fmind/brain-framework/tree/main/examples/watch)):
+Copy a standalone stdlib script into `sensors/` (or pair any JSON/JSONL CLI with `bf.yaml` `map:`): [local documents](https://github.com/fmind/brain-framework/blob/main/examples/sensors/local-documents.py), [highlights](https://github.com/fmind/brain-framework/blob/main/examples/sensors/highlights.py), [Git history](https://github.com/fmind/brain-framework/blob/main/examples/sensors/git-history.py), [GitHub history](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md), [Google Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py), [Gmail headers](https://github.com/fmind/brain-framework/blob/main/examples/sensors/gmail-headers.py), [Drive folders](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py), or [any source you can script](https://fmind.github.io/brain-framework/docs/sensors/#any-source-you-can-script). Keep them fresh in a terminal or [background service](https://fmind.github.io/brain-framework/docs/schedule/) with `bf watch` ([offline demo](https://github.com/fmind/brain-framework/tree/main/examples/watch)):
 
 <a href="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/watch.svg">
   <img
@@ -116,20 +116,18 @@ Copy a reviewed stdlib sensor into `sensors/` alongside [`_sensor.py`](https://g
 
 ## Let your agent come to you
 
-An [assistant](https://fmind.github.io/brain-framework/docs/prompts/) watches your brain offline and invokes your harness only when `when:` matches:
+A [prompt job](https://fmind.github.io/brain-framework/docs/prompts/) watches your brain offline and invokes your harness only when an event or `gate:` triggers it:
 
 ```yaml
-assistants:
+jobs:
   triage:
     prompt: prompts/triage.md
-    command:
+    harness:
       [
         claude,
         --print,
         --output-format,
         json,
-        --json-schema,
-        "{{schema}}",
         --tools,
         "Read,Grep,Glob,Bash",
         --allowedTools,
@@ -137,14 +135,14 @@ assistants:
         --permission-mode,
         dontAsk,
       ]
-    reply: { path: /structured_output }
-    propose: true
+    extract: /result
+    emit: message
     post: desktop
-    schedules:
-      mail: { every: 600, when: { sources: [mail] } }
+    on:
+      - { every: 600, event: { kind: record, source: mail } }
 ```
 
-`when:` checks SQLite with zero subprocesses, passes new events to your harness, posts replies to your [channel](https://fmind.github.io/brain-framework/docs/channels/) and saves validated `draft` `ACTION.md` proposals when `propose: true`. See [safe prompts](https://fmind.github.io/brain-framework/docs/prompts/#keep-prompts-safe) and [propose, then act](https://fmind.github.io/brain-framework/docs/prompts/#propose-then-act).
+Event rules and `gate:` scripts skip quiet intervals without starting a model, `extract:` unwraps harness JSON, and `post:` delivers answers through your [channel](https://fmind.github.io/brain-framework/docs/channels/) (while `emit: action` writes validated `draft` `ACTION.md` notes). See [safe prompts](https://fmind.github.io/brain-framework/docs/prompts/#keep-prompts-safe) and [propose, then act](https://fmind.github.io/brain-framework/docs/prompts/#propose-then-act).
 
 ## Good to know
 

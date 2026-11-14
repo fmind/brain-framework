@@ -195,6 +195,7 @@ _REPLIES: dict[schemas.Kind, dict[str, object]] = {
     "search-reply": replies.SEARCH,
     "read-reply": replies.READ,
     "status-reply": replies.STATUS,
+    "doctor-reply": replies.DOCTOR,
 }
 _STRICT = {kind: Draft202012Validator(schema) for kind, schema in _REPLIES.items()}
 _PUBLISHED = {kind: Draft202012Validator(schemas.document(kind)) for kind in _REPLIES}
@@ -208,9 +209,9 @@ def _published(kind: schemas.Kind, result: dict[str, object]) -> None:
 
 @pytest.fixture(autouse=True)
 def published_replies(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Search and read replies return through `bounded`, status replies from `health.report`: validate each one
-    against its kind's reply schemas. Tests call `health.report` through the module, so this check sees them."""
-    bounded, report = retrieve.bounded, health.report
+    """Search and read replies return through `bounded`, status/doctor replies from `health`: validate each one
+    against its kind's reply schemas. Tests call `health.report`/`health.doctor` through the module."""
+    bounded, report, doctor = retrieve.bounded, health.report, getattr(health, "doctor", None)
 
     def checked(value: dict[str, object], limit: int = MAX_REPLY) -> dict[str, object]:
         result = bounded(value, limit)
@@ -225,6 +226,14 @@ def published_replies(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(retrieve, "bounded", checked)
     monkeypatch.setattr(health, "report", status)
+    if doctor is not None:
+
+        def checked_doctor(store: Store, *args: object, **kwargs: object) -> dict[str, object]:
+            result = doctor(store, *args, **kwargs)
+            _published("doctor-reply", result)
+            return result
+
+        monkeypatch.setattr(health, "doctor", checked_doctor)
 
 
 @pytest.fixture(autouse=True)
@@ -275,7 +284,7 @@ def brain(tmp_path: Path) -> Store:
     root = tmp_path / "brain"
     root.mkdir()
     store = Store(root)
-    store.write("bf.yaml", b"version: 9\nname: fixture\nsensors: {}\n")
+    store.write("bf.yaml", b"version: 10\nname: fixture\njobs: {}\n")
     store.write("projects/offline.md", PROJECT)
     store.write(
         "concepts/evidence.md",

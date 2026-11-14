@@ -65,10 +65,10 @@ def test_replies_localize_instants_but_return_stored_provider_values() -> None:
         assert reply["record"]["relations"] == {"start": stored}
         # A note's date replaces the instant that ordered it.
         assert "time" not in present({"date": "2026-09-26", "time": stored})
-        # Status maps key entries by program name: sensors named date, time or fields stay listed and localized.
+        # Status maps key entries by job/source name: entries named date, time or fields stay listed and localized.
         named = {name: {"last_collected": stored} for name in ("date", "time", "fields")}
         local = {name: {"last_collected": "2026-09-26T11:00:00+02:00"} for name in named}
-        assert present({"sources": named, "routines": named}) == {"sources": local, "routines": local}
+        assert present({"sources": named, "jobs": named}) == {"sources": local, "jobs": local}
         # Only a source's `changed` is an instant: under that key, pages list items and cache refreshes count files.
         assert present({"changed": [], "index": {"changed": 4}}) == {"changed": [], "index": {"changed": 4}}
         """,

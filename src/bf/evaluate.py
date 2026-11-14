@@ -131,7 +131,7 @@ class Case(Model):
 class Suite(Model):
     """A bounded collection of retrieval assertions; evaluated offline without executing programs."""
 
-    version: Literal[9] = Field(description="Brain format, shared with bf.yaml; independent of the package version.")
+    version: Literal[10] = Field(description="Brain format, shared with bf.yaml; independent of the package version.")
     cases: Annotated[list[Case], Field(min_length=1, max_length=200)] = Field(
         description="One to 200 retrieval cases with unique names."
     )

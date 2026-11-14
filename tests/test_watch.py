@@ -18,31 +18,28 @@ from concurrent import futures
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Event
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from uuid import UUID
 
 import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
-import bf.collect as collector
 import bf.watch as watching
-from bf.assistants import Dispatcher
 from bf.cli import _cancel, app
 from bf.config import load
 from bf.health import attention
-from bf.history import state
-from bf.models import WEEKDAYS, Error, WatchSettings, encode, local, timestamp
+from bf.models import WEEKDAYS, Error, WatchSettings, local, timestamp
 from bf.runtime import Queue
-from bf.storage import Store, collecting, private_dir
+from bf.storage import Store, collecting
 from bf.watch import (
     Dashboard,
+    Dispatcher,
     Job,
     Row,
     Sort,
     State,
+    StreamStoppedError,
     _loop,
     _stop,
     clean,
@@ -59,25 +56,29 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
-CONFIG = b"""version: 9
+CONFIG = b"""version: 10
 name: fixture
-sensors:
+jobs:
   calendar:
-    command: [echo]
-    refresh: 3600
+    run: [echo]
+    emit: records
+    on: {every: 3600}
   git:
-    command: [echo]
-    refresh: 300
+    run: [echo]
+    emit: records
+    on: {every: 300}
   manual:
-    command: [echo]
+    run: [echo]
+    emit: records
   disabled:
-    command: [echo]
+    run: [echo]
+    emit: records
     enabled: false
-    refresh: 300
-routines:
+    on: {every: 300}
   review:
-    command: [echo]
-    refresh: 86400
+    run: [echo]
+    emit: action
+    on: {every: 86400}
 """
 
 
@@ -102,33 +103,27 @@ class FakeLive:
 def test_snapshot_reads_counts_and_status_without_executing(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
     now = datetime.now(UTC)
-    private_dir(brain, ".bf", "state").write(
-        "sensors.json",
-        encode(
-            {
-                "calendar": {
-                    "success": now.isoformat(),
-                    "added": 3,
-                    "updated": 2,
-                    "removed": 1,
-                    "elapsed_seconds": 0.25,
-                    "output_bytes": 128,
-                    "reconcile": True,
-                    "records": 10,
-                },
-                "git": {
-                    "success": (now - timedelta(days=1)).isoformat(),
-                    "run": (now - timedelta(minutes=1)).isoformat(),
-                    "failures": 2,
-                    "error": "program exited with status 1",
-                },
-                "disabled": {"run": now.isoformat(), "failures": 1, "error": "program exited with status 1"},
-            }
-        ),
+    queue = Queue(brain)
+    queue.remember(
+        "calendar",
+        last_success=now.isoformat(),
+        added=3,
+        updated=2,
+        removed=1,
+        elapsed_seconds=0.25,
+        output_bytes=128,
+        reconcile=True,
+        records=10,
     )
-    private_dir(brain, ".bf", "state").write(
-        "routines.json", encode({"review": {"success": now.isoformat(), "action": "actions/review/ACTION.md"}})
+    queue.remember(
+        "git",
+        last_success=(now - timedelta(days=1)).isoformat(),
+        last_run=(now - timedelta(minutes=1)).isoformat(),
+        error_count=2,
+        last_error="program exited with status 1",
     )
+    queue.remember("disabled", last_run=now.isoformat(), error_count=1, last_error="program exited with status 1")
+    queue.remember("review", last_success=now.isoformat(), action="actions/review/ACTION.md")
     rows = {row.name: row for row in snapshot(brain, ("calendar",))}
     assert rows["calendar"].status is State.FRESH
     assert rows["calendar"].added == 3
@@ -136,7 +131,7 @@ def test_snapshot_reads_counts_and_status_without_executing(brain: Store) -> Non
     assert rows["calendar"].output_bytes == 128
     assert rows["calendar"].reconcile
     assert rows["calendar"].records == 10
-    # Reply instants are canonical UTC, whatever offset the history used.
+    # Reply instants are canonical UTC, whatever offset the runtime state used.
     assert rows["calendar"].success.endswith("Z")
     assert rows["calendar"].next_due.endswith("Z")
     assert rows["git"].records is None
@@ -151,9 +146,8 @@ def test_snapshot_reads_counts_and_status_without_executing(brain: Store) -> Non
     # A disabled program's last failure is history: like bf status, the row reports no error.
     assert (rows["disabled"].error, rows["disabled"].log) == ("", "")
     assert rows["review"].action.endswith("ACTION.md")
-    private_dir(brain, ".bf", "state").write(
-        "sensors.json", encode({"calendar": {"success": (now - timedelta(days=1)).isoformat()}})
-    )
+    queue.remember("calendar", last_success=(now - timedelta(days=1)).isoformat())
+    queue.remember("git", last_success="", last_run="", error_count=0, last_error="")
     assert {row.name: row.status for row in snapshot(brain)}["calendar"] is State.DUE
     assert {row.name: row.status for row in snapshot(brain)}["git"] is State.NEVER
 
@@ -163,9 +157,9 @@ def test_dashboard_layout_keeps_data_literal_and_handles_resize(width: int, heig
     dashboard = Dashboard(
         "[red]fixture\x1b]0;bad",
         rows=[
-            Row("assistant", "assistant", State.FRESH, True, 1800, runs=1, record="memories/\x1b[2Jassistant"),
+            Row("message", "assistant", State.FRESH, True, 1800, runs=1, record="memories/\x1b[2Jassistant"),
             Row(
-                "sensor",
+                "records",
                 "calendar",
                 State.FRESH,
                 True,
@@ -175,8 +169,8 @@ def test_dashboard_layout_keeps_data_literal_and_handles_resize(width: int, heig
                 updated=2,
                 removed=0,
             ),
-            Row("sensor", "git", State.FAILED, True, 300, error="[bold]literal\x1b[2J", log="/private/\x1b[2Jlog"),
-            Row("routine", "review", State.NEVER, False, 86400, action="actions/\x1b[2Jreview"),
+            Row("records", "git", State.FAILED, True, 300, error="[bold]literal\x1b[2J", log="/private/\x1b[2Jlog"),
+            Row("action", "review", State.NEVER, False, 86400, action="actions/\x1b[2Jreview"),
         ],
     )
     output = io.StringIO()
@@ -209,7 +203,7 @@ def test_empty_many_rows_and_controls() -> None:
     assert dashboard.key("j") == ""
     assert dashboard.cursor == 0
     dashboard.rows = [
-        Row("sensor", f"source-{i:02}", State.FAILED if i == 25 else State.FRESH, True, 60) for i in range(40)
+        Row("records", f"source-{i:02}", State.FAILED if i == 25 else State.FRESH, True, 60) for i in range(40)
     ]
     for _ in range(26):
         dashboard.key("\x1b[B")
@@ -233,35 +227,35 @@ def test_empty_many_rows_and_controls() -> None:
 
 
 def test_an_empty_attention_filter_says_nothing_needs_attention() -> None:
-    dashboard = Dashboard("fixture", attention=True, rows=[Row("sensor", "calendar", State.FRESH, True, 60)])
+    dashboard = Dashboard("fixture", attention=True, rows=[Row("records", "calendar", State.FRESH, True, 60)])
     output = screen(dashboard, 80, 24)
-    assert "No matching programs" in output
-    assert "Nothing needs attention; press Tab to show every program." in output
-    assert "Add a reviewed sensor" not in output
-    # Without any program, the filter is not why the table is empty.
+    assert "No matching jobs" in output
+    assert "Nothing needs attention; press Tab to show every job." in output
+    assert "Add a reviewed job" not in output
+    # Without any job, the filter is not why the table is empty.
     dashboard.rows = []
-    assert "Add a reviewed sensor, routine or assistant in bf.yaml." in screen(dashboard, 80, 24)
+    assert "Add a reviewed job in bf.yaml." in screen(dashboard, 80, 24)
 
 
 @pytest.mark.parametrize(
     ("states", "running", "paused", "summary"),
     [
         # No check starts until Space, so a countdown would announce one.
-        ([State.FAILED], False, True, "1 program   1 selected   1 needs attention   Checks paused"),
+        ([State.FAILED], False, True, "1 job   1 selected   1 needs attention   Checks paused"),
         # An active update finishes while paused.
-        ([State.FAILED], True, True, "1 program   1 selected   1 needs attention   Updating…"),
+        ([State.FAILED], True, True, "1 job   1 selected   1 needs attention   Updating…"),
         (
             [State.FAILED, State.DUE, State.FRESH],
             False,
             False,
-            "3 programs   3 selected   2 need attention   Next check in ",
+            "3 jobs   3 selected   2 need attention   Next check in ",
         ),
     ],
 )
 def test_summary_agrees_with_its_counts_and_shows_no_countdown_while_paused(
     states: list[State], summary: str, *, running: bool, paused: bool
 ) -> None:
-    rows = [Row("sensor", f"source-{index}", status, True, 60) for index, status in enumerate(states)]
+    rows = [Row("records", f"source-{index}", status, True, 60) for index, status in enumerate(states)]
     dashboard = Dashboard("fixture", rows=rows, running=running, paused=paused)
     assert screen(dashboard, 80, 24).splitlines()[1].startswith(summary)
 
@@ -278,7 +272,7 @@ def test_summary_agrees_with_its_counts_and_shows_no_countdown_while_paused(
     ],
 )
 def test_terminal_key_variants_share_one_action(keys: list[str], cursor: int) -> None:
-    dashboard = Dashboard("fixture", rows=[Row("sensor", f"s{i}", State.FRESH, True, 60) for i in range(5)])
+    dashboard = Dashboard("fixture", rows=[Row("records", f"s{i}", State.FRESH, True, 60) for i in range(5)])
     for key in keys:
         assert dashboard.key(key) == ""
     assert dashboard.cursor == cursor
@@ -288,13 +282,13 @@ def test_terminal_key_variants_share_one_action(keys: list[str], cursor: int) ->
     ("width", "height"), [(80, 11), (80, 18), (80, 24), (100, 24), (120, 11), (120, 30), (160, 50), (80, 40)]
 )
 def test_selected_row_stays_visible_while_scrolling(width: int, height: int) -> None:
-    dashboard = Dashboard("fixture", rows=[Row("sensor", f"source-{i:02}", State.FRESH, True, 60) for i in range(40)])
+    dashboard = Dashboard("fixture", rows=[Row("records", f"source-{i:02}", State.FRESH, True, 60) for i in range(40)])
     dashboard.key("G")
     output = screen(dashboard, width, height)
     assert len(output.splitlines()) == height
     assert "> source-39" in output
     # The title range matches the rows actually drawn, including the last one.
-    title = re.search(r"Programs · (\d+)-(\d+)/40", output)
+    title = re.search(r"Jobs · (\d+)-(\d+)/40", output)
     assert title
     assert title[2] == "40"
     drawn = [int(number) for number in re.findall(r"│ [> ] source-(\d+)", output)]
@@ -313,9 +307,9 @@ def test_details_show_diagnostics_and_routine_markers_at_every_width(width: int,
     dashboard = Dashboard(
         "fixture",
         rows=[
-            Row("routine", routine, State.FRESH, True, 60, action="actions/weekly-review"),
-            Row("sensor", "broken", State.FAILED, True, 60, error="program exited with status 1", log="/state/b.log"),
-            *(Row("sensor", f"source-{i:02}", State.FRESH, True, 60) for i in range(count - 2)),
+            Row("action", routine, State.FRESH, True, 60, action="actions/weekly-review"),
+            Row("records", "broken", State.FAILED, True, 60, error="program exited with status 1", log="/state/b.log"),
+            *(Row("records", f"source-{i:02}", State.FRESH, True, 60) for i in range(count - 2)),
         ],
     )
     output = screen(dashboard, width, height)
@@ -331,17 +325,17 @@ def test_details_show_diagnostics_and_routine_markers_at_every_width(width: int,
 @pytest.mark.parametrize(
     ("row", "command"),
     [
-        (Row("sensor", "calendar", State.FRESH, True, 60), "bf collect calendar"),
-        (Row("sensor", "manual", State.MANUAL, True, 0), "bf collect manual"),
-        (Row("routine", "weekly-log", State.FRESH, True, 60), "bf run weekly-log"),
-        (Row("assistant", "personal", State.NEVER, True, 1800, runs=0), "bf run personal"),
-        (Row("assistant", "manual", State.MANUAL, True, 0, runs=0), "bf run manual"),
-        (Row("sensor", "disabled", State.DISABLED, True, 60), ""),
-        (Row("assistant", "paused", State.DISABLED, True, 1800, runs=0), ""),
+        (Row("records", "calendar", State.FRESH, True, 60), "bf collect calendar"),
+        (Row("records", "manual", State.MANUAL, True, 0), "bf collect manual"),
+        (Row("action", "weekly-log", State.FRESH, True, 60), "bf run weekly-log"),
+        (Row("message", "personal", State.NEVER, True, 1800, runs=0), "bf run personal"),
+        (Row("message", "manual", State.MANUAL, True, 0, runs=0), "bf run manual"),
+        (Row("records", "disabled", State.DISABLED, True, 60), ""),
+        (Row("message", "paused", State.DISABLED, True, 1800, runs=0), ""),
     ],
 )
 def test_details_name_the_command_that_runs_the_program_now(row: Row, command: str) -> None:
-    # bf collect runs only sensors and bf run routines and assistants; neither runs a disabled program.
+    # bf collect runs only records jobs and bf run other jobs; neither runs a disabled job.
     commands = re.compile(r"bf (?:collect|run) \S+")
     assert commands.findall(Dashboard("fixture", rows=[row]).details(row).plain) == ([command] if command else [])
     # An observer runs nothing and suggests no executing command.
@@ -349,17 +343,17 @@ def test_details_name_the_command_that_runs_the_program_now(row: Row, command: s
 
 
 def test_configured_periods_show_exactly() -> None:
-    row = Row("sensor", "git", State.FRESH, True, 5400)
+    row = Row("records", "git", State.FRESH, True, 5400)
     dashboard = Dashboard("fixture", rows=[row], preferences=WatchSettings(interval=90))
     # Ages and countdowns round down; a configured period does not, so the guide matches the late warning's seconds.
-    assert "Refresh: 90m" in dashboard.details(row).plain
+    assert "Schedule: 90m" in dashboard.details(row).plain
     assert "Check: 90s" in dashboard.guide().plain
     assert [period(n) for n in (5, 60, 90, 3600, 5400, 86400, 604800)] == ["5s", "1m", "90s", "1h", "90m", "1d", "7d"]
 
 
 def test_details_show_the_last_success_in_local_time() -> None:
     success = "2026-09-01T11:59:00.123456Z"
-    dashboard = Dashboard("fixture", rows=[Row("sensor", "calendar", State.FRESH, True, 60, success=success)])
+    dashboard = Dashboard("fixture", rows=[Row("records", "calendar", State.FRESH, True, 60, success=success)])
     # Like every reply, with the local offset and to the second, whole within the details panel.
     output = screen(dashboard, 120, 24)
     assert f"Last OK: {local(success)}" in output
@@ -367,12 +361,12 @@ def test_details_show_the_last_success_in_local_time() -> None:
 
 
 def test_short_terminals_keep_program_rows_over_details() -> None:
-    dashboard = Dashboard("fixture", rows=[Row("sensor", f"source-{i:02}", State.FRESH, True, 60) for i in range(40)])
+    dashboard = Dashboard("fixture", rows=[Row("records", f"source-{i:02}", State.FRESH, True, 60) for i in range(40)])
     output = screen(dashboard, 80, 11)
     assert "> source-00" in output
     assert "Details" not in output
     # Below the frame's own height no row fits, and the title says so instead of claiming one.
-    assert "Programs · 0-0/40" in screen(dashboard, 80, 10)
+    assert "Jobs · 0-0/40" in screen(dashboard, 80, 10)
 
 
 @pytest.mark.parametrize(("width", "height"), [(80, 24), (100, 24), (120, 30)])
@@ -381,7 +375,7 @@ def test_columns_keep_state_ages_and_counts_whole(width: int, height: int) -> No
         "fixture",
         rows=[
             Row(
-                "sensor",
+                "records",
                 "github-pull-requests",
                 State.FAILED,
                 True,
@@ -393,23 +387,23 @@ def test_columns_keep_state_ages_and_counts_whole(width: int, height: int) -> No
                 updated=5678,
                 removed=9012,
             ),
-            Row("sensor", "gmail-inbox", State.FRESH, True, 3600, next_due=(NOW + timedelta(seconds=59)).isoformat()),
-            Row("routine", "weekly-review", State.DISABLED, False, 0),
-            Row("sensor", "z-" + "very-" * 12 + "long-name", State.DISABLED, True, 300),
+            Row("records", "gmail-inbox", State.FRESH, True, 3600, next_due=(NOW + timedelta(seconds=59)).isoformat()),
+            Row("action", "weekly-review", State.DISABLED, False, 0),
+            Row("records", "z-" + "very-" * 12 + "long-name", State.DISABLED, True, 300),
         ],
     )
     output = screen(dashboard, width, height)
     for value in ("github-pull-requests", "failed", "59m ago", "now", "12345", "1234/5678/9012", "excluded", "59s"):
         assert value in output
     assert "disabled" in output
-    # Only the program name shortens.
+    # Only the job name shortens.
     assert "z-very-very-" in output
     assert "long-name" not in output
 
 
 def test_text_on_a_background_sets_its_own_color() -> None:
     dashboard = Dashboard(
-        "fixture", rows=[Row("sensor", "calendar", State.FRESH, True, 60), Row("sensor", "git", State.DUE, True, 60)]
+        "fixture", rows=[Row("records", "calendar", State.FRESH, True, 60), Row("records", "git", State.DUE, True, 60)]
     )
     console = Console(file=io.StringIO(), width=120, height=24, color_system="truecolor", force_terminal=True)
     filled = [
@@ -425,7 +419,7 @@ def test_text_on_a_background_sets_its_own_color() -> None:
 def test_fixed_lines_truncate_instead_of_hiding_sort_and_keys() -> None:
     dashboard = Dashboard(
         "a-" + "very-" * 12 + "long-brain",
-        rows=[Row("sensor", "calendar", State.FRESH, True, 60)],
+        rows=[Row("records", "calendar", State.FRESH, True, 60)],
         message="A long status message " * 5,
     )
     dashboard.key("i")
@@ -453,14 +447,14 @@ def test_fixed_lines_truncate_instead_of_hiding_sort_and_keys() -> None:
         (Sort.DURATION, ["alpha", "gamma", "beta", "unknown"], ["beta", "gamma", "alpha", "unknown"]),
         (Sort.OUTPUT, ["beta", "gamma", "alpha", "unknown"], ["alpha", "gamma", "beta", "unknown"]),
         (Sort.REFRESH, ["unknown", "gamma", "beta", "alpha"], ["alpha", "beta", "gamma", "unknown"]),
-        # Sensors tie on kind, so they stay alphabetical in both directions.
-        (Sort.KIND, ["unknown", "alpha", "beta", "gamma"], ["alpha", "beta", "gamma", "unknown"]),
+        # Records jobs tie on emit, so they stay alphabetical in both directions.
+        (Sort.EMIT, ["unknown", "alpha", "beta", "gamma"], ["alpha", "beta", "gamma", "unknown"]),
     ],
 )
 def test_sort_orders_values_numerically_with_unknowns_last(sort: Sort, expected: list[str], reverse: list[str]) -> None:
     rows = [
         Row(
-            "sensor",
+            "records",
             "alpha",
             State.FRESH,
             True,
@@ -475,7 +469,7 @@ def test_sort_orders_values_numerically_with_unknowns_last(sort: Sort, expected:
             output_bytes=9,
         ),
         Row(
-            "sensor",
+            "records",
             "beta",
             State.FAILED,
             True,
@@ -490,7 +484,7 @@ def test_sort_orders_values_numerically_with_unknowns_last(sort: Sort, expected:
             output_bytes=100,
         ),
         Row(
-            "sensor",
+            "records",
             "gamma",
             State.DUE,
             False,
@@ -504,7 +498,7 @@ def test_sort_orders_values_numerically_with_unknowns_last(sort: Sort, expected:
             elapsed_seconds=9,
             output_bytes=10,
         ),
-        Row("routine", "unknown", State.NEVER, True, 0),
+        Row("action", "unknown", State.NEVER, True, 0),
     ]
     dashboard = Dashboard("fixture", rows=rows, sort=sort, descending=sort.descending)
     assert [row.name for row in dashboard.visible()] == expected
@@ -515,9 +509,9 @@ def test_sort_orders_values_numerically_with_unknowns_last(sort: Sort, expected:
 
 
 def test_sort_controls_keep_selection_across_polls_and_filters() -> None:
-    alpha = Row("sensor", "alpha", State.FRESH, True, 60, records=2)
-    beta = Row("sensor", "beta", State.FAILED, True, 60, records=10)
-    routine = Row("routine", "beta", State.NEVER, True, 60)
+    alpha = Row("records", "alpha", State.FRESH, True, 60, records=2)
+    beta = Row("records", "beta", State.FAILED, True, 60, records=10)
+    routine = Row("action", "aa-act", State.NEVER, True, 60)
     dashboard = Dashboard("fixture", rows=[beta, routine, alpha])
     dashboard.key("G")
     assert dashboard.selected() == beta
@@ -531,7 +525,7 @@ def test_sort_controls_keep_selection_across_polls_and_filters() -> None:
     assert dashboard.selected() == beta
     assert dashboard.cursor == 0
     dashboard.key("\t")
-    assert {row.name for row in dashboard.visible()} == {"beta"}
+    assert {row.name for row in dashboard.visible()} == {"beta", "aa-act"}
     dashboard.key("n")
     assert not dashboard.descending
     assert dashboard.selected() == beta
@@ -556,8 +550,8 @@ def test_ties_stay_alphabetical_in_both_directions_and_help_is_visible() -> None
     dashboard = Dashboard(
         "fixture",
         rows=[
-            Row("sensor", "zulu", State.FRESH, True, 60, records=2),
-            Row("sensor", "alpha", State.FRESH, True, 60, records=2),
+            Row("records", "zulu", State.FRESH, True, 60, records=2),
+            Row("records", "alpha", State.FRESH, True, 60, records=2),
         ],
     )
     dashboard.key("i")
@@ -565,23 +559,23 @@ def test_ties_stay_alphabetical_in_both_directions_and_help_is_visible() -> None
         dashboard.key(key)
         assert [row.name for row in dashboard.visible()] == ["alpha", "zulu"]
     output = screen(dashboard, 80, 24)
-    assert "Programs · 1-2/2 · items ↓" in output
+    assert "Jobs · 1-2/2 · items ↓" in output
     assert "Items" in output
     assert "s sort" in output
     assert "f refresh  Space pause" in output
     dashboard.key("?")
-    output = screen(dashboard, 80, 24)
-    assert "not total stored" in output
-    assert "Unknown values stay last" in output
-    assert "Space pauses future checks" in output
-    assert "not proof the provider is unchanged" in output
+    flat = " ".join(line.strip("│ ") for line in screen(dashboard, 80, 24).splitlines())
+    assert "records returned by last committed run" in flat
+    assert "Failed runs keep prior counts." in flat
+    assert "f/u refreshes; Space pauses; q stops watch." in flat
+    assert "Fresh is local success, not proof provider is unchanged." in flat
 
 
 def test_observer_offers_only_what_it_can_do() -> None:
     dashboard = Dashboard(
         "fixture",
         observe=True,
-        rows=[Row("sensor", "calendar", State.FRESH, True, 60), Row("sensor", "git", State.DUE, False, 60)],
+        rows=[Row("records", "calendar", State.FRESH, True, 60), Row("records", "git", State.DUE, False, 60)],
     )
     output = screen(dashboard, 80, 24)
     assert "OBSERVE · no execution" in output
@@ -591,10 +585,10 @@ def test_observer_offers_only_what_it_can_do() -> None:
     # The observer's selection does not describe the active collector's selection.
     assert "selected" not in output
     dashboard.key("j")
-    assert "excluded from this view" in screen(dashboard, 80, 24)
+    assert "excluded" in screen(dashboard, 80, 24)
     dashboard.key("?")
     output = screen(dashboard, 80, 24)
-    assert "u rereads history" in output
+    assert "view never runs jobs or sends alerts. u rereads; q quits." in output
     assert "Space pauses" not in output
     assert "u checks" not in output
 
@@ -676,7 +670,7 @@ def test_dashboard_applies_batched_keys_in_order(brain: Store) -> None:
     dashboard = Dashboard("fixture", observe=True)
     try:
         os.write(writer, b"jujq")  # u rereads history without moving the selection
-        _loop(brain, dashboard, Job(brain, (), ()), (), (), live=cast("Live", live), descriptor=reader)
+        _loop(brain, dashboard, Job(brain, ()), (), live=cast("Live", live), descriptor=reader)
     finally:
         os.close(reader)
         os.close(writer)
@@ -696,7 +690,7 @@ def test_idle_dashboard_redraws_once_a_second(brain: Store, monkeypatch: pytest.
     monkeypatch.setattr("bf.watch.read_keys", keys)
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda _: None))
     live = FakeLive()
-    _loop(brain, Dashboard("fixture", observe=True), Job(brain, (), ()), (), (), live=cast("Live", live))
+    _loop(brain, Dashboard("fixture", observe=True), Job(brain, ()), (), live=cast("Live", live))
     # Ten idle seconds: one frame per second for relative ages, not one per key poll.
     assert live.frames == 10
     assert min(waits) == 1
@@ -705,8 +699,11 @@ def test_idle_dashboard_redraws_once_a_second(brain: Store, monkeypatch: pytest.
 @pytest.mark.parametrize(
     ("failure", "message"),
     [
-        (Error("invalid bf.yaml: sensors.git.refresh: Input should be a valid integer"), None),
-        (PermissionError(13, "Permission denied"), "Cannot read bf.yaml or history; run bf status for diagnostics"),
+        (Error("invalid bf.yaml: jobs.git.on.every: Input should be a valid integer"), None),
+        (
+            PermissionError(13, "Permission denied"),
+            "Cannot read bf.yaml or runtime state; run bf status for diagnostics",
+        ),
     ],
 )
 def test_observation_loop_never_executes_and_recovers_config_error(
@@ -731,9 +728,9 @@ def test_observation_loop_never_executes_and_recovers_config_error(
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda _: None))
     monkeypatch.setattr(Job, "start", lambda _: pytest.fail("observation executed a program"))
     with pytest.raises(StopIteration):
-        _loop(brain, Dashboard("fixture", observe=True), Job(brain, (), ()), (), ())
+        _loop(brain, Dashboard("fixture", observe=True), Job(brain, ()), ())
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert events[0]["programs"] == []
+    assert events[0]["jobs"] == []
     # BF's own diagnostic names the field without quoting content; other failures point to bf status.
     assert events[0]["message"] == (message or str(failure))
     assert events[1]["message"] == "Configuration recovered"
@@ -743,7 +740,7 @@ def test_observation_loop_never_executes_and_recovers_config_error(
 def test_watcher_names_a_selected_program_bf_yaml_no_longer_declares(
     brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # `bf watch --sensor git` runs while its owner renames git in a bf.yaml that stays valid.
+    # `bf watch --job git` runs while its owner renames git in a bf.yaml that stays valid.
     brain.write("bf.yaml", CONFIG.replace(b"  git:\n", b"  gitlab:\n"))
     ticks = iter([0.0, 4.0, 8.0])
     starts: list[set[str]] = []
@@ -758,11 +755,11 @@ def test_watcher_names_a_selected_program_bf_yaml_no_longer_declares(
     dashboard = Dashboard("fixture")
     monkeypatch.setattr(Job, "start", lambda _: starts.append({row.name for row in dashboard.rows if row.included}))
     with pytest.raises(StopIteration):
-        _loop(brain, dashboard, Job(brain, ("git",), ()), ("git",), ())
+        _loop(brain, dashboard, Job(brain, ("git",)), ("git",))
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     # bf status sees nothing wrong with bf.yaml: the message names the selection, and nothing runs until it is valid.
-    assert events[0]["message"] == "unknown sensor git; check names in bf.yaml; did you mean gitlab?"
-    assert (events[0]["programs"], events[0]["running"]) == ([], False)
+    assert events[0]["message"] == "unknown job git; check jobs in bf.yaml; did you mean gitlab?"
+    assert (events[0]["jobs"], events[0]["running"]) == ([], False)
     assert starts == [{"git"}]
     assert events[1]["running"]
 
@@ -770,10 +767,10 @@ def test_watcher_names_a_selected_program_bf_yaml_no_longer_declares(
 def test_job_runs_selected_program_and_retains_state(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n  sample:\n    command: [python3, sensors/sample.py]\n    refresh: 60\n",
+        b"version: 10\nname: fixture\njobs:\n  sample:\n    run: [python3, sensors/sample.py]\n    emit: records\n    on: {every: 60}\n",
     )
     brain.write("sensors/sample.py", b'import json\nprint(json.dumps([{"id":"one","title":"Local fixture"}]))\n')
-    job = Job(brain, ("sample",), ())
+    job = Job(brain, ("sample",))
     assert job.poll() is None
     job.start()
     try:
@@ -805,12 +802,12 @@ def test_stopping_a_job_leaves_time_to_roll_back_a_commit(
             return 130
 
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
-    job = Job(brain, (), ())
+    job = Job(brain, ())
     job.process = cast("subprocess.Popen[bytes]", Update())
     job.close()
     # A cancelled update rolls back its interrupted record commit before exiting; SIGKILL would leave the journal.
     # Only a stop that takes longer than a second says why the terminal waits.
-    assert signals == (["terminate", "wait 1", "wait 59"] if slow else ["terminate", "wait 1"])
+    assert signals == (["terminate", "wait 1.0", "wait 59"] if slow else ["terminate", "wait 1.0"])
     stopping = "bf: stopping the active update; this can take up to 60 seconds\n"
     assert capsys.readouterr().err == (stopping if slow else "")
 
@@ -849,10 +846,10 @@ def test_stopping_a_job_after_the_terminal_closed_still_waits_then_kills(
 
     monkeypatch.setattr(sys, "stderr", HungUp())
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
-    job = Job(brain, (), ())
+    job = Job(brain, ())
     job.process = cast("subprocess.Popen[bytes]", Hung(clock, signals))
     job.close()
-    assert signals == ["terminate", "wait 1", "wait 59", "kill", "wait None"]
+    assert signals == ["terminate", "wait 1.0", "wait 59.0", "kill", "wait None"]
 
 
 def test_a_cancellation_while_stopping_still_waits_then_kills(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -866,7 +863,7 @@ def test_a_cancellation_while_stopping_still_waits_then_kills(brain: Store, monk
             return super().wait(timeout)
 
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
-    job = Job(brain, (), ())
+    job = Job(brain, ())
     job.process = cast("subprocess.Popen[bytes]", Closing(clock, signals))
     # Like main(): a hangup cancels like Ctrl-C.
     previous = signal.signal(signal.SIGHUP, _cancel)
@@ -876,22 +873,22 @@ def test_a_cancellation_while_stopping_still_waits_then_kills(brain: Store, monk
     finally:
         signal.signal(signal.SIGHUP, previous)
     # The interrupt waits until the update was killed, so watch never exits leaving it unsupervised.
-    assert signals == ["terminate", "wait 1", "wait 59", "kill", "wait None"]
+    assert signals == ["terminate", "wait 1.0", "wait 59.0", "kill", "wait None"]
 
 
 def test_job_tells_skipped_cache_files_apart_from_failed_programs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n"
-        b"  sample:\n    command: [python3, sensors/sample.py]\n    refresh: 60\n"
-        b"  failing:\n    command: [python3, sensors/failing.py]\n    refresh: 60\n",
+        b"version: 10\nname: fixture\njobs:\n"
+        b"  sample:\n    run: [python3, sensors/sample.py]\n    emit: records\n    on: {every: 60}\n"
+        b"  failing:\n    run: [python3, sensors/failing.py]\n    emit: records\n    on: {every: 60}\n",
     )
     brain.write("sensors/sample.py", b'import json\nprint(json.dumps([{"id":"one","title":"Local fixture"}]))\n')
     brain.write("sensors/failing.py", b"raise SystemExit(3)\n")
     brain.write("projects/broken.md", b"---\nstale_after: soon\n---\n# Broken\n")
     # Every selected program ran and only the search cache skipped a file, or a program also failed.
     for selected, skipped in ((("sample",), 1), (("failing",), 0)):
-        job = Job(brain, selected, ())
+        job = Job(brain, selected)
         job.start()
         try:
             assert job.process is not None
@@ -927,7 +924,7 @@ def test_tui_exit_restores_terminal_and_cancels_sensor(
 ) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n  slow:\n    command: [python3, sensors/slow.py]\n    refresh: 60\n",
+        b"version: 10\nname: fixture\njobs:\n  slow:\n    run: [python3, sensors/slow.py]\n    emit: records\n    on: {every: 60}\n",
     )
     marker = tmp_path / "started"
     brain.write(
@@ -984,14 +981,14 @@ def test_shipped_offline_watch_example(tmp_path: Path) -> None:
     store = Store(Path(shutil.copytree(source, tmp_path / "watch-demo")))
     first: dict = update(store)
     assert not first["ok"]
-    results = {entry["sensor"]: entry for entry in first["sensors"]}
+    results = {entry["job"]: entry for entry in first["jobs"]}
     assert set(results) == {"calendar", "git", "unavailable"}
     assert results["calendar"]["added"] == 1
     assert results["git"]["added"] == 1
     assert results["unavailable"]["status"] == "failed"
     rows = {row.name: row for row in snapshot(store)}
-    # The failed sensor retries after one minute of backoff, so the next five-second cycles skip it.
-    failed_at = datetime.fromisoformat(str(state(store)["unavailable"]["run"]))
+    # The failed job retries after one minute of backoff, so the next five-second cycles skip it.
+    failed_at = datetime.fromisoformat(str(Queue(store).state_of("unavailable")["last_run"]))
     assert datetime.fromisoformat(rows["unavailable"].next_due) == failed_at + timedelta(minutes=1)
     assert rows["unavailable"].status is State.FAILED
     dashboard = Dashboard("watch-demo", rows=snapshot(store))
@@ -999,20 +996,20 @@ def test_shipped_offline_watch_example(tmp_path: Path) -> None:
     assert [(row.name, row.records) for row in dashboard.visible()[:2]] == [("calendar", 1), ("git", 1)]
     output = screen(dashboard, 80, 24)
     assert "items ↓" in output
-    assert "1/0/0" in output
+    assert "1/—/—" in output
     dashboard.key("r")
     assert "items ↑" in screen(dashboard, 80, 24)
     dashboard.key("s")
     assert dashboard.visible()[0].name == "unavailable"
-    second: dict = update(store, sensors=("calendar", "git"))
+    second: dict = update(store, jobs=("calendar", "git"))
     assert second["ok"]
-    assert second["sensors"] == []
+    assert second["jobs"] == []
     # Follow the README's source-addition command, then reuse watch's actual update subprocess.
     example = (source / "README.md").read_text().split("```bash\npython3 - <<'PYTHON'\n", 1)[1].split("\nPYTHON", 1)[0]
     subprocess.run(  # noqa: S603 - repository-owned example, isolated fictional brain
         [sys.executable, "-c", example], cwd=store.root, check=True, timeout=60
     )
-    job = Job(store, (), ())
+    job = Job(store, ())
     job.start()
     try:
         assert job.process is not None
@@ -1020,8 +1017,8 @@ def test_shipped_offline_watch_example(tmp_path: Path) -> None:
         assert job.reply is not None
         job.reply.seek(0)
         refreshed = json.load(job.reply)
-        assert [entry["sensor"] for entry in refreshed["sensors"]] == ["new-calendar"]
-        assert refreshed["sensors"][0]["added"] == 1
+        assert [entry["job"] for entry in refreshed["jobs"]] == ["new-calendar"]
+        assert refreshed["jobs"][0]["added"] == 1
         assert {row.name: row for row in snapshot(store)}["new-calendar"].records == 1
     finally:
         job.close()
@@ -1032,13 +1029,12 @@ def test_json_watch_reports_completion_rows_and_delivery_warning(
     brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], delivered: bool
 ) -> None:
     brain.write("bf.yaml", CONFIG)
-    private_dir(brain, ".bf", "state").write(
-        "sensors.json", encode({"calendar": {"success": "2026-09-01T14:00:00+02:00", "records": 10, "added": 1}})
-    )
+    Queue(brain).remember("calendar", last_success=timestamp("2026-09-01T14:00:00+02:00"), records=10, added=1)
     starts: list[float] = []
     ticks = iter([0.0, 1.0, 4.0, 7.0, 8.0])
     results = iter([0, 1])
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda _: None))
+    monkeypatch.setattr("bf.watch._Supervisor.tick", lambda *_: None)
     monkeypatch.setattr(Job, "start", lambda _: starts.append(1))
     monkeypatch.setattr(Job, "poll", lambda _: next(results))
     monkeypatch.setattr("bf.watch_settings.desktop", lambda *_args: delivered)
@@ -1049,8 +1045,8 @@ def test_json_watch_reports_completion_rows_and_delivery_warning(
     assert len(starts) == 2
     assert any(event["message"] == "Update complete" for event in events)
     assert not events[-1]["running"]
-    assert set(events[0]) == {"brain", "running", "assisting", "message", "programs"}
-    calendar = next(row for row in events[0]["programs"] if row["name"] == "calendar")
+    assert set(events[0]) == {"brain", "running", "assisting", "message", "jobs"}
+    calendar = next(row for row in events[0]["jobs"] if row["name"] == "calendar")
     assert (calendar["records"], calendar["added"], calendar["updated"]) == (10, 1, None)
     assert calendar["success"] == "2026-09-01T12:00:00+00:00"
     warnings = captured.err.splitlines()
@@ -1065,9 +1061,7 @@ def test_json_watch_reports_completion_rows_and_delivery_warning(
 
 def test_json_watch_writes_utf8_whatever_the_locale(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write("bf.yaml", CONFIG)
-    private_dir(brain, ".bf", "state").write(
-        "sensors.json", encode({"calendar": {"run": "2026-09-01T12:00:00Z", "error": "échec du fournisseur"}})
-    )
+    Queue(brain).remember("calendar", last_run="2026-09-01T12:00:00Z", last_error="échec du fournisseur", error_count=1)
     raw = io.BytesIO()
     # Like `bf read`, the JSON Lines stream is UTF-8 even when the terminal's encoding is ASCII.
     monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, encoding="ascii"))
@@ -1077,7 +1071,7 @@ def test_json_watch_writes_utf8_whatever_the_locale(brain: Store, monkeypatch: p
     with pytest.raises(StopIteration):
         watch(brain, interval=5, json_output=True)
     event = json.loads(raw.getvalue().decode("utf-8").splitlines()[0])
-    calendar = next(row for row in event["programs"] if row["name"] == "calendar")
+    calendar = next(row for row in event["jobs"] if row["name"] == "calendar")
     assert calendar["error"] == "échec du fournisseur"
 
 
@@ -1092,7 +1086,6 @@ def test_status_watch_routes_to_observation(brain: Store, monkeypatch: pytest.Mo
 @pytest.fixture(autouse=True)
 def fixed_action_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("bf.watch_settings.desktop", lambda *_args: True)
-    monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=1))
 
 
 @pytest.mark.parametrize("key", ["f", "u"])
@@ -1101,7 +1094,7 @@ def test_refresh_reloads_sources_and_preserves_execution_boundaries(
     brain: Store, monkeypatch: pytest.MonkeyPatch, key: str, mode: str
 ) -> None:
     brain.write("bf.yaml", CONFIG)
-    sensors = ("calendar",) if mode == "selected" else ()
+    selected = ("calendar",) if mode == "selected" else ()
     dashboard = Dashboard("fixture", observe=mode == "observe", paused=mode == "paused", next_check=600)
     starts: list[set[str]] = []
     clock = [1.0]
@@ -1117,7 +1110,9 @@ def test_refresh_reloads_sources_and_preserves_execution_boundaries(
         if steps == 1:
             brain.write(
                 "bf.yaml",
-                CONFIG.replace(b"sensors:\n", b"sensors:\n  new-source:\n    command: [echo]\n    refresh: 60\n"),
+                CONFIG.replace(
+                    b"jobs:\n", b"jobs:\n  new-source:\n    run: [echo]\n    emit: records\n    on: {every: 60}\n"
+                ),
             )
             return [key]
         assert "new-source" in {row.name for row in dashboard.rows}
@@ -1132,7 +1127,7 @@ def test_refresh_reloads_sources_and_preserves_execution_boundaries(
     monkeypatch.setattr(Job, "start", start)
     monkeypatch.setattr("bf.watch.read_keys", keys)
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
-    _loop(brain, dashboard, Job(brain, sensors, ()), sensors, (), live=cast("Live", FakeLive()))
+    _loop(brain, dashboard, Job(brain, selected), selected, live=cast("Live", FakeLive()))
     if mode == "observe":
         assert not starts
     else:
@@ -1149,7 +1144,9 @@ def test_refresh_during_update_coalesces_and_waits_for_valid_configuration(
     starts: list[set[str]] = []
     clock = [1.0]
     steps = 0
-    changed = CONFIG.replace(b"sensors:\n", b"sensors:\n  new-source:\n    command: [echo]\n    refresh: 60\n")
+    changed = CONFIG.replace(
+        b"jobs:\n", b"jobs:\n  new-source:\n    run: [echo]\n    emit: records\n    on: {every: 60}\n"
+    )
 
     def start(_job: Job) -> None:
         starts.append({row.name for row in dashboard.rows})
@@ -1181,7 +1178,7 @@ def test_refresh_during_update_coalesces_and_waits_for_valid_configuration(
     monkeypatch.setattr(Job, "poll", lambda _: 0 if steps >= 2 else None)
     monkeypatch.setattr("bf.watch.read_keys", keys)
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
-    _loop(brain, dashboard, Job(brain, (), ()), (), (), live=cast("Live", FakeLive()))
+    _loop(brain, dashboard, Job(brain, ()), (), live=cast("Live", FakeLive()))
     assert len(starts) == 2
 
 
@@ -1204,12 +1201,13 @@ def test_a_check_interval_slower_than_a_refresh_is_flagged(
     dashboard = Dashboard("fixture", late=late.removeprefix("bf: ").strip())
     assert "interval too slow, press ?" in screen(dashboard, 80, 24)
     dashboard.help = True
-    guide = screen(dashboard, 80, 24)
-    for line in ("checks happen every 7200s", "Space pauses future checks", "not proof the provider is unchanged"):
+    guide = " ".join(line.strip("│ ") for line in screen(dashboard, 80, 24).splitlines())
+    for line in ("checks happen every 7200s", "f/u refreshes; Space pauses", "not proof provider is unchanged"):
         assert line in guide
     # A long program name wraps the warning onto a third line, which costs a line that the footer repeats.
     dashboard.late = dashboard.late.replace("git", "a-long-program-name-for-the-weekly-git-review")
-    assert "not proof the provider is unchanged" in screen(dashboard, 80, 24)
+    wrapped = " ".join(line.strip("│ ") for line in screen(dashboard, 80, 24).splitlines())
+    assert "not proof provider is unchanged" in wrapped
     # An interval faster than every refresh says nothing.
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=iter([0.0]).__next__, sleep=lambda _: None))
     with pytest.raises(StopIteration):
@@ -1217,10 +1215,10 @@ def test_a_check_interval_slower_than_a_refresh_is_flagged(
     assert not capsys.readouterr().err
 
 
-HELPER = b"""assistants:
-  helper:
+HELPER = b"""  helper:
     prompt: prompts/helper.md
-    command: [harness]
+    harness: [harness]
+    emit: log
 """
 
 
@@ -1254,10 +1252,10 @@ def test_snapshot_reads_one_bf_yaml_while_an_editor_saves_it(brain: Store, monke
     brain.write("bf.yaml", CONFIG + HELPER.replace(b"  helper:", b"  renamed:"))
     renamed = load(brain)
     brain.write("bf.yaml", CONFIG + HELPER)
-    # The atomic save that renames the assistant lands right after the dashboard's own load.
+    # The atomic save that renames the job lands right after the dashboard's own load.
     monkeypatch.setattr("bf.health.load", lambda _store: renamed)
     rows = {row.name: row for row in snapshot(brain)}
-    assert rows["helper"].kind == "assistant"
+    assert rows["helper"].emit == "log"
     assert "renamed" not in rows
 
 
@@ -1266,11 +1264,10 @@ def test_a_sensor_that_keeps_missing_parts_needs_attention_after_three_runs(brai
     now = datetime.now(UTC).isoformat()
 
     def history(runs: int) -> None:
-        missing = {"success": now, "run": now, "incomplete_runs": runs, "missed": 1, "of": 3}
-        # A manual and a disabled sensor show their gap, but neither needs attention, as in bf status.
-        private_dir(brain, ".bf", "state").write(
-            "sensors.json", encode(dict.fromkeys(("calendar", "manual", "disabled"), missing))
-        )
+        # A manual and a disabled job show their gap, but neither needs attention, as in bf status.
+        queue = Queue(brain)
+        for name in ("calendar", "manual", "disabled"):
+            queue.remember(name, last_success=now, last_run=now, incomplete_runs=runs, missed=1, of=3)
 
     history(2)
     dashboard = Dashboard("fixture", rows=snapshot(brain))
@@ -1281,12 +1278,12 @@ def test_a_sensor_that_keeps_missing_parts_needs_attention_after_three_runs(brai
     history(3)
     dashboard.replace_rows(snapshot(brain))
     rows = {row.name: row for row in dashboard.rows}
-    assert {"kind": "sensor", "name": "calendar", "freshness": "fresh", "degraded": True} in attention(brain)
+    assert {"kind": "job", "name": "calendar", "freshness": "fresh", "degraded": True} in attention(brain)
     assert [name for name in ("calendar", "manual", "disabled") if watching.needs_attention(rows[name])] == ["calendar"]
     dashboard.key("\t")
     assert rows["calendar"] in dashboard.visible()
     detail = dashboard.details(rows["calendar"]).plain
-    assert "Last run missed 1 of 3; 3 incomplete runs in a row" in detail
+    assert "Last run missed 1 of 3; 3 incomplete in a row" in detail
     assert "Log: logs/calendar.log" in detail
     # The JSON stream carries the same counts.
     assert json.loads(json.dumps(asdict(rows["calendar"])))["degraded"] == {"runs": 3, "missed": 1, "of": 3}
@@ -1296,8 +1293,8 @@ def test_a_sensor_that_keeps_missing_parts_needs_attention_after_three_runs(brai
 def test_a_new_assistant_schedule_needs_attention_only_once_due(brain: Store) -> None:
     # A weekday three days away is never today, even if the test crosses midnight.
     later = WEEKDAYS[(datetime.now(UTC).weekday() + 3) % 7]
-    waiting = HELPER + f"    schedules:\n      weekly: {{at: '00:00', timezone: UTC, days: [{later}]}}\n".encode()
-    brain.write("bf.yaml", b"version: 9\nname: fixture\n" + waiting)
+    waiting = HELPER + f"    on:\n      - {{at: '00:00', timezone: UTC, days: [{later}]}}\n".encode()
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + waiting)
     dashboard = Dashboard("fixture", rows=snapshot(brain))
     [helper] = dashboard.rows
     # As in bf status, the row says `never` but stays out of attention until its first slot.
@@ -1306,11 +1303,11 @@ def test_a_new_assistant_schedule_needs_attention_only_once_due(brain: Store) ->
     dashboard.key("\t")
     assert dashboard.visible() == []
     # An interval schedule without a success is due at once, so both views count it.
-    brain.write("bf.yaml", b"version: 9\nname: fixture\n" + waiting + b"      hourly: {every: 3600}\n")
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + waiting + b"      - {every: 3600}\n")
     dashboard.replace_rows(snapshot(brain))
     [helper] = dashboard.rows
     assert (helper.status, helper.early) == (State.NEVER, False)
-    assert attention(brain) == [{"kind": "assistant", "name": "helper", "freshness": "never"}]
+    assert attention(brain) == [{"kind": "job", "name": "helper", "freshness": "never"}]
     assert dashboard.visible() == [helper]
     assert "1 needs attention" in screen(dashboard, 120, 30)
 
@@ -1339,12 +1336,11 @@ def test_watch_signals_the_update_then_stops_the_dispatcher_then_waits(
 
     class Dispatching:
         def __init__(self, _store: Store, names: set[str]) -> None:
-            assert names == {"helper"}
+            assert names == {"calendar", "git", "manual", "disabled", "review", "helper"}
             self.names = names
+            self.daemons: dict[str, object] = {}
             self.tasks: dict[str, object] = {}
-            self.transports: dict[str, object] = {}
             self.health: dict[str, str] = {}
-            self.queue = SimpleNamespace(outstanding=lambda _names: [])
 
         def __enter__(self) -> Dispatching:
             events.append("dispatcher start")
@@ -1361,7 +1357,7 @@ def test_watch_signals_the_update_then_stops_the_dispatcher_then_waits(
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=iter([0.0]).__next__, sleep=lambda _: None))
     with pytest.raises(StopIteration):
         watch(brain, json_output=True)
-    # Exit callbacks run in reverse: the update is signalled before the dispatcher waits for its harnesses, and watch
+    # Exit callbacks run in reverse: the update is signalled before the dispatcher waits for its threads, and watch
     # waits for the update only once the dispatcher stopped.
     assert events == ["start", "dispatcher start", "terminate", "dispatcher close", "close"]
 
@@ -1373,25 +1369,35 @@ def test_watch_shows_dispatcher_errors_and_keeps_collecting(
     capsys: pytest.CaptureFixture[str],
     failure: str,
 ) -> None:
-    # A due schedule whose prompt is missing, a half-saved bf.yaml or a full queue never stops watch.
-    config = CONFIG + HELPER + b"    schedules:\n      review: {every: 3600}\n"
+    # A due event job whose prompt is missing, a half-saved bf.yaml, or a full queue never stops watch.
+    config = CONFIG + HELPER + b"    on:\n      - {event: {kind: mail}}\n"
     brain.write("bf.yaml", config)
     if failure != "prompt":
         brain.write("prompts/helper.md", b"Review.\n")
+    queue = Queue(brain)
+    if failure in {"prompt", "capacity"}:
+        queue.record_event("mail", "inbox", {"id": "1"})
+    else:
+        queue.set_progress("init", {"ok": True})
     if failure == "capacity":
-        # The queue refuses the schedule's job: schedule() reports it per assistant, retried after a backoff.
         monkeypatch.setattr(
-            "bf.assistants.Queue.enqueue",
-            lambda *_: (_ for _ in ()).throw(Error("assistant queue is full; finish, retry or cancel unfinished work")),
+            "bf.runtime.Queue.start_run",
+            lambda *_, **__: (_ for _ in ()).throw(
+                Error("runtime queue has no unresolved-work slots; clear pending work first")
+            ),
         )
     ran: list[str] = []
-    monkeypatch.setattr("bf.assistants.Dispatcher.runner", lambda *_: ran.append("harness") or b"Reviewed.")
+    monkeypatch.setattr("bf.jobs.subprocess.Popen", lambda *_, **__: ran.append("harness") or pytest.fail("unexpected"))
+    dispatchers: list[Dispatcher] = []
+    enter = Dispatcher.__enter__
+    monkeypatch.setattr(Dispatcher, "__enter__", lambda self: dispatchers.append(self) or enter(self))
 
-    # Saved between two-second snapshots, so the next dispatcher pass reads it first, or right after a pass, so the
-    # next snapshot does.
+    # Saved before snapshot (snapshot) or between reactive passes (invalid), then restored cleanly.
     saved = {"invalid": (0.5, 3.5), "snapshot": (1.5, 4.5)}.get(failure, ())
 
     def step(now: float) -> None:
+        if dispatchers:
+            futures.wait(list(dispatchers[0].tasks.values()), timeout=10)
         if saved and now == saved[0]:
             brain.write("bf.yaml", config + b"  broken: [\n")
         if saved and now == saved[1]:
@@ -1401,8 +1407,8 @@ def test_watch_shows_dispatcher_errors_and_keeps_collecting(
     reason = {
         "invalid": "bf.yaml: invalid YAML",
         "snapshot": "bf.yaml: invalid YAML",
-        "prompt": "prompts/helper.md: cannot read assistant helper's prompt",
-        "capacity": "assistant queue is full",
+        "prompt": "helper: prompts/helper.md: cannot read UTF-8 Markdown prompt for helper; see logs/helper.log",
+        "capacity": "runtime queue has no unresolved-work slots; clear pending work first",
     }[failure]
     messages = [event["message"] for event in events]
     assert any(message.startswith(reason) for message in messages), messages
@@ -1411,142 +1417,145 @@ def test_watch_shows_dispatcher_errors_and_keeps_collecting(
     assert errors[0].startswith("bf: ")
     if saved:
         assert "Configuration recovered" in messages
-        assert messages[-1] == "Assistant work resumed"
+        assert messages[-1] == "Dispatcher resumed"
     else:
-        # A schedule that cannot be admitted queues nothing, and collection keeps reporting its programs.
         assert ran == []
-        assert all(event["programs"] for event in events)
+        assert all(event["jobs"] for event in events)
 
 
-@pytest.mark.parametrize("failure", ["read", "stream", "delivery"])
+@pytest.mark.parametrize("failure", ["events", "daemon"])
 def test_watch_shows_failing_inputs_and_deliveries_until_they_recover(
     brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: str
 ) -> None:
-    channel = {
-        "read": b"  inbox:\n    read: {command: [reader]}\n    send: {command: [sender]}\n",
-        "stream": b"  chat:\n    send: {command: [send]}\n    stream: {command: [receive]}\n",
-        "delivery": b"  chat:\n    send: {command: [send]}\n",
-    }[failure]
-    settings = {
-        "read": b"    inputs:\n      - channel: {name: inbox, mode: read, every: 1}\n",
-        "stream": b"    inputs:\n      - channel: {name: chat, mode: stream}\n",
-        "delivery": b"    schedules:\n      review: {every: 3600}\n    post: chat\n",
-    }[failure]
-    brain.write("bf.yaml", CONFIG + b"channels:\n" + channel + HELPER + settings)
-    brain.write("prompts/helper.md", b"Review.\n")
+    if failure == "events":
+        extra = (
+            b"  helper:\n    run: [python3, routines/check.py]\n    emit: log\n    on:\n      - {event: {kind: mail}}\n"
+        )
+        brain.write(
+            "routines/check.py",
+            b"import pathlib, sys\nif pathlib.Path('fail').exists():\n    sys.exit(1)\n",
+        )
+    else:
+        extra = b"  chat:\n    run: [python3, channels/chat.py]\n    emit: messages\n    on: {daemon: true}\n"
+        brain.write(
+            "channels/chat.py",
+            b"import json, pathlib, sys, time\n"
+            b"if pathlib.Path('fail').exists():\n    sys.exit(1)\n"
+            b"print(json.dumps({'id': 'm1', 'sender': 'alice', 'conversation': 'c1', "
+            b"'time': '2026-10-17T00:00:00Z', 'text': 'ok'}), flush=True)\n"
+            b"time.sleep(30)\n",
+        )
+    brain.write("bf.yaml", CONFIG + extra)
+    brain.write("fail", b"1")
     queue = Queue(brain)
-    # The read's previous window ended an hour ago, so each poll reads.
-    earlier = timestamp((datetime.now(UTC) - timedelta(hours=1)).isoformat())
-    queue.set_progress("read:helper:inbox", {"since": earlier, "end": earlier})
-    broken, connections = [True], []
+    if failure == "events":
+        queue.record_event("mail", "inbox", {"id": "0"})
+    monkeypatch.setattr("bf.watch.job_ops.BACKOFF", 0.2)
+    dispatchers: list[Dispatcher] = []
+    enter = Dispatcher.__enter__
+    monkeypatch.setattr(Dispatcher, "__enter__", lambda self: dispatchers.append(self) or enter(self))
+    recovered = [False]
 
-    def reading(*_args: object, **_kwargs: object) -> list[object]:
-        if broken[0]:
-            raise Error("program exited with status 1")
-        return []
+    def step(now: float) -> None:
+        if dispatchers:
+            futures.wait(list(dispatchers[0].tasks.values()), timeout=10)
+        if failure == "events" and not recovered[0] and now in {0.5, 1.5, 2.5}:
+            queue.record_event("mail", "inbox", {"id": str(now)})
+        if failure == "daemon" and now == 0.5:
+            deadline = time.monotonic() + 10
+            while not queue.progress("health:daemon:chat").get("error") and time.monotonic() < deadline:
+                time.sleep(0.01)
+        if now == 4.5:
+            recovered[0] = True
+            brain.delete("fail")
+            if failure == "daemon":
+                deadline = time.monotonic() + 10
+                while queue.progress("health:daemon:chat").get("error") and time.monotonic() < deadline:
+                    time.sleep(0.01)
 
-    def streaming(*args: object, **_: object) -> None:
-        # Stops once with an error, then stays connected until watch stops.
-        connections.append(1)
-        if len(connections) == 1:
-            raise Error("channel chat: stream closed its output")
-        cast("Event", args[-1]).wait()
+    events, errors = json_watch(brain, monkeypatch, capsys, 9, step)
+    reason = {
+        "events": "helper: program exited with status 1; see logs/helper.log",
+        "daemon": "daemon chat: exited with status 1; see logs/chat.log",
+    }[failure]
+    messages = [event["message"] for event in events]
+    assert reason in messages, messages
+    # One diagnostic line for the failure across repeated passes; then reactive/daemon work resumes.
+    assert errors == [f"bf: {reason}"]
+    assert messages[-1] == "Dispatcher resumed"
 
-    def runner(_self: Dispatcher, _argv: list[str], _command: object, _store: Store, name: str, _stdin: bytes) -> bytes:
-        if name == "channel.chat.send":
-            raise Error("program exited with status 1")
-        return b"Reviewed."
 
-    monkeypatch.setattr("bf.assistants.channels.read", reading)
-    monkeypatch.setattr("bf.assistants.channels.stream", streaming)
-    monkeypatch.setattr("bf.assistants.Dispatcher.runner", runner)
-    # The dispatcher's read intervals follow watch's fake clock.
-    monkeypatch.setattr("bf.assistants.time", SimpleNamespace(monotonic=lambda: watching.time.monotonic()))
+def test_watch_rejects_second_json_watcher_and_skips_busy_event_job(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = CONFIG + HELPER + b"    on:\n      - {event: {kind: mail}}\n"
+    brain.write("bf.yaml", config)
+    brain.write("prompts/helper.md", b"Review.\n")
+    Queue(brain).record_event("mail", "inbox", {"id": "1"})
+
+    # A second foreground JSON watcher refuses to share the .watch lock.
+    with (
+        collecting(brain, ".watch"),
+        pytest.raises(Error, match="another watcher owns this brain; open bf watch in a terminal to observe it"),
+    ):
+        watch(brain, interval=60, json_output=True)
+
+    # Holding an event job's own lock never stalls watch or raises an error; once released, the next pass runs it.
+    ran: list[str] = []
+    monkeypatch.setattr(
+        "bf.jobs.run_job", lambda _store, name, **_kwargs: ran.append(name) or {"job": name, "status": "ok"}
+    )
+    monkeypatch.setattr(
+        "bf.watch.job_ops.run_job", lambda _store, name, **_kwargs: ran.append(name) or {"job": name, "status": "ok"}
+    )
+    owner = collecting(brain, ".events-helper")
+    owner.__enter__()
     dispatchers: list[Dispatcher] = []
     enter = Dispatcher.__enter__
     monkeypatch.setattr(Dispatcher, "__enter__", lambda self: dispatchers.append(self) or enter(self))
 
     def step(now: float) -> None:
-        # Each pass sees the outcome of the work the previous one started, and a stream's recorded failure.
         if dispatchers:
             futures.wait(list(dispatchers[0].tasks.values()), timeout=10)
-        if failure == "stream" and now == 0.5:
-            deadline = time.monotonic() + 10
-            while not queue.progress("health:channel:chat").get("error") and time.monotonic() < deadline:
-                time.sleep(0.01)
-        if now == 4.5:
-            # The input reads again, the stream accepts a message, or the owner cancels the uncertain delivery.
-            broken[0] = False
-            if failure == "stream":
-                queue.set_progress("health:channel:chat", {"error": "", "at": timestamp(datetime.now(UTC).isoformat())})
-            for delivery in cast("list[dict]", queue.report()["deliveries"]):
-                queue.retry(str(delivery["id"]), cancel=True)
-
-    events, errors = json_watch(brain, monkeypatch, capsys, 9, step)
-    reason = {
-        "read": "channel inbox: read failed: program exited with status 1; see logs/channel.inbox.read.log",
-        "stream": "channel chat: stream closed its output",
-        "delivery": "channel chat: delivery failed or uncertain; inspect bf queue",
-    }[failure]
-    messages = [event["message"] for event in events]
-    assert reason in messages, messages
-    # One diagnostic line for the failure, whichever pass sees it again; then work resumes.
-    assert errors == [f"bf: {reason}"]
-    assert messages[-1] == "Assistant work resumed"
-
-
-def test_watch_waits_for_an_update_that_owns_assistant_work(
-    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    brain.write("bf.yaml", CONFIG + HELPER)
-    brain.write("prompts/helper.md", b"Review.\n")
-    owner = collecting(brain, ".dispatch")
-    owner.__enter__()
-
-    def step(now: float) -> None:
         if now == 2.0:
-            # bf update finishes its assistant cycle.
+            assert ran == []
             owner.__exit__(None, None, None)
 
     try:
         events, errors = json_watch(brain, monkeypatch, capsys, 5, step)
     finally:
         owner.__exit__(None, None, None)
-    waiting = "Another bf update owns assistant work; assistants start once it finishes"
-    # The first snapshot precedes the first dispatcher pass.
-    assert events[1]["message"] == waiting
-    assert errors == [f"bf: {waiting}"]
-    assert events[-1]["message"] == "Assistant work resumed"
+    assert errors == []
+    assert ran == ["helper"]
+    assert all(event["jobs"] for event in events)
 
 
 def test_a_stopped_stream_worker_still_stops_watch(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write(
         "bf.yaml",
-        CONFIG
-        + b"channels:\n  chat:\n    send: {command: [send]}\n    stream: {command: [receive]}\n"
-        + HELPER
-        + b"    inputs:\n      - channel: {name: chat, mode: stream}\n",
+        CONFIG + b"  chat:\n    run: [python3, channels/chat.py]\n    emit: messages\n    on: {daemon: true}\n",
     )
-    brain.write("prompts/helper.md", b"Answer.\n")
-    # A worker that returns without being stopped: watch exits so its service manager restarts it.
-    monkeypatch.setattr("bf.assistants.Dispatcher._stream", lambda *_: None)
+    brain.write("channels/chat.py", b"import sys\nsys.exit(1)\n")
+    monkeypatch.setattr("bf.watch.job_ops.BACKOFF", 0.0)
+    real_sleep = time.sleep
     clock = [0.0]
 
     def sleep(delay: float) -> None:
+        real_sleep(0.01)
         clock[0] += delay
-        assert clock[0] < 10, "watch kept running without its stream"
+        assert clock[0] < 60, "watch kept running without its stream"
 
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
     monkeypatch.setattr(Job, "start", lambda _: None)
-    with pytest.raises(Error, match="stream worker stopped unexpectedly"):
+    with pytest.raises(StreamStoppedError, match=r"daemon chat: exited with status 1; see logs/chat\.log"):
         watch(brain, interval=3600, json_output=True)
 
 
 def test_an_idle_dispatcher_ticks_once_a_second(
     brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    brain.write("bf.yaml", CONFIG + HELPER)
-    brain.write("prompts/helper.md", b"Review.\n")
+    brain.write("bf.yaml", CONFIG)
+    Queue(brain).set_progress("init", {"ok": True})
     ticks: list[float] = []
     clock: list[float] = []
     original = Dispatcher.tick
@@ -1565,17 +1574,16 @@ def test_an_idle_dispatcher_ticks_once_a_second(
 def test_watch_clears_the_transport_health_its_dispatcher_records(
     brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    brain.write("bf.yaml", CONFIG + HELPER)
-    brain.write("prompts/helper.md", b"Review.\n")
+    brain.write("bf.yaml", CONFIG)
     queue = Queue(brain)
-    # A watcher that crashed left a stream error; a running one records another.
-    queue.set_progress("health:channel:chat", {"error": "stream exited", "at": "2026-10-17T00:00:00.000000Z"})
+    # A watcher that crashed left a daemon error; a running one records another and clears daemon health on stop.
+    queue.set_progress("health:daemon:chat", {"error": "stream exited", "at": "2026-10-17T00:00:00.000000Z"})
     seen: list[dict] = []
 
     def step(now: float) -> None:
         if now == 1.0:
             seen.append(cast("dict", queue.report()["transports"]))
-            queue.set_progress("health:read:helper:chat", {"error": "read failed", "at": "2026-10-17T00:00:00.000000Z"})
+            queue.set_progress("health:daemon:chat", {"error": "read failed", "at": "2026-10-17T00:00:00.000000Z"})
 
     json_watch(brain, monkeypatch, capsys, 2, step)
     # Health describes a running dispatcher only: bf status --check recovers once watch stops.

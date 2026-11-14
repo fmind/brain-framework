@@ -1,108 +1,139 @@
-"""Collect every due sensor, run every due routine and assistant of one brain, then refresh its search cache."""
+"""Run due jobs (records, scheduled, events, wakes, deliveries) of one brain, then refresh its search cache."""
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Collection, Generator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from threading import Event
+from typing import cast
 
-from bf import assistants as assistant_runtime
-from bf import index, pages
-from bf.collect import Runner, collect, due, due_routines, enabled, hooked, routine, run, window
+from pydantic import JsonValue
+
+from bf import collect, index
 from bf.config import load
-from bf.history import ROUTINES, remember, state
-from bf.models import PROGRAM_KINDS as KINDS
-from bf.models import Config, Error, ProgramKind, Routine, reason, suggest, timestamp
-from bf.storage import BusyError, Store, collecting, recording
+from bf.jobs import Runner, deliver_due, dispatch_events, run, run_job
+from bf.models import Config, Error, Job, reason, suggest
+from bf.runtime import Queue
+from bf.storage import BusyError, Store, collecting
 
-# Seconds a cycle waits for another update of the same brain before failing visibly.
-WAIT = 600
-# Concurrent due sensors one update cycle runs in parallel.
-WORKERS = 4
-
-
+WAIT, WORKERS = 600, 4
 _INACCESSIBLE = "inaccessible files; check permissions and free space"
 
 
-def selection(
-    config: Config,
-    sensors: tuple[str, ...] = (),
-    routines: tuple[str, ...] = (),
-    assistants: tuple[str, ...] = (),
-    kinds: frozenset[ProgramKind] = KINDS,
-) -> tuple[set[str], set[str], set[str]]:
-    """Explicit lists select only the programs they name; with no list at all, every program is selected. `kinds`
-    keeps only those kinds of program, as watch does to run assistants beside collection."""
-    for kind, names, known in (
-        ("sensor", sensors, config.sensors),
-        ("routine", routines, config.routines),
-        ("assistant", assistants, config.assistants),
-    ):
-        if unknown := sorted(set(names) - known.keys()):
-            raise Error(f"unknown {kind} {unknown[0]}; check names in bf.yaml{suggest(unknown[0], known)}")
-    if not (sensors or routines or assistants):
-        sensors, routines, assistants = tuple(config.sensors), tuple(config.routines), tuple(config.assistants)
-    return (
-        set(sensors) if "sensor" in kinds else set(),
-        set(routines) if "routine" in kinds else set(),
-        set(assistants) if "assistant" in kinds else set(),
+def _is_daemon(job: Job) -> bool:
+    return any(t.daemon for t in job.triggers)
+
+
+def selection(config: Config, names: tuple[str, ...] = ()) -> set[str]:
+    """Explicit job names select only those jobs; an empty tuple selects every configured job."""
+    if names and (unknown := sorted(set(names) - config.jobs.keys())):
+        raise Error(f"unknown job {unknown[0]}; check jobs in bf.yaml{suggest(unknown[0], config.jobs)}")
+    return set(names) if names else set(config.jobs)
+
+
+def scheduled(config: Config, names: tuple[str, ...] = ()) -> list[tuple[int, str]]:
+    """Selected enabled non-daemon jobs with interval triggers, as (every_seconds, name), fastest first."""
+    sel = selection(config, names)
+    return sorted(
+        (t.every, n)
+        for n in sel
+        if (j := config.jobs[n]).enabled and not _is_daemon(j)
+        for t in j.triggers
+        if t.every is not None
     )
 
 
-def scheduled(
-    config: Config, sensors: tuple[str, ...] = (), routines: tuple[str, ...] = (), assistants: tuple[str, ...] = ()
-) -> list[tuple[int, str]]:
-    """The selected enabled programs that refresh on their own, as (refresh seconds, name), fastest first."""
-    selected_sensors, selected_routines, selected_assistants = selection(config, sensors, routines, assistants)
-    programs = [
-        *((name, config.sensors[name]) for name in selected_sensors),
-        *((name, config.routines[name]) for name in selected_routines),
-    ]
-    intervals = [(program.refresh, name) for name, program in programs if program.enabled and program.refresh]
-    for name in selected_assistants:
-        assistant = config.assistants[name]
-        if assistant.enabled:
-            intervals.extend((schedule.every, name) for schedule in assistant.schedules.values() if schedule.every)
-            intervals.extend((item.channel.every, name) for item in assistant.inputs if item.channel.mode == "read")
-    return sorted(intervals)
-
-
-def late(
-    config: Config,
-    every: int,
-    sensors: tuple[str, ...] = (),
-    routines: tuple[str, ...] = (),
-    assistants: tuple[str, ...] = (),
-    *,
-    include_assistants: bool = True,
-) -> str:
-    """Why checking every `every` seconds runs the fastest selected program late, or ""."""
-    programs = scheduled(config, sensors, routines, assistants)
-    if not include_assistants:
-        programs = [(every, name) for every, name in programs if name not in config.assistants]
-    if not programs or every < programs[0][0]:
+def late(config: Config, every: int, names: tuple[str, ...] = ()) -> str:
+    """Why checking every `every` seconds runs the fastest selected job late, or ""."""
+    if not (items := scheduled(config, names)) or every < items[0][0]:
         return ""
-    refresh, name = programs[0]
-    return (
-        f"{name} refreshes every {refresh}s, but checks happen every {every}s: it will run late and status can "
-        "report it overdue"
-    )
+    r, name = items[0]
+    return f"{name} refreshes every {r}s, but checks happen every {every}s: it will run late and status can report it overdue"
 
 
 @contextmanager
 def _cycle(store: Store, wait: float) -> Generator[None]:
-    """Serialize collection cycles of one brain; assistant work runs outside it, so a long agent run never blocks
-    collection."""
-    with ExitStack() as stack:
-        try:
-            # Program names cannot start with a dot; this cannot collide with a program's lock.
-            stack.enter_context(collecting(store, ".update", wait=wait))
-        except BusyError as error:
-            raise Error("another update is still active; retry after it finishes") from error
-        yield
+    """Serialize record collection cycles per brain; non-record jobs, wakes and deliveries run after it."""
+    try:
+        with collecting(store, ".update", wait=wait):
+            yield
+    except BusyError as error:
+        raise Error("another update is still active; retry after it finishes") from error
+
+
+def _exec(
+    base: dict[str, object], dry_run: bool, status: str, fn: Callable[[], dict[str, object]]
+) -> tuple[dict[str, object], bool]:
+    if dry_run:
+        return {**base, "status": "due"}, False
+    try:
+        out = fn()
+        return {**base, **out, "status": "gated" if out.get("status") == "gated" else status}, False
+    except BusyError:
+        return {**base, "status": "skipped", "skipped": "another run of this job is still active"}, False
+    except (Error, OSError, UnicodeError) as error:
+        return {**base, "status": "failed", "error": reason(error, _INACCESSIBLE)}, True
+
+
+def run_wakes(
+    store: Store,
+    config: Config,
+    selected: Collection[str],
+    *,
+    dry_run: bool = False,
+    runner: Runner = run,
+    stopped: Event | None = None,
+) -> tuple[list[dict[str, object]], bool]:
+    """Claim and run due pending wakes for enabled non-daemon jobs in `selected`."""
+    if not (queue := Queue(store)).exists():
+        return [], False
+    results, failed = [], False
+    for w in queue.due_wakes():
+        if stopped is not None and stopped.is_set():
+            break
+        name, wid = str(w["job"]), str(w["id"])
+        job = config.jobs.get(name)
+        if name not in selected or job is None or not job.enabled or _is_daemon(job):
+            continue
+        if not dry_run and not queue.claim_wake(wid):
+            continue
+        rt, depth = str(w.get("reason") or ""), int(cast("int", w.get("wake_depth", 0)))
+        base: dict[str, object] = {"job": name, "emit": job.emit, "kind": "wake", "wake_id": wid}
+        fn = partial(run_job, store, name, kind="wake", reason_text=rt, wake_depth=depth, runner=runner)
+        res, err = _exec(base, dry_run, "ran", fn)
+        if not dry_run:
+            msg = "job busy during wake" if res["status"] == "skipped" else str(res.get("error") or "")
+            queue.finish_wake(wid, state="failed" if err or res["status"] == "skipped" else "done", error=msg)
+        results.append(res)
+        failed |= err
+    return results, failed
+
+
+def run_deliveries(
+    store: Store, targets: Collection[str] = (), *, runner: Runner = run, stopped: Event | None = None
+) -> tuple[int, bool]:
+    """Attempt up to currently-pending due outbound deliveries cleanly without infinite retry loops."""
+    if not (queue := Queue(store)).exists():
+        return 0, False
+    pending = max(0, int(cast("int", queue.status().get("pending", 0))))
+    attempted, failed = 0, False
+    for target in sorted(targets) if targets else [""]:
+        for _ in range(pending):
+            if stopped is not None and stopped.is_set():
+                return attempted, failed
+            try:
+                if not deliver_due(store, job=target, runner=runner):
+                    break
+                attempted += 1
+            except BusyError:
+                break
+            except Error, OSError, UnicodeError:
+                failed = True
+                break
+    return attempted, failed
 
 
 def update(
@@ -111,228 +142,85 @@ def update(
     dry_run: bool = False,
     now: datetime | None = None,
     runner: Runner = run,
-    sensors: tuple[str, ...] = (),
-    routines: tuple[str, ...] = (),
-    assistants: tuple[str, ...] = (),
-    kinds: frozenset[ProgramKind] = KINDS,
+    jobs: tuple[str, ...] = (),
     wait: float = WAIT,
 ) -> dict[str, object]:
-    """Run one brain's due programs; like collect, a brain that cannot start its cycle fails with an error.
-
-    One failing program never blocks the others; the report names it and its private log. Routines run after the
-    sensors, and assistant work after both, so each sees this run's evidence. Collection cycles are serialized per
-    brain so watch and timers cannot repeat a stale due list: sensors and routines hold the brain's update lock,
-    waiting up to `wait` seconds for another cycle of the same brain, such as a timer for another selection firing
-    at the same minute, then compute their due list inside it. Assistant work, due batch reads, schedules, queued jobs
-    and deliveries, runs after its release.
-    """
-    given = now
-    config = load(store)
-    # Validate the selection before waiting for the lock or executing anything.
-    selected_sensors, selected_routines, selected_assistants = selection(config, sensors, routines, assistants, kinds)
-    failed = False
-    results: list[dict[str, object]] = []
-    ran: list[dict[str, object]] = []
-    collecting_programs = not dry_run and bool(selected_sensors or selected_routines)
-    with _cycle(store, wait) if collecting_programs else nullcontext():
-        # Dated once the cycle lock is held: waiting for another update must not leave due work for the next one.
+    """Run due record collections, scheduled jobs, event dispatches, wakes and deliveries, then refresh the index."""
+    given, config = now, load(store)
+    selected, failed, results = selection(config, jobs), False, []
+    cycles = not dry_run and any(config.jobs[n].emit == "records" for n in selected)
+    with _cycle(store, wait) if cycles else nullcontext():
         now = given or datetime.now(UTC)
-        windows = [item for item in due(store, now) if item[0] in selected_sensors]
-        routine_windows = [item for item in due_routines(store, now) if item[0] in selected_routines]
+        rec_win = [item for item in collect.due(store, now) if item[0] in selected]
 
-        def _collect_sensor(
-            item: tuple[str, str, str, bool], runner: Runner = runner
-        ) -> tuple[dict[str, object], bool]:
-            sensor, start, end, reconcile = item
-            result: dict[str, object] = {"sensor": sensor, "start": start, "end": end, "reconcile": reconcile}
-            if dry_run:
-                return {**result, "status": "due"}, False
-            try:
-                result.update(
-                    collect(
-                        store,
-                        sensor,
-                        start=start,
-                        end=end,
-                        reconcile=reconcile,
-                        runner=runner,
-                        clock=lambda: now,
-                        live=given is None,
-                    )
+        def _collect(item: tuple[str, str, str, bool], run_fn: Runner = runner) -> tuple[dict[str, object], bool]:
+            n, s, e, rec = item
+            base: dict[str, object] = {"job": n, "emit": "records", "start": s, "end": e, "reconcile": rec}
+
+            def _go() -> dict[str, object]:
+                live = given is None
+                return collect.collect(
+                    store, n, start=s, end=e, reconcile=rec, runner=run_fn, clock=lambda: now, live=live
                 )
-                result["status"] = "collected"
-                return result, False
-            except BusyError:
-                # Another process, such as a manual bf collect, is running it: its run covers this cycle.
-                result.update(status="skipped", skipped="another run of this sensor is still active")
-                return result, False
-            except (Error, OSError, UnicodeError) as error:
-                result.update(status="failed", error=reason(error, _INACCESSIBLE))
-                return result, True
 
-        if len(windows) > 1 and not dry_run:
-            # Signals reach only the main thread: on cancellation, stop the workers' programs instead of waiting for them.
+            return _exec(base, dry_run, "collected", _go)
+
+        if len(rec_win) > 1 and not dry_run:
             stop = Event()
-            parallel = partial(run, cancelled=stop.is_set) if runner is run else runner
-            pool = ThreadPoolExecutor(max_workers=min(WORKERS, len(windows)))
-            try:
-                outcomes = list(pool.map(partial(_collect_sensor, runner=parallel), windows))
-            except BaseException:
-                stop.set()
-                raise
-            finally:
-                pool.shutdown(wait=True, cancel_futures=True)
+            par = partial(run, cancelled=stop.is_set) if runner is run else runner
+            with ThreadPoolExecutor(max_workers=min(WORKERS, len(rec_win))) as pool:
+                try:
+                    outcomes = list(pool.map(lambda w: _collect(w, par), rec_win))
+                except BaseException:
+                    stop.set()
+                    raise
         else:
-            outcomes = [_collect_sensor(item) for item in windows]
-        for result, item_failed in outcomes:
-            results.append(result)
-            failed |= item_failed
-        for program, start, end in routine_windows:
-            result = {"routine": program, "start": start, "end": end}
-            routine_cfg = config.routines[program]
-            next_cursor = ""
-            try:
-                if routine_cfg.when is not None:
-                    with collecting(store, program) if not dry_run else nullcontext():
-                        routine_state = state(store, ROUTINES).get(program, {})
-                        saved_cursor = str(routine_state.get("when_cursor") or "")
-                        cursor = saved_cursor or timestamp(
-                            (now - timedelta(seconds=routine_cfg.refresh or 86_400)).isoformat()
-                        )
-                        matched, _, next_cursor = pages.evaluate_when(
-                            store, routine_cfg.when, now, cursor=cursor, exclude=("routine", program)
-                        )
-                        if not matched:
-                            if not dry_run:
-                                at_ts = timestamp(now.isoformat())
-                                with recording(store):
-                                    remember(
-                                        store,
-                                        program,
-                                        ROUTINES,
-                                        run=at_ts,
-                                        success=at_ts,
-                                        error="",
-                                        failures=0,
-                                        **({"when_cursor": next_cursor} if next_cursor else {}),
-                                    )
-                            ran.append({**result, "status": "gated"})
-                            continue
-                if dry_run:
-                    ran.append({**result, "status": "due"})
-                    continue
-                result.update(
-                    routine(
-                        store,
-                        program,
-                        start=start,
-                        end=end,
-                        when_cursor=next_cursor,
-                        runner=runner,
-                        clock=lambda: now,
-                    )
-                )
-                result["status"] = "skipped" if "skipped" in result else "ran"
-            except BusyError as error:
-                skipped_msg = (
-                    str(error)
-                    if str(error).startswith("search cache is ")
-                    else "another run of this routine is still active"
-                )
-                result.update(status="skipped", skipped=skipped_msg)
-            except (Error, OSError, UnicodeError) as error:
-                result.update(status="failed", error=reason(error, _INACCESSIBLE))
-                failed = True
-            ran.append(result)
-    unscoped = not (sensors or routines or assistants) and "assistant" in kinds
-    asked = assistant_runtime.cycle(
-        store,
-        selected_assistants,
-        at=given or datetime.now(UTC),
-        dry_run=dry_run,
-        runner=runner,
-        include_standalone=unscoped,
-    )
-    failed |= any(item["status"] == "failed" for item in asked)
-    report: dict[str, object] = {"brain": config.name, "sensors": results, "routines": ran}
-    if config.assistants or asked:
-        report["assistants"] = asked
-    # Enabled programs that never run here are named, so an empty cycle is not mistaken for current evidence: sensors and
-    # unscheduled routines, and assistants without schedules or inputs, which only bf run starts.
-    manual = sorted(
-        [
-            name
-            for name, program in (*config.sensors.items(), *config.routines.items())
-            if program.enabled
-            and not (program.scheduled if isinstance(program, Routine) else program.refresh)
-            and name in selected_sensors | selected_routines
-        ]
-        + [
-            name
-            for name, assistant in config.assistants.items()
-            if assistant.enabled and not (assistant.schedules or assistant.inputs) and name in selected_assistants
-        ]
-    )
-    if manual:
-        report["manual"] = manual
-    # An assistant-only cycle that ran nothing changed nothing to index.
-    if not dry_run and (kinds & {"sensor", "routine"} or any(item["status"] == "ran" for item in asked)):
+            outcomes = [_collect(w) for w in rec_win]
+        results.extend(r for r, _ in outcomes)
+        failed |= any(f for _, f in outcomes)
+
+    sched_now = given or max(datetime.now(UTC), now + timedelta(microseconds=1))
+    other = [w for w in collect.due_jobs(store, sched_now) if w[0] in selected and not _is_daemon(config.jobs[w[0]])]
+    other.sort(key=lambda w: (config.jobs[w[0]].is_low_priority, w[0]))
+    for n, s, e in other:
+        base: dict[str, object] = {"job": n, "emit": config.jobs[n].emit, "kind": "schedule", "start": s, "end": e}
+        fn = partial(run_job, store, n, since=s, until=e, kind="schedule", runner=runner)
+        res, err = _exec(base, dry_run, "ran", fn)
+        results.append(res)
+        failed |= err
+
+    if not dry_run and Queue(store).exists():
+
+        def _on_event(n: str, evs: list[JsonValue]) -> dict[str, object]:
+            nonlocal failed
+            base: dict[str, object] = {"job": n, "emit": config.jobs[n].emit, "kind": "event"}
+            out, err = _exec(base, False, "ran", partial(run_job, store, n, kind="event", events=evs, runner=runner))
+            results.append(out)
+            failed |= err
+            return out
+
+        active = [n for n in sorted(selected) if not _is_daemon(config.jobs[n])]
+        dispatch_events(store, active, runner=runner, submit=_on_event)
+
+    wake_res, wake_failed = run_wakes(store, config, selected, dry_run=dry_run, runner=runner)
+    results.extend(wake_res)
+    delivered, del_failed = (0, False) if dry_run else run_deliveries(store, selected if jobs else (), runner=runner)
+    failed |= wake_failed or del_failed
+    manual = [
+        n
+        for n in sorted(selected)
+        if (j := config.jobs[n]).enabled
+        and (j.run or j.prompt or not j.send)
+        and not any(t.every or t.at or t.daemon or t.event for t in j.triggers)
+    ]
+    extras: dict[str, object] = {k: v for k, v in (("manual", manual), ("deliveries", delivered)) if v}
+    reply: dict[str, object] = {"brain": config.name, "jobs": results, **extras}
+    if not dry_run:
         try:
-            report["index"] = index.refresh(store, wait=120, recover=True)
-            failed |= bool(report["index"]["skipped"])
+            idx = index.refresh(store, wait=120, recover=True)
+            reply["index"] = idx
+            failed |= bool(idx["skipped"])
         except (Error, OSError, UnicodeError) as error:
-            report["index"] = {"error": reason(error, _INACCESSIBLE)}
+            reply["index"] = {"error": reason(error, _INACCESSIBLE)}
             failed = True
-    return {"ok": not failed, "dry_run": dry_run, **report}
-
-
-def runnable(config: Config, names: tuple[str, ...]) -> None:
-    """Fail on the first routine name that is unknown or disabled, suggesting routines and assistants that can run."""
-    for name in names:
-        if name not in config.routines and name not in config.assistants:
-            known = [
-                known for known, program in (*config.routines.items(), *config.assistants.items()) if program.enabled
-            ]
-            raise Error(f"unknown routine or assistant {name}; check names in bf.yaml{suggest(name, known)}")
-        enabled(config.routines, "routine", name)
-
-
-def run_routines(
-    store: Store,
-    *,
-    names: tuple[str, ...] = (),
-    hook: str = "",
-    args: tuple[str, ...] = (),
-    stdin: bytes = b"",
-    dry_run: bool = False,
-) -> dict[str, object]:
-    """Run named routines, or every enabled routine of a hook, now; one failure never blocks the others.
-
-    Each covers the time since its last reviewed window and receives the same arguments and input. An unknown or
-    disabled name fails before any routine runs. A hook that no routine lists runs nothing and succeeds, so a Git
-    hook can call it before any routine exists.
-    """
-    now = datetime.now(UTC)
-    config = load(store)
-    runnable(config, names)
-    selected = list(names) if names else hooked(config, hook)
-    results: list[dict[str, object]] = []
-    failed = False
-    for name in selected:
-        start, end = window(store, name, now)
-        result: dict[str, object] = {"routine": name}
-        try:
-            result.update(
-                routine(store, name, start=start, end=end, dry_run=dry_run, args=args, stdin=stdin, clock=lambda: now)
-            )
-            result["status"] = "skipped" if "skipped" in result else "ran"
-        except (Error, OSError, UnicodeError) as error:
-            result.update(status="failed", error=reason(error, _INACCESSIBLE))
-            failed = True
-        results.append(result)
-    return {"ok": not failed, "dry_run": dry_run, **({"hook": hook} if hook else {}), "routines": results}
-
-
-def run_assistant(store: Store, name: str, *, text: str = "", dry_run: bool = False) -> dict[str, object]:
-    """Run one assistant now; its named schedules and subscriptions keep independent progress."""
-    return assistant_runtime.manual(store, name, text=text, dry_run=dry_run)
+    return {"ok": not failed, "dry_run": dry_run, **reply}

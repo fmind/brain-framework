@@ -11,35 +11,276 @@ such as stashes and notes.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import re
+import signal
 import stat
+import subprocess
 import sys
-from datetime import datetime
+import threading
+import time
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote
-
-import _sensor
+from urllib.parse import quote, urlsplit
 
 # `git log --since-as-filter` first shipped in Git 2.37.
 MIN_GIT = (2, 37)
 MAX_REPOSITORIES = 200
 MAX_COMMITS = 10000
 MAX_BYTES = 16 << 20
+MAX_REF = 8192
+MAX_LINKS = 1000
 AUTOMATED = re.compile(r"(\[bot\]@users\.noreply\.github\.com|@([a-z0-9-]+\.)*(invalid|test|example|localhost))$")
-InvalidError = _sensor.InvalidError
-repository_identity = _sensor.git_remote_identity
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
+IDENTITY = re.compile(r"[a-z][a-z0-9+.-]*:\S+")
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_SEGMENT = re.compile(r"[A-Za-z0-9_.-]+")
+_SCP_REMOTE = re.compile(r"^git@([A-Za-z0-9.-]+):([^/\s]+)/([^/\s]+?)(?:\.git)?$")
+_GIT_ENV = frozenset(
+    {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    }
+)
+
+
+class InvalidError(ValueError):
+    """Input or repository state violated the expected contract."""
+
+
+class ProviderError(Exception):
+    """Git subprocess failed, timed out, or could not start."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def run(argv: Sequence[str], *, timeout: float, max_bytes: int) -> bytes:
+    """Execute Git from / without inherited hook GIT_* overrides, with bounded output and process-group reaping."""
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV}
+    try:
+        proc = subprocess.Popen(
+            list(argv),
+            cwd="/",
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise ProviderError(f"cannot start {argv[0]}") from error
+    stdout, stderr = proc.stdout, proc.stderr
+    if stdout is None or stderr is None:
+        if stdout is not None:
+            stdout.close()
+        if stderr is not None:
+            stderr.close()
+        raise RuntimeError("subprocess pipes missing")
+    out_fd, err_fd = stdout.fileno(), stderr.fileno()
+    chunks: list[bytes] = []
+    overflow = False
+
+    def drain_out() -> None:
+        nonlocal overflow
+        total = 0
+        while data := os.read(out_fd, 65536):
+            total += len(data)
+            if total > max_bytes:
+                overflow = True
+                with contextlib.suppress(OSError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                return
+            chunks.append(data)
+
+    def drain_err() -> None:
+        while os.read(err_fd, 65536):
+            pass
+
+    t_out = threading.Thread(target=drain_out, daemon=True)
+    t_err = threading.Thread(target=drain_err, daemon=True)
+    t_out.start()
+    t_err.start()
+    deadline = time.monotonic() + timeout
+    try:
+        while t_out.is_alive():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                with contextlib.suppress(OSError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                raise ProviderError(f"{argv[0]} exceeded its {int(timeout)}s timeout")
+            t_out.join(timeout=min(remaining, 0.05))
+        try:
+            remaining = max(0.0, deadline - time.monotonic())
+            code = proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            raise ProviderError(f"{argv[0]} exceeded its {int(timeout)}s timeout") from None
+    finally:
+        if proc.poll() is None:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        t_out.join(timeout=1.0)
+        t_err.join(timeout=1.0)
+        stdout.close()
+        stderr.close()
+    if overflow:
+        raise InvalidError(f"{argv[0]} output exceeds {max_bytes} bytes")
+    if code != 0:
+        raise ProviderError(f"{argv[0]} exited with status {code}", status=code)
+    return b"".join(chunks)
+
+
+def line(value: str, fallback: str = "") -> str:
+    cleaned = " ".join(CONTROL.sub(" ", value).split())
+    return (cleaned[:4096] or fallback)[:4096] if (cleaned or fallback) else ""
+
+
+def reference(value: str) -> str:
+    if (
+        not value
+        or len(value) > MAX_REF
+        or any(c.isspace() for c in value)
+        or CONTROL.search(value)
+        or not IDENTITY.fullmatch(value)
+    ):
+        return ""
+    return value
+
+
+def person(email: str) -> str:
+    cleaned = email.strip().lower()
+    return reference("person:email/" + quote(cleaned, safe="@.")) if "@" in cleaned else ""
+
+
+def iso_utc(value: str) -> str:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        raise InvalidError("timestamps require timezones")
+    return dt.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def emit(records: list[dict[str, object]], *, max_bytes: int = MAX_BYTES) -> None:
+    payload = (json.dumps(records, ensure_ascii=False) + "\n").encode("utf-8")
+    if len(payload) > max_bytes:
+        raise InvalidError(f"output exceeds {max_bytes} bytes")
+    sys.stdout.buffer.write(payload)
+
+
+def cli(action: Callable[[], None], summary: str, hint: str) -> None:
+    try:
+        action()
+    except (InvalidError, ProviderError) as error:
+        sys.stderr.write(f"{summary}: {error}.\n")
+        sys.exit(1)
+    except (OSError, UnicodeError, ValueError, LookupError, ArithmeticError, RecursionError):
+        sys.stderr.write(f"{summary}; {hint}.\n")
+        sys.exit(1)
+
+
+def _valid_host(host: str) -> str:
+    lowered = host.lower()
+    labels = lowered.split(".")
+    if (
+        len(labels) < 2
+        or any(not _DNS_LABEL.fullmatch(lbl) for lbl in labels)
+        or not re.fullmatch(r"[a-z]{2,63}", labels[-1])
+    ):
+        return ""
+    return lowered
+
+
+def repository_identity(raw_url: str) -> str:
+    """Canonical lowercase repo identity for credential-free HTTPS, ssh://git@, and git@HOST:OWNER/REPO remotes."""
+    url = raw_url.strip()
+    if not url or CONTROL.search(url):
+        return ""
+    if match := _SCP_REMOTE.fullmatch(url):
+        host, owner, name = _valid_host(match[1]), match[2], match[3]
+    else:
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return ""
+        if parsed.query or parsed.fragment or parsed.port is not None:
+            return ""
+        if parsed.scheme == "https":
+            if parsed.username is not None or parsed.password is not None:
+                return ""
+        elif parsed.scheme == "ssh":
+            if parsed.username != "git" or parsed.password is not None or parsed.netloc.partition("@")[0] != "git":
+                return ""
+        else:
+            return ""
+        host = _valid_host(parsed.hostname or "")
+        path = parsed.path.lstrip("/")
+        path = path.removesuffix(".git")
+        parts = path.split("/")
+        if len(parts) != 2:
+            return ""
+        owner, name = parts
+    if (
+        not host
+        or not _SEGMENT.fullmatch(owner)
+        or not _SEGMENT.fullmatch(name)
+        or owner in {".", ".."}
+        or name in {".", ".."}
+    ):
+        return ""
+    return reference(f"repo:{host}/{quote(owner.lower(), safe='')}/{quote(name.lower(), safe='')}")
+
+
+def make_record(
+    identifier: str,
+    title: str,
+    *,
+    item_type: str,
+    time_value: str,
+    text: str,
+    aliases: Sequence[str],
+    relations: dict[str, list[str]],
+    attributes: dict[str, object],
+) -> dict[str, object]:
+    out: dict[str, object] = {
+        "id": identifier,
+        "title": line(title, identifier),
+        "@type": item_type,
+        "text": text,
+        "time": iso_utc(time_value),
+    }
+    valid_aliases = sorted({a for a in aliases if reference(a)})
+    if valid_aliases:
+        out["aliases"] = valid_aliases
+    cleaned = {k: list(dict.fromkeys(r for r in v if reference(r)))[:MAX_LINKS] for k, v in relations.items()}
+    nonempty = {k: v for k, v in cleaned.items() if v}
+    if nonempty:
+        out["relations"] = nonempty
+    if attributes:
+        out["attributes"] = attributes
+    return out
 
 
 def remote(repository: Path) -> str:
     """The origin remote's repository identity, never its raw URL or credentials; "" when there is none."""
     try:
-        raw = _sensor.run(["git", "-C", str(repository), "remote", "get-url", "origin"], timeout=10, max_bytes=8192)
-    except _sensor.ProviderError as error:
+        raw = run(["git", "-C", str(repository), "remote", "get-url", "origin"], timeout=10, max_bytes=8192)
+    except ProviderError as error:
         if error.status is None:
             raise
         return ""
-    except _sensor.InvalidError:
+    except InvalidError:
         return ""
     return repository_identity(raw.decode(errors="replace"))
 
@@ -50,7 +291,7 @@ def nameable(relative: str) -> bool:
         relative.encode()
     except UnicodeEncodeError:
         return False
-    return not _sensor.CONTROL.search(relative)
+    return not CONTROL.search(relative)
 
 
 def shared(marker: Path) -> tuple[str, bool] | None:
@@ -145,8 +386,8 @@ def repositories(root: Path, skip: frozenset[str]) -> tuple[list[tuple[str, Path
 def supported() -> None:
     """Check Git once: an older Git rejects `--since-as-filter`, which would fail every repository by name."""
     try:
-        reply = _sensor.run(["git", "version"], timeout=10, max_bytes=1024).decode(errors="replace")
-    except _sensor.SensorError:
+        reply = run(["git", "version"], timeout=10, max_bytes=1024).decode(errors="replace")
+    except ProviderError:
         reply = ""
     found = re.match(r"git version (\d+)\.(\d+)", reply)
     if not found or (int(found[1]), int(found[2])) < MIN_GIT:
@@ -155,7 +396,7 @@ def supported() -> None:
 
 def history(repository: Path, start: str, end: str) -> list[str]:
     """One repository's commits in the window, as hash, committer time, author email and message fields."""
-    payload = _sensor.run(
+    payload = run(
         [
             "git",
             "-C",
@@ -210,7 +451,7 @@ def collect(
             fields = history(repository, start, end)
         except InvalidError as error:
             raise InvalidError(f"{relative}: {error}") from None
-        except (_sensor.ProviderError, ValueError):
+        except (ProviderError, ValueError):
             # A stale worktree, damaged objects, another owner's repository or a stalled mount: name it so it can
             # be repaired or skipped. Its window is retried, never passed over.
             raise InvalidError(
@@ -229,17 +470,17 @@ def collect(
                 continue
             repository_ref = "repo:local/" + quote(relative, safe="/")
             repo_refs = [repository_ref, *([origin] if origin else [])]
-            author_person = _sensor.person(author)
+            author_person = person(author)
             author_refs = [author_person] if author_person else []
             message = message.strip()
             subject = message.partition("\n")[0]
             key = relative + "@" + commit
             records.append(
-                _sensor.record(
+                make_record(
                     key,
-                    _sensor.line(f"{relative}: {subject}", relative),
+                    line(f"{relative}: {subject}", relative),
                     item_type="Commit",
-                    time=when,
+                    time_value=when,
                     text=f"Repository: {relative}\nCommit: {commit}\nAuthor: {author}\nCommitted: {when}\n\n{message}",
                     aliases=["commit:local/" + quote(key, safe="/@")],
                     relations={
@@ -264,10 +505,10 @@ def main() -> None:
         raise InvalidError("expected ROOT START END [--skip RELATIVE_REPO]...")
     # Git starts from /: a relative ROOT names a folder below the brain, where BF runs this sensor.
     result, skipped = collect(Path(sys.argv[1]).absolute(), sys.argv[2], sys.argv[3], frozenset(options[1::2]))
-    _sensor.emit(result, max_bytes=MAX_BYTES)
+    emit(result, max_bytes=MAX_BYTES)
     if skipped:
         print(f"Git history skipped {skipped} unreadable, non-UTF-8 or control-character folders.", file=sys.stderr)
 
 
 if __name__ == "__main__":
-    _sensor.cli(main, "Git history collection failed", "check repository access and the requested window")
+    cli(main, "Git history collection failed", "check repository access and the requested window")

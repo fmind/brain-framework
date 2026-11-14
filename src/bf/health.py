@@ -1,23 +1,22 @@
-"""Collection coverage shared by status and retrieval; freshness never implies complete history."""
+"""Job health, source coverage, runtime status summary and preflight doctor checks; strictly read-only."""
 
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
+import stat
 import tomllib
-from collections.abc import Generator, Iterable, Mapping
-from contextlib import contextmanager, suppress
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
-from bf import __version__, index, usage
+from bf import __version__, collect, index, usage
 from bf.config import is_registered, load
-from bf.history import ASSISTANTS, ROUTINES, log_path, state
-from bf.models import CACHE_ERROR, Assistant, Config, Error, Program, Routine, Sensor, decode, reason, timestamp
-from bf.runtime import Queue, check_schema, check_version
-from bf.storage import QUEUE, Store
+from bf.models import CACHE_ERROR, MAX_PROMPT, Config, Error, Job, decode, timestamp
+from bf.runtime import Queue, environment, log_path
+from bf.storage import Store
 
-# Counters of the last committed collection, reported apart from indexed totals.
 _COUNTERS = (
     "records",
     "added",
@@ -33,543 +32,368 @@ _COUNTERS = (
     "output_bytes",
 )
 _RETAINED = frozenset({"forgotten", "expired"})
-# Committed runs in a row reporting missing items before a scheduled source needs attention: one lost feed can be a
-# passing provider error, three are a lasting gap.
 DEGRADED = 3
+_EMPTY_Q: dict[str, int | str | None] = {
+    "pending": 0,
+    "failed": 0,
+    "uncertain": 0,
+    "wakes": 0,
+    "active_runs": 0,
+    "oldest_pending": None,
+}
 
 
-def _freshness(program: Program | None, success: str, now: datetime) -> str:
-    """Scheduled programs are fresh within twice their refresh or one day after a wall-clock slot.
-
-    A disabled or undeclared program, such as a historical source, is unknown.
-    """
-    if program is None or not program.enabled:
+def _freshness(job: Job | None, success: str, now: datetime, *, default_tz: str | None = None) -> str:
+    """Compute `fresh`, `overdue`, `never`, `manual`, or `unknown` from triggers and `last_success`."""
+    if job is None or not job.enabled:
         return "unknown"
-    if isinstance(program, Routine):
-        if not program.scheduled:
-            return "manual"
-        if not success:
-            return "never"
-        if program.at is not None or program.days is not None:
-            grace = program.refresh or 86_400
-            return (
-                "fresh"
-                if now <= program.schedule_due(datetime.fromisoformat(success), success) + timedelta(seconds=grace)
-                else "overdue"
-            )
-    elif not program.refresh:
+    timed = [t for t in job.triggers if t.every is not None or t.at is not None]
+    if not timed:
         return "manual"
     if not success:
         return "never"
-    elapsed = now - datetime.fromisoformat(success)
-    return "fresh" if timedelta(0) <= elapsed <= timedelta(seconds=2 * program.refresh) else "overdue"
+    last_dt = datetime.fromisoformat(success)
+    if last_dt > now:
+        return "overdue"
+    for trig in timed:
+        grace = trig.every if trig.every is not None else 86_400
+        next_at = trig.schedule_due(last_dt, success, timezone=default_tz)
+        if now > next_at + timedelta(seconds=grace):
+            return "overdue"
+    return "fresh"
 
 
-def _silent(sensor: Sensor | None, success: str, changed: str, now: datetime) -> bool:
-    """Whether a scheduled source that still succeeds has gained no new or changed record within `silent_after`.
-
-    A source with no record yet is never silent: its zero count already shows it.
-    """
-    if sensor is None or not sensor.enabled or not sensor.refresh or sensor.silent_after is None:
+def _silent(job: Job | None, success: str, changed: str, now: datetime) -> bool:
+    if job is None or not job.enabled or job.silent_after is None:
         return False
-    if not success or not changed:
+    if not any(t.every is not None or t.at is not None for t in job.triggers) or not success or not changed:
         return False
-    return now - datetime.fromisoformat(changed) > timedelta(seconds=sensor.silent_after)
+    return now - datetime.fromisoformat(changed) > timedelta(seconds=job.silent_after)
 
 
 def degradation(entry: Mapping[str, object]) -> dict[str, object] | None:
-    """What a sensor's last committed run reported missing, and how many committed runs in a row did; None after a
-    complete run. Labels and reasons stay in the sensor's log."""
-    # Run history is validated already: each count is a non-negative integer.
-    runs, missed, of = (int(cast("int", entry.get(key, 0))) for key in ("incomplete_runs", "missed", "of"))
+    """Incomplete run counts from the last committed collection; None after a complete run."""
+    runs, missed, of = (int(cast("int", entry.get(k, 0))) for k in ("incomplete_runs", "missed", "of"))
     if runs < 1 or not 1 <= missed <= of:
         return None
     return {"runs": runs, "missed": missed, "of": of}
 
 
 def lasting(health: Mapping[str, object]) -> bool:
-    """Whether a source's runs reported missing items DEGRADED times in a row: one alert, not one per lost feed."""
+    """Whether a source's runs reported missing parts at least DEGRADED times in a row."""
     degraded = health.get("degraded")
     return isinstance(degraded, Mapping) and int(cast("int", degraded["runs"])) >= DEGRADED
+
+
+def is_late(job: Job, health: Mapping[str, object], now: datetime, *, default_tz: str | None = None) -> bool:
+    """Whether a scheduled job is `overdue`, or `never` succeeded with an already-due slot."""
+    if health["freshness"] == "overdue":
+        return True
+    if health["freshness"] != "never":
+        return False
+    timed = [t for t in job.triggers if t.every is not None or t.at is not None]
+    return any(t.schedule_due(now, timezone=default_tz) <= now for t in timed)
+
+
+def _health_entry(
+    job: Job | None, entry: Mapping[str, object], changed: str, now: datetime, tz: str | None
+) -> dict[str, object]:
+    success = str(entry.get("last_success", ""))
+    item: dict[str, object] = {
+        "state": "historical" if job is None else "active" if job.enabled else "disabled",
+        "freshness": _freshness(job, success, now, default_tz=tz),
+    }
+    if success and (job is None or job.emit == "records"):
+        item["last_collected"] = success
+    mode = (job.mode or "window") if job is not None else "window"
+    if job is not None and job.emit == "records" and mode in {"window", "cursor", "snapshot"}:
+        item["mode"] = mode
+    win = (
+        (job is None or (job.emit == "records" and mode == "window"))
+        and entry.get("window_start")
+        and entry.get("window_end")
+    )
+    if win:
+        item["window"] = {"since": entry["window_start"], "until": entry["window_end"]}
+    if entry.get("last_error") and (job is None or job.enabled):
+        item["failed"] = True
+    if _silent(job, success, changed, now):
+        item["silent"] = True
+    if degraded := degradation(entry):
+        item["degraded"] = degraded
+    return item
+
+
+def _load_states(
+    store: Store,
+) -> tuple[dict[str, dict[str, object]], dict[str, int | str | None], set[str], dict[str, str], str]:
+    """Read `.bf/runtime.sqlite3` strictly read-only without ever creating the database."""
+    queue = Queue(store)
+    if not queue.exists():
+        return {}, dict(_EMPTY_Q), set(), {}, ""
+    try:
+        states, q_summary = queue.all_states(), queue.status()
+        failing_jobs, failing_transports = queue.failing()
+        daemon_errors: dict[str, str] = {}
+        with queue.read() as db:
+            for key, raw in db.execute("SELECT key,value FROM checkpoints WHERE key LIKE 'health:daemon:%'"):
+                if isinstance(val := decode(raw), dict) and val.get("error"):
+                    daemon_errors[str(key).removeprefix("health:daemon:")] = str(val["error"])
+        return states, q_summary, set(failing_jobs) | set(failing_transports), daemon_errors, ""
+    except (Error, OSError, sqlite3.DatabaseError) as error:
+        msg = str(error) if isinstance(error, Error) else "runtime database is inaccessible; check its state"
+        return {}, dict(_EMPTY_Q), set(), {}, msg
 
 
 def source_health(
     store: Store, names: Iterable[str] = (), *, now: datetime | None = None, config: Config | None = None
 ) -> dict[str, dict[str, object]]:
-    """Describe active, disabled and historical sources without running them or exposing logs.
-
-    `names` may be the indexed counts per source, whose `changed` then reports a source silent past its
-    `silent_after`. A caller passes the `config` it loaded, so one reply describes one bf.yaml even mid-save.
-    """
-    now = now or datetime.now(UTC)
+    """Describe active, disabled and historical record sources without running commands or creating runtime DB."""
+    now, config, states = now or datetime.now(UTC), config or load(store), _load_states(store)[0]
     changed = (
-        {name: str(count.get("changed", "")) for name, count in names.items() if isinstance(count, Mapping)}
+        {k: str(v.get("changed", "")) for k, v in names.items() if isinstance(v, Mapping)}
         if isinstance(names, Mapping)
         else {}
     )
-    config = config or load(store)
-    history, asked = state(store), state(store, ASSISTANTS)
-    assistant_states = assistant_health(store, now=now, config=config)
-    result: dict[str, dict[str, object]] = {}
-    for name in sorted({*config.sensors, *config.assistants, *names}):
-        if name in config.assistants:
-            # An assistant's records are its runs: the assistant is their source.
-            assistant, health = config.assistants[name], assistant_states[name]
-            success = str(asked.get(name, {}).get("success", ""))
-            item: dict[str, object] = {"state": "active" if assistant.enabled else "disabled", "freshness": "unknown"}
-            if success:
-                item["last_collected"] = success
-            # Its failed or uncertain work, unresolved until retried or cancelled, while enabled. An unreadable
-            # queue, which names no log, leaves the freshness unknown instead.
-            if health.get("failed") and "log" in health:
-                item["failed"] = True
-            if assistant.enabled:
-                item["freshness"] = health["freshness"]
-            result[name] = item
-            continue
-        settings = config.sensors.get(name)
-        entry = history.get(name, {})
-        success = str(entry.get("success", ""))
-        item: dict[str, object] = {
-            "state": "historical" if settings is None else "active" if settings.enabled else "disabled",
-            "freshness": _freshness(settings, success, now),
-        }
-        if success:
-            # Run history already holds canonical UTC instants.
-            item["last_collected"] = success
-        if settings is not None:
-            item["mode"] = settings.mode
-        if (settings is None or settings.mode == "window") and entry.get("start") and entry.get("end"):
-            item["window"] = {"since": entry["start"], "until": entry["end"]}
-        # A disabled sensor's last failure is history, not a current fault.
-        if entry.get("error") and (settings is None or settings.enabled):
-            item["failed"] = True
-        if _silent(settings, success, changed.get(name, ""), now):
-            item["silent"] = True
-        # The records may lack what the missed parts hold, whatever the sensor's state now.
-        if degraded := degradation(entry):
-            item["degraded"] = degraded
-        result[name] = item
-    return result
-
-
-def _failure(name: str, entry: dict[str, object]) -> dict[str, object]:
-    """The last attempt's error, consecutive failures and log; empty after a success."""
-    if not entry.get("error"):
-        return {}
+    rec_sources = config.record_sources()
     return {
-        "failed": True,
-        "error": entry["error"],
-        "failures": entry.get("failures", 1),
-        "log": log_path(name),
+        src: _health_entry(
+            rec_sources[src][1] if src in rec_sources else None,
+            states.get(rec_sources[src][0], {}) if src in rec_sources else {},
+            changed.get(src, ""),
+            now,
+            config.defaults.timezone,
+        )
+        for src in sorted({*rec_sources, *names})
     }
 
 
-def routine_health(
-    store: Store, *, now: datetime | None = None, config: Config | None = None
-) -> dict[str, dict[str, object]]:
-    """Each configured routine's state, freshness, last success, latest action and failure."""
-    now = now or datetime.now(UTC)
-    config, history = config or load(store), state(store, ROUTINES)
-    result: dict[str, dict[str, object]] = {}
-    for name, settings in sorted(config.routines.items()):
-        entry = history.get(name, {})
-        success = str(entry.get("success", ""))
-        item: dict[str, object] = {
-            "state": "active" if settings.enabled else "disabled",
-            "freshness": _freshness(settings, success, now),
-        }
-        if success:
-            item["last_success"] = success
-        if entry.get("action"):
-            item["action"] = entry["action"]
-        result[name] = {**item, **(_failure(name, entry) if settings.enabled else {})}
-    return result
-
-
-class _Reader(Queue):
-    """The durable queue as status and retrieval see it: read only when it exists, never created, bound or locked for
-    writing, so reading never waits behind or blocks assistant work."""
-
-    def exists(self) -> bool:
-        # Execution creates the file, then commits its schema: until then the queue holds nothing.
-        try:
-            return self.store.lstat(QUEUE).st_size > 0
-        except FileNotFoundError:
-            return False
-
-    @contextmanager
-    def connect(self) -> Generator[sqlite3.Connection]:
-        info = self.store.lstat(QUEUE)
-        if info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise Error("assistant queue must be a private regular file owned by you")
-        for suffix in ("-wal", "-shm", "-journal"):
-            with suppress(FileNotFoundError):
-                self.store.lstat(QUEUE + suffix)
-        try:
-            uri = (self.store.root / QUEUE).as_uri() + "?mode=ro"
-            connection = sqlite3.connect(uri, uri=True, timeout=10, isolation_level=None)
-            try:
-                connection.row_factory = sqlite3.Row
-                connection.execute("PRAGMA trusted_schema=OFF")
-                # One snapshot for every query of this read.
-                connection.execute("BEGIN")
-                check_version(connection.execute("PRAGMA user_version").fetchone()[0])
-                check_schema(connection)
-                # The binding execution writes and checks: a queue it refuses reports nothing either. A drained
-                # queue follows a moved or renamed brain at its next execution, so reading it is safe now.
-                bound = connection.execute("SELECT value FROM checkpoints WHERE key='binding'").fetchone()
-                if (
-                    bound is not None
-                    and decode(bound[0]) != {"path": str(self.brain.root), "name": load(self.brain).name}
-                    and Queue.unresolved(connection)
-                ):
-                    raise Error(
-                        "assistant queue holds unresolved work admitted under this brain's previous path or name; "
-                        "restore them, resolve the work with bf queue, then move or rename the brain again"
-                    )
-                yield connection
-            finally:
-                connection.close()
-        except sqlite3.DatabaseError as error:
-            # A read-only reader cannot roll back the journal a killed writer left; the next writer does.
-            if getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_READONLY_ROLLBACK:
-                raise Error("assistant queue holds an interrupted write; run bf queue to recover it") from error
-            raise Error(
-                "assistant queue is unavailable; preserve its files and check permissions, disk space or corruption"
-            ) from error
-
-    def failing(self) -> tuple[list[str], list[str]]:
-        """Assistants with failed or uncertain jobs, and channels with unresolved deliveries that failed or are
-        uncertain: durable work only an explicit retry or cancel resolves."""
-        with self.connect() as db:
-            jobs = db.execute(
-                "SELECT DISTINCT assistant FROM jobs WHERE state IN ('failed','uncertain') ORDER BY assistant"
-            ).fetchall()
-            deliveries = db.execute(
-                "SELECT DISTINCT channel FROM deliveries WHERE state NOT IN ('delivered','cancelled') "
-                "AND (state='uncertain' OR error!='') ORDER BY channel"
-            ).fetchall()
-        return [row[0] for row in jobs], [row[0] for row in deliveries]
-
-
-def assistant_health(
-    store: Store, *, now: datetime | None = None, config: Config | None = None
-) -> dict[str, dict[str, object]]:
-    """Each assistant `config` declares (by default, bf.yaml's): its state, freshness, last scheduled success, runs,
-    latest record and failure.
-
-    A queue that cannot be read leaves every freshness unknown and names the reason as each assistant's error.
-    """
-    now = now or datetime.now(UTC)
-    config, history = config or load(store), state(store, ASSISTANTS)
-    result: dict[str, dict[str, object]] = {}
-    if not config.assistants:
-        return result
-    checkpoints: dict[str, object] = {}
-    failures: dict[str, str] = {}
-    unavailable = ""
-    try:
-        if (queue := _Reader(store)).exists():
-            with queue.connect() as db:
-                checkpoints = {
-                    row[0]: decode(row[1])
-                    for row in db.execute("SELECT key,value FROM checkpoints WHERE key LIKE 'schedule:%'")
-                }
-                # Each assistant's latest unresolved failure.
-                failures = {
-                    row[0]: row[1]
-                    for row in db.execute(
-                        "SELECT assistant,error,max(updated) FROM jobs WHERE state IN ('failed','uncertain') "
-                        "GROUP BY assistant"
-                    )
-                }
-    except (Error, OSError) as error:
-        unavailable = reason(error, "assistant queue is inaccessible; check its state")
-    for name, settings in sorted(config.assistants.items()):
-        entry = history.get(name, {})
-        schedules: dict[str, dict[str, object]] = {}
-        for schedule, spec in settings.schedules.items():
-            cadence: dict[str, object] = {"every": spec.every} if spec.every is not None else {"at": spec.at}
-            if unavailable:
-                schedules[schedule] = {"freshness": "unknown", **cadence}
-                continue
-            progress = checkpoints.get(f"schedule:{name}:schedule:{schedule}")
-            success = str(progress.get("success", "")) if isinstance(progress, dict) else ""
-            due = spec.next_due(now, success)
-            grace = spec.every if spec.every is not None else 86_400
-            freshness = (
-                "never"
-                if not success
-                else "fresh"
-                # Measured from the first slot after the last success: the next slot after now is never late.
-                if (
-                    now <= spec.next_due(datetime.fromisoformat(success), success) + timedelta(seconds=grace)
-                    if spec.at is not None or spec.days is not None
-                    else timedelta(0) <= now - datetime.fromisoformat(success) <= timedelta(seconds=2 * grace)
-                )
-                else "overdue"
-            )
-            schedules[schedule] = {
-                "freshness": freshness,
-                **cadence,
-                # The canonical instant replies present with the local offset, like every other time.
-                "next_due": timestamp(due.isoformat()),
-                **({"last_success": success} if success else {}),
-            }
-        freshness = next(
-            (kind for kind in ("overdue", "never") if any(item["freshness"] == kind for item in schedules.values())),
-            "fresh" if schedules else "manual",
+def _attach_run(
+    target: dict[str, object], entry: Mapping[str, object], log_name: str, active: bool, err: str = ""
+) -> None:
+    if counters := {k: entry[k] for k in _COUNTERS if k in entry and (entry[k] or k not in _RETAINED)}:
+        target["last_run"] = counters
+    if active and err:
+        target.update(
+            failed=True,
+            error=err,
+            failures=max(1, int(cast("int", entry.get("error_count", 1)))),
+            log=log_path(log_name),
         )
-        item: dict[str, object] = {
-            "state": "active" if settings.enabled else "disabled",
-            "freshness": "unknown" if unavailable or not settings.enabled else freshness,
-            "runs": entry.get("runs", 0),
-            "schedules": schedules,
-            "inputs": [binding.channel.model_dump() for binding in settings.inputs],
-        }
-        if entry.get("success"):
-            item["last_success"] = entry["success"]
-        if entry.get("record"):
-            item["record"] = entry["record"]
-        # A disabled assistant reports no failure; its unresolved jobs stay listed in bf queue until resolved.
-        if settings.enabled and unavailable:
-            item.update(failed=True, error=unavailable)
-        elif settings.enabled and name in failures:
-            item.update(failed=True, error=failures[name], log=log_path(name))
-        result[name] = item
-    return result
 
 
-def is_late(settings: Program | Assistant, health: Mapping[str, object], now: datetime) -> bool:
-    """Whether a scheduled program is `overdue`, or has `never` succeeded and is due now by the dispatcher's rule.
-
-    A scheduled sensor or interval routine without a success is due at once. Wall-clock routines and assistants are
-    late once a `never` schedule falls due: a weekday `at` schedule declared on Sunday waits for Monday's slot.
-    """
-    if health["freshness"] == "overdue":
-        return True
-    if health["freshness"] != "never":
-        return False
-    if isinstance(settings, Routine):
-        return settings.scheduled and settings.schedule_due(now) <= now
-    if not isinstance(settings, Assistant):
-        return True
-    schedules = health.get("schedules")
-    return isinstance(schedules, Mapping) and any(
-        isinstance(item := schedules.get(name), Mapping)
-        and item.get("freshness") == "never"
-        and spec.next_due(now) <= now
-        for name, spec in settings.schedules.items()
+def _job_entry(
+    name: str,
+    job: Job,
+    entry: Mapping[str, object],
+    failing: set[str],
+    daemon_err: str,
+    changed: str,
+    now: datetime,
+    tz: str | None,
+) -> dict[str, object]:
+    out: dict[str, object] = {
+        "enabled": job.enabled,
+        "emit": job.emit,
+        "priority": job.effective_priority,
+        **({"source": job.source or name} if job.emit == "records" else {}),
+        **_health_entry(job, entry, changed, now, tz),
+    }
+    if success := str(entry.get("last_success", "")):
+        out["last_success"] = success
+    if due_at := collect.next_due(job, entry, now, default_tz=tz):
+        out["next_due"] = timestamp(due_at.isoformat())
+    if reconciled := str(entry.get("last_reconcile", "")):
+        out["last_reconcile"] = reconciled
+    out.update({k: entry[k] for k in ("runs", "action", "record") if entry.get(k)})
+    err = str(
+        entry.get("last_error")
+        or daemon_err
+        or ("unresolved work in runtime queue; inspect bf queue" if name in failing else "")
     )
+    _attach_run(out, entry, name, job.enabled, err)
+    return out
 
 
-def _attention(
+def _attention_list(
     config: Config,
-    sources: dict[str, dict[str, object]],
-    routines: dict[str, dict[str, object]],
-    assistants: dict[str, dict[str, object]],
+    jobs: Mapping[str, Mapping[str, object]],
+    failing: set[str],
+    daemon_errors: Mapping[str, str],
     now: datetime,
 ) -> list[dict[str, object]]:
-    """Scheduled programs this machine runs that failed, are late or, for a source, fell silent or reported missing
-    items DEGRADED runs in a row, and assistants with failed work however it was asked."""
-    result: list[dict[str, object]] = []
-    for kind, healths, programs in (
-        ("sensor", {name: health for name, health in sources.items() if name not in config.assistants}, config.sensors),
-        ("routine", routines, config.routines),
-        ("assistant", assistants, config.assistants),
-    ):
-        for name, health in healths.items():
-            settings, failed = programs.get(name), health.get("failed")
-            silent, degraded = health.get("silent"), lasting(health)
-            if (
-                settings
-                and settings.enabled
-                and (
-                    # An assistant's failed work stays queued until retried or cancelled, however it was asked.
-                    (failed or bool(settings.schedules or settings.inputs))
-                    if isinstance(settings, Assistant)
-                    else settings.scheduled
-                    if isinstance(settings, Routine)
-                    else bool(settings.refresh)
-                )
-                and (failed or silent or degraded or is_late(settings, health, now))
-            ):
-                result.append(
-                    {
-                        "kind": kind,
-                        "name": name,
-                        "freshness": health["freshness"],
-                        **({"failed": True} if failed else {}),
-                        **({"silent": True} if silent else {}),
-                        **({"degraded": True} if degraded else {}),
-                    }
-                )
-    return result
-
-
-def _with_messaging(
-    alerts: list[dict[str, object]],
-    assistants: Mapping[str, Mapping[str, object]],
-    jobs: list[str],
-    channels: list[str],
-) -> list[dict[str, object]]:
-    named = {entry["name"] for entry in alerts if entry["kind"] == "assistant"}
-    result: list[dict[str, object]] = list(alerts)
-    result.extend(
-        {
-            "kind": "assistant",
-            "name": name,
-            "freshness": str(assistants.get(name, {}).get("freshness", "unknown")),
-            "failed": True,
-        }
-        for name in jobs
-        if name not in named
+    tz, seen, alerts = config.defaults.timezone, set(), []
+    for name, job in sorted(config.jobs.items()):
+        if not job.enabled:
+            continue
+        item = jobs[name]
+        failed = bool(item.get("failed") or name in failing or name in daemon_errors)
+        silent, degraded = bool(item.get("silent")), lasting(item)
+        if failed or is_late(job, item, now, default_tz=tz) or silent or degraded:
+            seen.add(name)
+            flags = {k: True for k, on in (("failed", failed), ("silent", silent), ("degraded", degraded)) if on}
+            alerts.append({"kind": "job", "name": name, "freshness": str(item["freshness"]), **flags})
+    alerts.extend(
+        {"kind": "job", "name": n, "freshness": "unknown", "failed": True}
+        for n in sorted((failing | daemon_errors.keys()) - seen)
+        if n not in config.jobs
     )
-    result.extend({"kind": "channel", "name": name, "freshness": "unknown", "failed": True} for name in channels)
-    return result
+    return alerts
+
+
+def _all_jobs(
+    config: Config,
+    states: Mapping[str, Mapping[str, object]],
+    failing: set[str],
+    daemon_errors: Mapping[str, str],
+    changed: Mapping[str, str],
+    now: datetime,
+) -> dict[str, dict[str, object]]:
+    tz = config.defaults.timezone
+    return {
+        n: _job_entry(
+            n, j, states.get(n, {}), failing, daemon_errors.get(n, ""), changed.get(j.source or n, ""), now, tz
+        )
+        for n, j in sorted(config.jobs.items())
+    }
 
 
 def attention(
     store: Store, now: datetime | None = None, counts: Mapping[str, Mapping[str, object]] | None = None
 ) -> list[dict[str, object]]:
-    """Scheduled sensors, routines and assistants this machine runs that failed, are late, fell silent or keep
-    reporting missing items, assistants with failed work and failing channels.
-
-    `counts` are the indexed counts per source, as `index.sources` gives them, from a caller holding the cache open:
-    opening it again would wait behind a publish that waits for that caller.
-    """
-    now = now or datetime.now(UTC)
-    if counts is None:
-        try:
-            with index.database(store) as (connection, _):
-                counts = index.sources(connection)
-        except Error, OSError, sqlite3.DatabaseError:
-            # Silence needs the cache; failures and lateness come from run history alone.
-            counts = {}
-    config = load(store)
-    assistants = assistant_health(store, now=now, config=config)
-    alerts = _attention(
-        config,
-        source_health(store, counts, now=now, config=config),
-        routine_health(store, now=now, config=config),
-        assistants,
-        now,
+    """Enabled jobs that failed, are late, fell silent or stay degraded, plus failing queue jobs."""
+    now, config = now or datetime.now(UTC), load(store)
+    changed = {k: str(v.get("changed", "")) for k, v in (counts or {}).items()}
+    states, _, failing, daemon_errors, _ = _load_states(store)
+    return _attention_list(
+        config, _all_jobs(config, states, failing, daemon_errors, changed, now), failing, daemon_errors, now
     )
-    _, jobs, channels = _messaging(store, config)
-    return _with_messaging(alerts, assistants, jobs, channels)
-
-
-def _messaging(store: Store, config: Config) -> tuple[dict[str, object] | None, list[str], list[str]]:
-    """The queue's report, read only when it exists, then the assistants and channels it shows failing.
-
-    Failed and uncertain work counts until it is retried or cancelled. Stream and read errors count while the
-    dispatcher that records them runs: watch clears them whenever its dispatcher starts or stops.
-    """
-    queue = _Reader(store)
-    if not queue.exists():
-        return None, [], []
-    messaging = queue.report()
-    failing, channels = queue.failing()
-    # A disabled assistant's failed work stays listed until resolved but alerts no one while it is paused; a removed
-    # assistant's still does, since only bf queue can resolve it.
-    assistants = [name for name in failing if name not in config.assistants or config.assistants[name].enabled]
-    transports = cast(dict[str, object], messaging["transports"])
-    # Work that cannot start counts too: a schedule the queue refused and a dispatcher pass that fails for every
-    # assistant.
-    for name, settings in config.assistants.items():
-        if settings.enabled and any(
-            isinstance(value := transports.get(key), dict) and value.get("error")
-            for key in (f"health:assistant:{name}", "health:dispatcher")
-        ):
-            assistants = sorted({*assistants, name})
-    for name, settings in config.assistants.items():
-        for item in settings.inputs if settings.enabled else ():
-            channel = item.channel.name
-            key = f"health:channel:{channel}" if item.channel.mode == "stream" else f"health:read:{name}:{channel}"
-            value = transports.get(key)
-            if isinstance(value, dict) and value.get("error") and channel not in channels:
-                channels.append(channel)
-    return messaging, assistants, sorted(channels)
 
 
 def _pinned(store: Store) -> str:
-    """The brain-framework version a brain's uv.lock pins, read as data and never run; empty without one."""
     try:
         lock = tomllib.loads(store.read("uv.lock").decode("utf-8"))
     except Error, OSError, ValueError, RecursionError:
-        # A shared brain supplies its lock: deep nesting or an overlong integer pins nothing, like any parse error.
         return ""
-    packages = lock.get("package")
-    for package in packages if isinstance(packages, list) else ():
-        if isinstance(package, dict) and package.get("name") == "brain-framework":
-            version = package.get("version")
-            return version if isinstance(version, str) else ""
+    for pkg in lock.get("package", ()) if isinstance(lock.get("package"), list) else ():
+        if isinstance(pkg, dict) and pkg.get("name") == "brain-framework" and isinstance(v := pkg.get("version"), str):
+            return v
     return ""
 
 
 def report(store: Store, now: datetime | None = None) -> dict[str, object]:
-    """One brain's cache, notes, records, source, routine and assistant freshness, errors, registration and usage."""
+    """One brain's cache, notes, jobs, record sources, queue summary, registration and usage; offline and read-only."""
     now = now or datetime.now(UTC)
     try:
-        config, history, summary = load(store), state(store), index.status(store)
+        config, summary = load(store), index.status(store)
         counts = cast("dict[str, dict[str, object]]", summary.pop("sources"))
-        coverage = source_health(store, counts, now=now, config=config)
-        routines = routine_health(store, now=now, config=config)
-        assistants = assistant_health(store, now=now, config=config)
+        states, q_summary, failing, daemon_errors, q_err = _load_states(store)
     except sqlite3.DatabaseError as error:
         raise Error(CACHE_ERROR) from error
+    changed, tz = {k: str(v.get("changed", "")) for k, v in counts.items()}, config.defaults.timezone
+    jobs = _all_jobs(config, states, failing, daemon_errors, changed, now)
+    rec_sources = config.record_sources()
     sources: dict[str, dict[str, object]] = {}
-    for name in sorted({*config.sensors, *config.assistants, *counts}):
-        # An assistant's run counters belong to its assistants entry.
-        run = {} if name in config.assistants else history.get(name, {})
-        # One shape shared with retrieval coverage, plus indexed totals and local run diagnostics.
-        entry: dict[str, object] = {**coverage[name], **counts.get(name, {"records": 0, "bytes": 0})}
-        # Retention counters show only when the last run removed or skipped records.
-        if counters := {key: run[key] for key in _COUNTERS if key in run and (run[key] or key not in _RETAINED)}:
-            entry["last_run"] = counters
-        if run.get("reconciled"):
-            entry["reconciled"] = run["reconciled"]
-        if (sensor := config.sensors.get(name)) is None or sensor.enabled:
-            entry.update(_failure(name, run))
-        sources[name] = {key: value for key, value in entry.items() if value != ""}
+    for src in sorted({*rec_sources, *counts}):
+        job_name, job = rec_sources.get(src, ("", None))
+        run = states.get(job_name, {}) if job_name else {}
+        entry: dict[str, object] = {
+            **_health_entry(job, run, changed.get(src, ""), now, tz),
+            **counts.get(src, {"records": 0, "bytes": 0}),
+        }
+        if run.get("last_reconcile"):
+            entry["reconciled"] = run["last_reconcile"]
+        _attach_run(entry, run, job_name, job is None or job.enabled, str(run.get("last_error") or ""))
+        sources[src] = {k: v for k, v in entry.items() if v != ""}
     problems = cast("list[dict[str, object]]", summary["problems"])
-    try:
-        messaging, jobs, channels = _messaging(store, config)
-    except (Error, OSError) as error:
-        # Unread work is unknown work: the reply is incomplete, not healthy.
-        messaging, jobs, channels = None, [], []
-        problems.append(
-            {"error": str(error) if isinstance(error, Error) else "assistant queue is inaccessible; check its state"}
-        )
-    # The reasons a brain is unhealthy, beside its problems: the home page's late or failed programs, then
-    # unresolved assistant work and failing channels.
-    alerts = _with_messaging(_attention(config, coverage, routines, assistants, now), assistants, jobs, channels)
-    # A busy cache still serves its last generation, marked stale in replies, while a live writer finishes.
-    healthy = not alerts and not problems and summary["cache"] in {"ready", "busy"}
+    if q_err:
+        problems.append({"error": q_err})
+    alerts = _attention_list(config, jobs, failing, daemon_errors, now)
+    healthy = not (alerts or problems or q_summary["failed"] or q_summary["uncertain"]) and summary["cache"] in {
+        "ready",
+        "busy",
+    }
     return {
         "healthy": healthy,
         "brain": config.name,
         "path": str(store.root),
         "registered": is_registered(store),
-        # Agents compare the pinned major version with the installed one before trusting either.
-        "runtime": {"installed": __version__, **({"pinned": pinned} if (pinned := _pinned(store)) else {})},
+        "runtime": {"installed": __version__, **({"pinned": p} if (p := _pinned(store)) else {})},
         **summary,
         "attention": alerts,
+        "jobs": jobs,
         "sources": sources,
-        **({"routines": routines} if routines else {}),
-        **({"assistants": assistants} if assistants else {}),
-        **({"messaging": messaging} if messaging else {}),
         "coverage": {
             kind: {
-                "sources": sum(value["state"] == kind for value in coverage.values()),
+                "sources": sum(v["state"] == kind for v in sources.values()),
                 "records": sum(
-                    int(cast("int", counts.get(name, {}).get("records", 0)))
-                    for name, value in coverage.items()
-                    if value["state"] == kind
+                    int(cast("int", counts.get(n, {}).get("records", 0)))
+                    for n, v in sources.items()
+                    if v["state"] == kind
                 ),
             }
             for kind in ("active", "disabled", "historical")
         },
+        "queue": q_summary,
         "usage": usage.summary(store),
+    }
+
+
+def _probe(store: Store, path: str, *, exe: bool = False, directory: bool = False) -> str:
+    try:
+        m = store.mode(path)
+    except Error, OSError:
+        return f"{path} does not exist"
+    if directory:
+        return "" if stat.S_ISDIR(m) else f"cwd {path} is not a directory"
+    if not stat.S_ISREG(m):
+        return f"{path} is not {'an executable ' if exe else 'a '}regular file"
+    return f"{path} is not an executable regular file" if exe and not (m & stat.S_IXUSR) else ""
+
+
+def _check_job_env(store: Store, config: Config, job: Job, host_path: str) -> dict[str, object]:
+    if not job.enabled:
+        return {"enabled": False, "ok": True}
+    cmds = (job.run, job.harness or (config.defaults.harness if job.prompt else []), job.send, job.gate)
+    bins = [
+        *job.requires.bins,
+        *(c[0] for c in cmds if c and not c[0].startswith(("sensors/", "routines/", "channels/"))),
+    ]
+    missing_bins = list(dict.fromkeys(b for b in bins if shutil.which(b, path=host_path) is None))
+    missing_env = list(dict.fromkeys(v for v in job.requires.env if not os.environ.get(v)))
+    errors = [
+        e
+        for c in cmds
+        if c and c[0].startswith(("sensors/", "routines/", "channels/")) and (e := _probe(store, c[0], exe=True))
+    ]
+    if job.prompt:
+        if e := _probe(store, job.prompt):
+            errors.append(e)
+        elif store.lstat(job.prompt).st_size > MAX_PROMPT:
+            errors.append(f"{job.prompt} exceeds {MAX_PROMPT} bytes")
+        if not (job.harness or config.defaults.harness):
+            errors.append("missing harness (set job.harness or defaults.harness)")
+    if job.cwd and (e := _probe(store, job.cwd, directory=True)):
+        errors.append(e)
+    err = "; ".join(errors)
+    return {
+        "enabled": True,
+        "ok": not (missing_bins or missing_env or err),
+        **({"missing_bins": missing_bins} if missing_bins else {}),
+        **({"missing_env": missing_env} if missing_env else {}),
+        **({"error": err} if err else {}),
+    }
+
+
+def doctor(store: Store) -> dict[str, object]:
+    """Verify configured jobs have required binaries, non-empty env vars (presence only), scripts and prompts."""
+    config, host_path = load(store), environment().get("PATH", "")
+    q_err = _load_states(store)[4]
+    jobs_out = {n: _check_job_env(store, config, j, host_path) for n, j in sorted(config.jobs.items())}
+    return {
+        "healthy": not q_err and all(bool(entry["ok"]) for entry in jobs_out.values()),
+        "brain": config.name,
+        "path": str(store.root),
+        "jobs": jobs_out,
+        "problems": [{"error": q_err}] if q_err else [],
     }

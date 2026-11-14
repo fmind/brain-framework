@@ -4,32 +4,44 @@ Keep one year of commits reachable from `main`, and all available issues and pul
 
 ## Configure one repository
 
-Install and authenticate [GitHub CLI](https://cli.github.com/manual/) for the intended account. Copy `_sensor.py` and `github-history.py` from the release tag matching `bf --version` into your brain's `sensors/` and make `github-history.py` executable, as [Example sensors](README.md) shows. They use only Python 3.11's standard library and `gh`; the package does not install them. Run the following commands inside that brain.
+Install and authenticate [GitHub CLI](https://cli.github.com/manual/) for the intended account. Copy `github-history.py` from the release tag matching `bf --version` into your brain's `sensors/` and make `github-history.py` executable, as [Example sensors](README.md) shows. It uses only Python 3.11's standard library and `gh`; the package does not install it. Run the following commands inside that brain.
 
-Replace the fictional `example/project` in these entries with the selected repository, then merge them into `bf.yaml` under its existing `sensors` mapping:
+Replace the fictional `example/project` in these entries with the selected repository, then merge them into `bf.yaml` under its existing `jobs` mapping:
 
 ```yaml
-# https://fmind.github.io/brain-framework/docs/sensors/
-sensors:
+# https://fmind.github.io/brain-framework/docs/configuration/
+jobs:
   github-commits:
-    command: [sensors/github-history.py, example/project, commits, "{{start}}", "{{end}}"]
+    run: [sensors/github-history.py, example/project, commits, "{{start}}", "{{end}}"]
+    emit: records
     mode: window
+    requires:
+      bins: [gh]
     lookback: 31536000 # 365 days for initial collection
-    refresh: 3600
-    reconcile: { refresh: 604800, lookback: 31536000 }
+    on:
+      every: 3600
+    reconcile: { every: 604800, lookback: 31536000 }
   github-issues:
-    command: [sensors/github-history.py, example/project, issues, "{{start}}", "{{end}}"]
+    run: [sensors/github-history.py, example/project, issues, "{{start}}", "{{end}}"]
+    emit: records
     mode: window
-    refresh: 3600
-    reconcile: { refresh: 86400, lookback: 604800 }
+    requires:
+      bins: [gh]
+    on:
+      every: 3600
+    reconcile: { every: 86400, lookback: 604800 }
   github-pulls:
-    command: [sensors/github-history.py, example/project, pulls, "{{start}}", "{{end}}"]
+    run: [sensors/github-history.py, example/project, pulls, "{{start}}", "{{end}}"]
+    emit: records
     mode: window
-    refresh: 3600
-    reconcile: { refresh: 86400, lookback: 604800 }
+    requires:
+      bins: [gh]
+    on:
+      every: 3600
+    reconcile: { every: 86400, lookback: 604800 }
 ```
 
-Each source belongs to one repository, which its records link as lowercase `repo:github.com/OWNER/REPO`: identities are case-sensitive, so name it that way in a project's `aliases`. Use distinct sensor names for additional repositories. The branch defaults to literal `main`, including commits reachable through merged branches; it is not a first-parent-only log. Append `--branch, master` to the commit command for a repository whose selected branch is `master`. A missing branch fails visibly rather than falling back to another branch.
+Each source belongs to one repository, which its records link as lowercase `repo:github.com/OWNER/REPO`: identities are case-sensitive, so name it that way in a project's `aliases`. Use distinct job names for additional repositories. The branch defaults to literal `main`, including commits reachable through merged branches; it is not a first-parent-only log. Append `--branch, master` to `run` for a repository whose selected branch is `master`. A missing branch fails visibly rather than falling back to another branch.
 
 ## Backfill, then refresh
 
@@ -73,7 +85,7 @@ Existing `bf watch` or `bf update` runs then collect incremental windows. The we
 - Issues and PRs retain title, description, creation and modification dates, state, `attributes.kind` (`issue` or `pull-request`), canonical URL and repository link; PR state distinguishes merged from closed. All ages and states are eligible. Comments, reviews, attachments, patches, CI logs and timeline events are outside this projection.
 - The [repository issues endpoint](https://docs.github.com/en/rest/issues/issues#list-repository-issues) includes PRs with their merge time, so one request lists 100 issues and PRs. The adapter separates them and selects by modification time. The [commits endpoint](https://docs.github.com/en/rest/commits/commits#list-commits) uses the explicit branch and dates. Output windows are half-open: `START <= time < END`, using modification time for issues/PRs.
 - There is one current record per upstream identity, not a revision archive. An old record can be updated later. Missing/deleted/private-inaccessible objects cannot be reconstructed, and window mode does not remove previously saved records. Pagination is not a transaction: each page of issues and PRs restarts after the last modification time read, so an object modified during a run moves to a later window instead of hiding an unread one. When more than 100 objects share two seconds of modification time, those are paged by number instead, and a concurrent change can still hide one of them from that run.
-- Each run allows at most 100 API pages of 100 items, so at most 10,000 commits or 10,000 listed issues and PRs, 10,000 output records and 16 MiB of JSON; each provider call allows 60 seconds and 16 MiB. BF's configured `timeout`, 300 seconds by default, also bounds the whole run: a manual backfill of a busy repository that fails on its timeout can instead be split into shorter windows, or run with a larger `timeout` (at most 3600) for that sensor. Issue and PR runs each scan the combined issue/PR endpoint, so the page bound includes both kinds.
+- Each run allows at most 100 API pages of 100 items, so at most 10,000 commits or 10,000 listed issues and PRs, 10,000 output records and 16 MiB of JSON; each provider call allows 60 seconds and 16 MiB. BF's configured `timeout`, 300 seconds by default, also bounds the whole run: a manual backfill of a busy repository that fails on its timeout can instead be split into shorter windows, or run with a larger `timeout` (at most 3600) for that job. Issue and PR runs each scan the combined issue/PR endpoint, so the page bound includes both kinds.
 - Limits, malformed pages or pagination, repeated identities and provider errors fail without printing a partial array or changing evidence. Narrow the interval after overflow; fix account access or rate limits before retrying a provider failure. An object listed again inside the window with another modification time changed during the run: retry that window. A listed PR without its merge time (`pull_request.merged_at`) fails rather than being saved as closed.
 - A scheduled run beyond these limits keeps failing. BF records a reconciliation only when it succeeds, so every later due run requests the whole `reconcile.lookback` again, and the regular hourly refresh collects nothing until one succeeds; `bf status` reports the failure. The weekly commit reconciliation above revisits 365 days: when the branch receives more than about 10,000 commits a year, shorten `reconcile.lookback` and the initial `lookback`, for example to 90 days (`7776000`), and backfill older months with explicit windows.
 - `lookback: 31536000` sets the first scheduled commit window; an explicit manual `--since` can request more. Retention is separate: this example never prunes old records. Measure saved file count, disk usage, cache build time and retrieval usefulness before widening scope.

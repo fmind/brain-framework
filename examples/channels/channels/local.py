@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Offline channel fixture: finite history, one pushed message, and recorded outgoing deliveries.
 
-While CHANNEL_DEMO_OFFLINE is set, send fails before recording anything, standing in for a provider outage.
+While logs/offline exists inside the brain, send fails before recording anything, standing in for a provider outage.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
+from threading import Event
 
 MESSAGE = {
     "id": "hello-1",
@@ -27,7 +27,7 @@ def main(argv: list[str]) -> None:
         sys.stdout.write(json.dumps({"messages": [MESSAGE] if start <= MESSAGE["time"] < end else []}) + "\n")
     elif operation == "send":
         message = json.load(sys.stdin)
-        if os.environ.get("CHANNEL_DEMO_OFFLINE"):
+        if Path("logs/offline").exists():
             sys.exit("local channel is offline; nothing was sent")
         destination = message.get("conversation") or "proactive-thread"
         path = Path("logs/deliveries.jsonl")
@@ -36,16 +36,10 @@ def main(argv: list[str]) -> None:
             output.write(json.dumps(message) + "\n")
         sys.stdout.write(json.dumps({"id": "sent-" + message["id"], "conversation": destination}) + "\n")
     elif operation == "stream":
-        if json.loads(sys.stdin.readline())["type"] != "resume":
-            raise ValueError("expected resume")
         sys.stdout.write(json.dumps(MESSAGE) + "\n")
         sys.stdout.flush()
-        ack = json.loads(sys.stdin.readline())
-        if (ack.get("type"), ack.get("id")) != ("ack", MESSAGE["id"]):
-            raise ValueError("expected durable acknowledgement")
-        # A real adapter waits for another provider message here. EOF means the supervisor stopped.
-        for _line in sys.stdin:
-            pass
+        # A real adapter blocks reading provider events until the supervisor stops it.
+        Event().wait()
     else:
         raise ValueError("unknown operation")
 

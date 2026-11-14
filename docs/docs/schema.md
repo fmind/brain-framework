@@ -9,23 +9,23 @@ This reference defines the persisted formats BF reads: `bf.yaml`, OKF notes, rec
 
 ```yaml
 # https://fmind.github.io/brain-framework/
-version: 9
+version: 10
 name: brain
 ```
 
-`version: 9` names the persisted brain format ([versioning](upgrades.md#versioning-and-stability)). Every program's `command` must start with either a bare executable name on `PATH` or a normalized relative path under `sensors/`, `routines/` or `channels/` (no absolute paths, `..` or placeholders in `command[0]`).
+`version: 10` names the persisted brain format ([versioning](upgrades.md#versioning-and-stability)). Every job command (`run`, `harness`, `send`, or `gate`) must start with either a bare executable name on `PATH` or a normalized relative path under `sensors/`, `routines/` or `channels/` (no absolute paths, `..` or placeholders in index `0`).
 
-## Program names
+## Job names {#program-names}
 
-Sensors, routines and assistants share one namespace per brain (max 64 characters) because they share `logs/NAME.log`, locks and `memories/NAME/` sources (`sensors.mail and assistants.mail: program names must be distinct`):
+All jobs share the `jobs:` namespace in `bf.yaml` (up to 128 jobs, max 64 characters) because they share `logs/NAME.log`, locks, state and optional `memories/SOURCE/` directories:
 
-- **Sensor, assistant, channel**: `[a-z][a-z0-9-]*`.
-- **Routine**: lowercase alphanumeric words joined by single hyphens, starting with a letter (used in `actions/YYYY-MM-DD_NAME-SUFFIX/`).
-- **Reserved**: no sensor, routine, channel or assistant may be named `bf` (`bf:` is reserved for [BF addresses](link-reference.md#bf-links)).
+- **Job name**: `[a-z][a-z0-9-]*`. Action filenames use lowercase alphanumeric words joined by hyphens.
+- **Record sources**: `emit: records` jobs use `source` (default: job name) for `SOURCE:ID` and must not collide across jobs.
+- **Reserved**: no job or `source` may be named `bf` (`bf:` is reserved for [BF addresses](link-reference.md#bf-links)).
 
 ## Editor schemas
 
-Print JSON Schemas offline with `bf schema [--kind brain|config|registry|eval|search-reply|read-reply|status-reply|assistant-reply]` (`brain`, the default, and `config` both print `bf.yaml`). `bf init` adds YAML language server modelines (`# yaml-language-server: $schema=https://raw.githubusercontent.com/fmind/brain-framework/vVERSION/docs/bf.schema.json` and `eval.schema.json`) pinned to `bf --version`.
+Print JSON Schemas offline with `bf schema [--kind brain|registry|eval|search-reply|read-reply|status-reply|doctor-reply]` (`brain`, the default, prints `bf.yaml`). `bf init` adds YAML language server modelines (`# yaml-language-server: $schema=https://raw.githubusercontent.com/fmind/brain-framework/vVERSION/docs/bf.schema.json` and `eval.schema.json`) pinned to `bf --version`.
 
 YAML parsing enforces the YAML 1.2 core schema via libyaml, rejecting duplicate keys, anchors/aliases, custom tags and oversized structures (`true`/`false` only for booleans; `on`, `no` and `1:30` are strings).
 
@@ -63,7 +63,7 @@ Any valid `RelationName` (`[a-z][a-zA-Z0-9]*(?:-[a-z0-9]+)*`, up to 64 chars) wo
 
 ```yaml
 # https://fmind.github.io/brain-framework/
-version: 9
+version: 10
 name: brain
 fields:
   author:
@@ -86,7 +86,7 @@ Recommended `@type`, `relations` and `attributes` names (no `bf.yaml` declaratio
 
 ### Record submission rules
 
-Sensors output a JSON array, JSON Lines (one JSON record object per line) or `{records, incomplete}` ([partial coverage](sensors.md#report-partial-coverage)). Each input record accepts only:
+Record jobs output a JSON array, JSON Lines (one JSON record object per line), a `{records, incomplete?, cursor?}` object ([partial coverage](sensors.md#report-partial-coverage)), or declarative `map:` source JSON. Each normalized record accepts only:
 
 - **Required**: `id` (1–4,096 chars, <= 7,988 percent-encoded, no control chars), `title` (<= 4,096 chars).
 - **Optional**: `@type`, `text` (<= 4 MiB unless `max_text_bytes` truncates it and sets `attributes.partial: true`), `time` (ISO 8601 with timezone), `url`, `links` (identities/URLs), `aliases` (namespaced identities), `relations` (validated targets), `attributes` (JSON object; never sensor-supplied `fields`).

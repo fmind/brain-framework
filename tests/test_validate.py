@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -12,12 +13,13 @@ from typer.testing import CliRunner
 
 from bf import markdown
 from bf.cli import app
+from bf.config import load
 from bf.markdown import note, parse, reference, validate_okf
 from bf.models import MAX_PROMPT, Error, Query, Record, encode
 from bf.records import path as record_path
 from bf.retrieve import read, search
 from bf.storage import LINKED, Store
-from bf.validate import validate
+from bf.validate import broken_links, validate, validate_action_markdown
 from conftest import records_file
 
 
@@ -79,7 +81,7 @@ def test_problems_are_collected_not_fail_fast(brain: Store) -> None:
 
 def test_non_finite_note_attributes_are_invalid_not_unanswerable(brain: Store) -> None:
     # YAML reads .nan and .inf as floats, which strict JSON replies cannot carry.
-    brain.write("bf.yaml", b"version: 9\nname: fixture\n")
+    brain.write("bf.yaml", b"version: 10\nname: fixture\n")
     for value in (b".nan", b"-.inf", b"[1, .inf]"):
         brain.write("projects/weight.md", b"---\ntype: project\nattributes:\n  weight: " + value + b"\n---\n# Weight\n")
         assert "projects/weight.md: invalid frontmatter: attributes" in "\n".join(located(validate(brain)))
@@ -93,7 +95,7 @@ def test_non_finite_note_attributes_are_invalid_not_unanswerable(brain: Store) -
 def test_link_schema_and_identity_problems_name_their_file_once(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nfields:\n  owner:\n    description: Owner.\n    targets: ['person:']\n",
+        b"version: 10\nname: fixture\nfields:\n  owner:\n    description: Owner.\n    targets: ['person:']\n",
     )
     brain.write("concepts/foreign.md", b"---\ntype: person\nentity: bf://other/people/alice\n---\n# Foreign\n")
     brain.write(
@@ -357,7 +359,7 @@ def test_okf_status_and_reserved_files_are_valid(brain: Store, folder: str, stat
 
 
 def test_case_variant_identities_warn_without_failing(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    brain.write("bf.yaml", b"version: 9\nname: fixture\nfields:\n  repository: {description: Repository.}\n")
+    brain.write("bf.yaml", b"version: 10\nname: fixture\nfields:\n  repository: {description: Repository.}\n")
     records_file(
         brain,
         "github",
@@ -429,9 +431,9 @@ def test_an_interrupted_edit_warns_before_case_variants(brain: Store, monkeypatc
 
 
 GRAPH = (
-    b"version: 9\nname: fixture\nfields:\n"
+    b"version: 10\nname: fixture\nfields:\n"
     b'  owner:\n    description: Responsible person.\n    targets: ["person:email/"]\n'
-    b"sensors:\n  calendar:\n    command: [gws]\n"
+    b"jobs:\n  calendar:\n    run: [gws]\n    emit: records\n"
 )
 
 
@@ -475,7 +477,7 @@ def test_validation_resolves_graph_links_through_declared_identities(brain: Stor
 
 
 def test_notes_type_claims_in_relations_without_declaring_every_relation(brain: Store) -> None:
-    brain.write("bf.yaml", GRAPH.replace(b"sensors:\n  calendar:\n    command: [gws]\n", b""))
+    brain.write("bf.yaml", GRAPH.replace(b"jobs:\n  calendar:\n    run: [gws]\n    emit: records\n", b""))
     brain.write(
         "projects/launch.md",
         b"---\ntype: project\nrelations:\n  owner: [person:email/bob@example.test]\n  partner: person:email/ada@example.test\n---\n# Launch\n\nShip it.\n",
@@ -541,7 +543,7 @@ def test_one_problem_never_hides_a_note_s_others_or_breaks_links_to_it(brain: St
 def test_claim_errors_neither_hide_each_other_nor_unname_the_note(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
+        b"version: 10\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
     )
     brain.write(
         "concepts/alice.md",
@@ -568,7 +570,7 @@ def test_claim_errors_neither_hide_each_other_nor_unname_the_note(brain: Store) 
 def test_a_problem_repeated_across_links_is_reported_once_where_it_first_occurs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
+        b"version: 10\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
     )
     # A reserved relation in frontmatter and 250 sections, beside as many owner claims outside declared targets.
     body = "".join(
@@ -614,7 +616,7 @@ def test_a_link_no_bf_address_can_hold_hides_neither_its_note_nor_other_problems
 def test_every_problem_of_a_record_is_reported(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
+        b"version: 10\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
     )
     brain.write(
         record_path("mail", "m1"),
@@ -684,16 +686,16 @@ def test_record_links_that_are_no_identities_warn_without_failing(brain: Store) 
 def test_scripts_run_through_an_interpreter_must_exist(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n"
-        b"  brief:\n    command: [uv, run, --no-project, sensors/brief.py, '{{start}}']\n"
-        b"  packaged:\n    command: [uv, run, --project, sensors/news, news]\n"
-        b"  piped:\n    command: [sh, -c, sensors/a.sh | sensors/b.sh]\n"
-        b"routines:\n  review:\n    command: [python3, routines/review.py, routines/report.md]\n",
+        b"version: 10\nname: fixture\njobs:\n"
+        b"  brief:\n    emit: records\n    run: [uv, run, --no-project, sensors/brief.py, '{{start}}']\n"
+        b"  packaged:\n    emit: records\n    run: [uv, run, --project, sensors/news, news]\n"
+        b"  piped:\n    emit: records\n    run: [sh, -c, sensors/a.sh | sensors/b.sh]\n"
+        b"  review:\n    run: [python3, routines/review.py, routines/report.md]\n",
     )
     assert located(validate(brain)) == [
-        "bf.yaml: sensors.brief.command: sensors/brief.py is not a regular file or folder",
-        "bf.yaml: sensors.packaged.command: sensors/news is not a regular file or folder",
-        "bf.yaml: routines.review.command: routines/review.py is not a regular file or folder",
+        "bf.yaml: jobs.brief.run: sensors/brief.py is not a regular file or folder",
+        "bf.yaml: jobs.packaged.run: sensors/news is not a regular file or folder",
+        "bf.yaml: jobs.review.run: routines/review.py is not a regular file or folder",
     ]
     # The interpreter runs the first brain path it is given, so it needs no executable bit; later arguments, such as
     # a file the routine may create, and shell command lines are not checked.
@@ -703,21 +705,21 @@ def test_scripts_run_through_an_interpreter_must_exist(brain: Store) -> None:
     assert validate(brain)["valid"]
 
 
-def test_an_enabled_assistant_schedule_gate_is_checked_like_any_program(brain: Store) -> None:
+def test_an_enabled_job_gate_is_checked_like_any_program(brain: Store) -> None:
     gated = (
-        b"version: 9\nname: fixture\nassistants:\n  helper:\n    prompt: prompts/a.md\n    command: [agent]\n"
-        b"    schedules:\n      events:\n        every: 300\n"
-        b'        gate: {command: [routines/missing-gate.py, "{{lines:settings/missing.txt}}"]}\n'
+        b"version: 10\nname: fixture\njobs:\n  helper:\n    prompt: prompts/a.md\n    harness: [agent]\n"
+        b"    on: {every: 300}\n"
+        b'    gate: [routines/missing-gate.py, "{{lines:settings/missing.txt}}"]\n'
     )
     brain.write("bf.yaml", gated)
     brain.write("prompts/a.md", b"Review.\n")
-    gate = "bf.yaml: assistants.helper.schedules.events.gate.command"
+    gate = "bf.yaml: jobs.helper.gate"
     assert located(validate(brain)) == [
         f"{gate}: routines/missing-gate.py is not an executable regular file",
         f"{gate}: settings/missing.txt does not exist; restore it or correct bf.yaml",
     ]
-    # A disabled assistant runs no gate, like any disabled program.
-    brain.write("bf.yaml", gated.replace(b"    command: [agent]\n", b"    command: [agent]\n    enabled: false\n"))
+    # A disabled job runs no gate, like any disabled program.
+    brain.write("bf.yaml", gated.replace(b"    harness: [agent]\n", b"    harness: [agent]\n    enabled: false\n"))
     assert validate(brain)["valid"]
 
 
@@ -762,20 +764,20 @@ def test_validation_parses_each_note_once(brain: Store, monkeypatch: pytest.Monk
 def test_validate_reports_a_prompt_file_every_run_would_reject(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nassistants:\n  assistant:\n    prompt: prompts/a.md\n    command: [agent]\n",
+        b"version: 10\nname: fixture\njobs:\n  assistant:\n    prompt: prompts/a.md\n    harness: [agent]\n",
     )
     brain.write("prompts/a.md", b"x" * (MAX_PROMPT + 1))
     problems = cast("list[dict[str, str]]", validate(brain)["problems"])
     assert {
         "file": "bf.yaml",
-        "error": f"assistants.assistant.prompt: prompts/a.md exceeds {MAX_PROMPT} bytes",
+        "error": f"jobs.assistant.prompt: prompts/a.md exceeds {MAX_PROMPT} bytes",
     } in problems
 
 
 def test_declarative_validate_policies_and_line_files(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\n"
+        b"version: 10\nname: fixture\n"
         b"validate:\n"
         b"  max_stale_days: 30\n"
         b"  warn_stale_days: 7\n"
@@ -784,9 +786,9 @@ def test_declarative_validate_policies_and_line_files(brain: Store) -> None:
         b"  forbid_patterns:\n"
         b"    - '/Users/[A-Za-z0-9._-]+'\n"
         b"    - '^Done$'\n"
-        b"sensors:\n"
+        b"jobs:\n"
         b"  scoped:\n"
-        b'    command: [echo, "{{lines:settings/missing.txt}}"]\n',
+        b'    run: [echo, "{{lines:settings/missing.txt}}"]\n',
     )
     brain.write("concepts/index.md", b"# Concepts\n")
     brain.write(
@@ -806,9 +808,7 @@ def test_declarative_validate_policies_and_line_files(brain: Store) -> None:
     assert {"warning": "stale_after is within 7 days", "file": "concepts/drift.md", "stale_after": soon} in cast(
         "list[dict[str, str]]", report["warnings"]
     )
-    assert (
-        "bf.yaml: sensors.scoped.command: settings/missing.txt does not exist; restore it or correct bf.yaml" in errors
-    )
+    assert "bf.yaml: jobs.scoped.run: settings/missing.txt does not exist; restore it or correct bf.yaml" in errors
     assert "concepts/index.md: missing link to concepts/evidence.md" in errors
     assert "concepts/evidence.md: frontmatter status must be explicitly set to one of: draft, stable" in errors
     assert "concepts/evidence.md: stale_after exceeds max_stale_days (30 days)" in errors
@@ -858,3 +858,106 @@ def test_missing_action_links_report_unresolved_with_exit_zero(brain: Store) -> 
     }
     cli = CliRunner().invoke(app, ["validate", "--brain", str(brain.root)])
     assert cli.exit_code == 0, cli.output
+
+
+def test_validate_policy_limits_canonical_actions_and_direct_helpers(brain: Store) -> None:
+    assert broken_links(brain, note("projects/p.md", b"# P\n\n[self](#) [ext](repo:a)\n")) == []
+    with pytest.raises(Error, match="exceeds 4 MiB"):
+        validate_action_markdown(brain, load(brain), "actions/2026-09-25_big/ACTION.md", b"x" * (4 * 1024 * 1024 + 1))
+
+    brain.write("settings/many.txt", "\n".join(f"arg-{i}" for i in range(130)).encode())
+    brain.write("concepts/sec-target.md", b"---\ntype: concept\nstatus: draft\n---\n# Target\n\n## Ok\n")
+    brain.write("actions/2026-09-25_audit/ACTION.md", b"---\ntype: action\nstatus: draft\n---\n# Audit\n")
+    brain.write(
+        "bf.yaml",
+        b"version: 10\nname: fixture\n"
+        b"fields:\n  follows:\n    description: Action relation.\n    targets: ['bf://fixture/actions/other']\n"
+        b"defaults:\n  harness: [routines/missing.py]\n"
+        b"validate:\n  index_note: concepts/missing-index.md\n"
+        b"jobs:\n  expanded:\n    run: [echo, '{{lines:settings/many.txt}}']\n    cwd: settings/missing-dir\n"
+        b"  bad-prompt:\n    prompt: prompts/missing-prompt.md\n"
+        b"  valid-cwd:\n    run: [echo, ok]\n    cwd: concepts\n",
+    )
+    brain.write("memories/topics/.forgotten", b"{not json\n")
+    brain.write(
+        "projects/relcheck.md",
+        b"---\ntype: project\nrelations:\n  owner: bf://fixture/meetings:lunch\n---\n"
+        b"# RelCheck\n\n[follow](bf://fixture/actions/2026-09-25_audit?rel=follows)"
+        b" [absent](bf://fixture/actions/2026-09-25_absent)"
+        b" [sec](../concepts/sec-target.md#ok)"
+        b" [lunchsec](bf://fixture/meetings:lunch#sec)\n",
+    )
+    records_file(brain, "mail", [Record(id="m1", title="Mail", links=["bf://fixture/actions/2026-09-25_absent"])])
+    records_file(brain, "bf", [Record(id="badsrc", title="Reserved source")])
+
+    problems = located(validate(brain))
+    assert "bf.yaml: defaults.harness: routines/missing.py is not an executable regular file" in problems
+    assert "bf.yaml: jobs.bad-prompt.prompt: prompts/missing-prompt.md is not a regular file" in problems
+    assert "bf.yaml: jobs.expanded.cwd: settings/missing-dir is not a directory" in problems
+    assert "bf.yaml: jobs.expanded.run: command arguments exceed 128 items after expanding line files" in problems
+    assert "bf.yaml: validate.index_note: concepts/missing-index.md does not exist" in problems
+    assert (
+        "projects/relcheck.md: follows link outside the declared targets: bf://fixture/actions/2026-09-25_audit"
+        in problems
+    )
+    assert "projects/relcheck.md: record cannot select a Markdown section: bf://fixture/meetings:lunch#sec" in problems
+    assert any(
+        p.startswith("memories/mail/") and "unresolved BF target: bf://fixture/actions/2026-09-25_absent" in p
+        for p in problems
+    )
+    assert any(p.startswith("memories/bf/") and "reserved" in p for p in problems)
+    assert any(p.startswith("memories/topics/.forgotten:") for p in problems)
+
+    cfg = load(brain)
+    validate_action_markdown(
+        brain,
+        cfg,
+        "actions/2026-09-25_audit/ACTION.md",
+        b"---\ntype: action\nstatus: draft\n---\n# Audit\n\n[ok](../../concepts/sec-target.md#ok)\n",
+        require_draft=True,
+    )
+    with pytest.raises(Error, match="requires type: action"):
+        validate_action_markdown(brain, cfg, "actions/2026-09-25_a/ACTION.md", b"---\ntype: project\n---\n# A\n")
+    with pytest.raises(Error, match="requires status: draft"):
+        validate_action_markdown(
+            brain,
+            cfg,
+            "actions/2026-09-25_a/ACTION.md",
+            b"---\ntype: action\nstatus: stable\n---\n# A\n",
+            require_draft=True,
+        )
+    with pytest.raises(Error, match="relations belong under relations:"):
+        validate_action_markdown(
+            brain,
+            cfg,
+            "actions/2026-09-25_a/ACTION.md",
+            b"---\ntype: action\nstatus: draft\nfollows: x\n---\n# A\n",
+        )
+    with pytest.raises(Error, match="and 1 more"):
+        validate_action_markdown(
+            brain,
+            cfg,
+            "actions/2026-09-25_a/ACTION.md",
+            b"---\ntype: action\nstatus: draft\n---\n# A\n\n[a](missing-a.md) [b](missing-b.md)\n",
+        )
+
+    brain.write("concepts/bad-index.md", b"---\ntype: [invalid\n---\n")
+    brain.write("bf.yaml", b"version: 10\nname: fixture\nvalidate:\n  index_note: concepts/bad-index.md\n")
+    invalid_index_problems = located(validate(brain))
+    assert "bf.yaml: validate.index_note: concepts/bad-index.md does not exist" not in invalid_index_problems
+    assert any(p.startswith("concepts/bad-index.md:") for p in invalid_index_problems)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_validate_reports_inaccessible_record_and_forgotten_files(brain: Store) -> None:
+    rec = record_path("meetings", "lunch")
+    brain.write("memories/meetings/.forgotten", b"[]\n")
+    (brain.root / rec).chmod(0o000)
+    (brain.root / "memories/meetings/.forgotten").chmod(0o000)
+    try:
+        problems = located(validate(brain))
+    finally:
+        (brain.root / rec).chmod(0o600)
+        (brain.root / "memories/meetings/.forgotten").chmod(0o600)
+    assert f"{rec}: inaccessible file; check permissions" in problems
+    assert "memories/meetings/.forgotten: inaccessible file; check permissions" in problems

@@ -52,17 +52,16 @@ def export() -> str:
                 '"valid":true',
                 '"manual":["assistant"]',
                 '"status":"ran"',
-                '"record":"assistant:',
                 "Owner message: What changed in the launch?",
-                '"title":"Brain assistant"',
-                '"text":"narrow"',
-                '"status":"gated"',
-                '"title":"narrow --wide"',
-                '"text":"manual"',
-                '"text":"The launch moved to Friday."',
-                "assistant reply at /structured_output is missing",
-                '"state":"uncertain"',
-                '"wakes":[{"assistant":"brief"',
+                "# Brain assistant",
+                '"action":"actions/',
+                '"title":"Launch brief"',
+                '"quiet":true',
+                '"job":"brief"',
+                '"state":"delivered"',
+                "Missing JSON pointer failed cleanly without posting.",
+                '"wakes":[{',
+                '"reason":"Recheck the launch."',
             ],
         ),
         (
@@ -70,16 +69,17 @@ def export() -> str:
             0,
             [
                 '"valid":true',
-                '"id":"hello-1"',
-                '"counts":{}',
-                '"status":"ran","text":"Acknowledged."',
-                '"total":2',
-                '"id":"sent-demo-send"},"state":"delivered"',
+                '"job":"local-poll","messages":1',
+                '"status":"ran"',
+                '"text": "Acknowledged."',
+                '"state":"delivered"',
                 "The send failed; its delivery waits in the queue.",
-                '"text":"Sent after the outage."',
+                '"text":"Sent after the outage.\\n"',
                 '{"id":"demo-retry","status":"delivered"}',
-                '"assistant":"scout"',
-                '"assistant":"actor"',
+                '"job":"scout"',
+                '"job":"actor"',
+                "proactive-thread",
+                "reply-1",
             ],
         ),
         ("routines", 0, ['"status":"ran"', "weekly-review-", '"valid":true']),
@@ -89,7 +89,6 @@ def export() -> str:
             [
                 "The first commit passed.",
                 "The hook refused the second commit.",
-                '"status":"failed"',
                 '{"error":"broken link: plan.md","file":"projects/launch.md"}',
             ],
         ),
@@ -122,23 +121,32 @@ def test_readme_walkthrough(example: str, block: int | None, expected: list[str]
     assert result.returncode == 0, result.stderr + result.stdout
     for text in expected:
         assert text in result.stdout, result.stdout
+    if example == "prompts":
+        assert "extract pointer '/structured_output/text' resolved empty or missing" in result.stderr
+    if example == "routines" and block == 1:
+        assert '"status":"failed"' in result.stderr
     if example == "channels":
         # The manual run and the scheduled review each send one proactive message with its own stable id.
         sent = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"conversation"')]
         assert len(sent) == 4, result.stdout
         assert sent[0]["id"] != sent[1]["id"]
         assert all(item["reply_to"] == "" and item["text"] == "Acknowledged." for item in sent[:2])
-        # The failed attempt recorded nothing: two assistant answers, then the direct send and the retried one.
+        # The failed attempt recorded nothing: two personal runs, then scout's proposal and actor's reply.
         assert re.search(r"^\s*4$", result.stdout, re.MULTILINE), result.stdout
-        # The scout posts its proposal; the owner's reply reaches the actor with that proposal in its history.
+        # The scout posts its proposal; the owner's reply reaches the actor via channel.received in events.
         proposal, answer = sent[2:]
         assert proposal["reply_to"] == ""
         assert proposal["text"].startswith("The review is ready. Proposed: 1.")
-        assert (answer["conversation"], answer["reply_to"]) == ("proactive-thread", "reply-1")
-        assert "Owner message: do 2" in answer["text"]
         context = json.loads(answer["text"].split("Invocation: ", 1)[1])
-        assert (context["kind"], context["channel"]) == ("input", "owner-chat")
-        assert [(item["role"], item["text"]) for item in context["history"]] == [("assistant", proposal["text"])]
+        assert (context["job"], context["kind"]) == ("actor", "event")
+        received = [event for event in context["events"] if event["kind"] == "channel.received"]
+        assert len(received) == 1
+        assert (
+            received[0]["source"],
+            received[0]["data"]["conversation"],
+            received[0]["data"]["id"],
+            received[0]["data"]["text"],
+        ) == ("owner-chat", "proactive-thread", "reply-1", "do 2")
     assert not (tmp_path / "unrelated-brain").exists()
     assert not list(tmp_path.glob("tmp.*")), "walkthrough did not remove its disposable brain"
 

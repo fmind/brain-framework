@@ -9,29 +9,28 @@ A sensor turns a selected source into searchable evidence. It prints a JSON arra
 
 ## Your first sensor
 
-Complete [Getting started](getting-started.md), including its [collection exercise](getting-started.md#collect-your-first-source), then work inside `~/brain`. The reviewed [local documents sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/local-documents.py) uses [`_sensor.py`](https://github.com/fmind/brain-framework/blob/main/examples/sensors/_sensor.py), reads only the folder passed to it and bounds file sizes and output. Move the brief into its own folder, then copy both files from the release tag matching `bf --version`:
+Complete [Getting started](getting-started.md), including its [collection exercise](getting-started.md#collect-your-first-source), then work inside `~/brain`. The reviewed [local documents sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/local-documents.py) reads only the folder passed to it and bounds file sizes and output. Move the brief into its own folder, then copy it from the release tag matching `bf --version`:
 
 ```bash
 mkdir -p inputs/website-demo
 mv inputs/brief.txt inputs/website-demo/brief.txt
-curl -fsSLo sensors/_sensor.py "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors/_sensor.py"
 curl -fsSLo sensors/local-documents.py "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors/local-documents.py"
 chmod +x sensors/local-documents.py
 ```
 
-Review the downloaded scripts before running them; `chmod +x` restores the executable bit BF needs to run a script directly.
+Review the downloaded script before running it; `chmod +x` restores the executable bit BF needs to run a script directly.
 
 ## Configure a sensor
 
-In `bf.yaml`, replace the `brief` entry under `sensors:` with this one. Keep `version`, `name` and other settings:
+In `bf.yaml`, replace the `brief` entry under `jobs:` with this one. Keep `version`, `name` and other settings:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
-sensors:
+jobs:
   local-documents:
-    command: [sensors/local-documents.py, website-demo, "{{brain}}/inputs/website-demo"]
+    run: [sensors/local-documents.py, website-demo, "{{brain}}/inputs/website-demo"]
+    emit: records
     mode: snapshot
-    refresh: 0
 ```
 
 `website-demo` is the stable label used in record ids, and the last argument selects the demo folder. The script needs Python 3.11 or later as `python3` ([sensor settings](#sensor-settings)).
@@ -76,25 +75,24 @@ Validation reports `"records":1` and `"valid":true`.
 
 ## Selected highlights
 
-The reviewed [highlights sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/highlights.py) keeps an exact passage, its locator and your separate annotation from a portable JSON export. Copy it (and `_sensor.py` if you skipped the section above) with the [fictional export](https://github.com/fmind/brain-framework/blob/main/examples/sensors/highlights.json):
+The reviewed [highlights sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/highlights.py) keeps an exact passage, its locator and your separate annotation from a portable JSON export. Copy it with the [fictional export](https://github.com/fmind/brain-framework/blob/main/examples/sensors/highlights.json):
 
 ```bash
 examples="https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors"
-curl -fsSLo sensors/_sensor.py "$examples/_sensor.py"
 curl -fsSLo sensors/highlights.py "$examples/highlights.py"
 curl -fsSLo inputs/highlights.json "$examples/highlights.json"
 chmod +x sensors/highlights.py
 ```
 
-Add `highlights` under `sensors:`, keeping existing entries (`highlights.py` already sets `@type`, `relations.source-document` and `attributes`):
+Add `highlights` under `jobs:`, keeping existing entries (`highlights.py` already sets `@type`, `relations.source-document` and `attributes`):
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
-sensors:
+jobs:
   highlights:
-    command: [sensors/highlights.py, reading, "{{brain}}/inputs/highlights.json"]
+    run: [sensors/highlights.py, reading, "{{brain}}/inputs/highlights.json"]
+    emit: records
     mode: snapshot
-    refresh: 0
 ```
 
 ```bash
@@ -106,51 +104,53 @@ bf read highlights:reading/brief-clarity
 
 ## Sensor settings
 
-The command is a program on PATH or in `sensors/`, followed by its arguments, run without a shell. The sensor's name becomes the source in `SOURCE:ID`.
+A sensor is a job under `jobs:` with `emit: records`. Its `run` command is a program on `PATH` or in `sensors/`, `routines/` or `channels/`, followed by arguments, run without a shell. The job's `source` (default: its job name) becomes the source in `SOURCE:ID`.
 
-| Setting          | Default  | Meaning                                                                                                                                                                                                                 |
-| ---------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `command`        | required | Program and arguments; optional only with `enabled: false`.                                                                                                                                                             |
-| `enabled`        | `true`   | Disabled sensors never run; their records stay searchable.                                                                                                                                                              |
-| `mode`           | `window` | `window` updates returned records; `snapshot` replaces the complete list.                                                                                                                                               |
-| `refresh`        | `0`      | Seconds between automatic runs; `0` keeps the sensor manual.                                                                                                                                                            |
-| `lookback`       | `86400`  | Seconds covered by the first run, each snapshot run and `bf collect` without `--since`.                                                                                                                                 |
-| `overlap`        | `300`    | Seconds re-read before the previous window's end.                                                                                                                                                                       |
-| `reconcile`      | none     | Occasional wider window `{refresh, lookback}` for `window` sensors; see [reconciliation](#frequent-updates-and-periodic-reconciliation).                                                                                |
-| `timeout`        | `300`    | Maximum runtime in seconds.                                                                                                                                                                                             |
-| `max_bytes`      | 64 MiB   | Maximum stdout bytes.                                                                                                                                                                                                   |
-| `max_text_bytes` | none     | Per-record UTF-8 byte ceiling (1–4,194,304): cuts longer `record.text` on a UTF-8 boundary and sets `attributes.partial: true`; unset, text above 4 MiB fails (`set max_text_bytes on this sensor to cut longer text`). |
-| `priority`       | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source).                                                                                                                                                       |
-| `silent_after`   | none     | Seconds without a new or changed record before a scheduled source [falls silent](schedule.md#silent-sources).                                                                                                           |
-| `expire_after`   | none     | Seconds of [retention](#keep-forget-and-expire-records): older records leave at the next collection.                                                                                                                    |
+| Setting          | Default  | Meaning                                                                                                                                                                                                              |
+| ---------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `run`            | required | Program and arguments; optional only with `enabled: false`.                                                                                                                                                          |
+| `emit`           | `log`    | Set `emit: records` to validate and store collected records under `memories/`.                                                                                                                                       |
+| `enabled`        | `true`   | Disabled jobs never run; existing records stay searchable.                                                                                                                                                           |
+| `mode`           | `window` | `window` updates returned records; `cursor` passes `{{cursor}}`; `snapshot` replaces the complete list.                                                                                                              |
+| `on`             | none     | Schedule trigger (`{ every: SECONDS }` or `{ at: "HH:MM", days: [...] }`); omitted keeps the job manual.                                                                                                             |
+| `lookback`       | `86400`  | Seconds covered by the first run, each snapshot run and `bf collect` without `--since`.                                                                                                                              |
+| `overlap`        | `300`    | Seconds re-read before the previous window's end.                                                                                                                                                                    |
+| `reconcile`      | none     | Occasional wider window `{ every, lookback }` for `window` sensors; see [reconciliation](#frequent-updates-and-periodic-reconciliation).                                                                             |
+| `timeout`        | `300`    | Maximum runtime in seconds.                                                                                                                                                                                          |
+| `max_bytes`      | 64 MiB   | Maximum stdout bytes.                                                                                                                                                                                                |
+| `max_text_bytes` | none     | Per-record UTF-8 byte ceiling (1–4,194,304): cuts longer `record.text` on a UTF-8 boundary and sets `attributes.partial: true`; unset, text above 4 MiB fails (`set max_text_bytes on this job to cut longer text`). |
+| `priority`       | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source).                                                                                                                                                    |
+| `silent_after`   | none     | Seconds without a new or changed record before a scheduled source [falls silent](schedule.md#silent-sources).                                                                                                        |
+| `expire_after`   | none     | Seconds of [retention](#keep-forget-and-expire-records): older records leave at the next collection.                                                                                                                 |
+| `requires`       | `{}`     | `{ bins, env }` binaries checked by `bf doctor` and host environment variables forwarded to the job.                                                                                                                 |
 
 Command rules ([limits](limits.md#size-bounds)):
 
-- **Placeholders**: `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}` expand once; `{{lines:relative/path.txt}}` splices non-blank, non-`#` lines (up to 4 MiB, 16,384 chars/line) into argv (max 128 items total). `{{home}}` fails visibly when no home folder resolves.
+- **Placeholders**: `{{brain}}`, `{{home}}`, `{{state}}`, `{{run}}`, `{{start}}`, `{{end}}` and `{{cursor}}` expand once in argv; `{{lines:relative/path.txt}}` splices non-blank, non-`#` lines (up to 4 MiB, 16,384 chars/line) into argv (max 128 items total). `{{home}}` fails visibly when no home folder resolves.
 - **Interpreter**: direct scripts (`[sensors/local-documents.py, ...]`) need `+x` and Python 3.11+ as `python3`. With an older `python3`, prepend uv: `[uv, run, --no-project, --python, "3.14", sensors/local-documents.py, ...]`.
-- **Name**: a sensor cannot be named `bf` (`bf:ID` would collide with BF addresses); see [program names](schema.md#program-names).
+- **Name**: a job cannot be named `bf` (`bf:ID` would collide with BF addresses); see [program names](schema.md#program-names).
 
 ### What a program receives
 
-Sensors and routines run from the brain root with stdin closed (except `bf run --stdin` or hooks) and loader-injection variables stripped, plus:
+Jobs run from the brain root with stdin closed (unless stdin is explicitly passed) and loader-injection variables stripped. Only allowlisted host variables, variables named in `requires.env` and `BF_BRAIN` are forwarded in the environment:
 
-| Variable       | Value                                                                                                                            |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `BF_BRAIN`     | Brain root, so nested `bf` calls read this brain.                                                                                |
-| `BF_PROGRAM`   | Program name in `bf.yaml`.                                                                                                       |
-| `BF_START`     | Window start (`{{start}}`), such as `2026-09-01T00:00:00.000000Z`.                                                               |
-| `BF_END`       | Window end (`{{end}}`).                                                                                                          |
-| `BF_STATE_DIR` | Private directory (`<brain>/.bf/state/SENSOR/`, mode `700`) for cursors; deleting it makes the next run fall back to `lookback`. |
+| Input        | Value                                                                                                                         |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `BF_BRAIN`   | Brain root environment variable, so nested `bf` calls read this brain.                                                        |
+| `{{start}}`  | Window start placeholder in `run:` / `gate:`, such as `2026-09-01T00:00:00.000000Z`.                                          |
+| `{{end}}`    | Window end placeholder in `run:` / `gate:`.                                                                                   |
+| `{{state}}`  | Private directory (`<brain>/.bf/state/JOB/`, mode `700`) for cursors; deleting it makes the next run fall back to `lookback`. |
+| `{{cursor}}` | Last saved `cursor` string from `.bf/runtime.sqlite3` for `mode: cursor` sources.                                             |
 
 #### Credentials {#credentials}
 
 Prefer credentials in this order:
 
 1. **Provider CLI login** (`gh auth login`, `gws`, `gcloud`) — the CLI manages tokens outside the script.
-2. **Private file outside the brain** (mode `600`, passed as `"{{home}}/.config/acme/token"` and read with `_sensor.secret()`) — works under systemd and launchd services that inherit only `PATH`.
+2. **Private file outside the brain** (mode `600`, passed as `"{{home}}/.config/acme/token"`) — works under systemd and launchd services that inherit only `PATH`.
 3. **OS keyring** — interactive sessions only (often locked under unattended user services).
 
-Never put secrets in `bf.yaml`, command arguments, the brain or service files. To pass non-secret profile variables (such as `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`) to one program, prefix `command` with `env`: `[env, "GOOGLE_WORKSPACE_CLI_CONFIG_DIR={{home}}/.config/gws-personal", sensors/gmail-headers.py, "{{start}}", "{{end}}"]` (or `"{{lines:settings/google.env}}"` with literal paths). Never re-add `LD_*`, `PYTHON*` or `NODE_OPTIONS`.
+Never put secrets in `bf.yaml`, command arguments, the brain or service files. To forward non-secret profile variables (such as `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`) from the host environment, list them in `requires.env` (or wrap `run` with `[env, "GOOGLE_WORKSPACE_CLI_CONFIG_DIR={{home}}/.config/gws-personal", sensors/gmail-headers.py, "{{start}}", "{{end}}"]`). Never re-add `LD_*`, `PYTHON*` or `NODE_OPTIONS`.
 
 ## Quiet a high-volume source
 
@@ -158,10 +158,11 @@ Set `priority: low` on high-volume feeds so they do not crowd period pages or wo
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
-sensors:
+jobs:
   news:
-    command: [sensors/news.py, "{{start}}", "{{end}}"]
-    refresh: 3600
+    run: [sensors/news.py, "{{start}}", "{{end}}"]
+    emit: records
+    on: { every: 3600 }
     priority: low
 ```
 
@@ -169,7 +170,7 @@ sensors:
 
 ## Any source you can script
 
-Any CLI, API, database query or export can become a sensor. Fetch every page before printing output, fail on incomplete fetches and never print secrets. A sensor prints a JSON array or JSON Lines (one JSON object per line):
+Any CLI, API, database query or export can become a sensor. Fetch every page before printing output, fail on incomplete fetches and never print secrets. A sensor prints a JSON array or JSON Lines (one JSON object per line), or maps existing JSON through `map:`:
 
 ```json
 {
@@ -187,19 +188,21 @@ Any CLI, API, database query or export can become a sensor. Fetch every page bef
 
 ## Collect and update
 
-`bf collect SENSOR` runs one sensor now. `bf update` and `bf watch` run due sensors (up to four concurrently) in one [selected brain](configuration.md#select-a-brain), appending stderr and summaries to `logs/SENSOR.log`. A second concurrent `bf collect` of the same sensor fails (`SENSOR is already running for this brain; retry later`), while `bf update` reports it `skipped`. Window sensors resume from their previous window minus `overlap`, catching up at most 30 days.
+`bf collect JOB` runs one `emit: records` job now. `bf update` and `bf watch` run due record jobs (up to four concurrently) in one [selected brain](configuration.md#select-a-brain), appending stderr and summaries to `logs/JOB.log`. A second concurrent `bf collect` of the same job fails (`JOB is already running for this brain; retry later`), while `bf update` reports it `skipped`. Window sensors resume from their previous window minus `overlap`, catching up at most 30 days.
 
 ### Frequent updates and periodic reconciliation
 
-Combine a short `refresh` window with an occasional wider `reconcile` window (`mode: window` only) to catch upstream edits:
+Combine a short `on.every` window with an occasional wider `reconcile` window (`mode: window` only) to catch upstream edits:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
-sensors:
+jobs:
   messages:
-    command: [sensors/messages.py, "{{start}}", "{{end}}"]
-    refresh: 3600
-    reconcile: { refresh: 86400, lookback: 604800 }
+    run: [sensors/messages.py, "{{start}}", "{{end}}"]
+    emit: records
+    mode: window
+    on: { every: 3600 }
+    reconcile: { every: 86400, lookback: 604800 }
 ```
 
 Once a day, the due run requests seven days instead of one hour. Failed runs, manual collections and `--dry-run` do not count as reconciliations.
@@ -222,20 +225,17 @@ When one feed or account among several fails, a sensor can keep the rest by prin
 { "records": [{ "id": "post-1", "title": "Release notes" }], "incomplete": { "missed": 1, "of": 3 } }
 ```
 
-- `1 <= missed <= of` (no extra keys); write what failed to stderr (`logs/SENSOR.log`).
+- `1 <= missed <= of` (optional `"cursor": "..."` too, no extra keys); write what failed to stderr (`logs/JOB.log`).
 - Saves returned records without removing absent snapshot items (even with `--allow-removal`) or expiring undated items (`forgotten` tombstones still apply).
 - Marks the source `"degraded": {"runs": N, "missed": 1, "of": 3}` in `bf status`, `memories` pages and search coverage; after three consecutive incomplete runs, a scheduled source joins `attention` and fails `bf status --check` until a complete run clears it.
 
-## Build a sensor with the kit
+## Build a standalone sensor
 
-[`_sensor.py`](https://github.com/fmind/brain-framework/blob/main/examples/sensors/_sensor.py) is a standard-library helper file you copy into `sensors/` and own:
+Sensors under [`examples/sensors/`](https://github.com/fmind/brain-framework/tree/main/examples/sensors) are self-contained standard-library Python 3.11+ scripts (copyable as-is without a shared helper module), or declarative `map:` entries over any CLI/JSON command:
 
-- `main(collect, failure=...)` and `cli(fn, prefix=..., hint=...)` wrap entry points without leaking provider output; `window()` and `state_dir()` read `BF_START`/`BF_END` and `BF_STATE_DIR`.
-- `load_state(name, default=...)` and `save_state(name, data)` persist JSON cursors atomically in `BF_STATE_DIR`.
-- `secret(path)` reads mode-`600` credential files; `run(*argv, timeout=..., max_bytes=...)` and `fetch(url, timeout=..., max_bytes=...)` bound subprocess and HTTPS calls; `git_remote_identity(url)` normalizes repository identities.
-- `redact(text)` masks credential shapes before building records; `record(...)` normalizes UTF-8 text and URLs; `emit(records, missed=..., of=...)` prints validated output within BF's bounds.
-
-Emit `@type`, `relations`, and `attributes` directly ([record format](schema.md#record-schema)) so records connect into the graph with zero `bf.yaml` boilerplate.
+- Accept `{{start}}`, `{{end}}`, `{{state}}` and `{{cursor}}` as CLI flags or positional args instead of env vars.
+- Bound file reads, HTTP/subprocess I/O and total stdout bytes, refuse symlinks, and never echo raw provider responses or tokens on stderr.
+- Emit `@type`, `relations`, and `attributes` directly ([record format](schema.md#record-schema))—or extract them from existing JSON tools with `map:`—so records connect into the graph with zero boilerplate.
 
 ### Check saved output
 

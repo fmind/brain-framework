@@ -167,7 +167,6 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
     brain: Store, selected: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"])
-    brain.write("sensors/_sensor.py", (ROOT / "examples/sensors/_sensor.py").read_bytes())
     brain.write("sensors/highlights.py", (ROOT / "examples/sensors/highlights.py").read_bytes())
     brain.write("inputs/highlights.json", b"{}")
     path = brain.root / "inputs/highlights.json"
@@ -175,16 +174,17 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
         "bf.yaml",
         json.dumps(
             {
-                "version": 9,
+                "version": 10,
                 "name": "fixture",
-                "sensors": {
+                "jobs": {
                     "highlights": {
-                        "command": [
+                        "run": [
                             "python3",
                             "sensors/highlights.py",
                             "reading",
                             "{{brain}}/inputs/highlights.json",
                         ],
+                        "emit": "records",
                         "mode": "snapshot",
                     }
                 },
@@ -213,7 +213,7 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
     assert "because visitors need clarity" in str(read(brain, decision_ref)["text"])
     brain.write(
         "evals/highlights.yaml",
-        b"version: 9\ncases:\n  - name: recover-decision-reason\n    query: clarity before signup\n"
+        b"version: 10\ncases:\n  - name: recover-decision-reason\n    query: clarity before signup\n"
         b"    scope: projects/website.md\n    expect: [projects/website.md#decision]\n"
         b"  - name: locate-source-passage\n    read: highlights:reading/brief-clarity\n"
         b"    text: [https://example.com/website-brief, Audience, Visitors need a clear product explanation]\n",

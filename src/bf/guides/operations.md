@@ -2,17 +2,18 @@
 
 Keep one brain healthy, verified, and fast without weakening safety boundaries or sacrificing evidence.
 
-## Inspect health (`bf status`)
+## Inspect health & prerequisites (`bf status`, `bf doctor`)
 
-Check registration, cache freshness, note/record counts, scheduled program health, unresolved queue work, logs, and usage stats:
+Check registration, cache freshness, note/record counts, scheduled job health, unresolved queue work, logs, and usage stats with `bf status`, or verify binaries (`requires.bins`), env vars (`requires.env`), script permissions, and paths with `bf doctor`:
 
 ```bash
 bf status
 bf status --check
+bf doctor
 ```
 
-- `bf status` reads local state offline and reports `"registered": true` or `false` alongside `"healthy"`.
-- `bf status --check` exits `1` on problems, unavailable caches, overdue or repeatedly failing/silent scheduled jobs, sources degraded three consecutive runs, unresolved assistant/queue work, or failing channels.
+- `bf status` and `bf doctor` run strictly offline without starting configured jobs.
+- `bf status --check` exits `1` on problems, unavailable caches, failed/overdue/silent scheduled jobs, sources degraded three consecutive runs, or unresolved queue failures/uncertain runs.
 - Remember the runtime boundary: run `uv run --locked bf ...` only when the brain has `pyproject.toml`/`uv.lock` AND `"registered": true`.
 
 ## Validate notes and config (`bf validate`)

@@ -19,15 +19,14 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from bf.assistants import GATE_EVENT_BYTES
 from bf.cli import app
-from bf.markdown import validate_okf
-from bf.messages import Receipt
-from bf.models import GateReply, encode
+from bf.models import encode
 from bf.storage import Store
 from conftest import ROOT, Provider
 
 GATE = "records-gate.py"
+GATE_MAX_EVENTS = 64
+GATE_EVENT_BYTES = 65_536
 START, END = "2026-09-29T10:00:00Z", "2026-09-29T11:00:00Z"
 # Never quoted by a diagnostic, whichever line or stream of the export carries it.
 PRIVATE = "Quarterly figures for the board"
@@ -51,19 +50,29 @@ def lines(*items: dict) -> str:
     return "".join(json.dumps(value) + "\n" for value in items)
 
 
-def gate(provider: Provider, state: Path, *arguments: str, environment: dict[str, str] | None = None):
+def gate(
+    provider: Provider,
+    state: Path,
+    *arguments: str,
+    window: bool = True,
+    environment: dict[str, str] | None = None,
+):
     state.mkdir(exist_ok=True)
-    window = {"BF_START": START, "BF_END": END, "BF_STATE_DIR": str(state)}
-    return provider.run(GATE, *arguments, folder="routines", environment=environment or window)
+    args = (*arguments, "--start", START, "--end", END, "--state", str(state)) if window else arguments
+    return provider.run(GATE, *args, folder="routines", environment=environment)
 
 
 def events(result) -> list[dict]:
-    assert result.returncode == 0, result.stderr
+    assert result.returncode in (0, 1), (result.returncode, result.stderr)
+    assert result.stderr == "", result.stderr
     reply = json.loads(result.stdout)
-    # What BF accepts from a gate: at most 64 events within 65,536 encoded bytes.
-    events = [event.model_dump(exclude_defaults=True) for event in GateReply.model_validate(reply).events]
-    assert len(encode(events)) <= GATE_EVENT_BYTES
-    return reply["events"]
+    items = reply["events"]
+    assert isinstance(items, list)
+    assert len(items) <= GATE_MAX_EVENTS
+    assert (result.returncode == 0) == bool(items)
+    assert all(isinstance(e, dict) and isinstance(e.get("key"), str) and isinstance(e.get("text"), str) for e in items)
+    assert len(encode(items)) <= GATE_EVENT_BYTES
+    return items
 
 
 def test_reports_records_observed_in_the_window_once(provider: Provider, tmp_path: Path) -> None:
@@ -94,7 +103,7 @@ def test_reports_records_observed_in_the_window_once(provider: Provider, tmp_pat
     assert provider.calls("bf") == [["export", "--kind", "items", "--scope", "memories/mail"]]
     # A second check of the same window finds nothing new: the harness does not start again.
     result = gate(provider, state, "mail")
-    assert (result.returncode, result.stdout, result.stderr) == (0, '{"events": []}\n', "")
+    assert (result.returncode, result.stdout, result.stderr) == (1, '{"events": []}\n', "")
     # A changed record is a new version, reported once more.
     provider.install("bf", [{"match": ["export"], "stdout": lines(item("mail:new", "2026-09-29T10:45:00Z"))}])
     assert [event["key"] for event in events(gate(provider, state, "mail"))] == [
@@ -117,7 +126,7 @@ def test_a_long_record_address_gets_a_hashed_key_and_is_still_reported_once(prov
         }
     ]
     result = gate(provider, state, "mail")
-    assert (result.returncode, result.stdout, result.stderr) == (0, '{"events": []}\n', "")
+    assert (result.returncode, result.stdout, result.stderr) == (1, '{"events": []}\n', "")
 
 
 def test_records_with_distinct_brains_or_reserved_characters_keep_their_address(
@@ -238,13 +247,13 @@ def test_remembered_keys_are_forgotten_after_35_days(provider: Provider, tmp_pat
         ),
     ],
 )
-def test_export_failures_exit_1_without_quoting_output(
+def test_export_failures_exit_2_without_quoting_output(
     provider: Provider, tmp_path: Path, response: dict, message: str
 ) -> None:
     provider.install("bf", [{"match": ["export"], **response}])
     state = tmp_path / "state"
     result = gate(provider, state, "mail")
-    assert (result.returncode, result.stdout, result.stderr) == (1, "", f"records-gate: {message}\n")
+    assert (result.returncode, result.stdout, result.stderr) == (2, "", f"records-gate: {message}\n")
     # Nothing was reported, so nothing is remembered: BF retries the gate.
     assert not (state / "records-gate.json").exists()
 
@@ -259,25 +268,27 @@ def test_an_older_bf_without_export_scope_is_named(provider: Provider, tmp_path:
     )
     result = gate(provider, tmp_path / "state", "mail")
     assert (result.returncode, result.stderr) == (
-        1,
+        2,
         "records-gate: bf 21.2.0 cannot export a scope; install bf 21.3.0 or later\n",
     )
 
 
 def test_missing_bf_or_window_fails_closed(provider: Provider, tmp_path: Path) -> None:
     result = gate(provider, tmp_path / "state", "mail")
-    assert (result.returncode, result.stderr) == (1, "records-gate: bf is not on PATH; install bf 21.3.0 or later\n")
+    assert (result.returncode, result.stderr) == (2, "records-gate: bf is not on PATH; install bf 21.3.0 or later\n")
     provider.install("bf", [])
-    for missing in ("BF_START", "BF_END", "BF_STATE_DIR"):
-        environment = {"BF_START": START, "BF_END": END, "BF_STATE_DIR": str(tmp_path)}
-        environment.pop(missing)
-        result = gate(provider, tmp_path / "state", "mail", environment=environment)
-        assert result.returncode == 2
-        assert result.stderr.startswith("records-gate: BF_START, BF_END and BF_STATE_DIR must be set")
+    state = tmp_path / "state"
+    for bad_args in (
+        ("mail", "--end", END),
+        ("mail", "--state", str(state)),
+        ("mail", "--end", "not-iso", "--state", str(state)),
+        ("mail", "--start", END, "--end", START, "--state", str(state)),
+    ):
+        assert gate(provider, state, *bad_args, window=False).returncode == 2
     assert provider.calls("bf") == []
     # Arguments are checked before anything runs.
     for arguments in (["Mail"], ["mail", "--where", "kind"], ["mail", "--period", "a/b"]):
-        assert gate(provider, tmp_path / "state", *arguments).returncode == 2
+        assert gate(provider, state, *arguments).returncode == 2
 
 
 def test_a_damaged_state_file_stops_the_gate(provider: Provider, tmp_path: Path) -> None:
@@ -286,9 +297,9 @@ def test_a_damaged_state_file_stops_the_gate(provider: Provider, tmp_path: Path)
     (state / "records-gate.json").write_text('{"seen": "x"}')
     provider.install("bf", [{"match": ["export"], "stdout": lines(item("mail:a", "2026-09-29T10:30:00Z"))}])
     result = gate(provider, state, "mail")
-    assert (result.returncode, result.stdout) == (1, "")
+    assert (result.returncode, result.stdout) == (2, "")
     assert result.stderr == (
-        "records-gate: cannot read records-gate.json in BF_STATE_DIR; delete it to report this window's records again\n"
+        "records-gate: cannot read records-gate.json in state directory; delete it to report this window's records again\n"
     )
     assert (state / "records-gate.json").read_text() == '{"seen": "x"}'
 
@@ -319,7 +330,7 @@ def test_the_export_is_bounded_in_time_and_line_size(
     started = time.monotonic()
     with pytest.raises(SystemExit) as stopped:
         list(module.export(str(slow), "memories/mail", time.monotonic() + 1))
-    assert stopped.value.code == 1
+    assert stopped.value.code == 2
     assert time.monotonic() - started < 30
     assert "bf export of memories/mail ran past the gate's 100-second limit" in capsys.readouterr().err
     # A line beyond the bound stops the gate before it is held whole.
@@ -344,15 +355,20 @@ def test_stopping_the_gate_stops_its_export(provider: Provider, tmp_path: Path) 
     fake.chmod(0o700)
     state = tmp_path / "state"
     state.mkdir()
-    environment = {
-        "PATH": f"{provider.bin}:/usr/bin:/bin",
-        "BF_START": START,
-        "BF_END": END,
-        "BF_STATE_DIR": str(state),
-    }
+    environment = {"PATH": f"{provider.bin}:/usr/bin:/bin"}
     # Its own session, as BF starts a gate.
     child = subprocess.Popen(  # noqa: S603 - the gate on a fake bf
-        [sys.executable, str(ROOT / "examples/routines" / GATE), "mail"],
+        [
+            sys.executable,
+            str(ROOT / "examples/routines" / GATE),
+            "mail",
+            "--start",
+            START,
+            "--end",
+            END,
+            "--state",
+            str(state),
+        ],
         env=environment,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -404,26 +420,48 @@ def test_the_state_file_keeps_the_newest_keys_within_its_bound(
         f"records-gate: forgot the oldest reported records, 1 of 10, to keep records-gate.json within {bound} bytes\n"
     )
 
+    state_file = tmp_path / "linked-gate.json"
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"seen": []}')
+    state_file.symlink_to(outside)
+    with pytest.raises(SystemExit) as bad_read:
+        module.load(state_file)
+    assert bad_read.value.code == 2
+    assert "symlinks are not allowed" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as bad_write:
+        module.save(state_file, set())
+    assert bad_write.value.code == 2
+    assert "must not be a symlink" in capsys.readouterr().err
+
 
 def test_the_gate_reads_records_collected_by_the_same_update(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     # The gate's own `bf export` runs inside `bf update`, which has just collected the source: no lock blocks it.
-    brain.write("routines/_bf.py", (ROOT / "examples/routines/_bf.py").read_bytes())
     brain.write("routines/records-gate.py", (ROOT / "examples/routines" / GATE).read_bytes())
-    brain.write("prompts/watcher.md", b"Events: {{context}}\n")
+    brain.write("prompts/watcher.md", b"---\ntype: action\nstatus: draft\n---\n# Watcher\n\nEvents: {{context}}\n")
     record = {"id": "m1 #launch", "title": "Launch moved", "time": "2026-09-29T12:00:00Z"}
     config = {
-        "version": 9,
+        "version": 10,
         "name": "fixture",
-        "sensors": {"mail": {"command": ["printf", json.dumps([record])], "refresh": 3600}},
-        "assistants": {
+        "jobs": {
+            "mail": {"run": ["printf", json.dumps([record])], "emit": "records", "on": {"every": 3600}},
             "watcher": {
                 "prompt": "prompts/watcher.md",
-                # `cat` answers with the prompt it received, events included.
-                "command": ["cat"],
-                "schedules": {
-                    "changes": {"every": 1, "gate": {"command": ["python3", "routines/records-gate.py", "mail"]}}
-                },
-            }
+                # `cat` answers with the prompt it received.
+                "harness": ["cat"],
+                "emit": "action",
+                "on": {"every": 1},
+                "gate": [
+                    "python3",
+                    "routines/records-gate.py",
+                    "mail",
+                    "--start",
+                    "{{start}}",
+                    "--end",
+                    "{{end}}",
+                    "--state",
+                    "{{state}}",
+                ],
+            },
         },
     }
     brain.write("bf.yaml", yaml.safe_dump(config).encode())
@@ -434,118 +472,24 @@ def test_the_gate_reads_records_collected_by_the_same_update(brain: Store, monke
     def update() -> dict:
         result = runner.invoke(app, ["update", "--brain", str(brain.root)])
         assert result.exit_code == 0, result.output
-        [row] = json.loads(result.stdout)["assistants"]
-        assert row["status"] == "ran"
+        [row] = [entry for entry in json.loads(result.stdout)["jobs"] if entry["job"] == "watcher"]
         return row
 
     first = update()
-    answer = runner.invoke(app, ["read", first["record"], "--brain", str(brain.root)])
+    assert first["status"] == "ran"
+    answer = runner.invoke(app, ["read", first["action"], "--brain", str(brain.root)])
+    assert answer.exit_code == 0, answer.output
+    assert '"job":"watcher"' in json.loads(answer.stdout)["text"]
+    # The gate remembers the collected record by its BF address and reads it without deadlock.
     uri = "bf://fixture/mail:m1%20%23launch"
-    assert f'"ref":"{uri}","text":"Launch moved"' in json.loads(answer.stdout)["record"]["text"]
-    # The event's address reads the record, as the harness would.
+    state_data = json.loads((brain.root / ".bf/state/watcher/records-gate.json").read_text())
+    assert any(entry.startswith(f"{uri}@") for entry in state_data["seen"])
     evidence = runner.invoke(app, ["read", uri, "--brain", str(brain.root)])
     assert evidence.exit_code == 0, evidence.output
     assert (json.loads(evidence.stdout)["brain"], json.loads(evidence.stdout)["ref"]) == ("fixture", "mail:m1 #launch")
     # The schedule is due again a second after its last success; its gate then finds nothing new.
     time.sleep(1.1)
     second = update()
-    assert second["job"] != first["job"]
-    assert "record" not in second
-    assert len(list((brain.root / "memories/watcher").glob("*.json"))) == 1
-
-
-def test_bf_kit_helpers_cover_windows_state_pagination_export_and_emitters(
-    provider: Provider,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    import io
-    from datetime import UTC, datetime
-
-    spec = importlib.util.spec_from_file_location("_bf_kit", ROOT / "examples/routines/_bf.py")
-    assert spec is not None
-    assert spec.loader is not None
-    kit = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(kit)
-
-    # window() reads BF_START/BF_END or manual argv and rejects missing/reversed windows.
-    monkeypatch.setenv("BF_START", START)
-    monkeypatch.setenv("BF_END", END)
-    start, end = kit.window()
-    assert (kit.canonical_time(start), kit.canonical_time(end)) == (
-        "2026-09-29T10:00:00.000000Z",
-        "2026-09-29T11:00:00.000000Z",
-    )
-    monkeypatch.delenv("BF_START")
-    assert kit.window([START, END]) == (start, end)
-    with pytest.raises(kit.BfError) as bad_window:
-        kit.window([END, START])
-    assert bad_window.value.status == 2
-
-    # state_dir(), load_state() and save_state() persist atomically and reject damaged state.
-    state_folder = tmp_path / "private-state"
-    monkeypatch.setenv("BF_STATE_DIR", str(state_folder))
-    assert kit.state_dir() == state_folder
-    assert kit.load_state("cursor.json", {"seen": []}) == {"seen": []}
-    kit.save_state("cursor.json", {"seen": ["a", "b"]})
-    assert kit.load_state("cursor.json") == {"seen": ["a", "b"]}
-    (state_folder / "broken.json").write_text("{broken")
-    with pytest.raises(kit.BfError, match=r"cannot read broken\.json"):
-        kit.load_state("broken.json")
-
-    # bf_pages() follows next_offset with --rel and --brain, and bf_export() passes --observed-since.
-    provider.install(
-        "bf",
-        [
-            {"match": ["read", "projects/a.md", "--offset", "2"], "stdout": {"items": [{"ref": "c"}]}},
-            {"match": ["read", "projects/a.md"], "stdout": {"items": [{"ref": "b"}], "next_offset": 2}},
-            {"match": ["export", "--observed-since"], "stdout": lines(item("mail:new", "2026-09-29T10:30:00Z"))},
-        ],
-    )
-    monkeypatch.setenv("PATH", f"{provider.bin}:/usr/bin:/bin")
-    pages_read = list(kit.bf_pages("projects/a.md", rel="depends-on", brain="fixture"))
-    assert [row["items"][0]["ref"] for row in pages_read] == ["b", "c"]
-    exported = list(kit.bf_export("memories/mail", observed_since=datetime(2026, 9, 29, 10, tzinfo=UTC)))
-    assert [row["ref"] for row in exported] == ["mail:new"]
-    assert provider.calls("bf")[-1] == [
-        "export",
-        "--kind",
-        "items",
-        "--scope",
-        "memories/mail",
-        "--observed-since",
-        "2026-09-29T10:00:00.000000Z",
-    ]
-
-    # emit_events() keeps 64 fitting events directly and summarizes a 65th event with default overflow.
-    capsys.readouterr()
-    fitting = kit.emit_events([{"key": f"k{n}", "text": f"Event {n}"} for n in range(64)])
-    assert len(fitting) == 64
-    assert len(GateReply.model_validate_json(capsys.readouterr().out).events) == 64
-    overflowed = kit.emit_events(
-        [{"key": f"k{n}", "text": f"Event {n}"} for n in range(65)],
-        overflow_key="custom:more",
-        overflow_ref="memories/mail",
-    )
-    assert len(overflowed) == 64
-    assert overflowed[-1] == {
-        "key": "custom:more",
-        "text": "2 more events are not listed.",
-        "ref": "memories/mail",
-    }
-    printed = [
-        event.model_dump(exclude_defaults=True)
-        for event in GateReply.model_validate_json(capsys.readouterr().out).events
-    ]
-    assert len(encode(printed)) <= GATE_EVENT_BYTES
-
-    # emit_action() writes valid OKF Markdown, and read_envelope() / emit_receipt() validate channel JSON.
-    kit.emit_action({"updated": "2026-09-29", "summary": "Check the inbox."}, ["# Inbox check", "", "All clear."])
-    action_md = capsys.readouterr().out
-    validate_okf("actions/2026-09-29_inbox/ACTION.md", action_md.encode("utf-8"))
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b'{"id":"m1","text":"Ping","conversation":"t1"}')))
-    envelope = kit.read_envelope()
-    assert envelope == {"id": "m1", "text": "Ping", "conversation": "t1"}
-    kit.emit_receipt("r1", conversation=envelope["conversation"])
-    assert Receipt.model_validate_json(capsys.readouterr().out).id == "r1"
+    assert second["status"] == "gated"
+    assert "action" not in second
+    assert len(list((brain.root / "actions").rglob("ACTION.md"))) == 1

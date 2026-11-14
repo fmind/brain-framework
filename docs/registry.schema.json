@@ -3,15 +3,7 @@
     "Registration": {
       "additionalProperties": false,
       "description": "A registered brain's location on this machine.",
-      "properties": {
-        "path": {
-          "description": "Machine-local absolute or home-relative path to the brain.",
-          "maxLength": 4096,
-          "minLength": 1,
-          "title": "Path",
-          "type": "string"
-        }
-      },
+      "properties": { "path": { "maxLength": 4096, "minLength": 1, "title": "Path", "type": "string" } },
       "required": ["path"],
       "title": "Registration",
       "type": "object"
@@ -31,7 +23,6 @@
         },
         { "type": "null" }
       ],
-      "description": "Names and local paths registered on this machine.",
       "title": "Brains"
     },
     "default": {
@@ -40,7 +31,6 @@
         { "type": "null" }
       ],
       "default": null,
-      "description": "Registered brain name selected by default outside a brain directory.",
       "title": "Default"
     }
   },

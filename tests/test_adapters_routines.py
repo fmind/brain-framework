@@ -284,97 +284,93 @@ def weekly_review() -> ModuleType:
 
 
 def test_weekly_review_qualifies_empty_sections_while_a_sensor_needs_attention() -> None:
-    # A calendar that never collected leaves the coming week empty: "Nothing is scheduled" would be a false claim.
+    # A job that never collected leaves the coming week empty: "Nothing is scheduled" would be a false claim.
     attention = [
-        {"kind": "sensor", "name": "calendar", "freshness": "never", "failed": True},
-        {"kind": "routine", "name": "backup", "freshness": "overdue"},
-        {"brain": "team", "kind": "assistant", "name": "assistant", "freshness": "fresh", "failed": True},
-        {"kind": "channel", "name": "telegram", "freshness": "fresh", "failed": True},
+        {"kind": "job", "name": "calendar", "freshness": "never", "failed": True},
+        {"kind": "job", "name": "backup", "freshness": "overdue"},
+        {"brain": "team", "kind": "job", "name": "assistant", "freshness": "fresh", "failed": True},
+        {"kind": "job", "name": "telegram", "freshness": "fresh", "failed": True},
     ]
     home = {"projects": [], "tasks": EMPTY_TASKS, "upcoming": [], "attention": attention}
     text = "\n".join(weekly_review().render("2026-09-25", home, {"total": 0}))
     lines = text.splitlines()
-    assert lines.index("## Programs needing attention") < lines.index("## Projects to review")
-    assert "- Sensor `calendar`: never succeeded on this machine; last attempt failed." in lines
-    assert "- Routine `backup`: overdue." in lines
-    assert "- Assistant `assistant` in brain `team`: last attempt failed." in lines
-    assert "- Channel `telegram`: last attempt failed." in lines
-    assert "- 0 items in the period, and a sensor needing attention may have missed some." in lines
-    assert "No upcoming item was collected, and a sensor needing attention may have missed some." in lines
-    assert lines[-1].startswith("Repair the programs needing attention first.")
+    assert lines.index("## Jobs needing attention") < lines.index("## Projects to review")
+    assert "- Job `calendar`: never succeeded on this machine; last attempt failed." in lines
+    assert "- Job `backup`: overdue." in lines
+    assert "- Job `assistant` in brain `team`: last attempt failed." in lines
+    assert "- Job `telegram`: last attempt failed." in lines
+    assert "- 0 items in the period, and a job needing attention may have missed some." in lines
+    assert "No upcoming item was collected, and a job needing attention may have missed some." in lines
+    assert lines[-1].startswith("Repair the jobs needing attention first.")
     validate_okf("actions/2026-09-25_weekly-review/ACTION.md", text.encode())
 
 
 def test_weekly_review_says_why_a_silent_source_needs_attention() -> None:
     # A silent source still succeeds, so its freshness alone left "needs attention" unexplained.
     attention = [
-        {"kind": "sensor", "name": "mail", "freshness": "fresh", "silent": True},
-        {"kind": "sensor", "name": "feed", "freshness": "overdue", "silent": True},
-        {"kind": "sensor", "name": "rss", "freshness": "fresh", "degraded": True},
+        {"kind": "job", "name": "mail", "freshness": "fresh", "silent": True},
+        {"kind": "job", "name": "feed", "freshness": "overdue", "silent": True},
+        {"kind": "job", "name": "rss", "freshness": "fresh", "degraded": True},
     ]
     home = {"projects": [], "tasks": EMPTY_TASKS, "upcoming": [], "attention": attention}
     text = "\n".join(weekly_review().render("2026-09-25", home, {"total": 0}))
     lines = text.splitlines()
-    assert "- Sensor `mail`: no new or changed record within its `silent_after`." in lines
-    assert "- Sensor `feed`: overdue; no new or changed record within its `silent_after`." in lines
-    assert "- Sensor `rss`: recent runs missed parts; its log names them." in lines
-    assert "- 0 items in the period, and a sensor needing attention may have missed some." in lines
+    assert "- Job `mail`: no new or changed record within its `silent_after`." in lines
+    assert "- Job `feed`: overdue; no new or changed record within its `silent_after`." in lines
+    assert "- Job `rss`: recent runs missed parts; its log names them." in lines
+    assert "- 0 items in the period, and a job needing attention may have missed some." in lines
     validate_okf("actions/2026-09-25_weekly-review/ACTION.md", text.encode())
 
 
 def test_weekly_review_states_empty_sections_plainly_when_every_sensor_is_current() -> None:
-    # A late routine or failing channel collects no evidence: the empty sections need no qualification.
+    # Without jobs needing attention (ignoring non-job entries), empty sections need no qualification.
     home = {
         "projects": [],
         "tasks": EMPTY_TASKS,
-        "attention": [
-            {"kind": "routine", "name": "backup", "freshness": "overdue"},
-            {"kind": "channel", "name": "telegram", "freshness": "fresh", "failed": True},
-        ],
+        "attention": [{"kind": "other", "name": "ignored", "freshness": "overdue"}],
     }
     lines = list(weekly_review().render("2026-09-25", home, {"total": 0}))
-    assert "- Channel `telegram`: last attempt failed." in lines
+    assert "## Jobs needing attention" not in lines
     assert "- 0 items in the period." in lines
     assert "No upcoming item was collected." in lines
 
 
 def test_weekly_review_reports_programs_needing_attention_alone(provider: Provider) -> None:
-    # Nothing else to review is no reason to stay silent about a failing sensor.
-    home = {"page": "", "projects": [], "attention": [{"kind": "sensor", "name": "mail", "freshness": "overdue"}]}
+    # Nothing else to review is no reason to stay silent about a failing job.
+    home = {"page": "", "projects": [], "attention": [{"kind": "job", "name": "mail", "freshness": "overdue"}]}
     pages(provider, home, {"page": "7d", "total": 0})
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
-    assert "- Sensor `mail`: overdue." in result.stdout.splitlines()
+    assert "- Job `mail`: overdue." in result.stdout.splitlines()
     validate_okf("actions/2026-09-25_weekly-review/ACTION.md", result.stdout.encode())
 
 
 def test_weekly_review_leaves_its_own_run_out_of_attention(provider: Provider) -> None:
-    # BF records a routine's run only after it exits: on its first run, after its own failure or after a pause, the
-    # home page lists the running review itself. 18.5.0 wrote an action about only that on an otherwise empty brain.
-    alone = [{"kind": "routine", "name": "weekly-review", "freshness": "never"}]
+    # BF records a job's run only after it exits: on its first run, after its own failure or after a pause, the
+    # home page lists the running review itself.
+    alone = [{"kind": "job", "name": "weekly-review", "freshness": "never"}]
     pages(provider, {"page": "", "projects": [], "attention": alone}, {"page": "7d", "total": 0})
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert (result.returncode, result.stdout) == (0, "")
-    others = [*alone, {"kind": "routine", "name": "weekly-review", "freshness": "overdue", "failed": True}]
-    others.append({"kind": "routine", "name": "backup", "freshness": "overdue"})
+    others = [*alone, {"kind": "job", "name": "weekly-review", "freshness": "overdue", "failed": True}]
+    others.append({"kind": "job", "name": "backup", "freshness": "overdue"})
     pages(provider, {"page": "", "projects": [], "attention": others}, {"page": "7d", "total": 0})
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
-    assert [line for line in lines if line.startswith("- Routine")] == ["- Routine `backup`: overdue."]
+    assert [line for line in lines if line.startswith("- Job")] == ["- Job `backup`: overdue."]
 
 
 def test_weekly_review_keeps_another_brains_routine_of_its_name(provider: Provider) -> None:
-    # A brain declaring another under `brains:` lists that brain's programs too: the review once dropped every
-    # `weekly-review` entry, hiding a failure in the other brain, and wrote nothing when that was all to review.
-    own = {"brain": "main", "kind": "routine", "name": "weekly-review", "freshness": "never"}
-    other = {"brain": "team", "kind": "routine", "name": "weekly-review", "freshness": "never", "failed": True}
+    # Filtering own runs preserves entries from another brain with the same job name.
+    own = {"brain": "main", "kind": "job", "name": "weekly-review", "freshness": "never"}
+    other = {"brain": "team", "kind": "job", "name": "weekly-review", "freshness": "never", "failed": True}
     named = {"brain": "main", "healthy": True}
     pages(provider, {"page": "", "projects": [], "attention": [own, other]}, {"page": "7d", "total": 0}, status=named)
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
-    assert [line for line in result.stdout.splitlines() if line.startswith("- Routine")] == [
-        "- Routine `weekly-review` in brain `team`: never succeeded on this machine; last attempt failed."
+    assert [line for line in result.stdout.splitlines() if line.startswith("- Job")] == [
+        "- Job `weekly-review` in brain `team`: never succeeded on this machine; last attempt failed."
     ]
     assert ["status", "--brain", "/brains/main"] in provider.calls("bf")
     pages(provider, {"page": "", "projects": [], "attention": [own]}, {"page": "7d", "total": 0}, status=named)
@@ -467,14 +463,11 @@ def test_weekly_review_counts_one_in_the_singular() -> None:
     assert "from `bf read`, `bf read projects`, `bf read tasks` and `bf read 7d`." in text
 
 
-def test_bf_helper_formats_safe_yaml_frontmatter_and_rejects_symlinked_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_weekly_review_formats_safe_yaml_frontmatter() -> None:
     import yaml
 
-    _bf = weekly_review()._bf  # noqa: SLF001
-
-    rendered = _bf.format_action(
+    mod = weekly_review()
+    rendered = mod.format_action(
         {
             "status": "draft",
             "updated": "2026-09-25",
@@ -489,14 +482,5 @@ def test_bf_helper_formats_safe_yaml_frontmatter_and_rejects_symlinked_state(
     assert front["summary"] == "true"
     assert front["tags"] == ["alpha, beta", "123", "- item"]
     assert front["attributes"] == {"kind": "yes", "count": 3, "active": True}
-    with pytest.raises(_bf.BfError, match="non-JSON"):
-        _bf.format_action({"status": "draft", "attributes": {"bad": float("nan")}}, ["# Bad"])
-
-    state = tmp_path / "state"
-    state.mkdir()
-    outside = tmp_path / "outside.json"
-    outside.write_text("{}")
-    (state / "linked.json").symlink_to(outside)
-    monkeypatch.setenv("BF_STATE_DIR", str(state))
-    with pytest.raises(_bf.BfError, match="symlink"):
-        _bf.save_state("linked.json", {"ok": True})
+    with pytest.raises(ValueError, match="non-JSON"):
+        mod.format_action({"status": "draft", "attributes": {"bad": float("nan")}}, ["# Bad"])

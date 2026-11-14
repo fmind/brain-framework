@@ -29,9 +29,9 @@ def test_example_collects_searches_and_resumes(tmp_path: Path) -> None:
         assert result.exit_code == code, result.output
         return json.loads(result.stdout) if result.stdout else {}
 
-    assert invoke("update", "--dry-run")["sensors"][0]["status"] == "due"
+    assert invoke("update", "--dry-run")["jobs"][0]["status"] == "due"
     assert not (brain / "memories").exists()
-    assert invoke("update")["sensors"][0]["status"] == "collected"
+    assert invoke("update")["jobs"][0]["status"] == "collected"
     assert invoke("validate")["valid"]
     assert invoke("eval")["passed"]
     context = invoke("read", "actions/2026-09-25_retention-review/ACTION.md#context")
@@ -48,7 +48,7 @@ def test_example_collects_searches_and_resumes(tmp_path: Path) -> None:
     assert found["items"][0]["ref"] == "actions/2026-09-19_retention/outputs/answer.md"
     assert invoke("validate")["valid"]
     record_files = sorted((brain / "memories/demo").glob("*.json"))
-    assert invoke("update")["sensors"] == []
+    assert invoke("update")["jobs"] == []
     assert sorted((brain / "memories/demo").glob("*.json")) == record_files
     assert (action / "inputs/request.txt").is_file()
 
@@ -76,7 +76,7 @@ def test_prepared_knowledge_transfer_works_without_the_source_brain(tmp_path: Pa
     store.write(manifest["files"][0], candidate)
     store.write(
         "evals/retrieval.yaml",
-        b"version: 9\ncases:\n  - name: shared-procedure\n    read: concepts/selected-evidence.md\n"
+        b"version: 10\ncases:\n  - name: shared-procedure\n    read: concepts/selected-evidence.md\n"
         b"    text: [draft, Partial evidence remains partial, No successful outcome]\n"
         b"  - name: no-private-history\n    query: unverified belief\n    empty: true\n",
     )

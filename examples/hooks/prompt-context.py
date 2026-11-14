@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 import unicodedata
 from typing import Any
-
-import _bf
 
 INPUT_BYTES = 4 << 20
 REPLY_BYTES = 1 << 20
@@ -35,12 +35,94 @@ OPERATORS = frozenset({"AND", "OR"})
 NOTE = re.compile(
     r"(?:bf://[a-z][a-z0-9-]{0,63}/)?(?:projects|concepts|actions)/[^\x00-\x1f\x7f-\x9f]+?\.md(?:#[^\x00-\x1f\x7f-\x9f]*)?"
 )
-visible = _bf.visible
-code = _bf.code
+
+
+class BfError(Exception):
+    """Offline `bf` query failed or returned unusable JSON."""
+
+
+def visible(value: str) -> str:
+    """Escape control and invisible Unicode format characters."""
+    parts: list[str] = []
+    for ch in value:
+        if unicodedata.category(ch) in {"Cc", "Cf", "Cs", "Zl", "Zp"}:
+            cp = ord(ch)
+            parts.append(f"\\u{cp:04x}" if cp <= 0xFFFF else f"\\U{cp:08x}")
+        else:
+            parts.append(ch)
+    return "".join(parts)
+
+
+def code(value: str) -> str:
+    """Wrap one ref cleanly in a Markdown code span."""
+    cleaned = visible(value)
+    fence = "`" * (max((len(m.group(0)) for m in re.finditer(r"`+", cleaned)), default=0) + 1)
+    pad = (
+        " "
+        if cleaned.startswith("`")
+        or cleaned.endswith("`")
+        or (len(fence) > 1 and (cleaned.startswith(" ") or cleaned.endswith(" ")))
+        else ""
+    )
+    return f"{fence}{pad}{cleaned}{pad}{fence}"
 
 
 def plain(value: object, limit: int = 120) -> str:
-    return _bf.plain(value, limit)
+    text = re.sub(r"[ \t\r\n]+", " ", str(value or "")).strip()
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"[ \t\r\n]+", " ", re.sub(r"[\[\]`<>]", "", text)).strip()
+    return visible(text)[:limit]
+
+
+STALE_CACHE_ERROR = "identity resolution used a stale cache"
+
+
+def _stale_error(problem: object) -> bool:
+    if not isinstance(problem, dict):
+        return False
+    if problem.get("error") != STALE_CACHE_ERROR or not set(problem) <= {"brain", "error"}:
+        return False
+    return "brain" not in problem or (isinstance(problem["brain"], str) and bool(problem["brain"]))
+
+
+def bf_json(*args: str, timeout: float, allow_stale: bool = False, max_bytes: int = REPLY_BYTES) -> dict[str, Any]:
+    if timeout <= 0:
+        raise BfError("lookup deadline exceeded")
+    exe = shutil.which("bf")
+    if exe is None:
+        raise BfError("bf not found on PATH")
+    try:
+        result = subprocess.run(  # noqa: S603
+            [exe, *args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise BfError("bf execution failed") from error
+    if result.returncode != 0 or len(result.stdout) > max_bytes:
+        raise BfError("bf exited nonzero or exceeded reply bound")
+    try:
+        reply = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
+        raise BfError("invalid bf JSON reply") from error
+    if not isinstance(reply, dict):
+        raise BfError("unexpected bf JSON root")
+    has_stale = "stale" in reply
+    if has_stale:
+        stale = reply["stale"]
+        if not isinstance(stale, list) or not stale or not all(isinstance(s, str) and s for s in stale):
+            raise BfError("malformed stale metadata")
+        if not allow_stale:
+            raise BfError("stale bf reply")
+    if "problems" in reply:
+        problems = reply["problems"]
+        if not isinstance(problems, list):
+            raise BfError("malformed problems metadata")
+        if problems and not (allow_stale and has_stale and all(_stale_error(p) for p in problems)):
+            raise BfError("incomplete bf reply")
+    return reply
 
 
 def query(prompt: str) -> str:
@@ -57,8 +139,8 @@ def search(words: str, brain: str) -> dict[str, Any] | None:
     """Literal argv after `--`, so the words stay a query; bounded time and output."""
     args = ["search", "--limit", str(LIMIT), *(["--brain", brain] if brain else []), "--", words]
     try:
-        return _bf.bf_json(*args, timeout=SEARCH_SECONDS, allow_stale=True, max_bytes=REPLY_BYTES)
-    except _bf.BfError:
+        return bf_json(*args, timeout=SEARCH_SECONDS, allow_stale=True, max_bytes=REPLY_BYTES)
+    except BfError:
         return None
 
 

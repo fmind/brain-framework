@@ -12,7 +12,7 @@ import yaml
 from typer.testing import CliRunner
 
 from bf.cli import app
-from bf.messages import Receipt
+from bf.runtime import Receipt
 from bf.storage import Store
 from conftest import ROOT, Provider
 
@@ -109,19 +109,18 @@ def test_an_invalid_message_exits_2_before_any_notification(provider: Provider, 
     assert provider.calls("notify-send") == []
 
 
-def test_bf_channel_send_accepts_the_receipt(provider: Provider, brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    brain.write("channels/_bf.py", (ROOT / "examples" / FOLDER / "_bf.py").read_bytes())
+def test_bf_post_accepts_the_receipt(provider: Provider, brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write("channels/desktop.py", (ROOT / "examples" / FOLDER / ADAPTER).read_bytes())
-    channel = {"desktop": {"send": {"command": ["python3", "channels/desktop.py", "send"]}}}
-    brain.write("bf.yaml", yaml.safe_dump({"version": 9, "name": "fixture", "channels": channel}).encode())
+    desktop_job = {"desktop": {"send": ["python3", "channels/desktop.py", "send"]}}
+    brain.write("bf.yaml", yaml.safe_dump({"version": 10, "name": "fixture", "jobs": desktop_job}).encode())
     # Either platform's notifier: the adapter picks one by sys.platform.
     for notifier in ("notify-send", "osascript"):
         provider.install(notifier, [{"match": [], "stdout": ""}])
     monkeypatch.setenv("PATH", f"{provider.bin}:{Path(sys.executable).parent}:/usr/bin:/bin")
     result = CliRunner().invoke(
         app,
-        ["channel", "send", "desktop", "--stdin", "--brain", str(brain.root)],
-        input='{"text":"The review is ready."}',
+        ["post", "--to", "desktop", "--stdin", "--brain", str(brain.root)],
+        input="The review is ready.",
     )
     assert result.exit_code == 0, result.output
     reply = json.loads(result.stdout)

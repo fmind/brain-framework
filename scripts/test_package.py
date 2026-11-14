@@ -126,11 +126,17 @@ def main() -> None:
                 """
 from importlib.metadata import distribution
 from pathlib import Path
+from typing import get_args
 import bf
 from bf.watch import Dashboard
-from bf.schemas import document
+from bf.schemas import Kind, document
 
 assert Dashboard("package-smoke").render(80, 24)
+assert "assistant-reply" not in get_args(Kind)
+assert "doctor-reply" in get_args(Kind)
+doctor_props = document("doctor-reply").get("properties")
+assert isinstance(doctor_props, dict)
+assert {"healthy", "brain", "path", "jobs", "problems"} <= set(doctor_props)
 for kind, title in [("brain", "Config"), ("registry", "UserConfig"), ("eval", "Suite")]:
     assert document(kind)["title"] == title
 installed = distribution("brain-framework")
@@ -154,7 +160,7 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             if (home / "config/bf/config.yaml").exists():
                 raise SystemExit("init unexpectedly registered the smoke-test brain")
             starter_yaml = (brain / "bf.yaml").read_text()
-            if "version: 9" not in starter_yaml or "fields:" in starter_yaml:
+            if "version: 10" not in starter_yaml or "fields:" in starter_yaml:
                 raise SystemExit(f"{artifact.name}: unexpected starter bf.yaml: {starter_yaml}")
             skill_install = json.loads(
                 run(bf, "skill", "install", "--brain", str(brain), cwd=home, env=env, capture=True)
@@ -180,6 +186,7 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                     ("read", "projects"),
                     ("read", "tasks"),
                     ("status", "--check"),
+                    ("doctor",),
                     ("eval",),
                 ]
             }
@@ -209,6 +216,7 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                 ),
                 "health": replies[("status", "--check")].get("healthy") is True
                 and replies[("status", "--check")].get("registered") is True,
+                "doctor": replies[("doctor",)].get("healthy") is True,
                 "evaluation": replies[("eval",)].get("passed") is True and bool(replies[("eval",)].get("cases")),
             }
             if failed := [name for name, passed in checks.items() if not passed]:

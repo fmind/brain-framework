@@ -23,35 +23,41 @@ import pytest
 from typer.testing import CliRunner
 
 from bf import collect as collect_module
-from bf import records
+from bf import jobs, records
+from bf import validate as validate_module
 from bf.cli import app, main
-from bf.collect import Runner, collect, due, run
+from bf.collect import collect, due
 from bf.health import source_health
-from bf.history import LOG_LIMIT, SENSORS, environment, log_path, remember, state
-from bf.models import MAX_FIELDS, Command, Error, Record, Sensor, encode, timestamp
-from bf.storage import BusyError, Store, collecting, private_dir, writer
+from bf.jobs import Runner, run
+from bf.models import MAX_FIELDS, Error, Job, Record, ValidateSettings, encode, timestamp
+from bf.runtime import LOG_LIMIT, Queue, environment, log_path
+from bf.storage import BusyError, Store, collecting, writer
 from bf.update import update
 from bf.watch import snapshot
 
 START = "2026-09-01T00:00:00.000000Z"
 END = "2026-09-02T00:00:00.000000Z"
 NOW = datetime(2026, 9, 2, tzinfo=UTC)
-CONFIG = b"""version: 9
+CONFIG = b"""version: 10
 name: fixture
-sensors:
+jobs:
   sample:
-    command: [echo, "{{start}}", "{{end}}", "{{brain}}", "{{home}}"]
-    refresh: 3600
+    run: [echo, "{{start}}", "{{end}}", "{{brain}}", "{{home}}"]
+    emit: records
+    on: {every: 3600}
   folders:
-    command: [echo]
+    run: [echo]
+    emit: records
     mode: snapshot
-    refresh: 86400
+    on: {every: 86400}
   manual:
-    command: [echo]
+    run: [echo]
+    emit: records
   disabled:
-    command: [echo]
+    run: [echo]
+    emit: records
     enabled: false
-    refresh: 60
+    on: {every: 60}
 """
 
 
@@ -68,10 +74,10 @@ def configured(brain: Store) -> Store:
 def test_collect_dry_run_then_upsert(configured: Store) -> None:
     output = emit({"id": "x", "title": "Decision", "text": "Keep evidence", "time": "2026-09-01T10:00:00Z"})
 
-    def fake(argv: list[str], source: Command, store: Store, name: str, stdin: bytes) -> bytes:
+    def fake(argv: list[str], source: Job, store: Store, name: str, stdin: bytes) -> bytes:
         assert argv[1:] == [START, END, str(configured.root), str(Path.home())]
-        assert isinstance(source, Sensor)
-        assert source.refresh == 3600
+        assert isinstance(source, Job)
+        assert source.triggers[0].every == 3600
         assert store.root == configured.root
         assert (name, stdin) == ("sample", b"")
         return output
@@ -79,7 +85,7 @@ def test_collect_dry_run_then_upsert(configured: Store) -> None:
     preview = collect(configured, "sample", start=START, end=END, runner=fake, dry_run=True)
     samples = cast("list[dict[str, object]]", preview["samples"])
     assert preview["records"] == 1
-    assert preview["sensor"] == "sample"
+    assert preview["job"] == "sample"
     assert preview["requested_start"] == START
     assert preview["requested_end"] == END
     assert preview["output_bytes"] == len(output)
@@ -88,10 +94,10 @@ def test_collect_dry_run_then_upsert(configured: Store) -> None:
     assert preview["reconcile"] is False
     assert samples[0]["id"] == "x"
     assert records.files(configured, "sample") == []
-    assert state(configured) == {}
+    assert Queue(configured).all_states() == {}
     result = collect(configured, "sample", start=START, end=END, runner=fake, clock=lambda: NOW)
-    assert {key: result[key] for key in ("sensor", "records", "added", "updated", "unchanged", "removed")} == {
-        "sensor": "sample",
+    assert {key: result[key] for key in ("job", "records", "added", "updated", "unchanged", "removed")} == {
+        "job": "sample",
         "records": 1,
         "added": 1,
         "updated": 0,
@@ -101,17 +107,18 @@ def test_collect_dry_run_then_upsert(configured: Store) -> None:
     assert result["output_bytes"] == preview["output_bytes"]
     assert records.files(configured, "sample") == [records.path("sample", "x")]
     # Run history keeps canonical UTC instants, like every other reply timestamp.
-    assert state(configured)["sample"] == {
-        "run": END,
-        "success": END,
-        "start": START,
-        "end": END,
-        "error": "",
-        "failures": 0,
-        # Retention counters reset each run, so status never reports an earlier run's.
-        "forgotten": 0,
-        "expired": 0,
-        **{key: value for key, value in result.items() if key != "sensor"},
+    assert Queue(configured).all_states()["sample"] == {
+        "last_run": END,
+        "last_success": END,
+        "window_start": START,
+        "window_end": END,
+        "runs": 1,
+        "records": 1,
+        "added": 1,
+        "requested_start": START,
+        "requested_end": END,
+        "elapsed_seconds": result["elapsed_seconds"],
+        "output_bytes": result["output_bytes"],
     }
 
 
@@ -136,9 +143,9 @@ def test_invalid_output_writes_nothing_and_is_remembered(
     assert records.files(configured, "sample") == []
     if dry_run:
         # A failed preview saves no run history either, so it cannot make a source failed or due.
-        assert state(configured) == {}
+        assert Queue(configured).all_states() == {}
     else:
-        assert match.split()[0] in str(state(configured)["sample"]["error"])
+        assert match.split()[0] in str(Queue(configured).all_states()["sample"]["last_error"])
 
 
 def test_provider_keys_never_reach_errors_or_history(configured: Store) -> None:
@@ -147,13 +154,13 @@ def test_provider_keys_never_reach_errors_or_history(configured: Store) -> None:
         # Collection rejects precomputed fields itself: printed ones fail before validation, whatever their keys.
         (
             b'[{"id":"x","title":"A","fields":{"From: ceo@corp.example":1}}]',
-            "record 0: sensors must output @type, relations and attributes, not fields",
+            "record 0: collectors must output @type, relations and attributes, not fields",
         ),
     ]:
         with pytest.raises(Error, match=match) as failure:
             collect(configured, "sample", start=START, end=END, runner=lambda *_, data=output: data)
         assert "ceo@corp" not in str(failure.value)
-        assert "ceo@corp" not in str(state(configured)["sample"]["error"])
+        assert "ceo@corp" not in str(Queue(configured).all_states()["sample"]["last_error"])
 
 
 def test_provider_relation_names_never_reach_errors_history_or_status(configured: Store) -> None:
@@ -162,7 +169,7 @@ def test_provider_relation_names_never_reach_errors_history_or_status(configured
     with pytest.raises(Error, match="invalid BF link") as failure:
         collect(configured, "sample", start=START, end=END, runner=lambda *_: output)
     assert "Ignore_Previous" not in str(failure.value)
-    assert "Ignore_Previous" not in json.dumps(state(configured))
+    assert "Ignore_Previous" not in json.dumps(Queue(configured).all_states())
     status = CliRunner().invoke(app, ["status", "--brain", str(configured.root)])
     assert "Ignore_Previous" not in status.stdout
     assert "invalid BF link" in status.stdout
@@ -175,14 +182,14 @@ def test_large_invalid_output_reports_only_its_first_invalid_record(configured: 
     message = "collector must print one JSON array of records: 1.title: Field required; nothing was written"
     with pytest.raises(Error, match=re.escape(message)):
         collect(configured, "sample", start=START, end=END, runner=lambda *_: output)
-    assert state(configured)["sample"]["error"] == message
+    assert Queue(configured).all_states()["sample"]["last_error"] == message
     assert records.files(configured, "sample") == []
 
 
 def test_printed_fields_fail_by_their_rule_whatever_their_keys(configured: Store) -> None:
     # Validation would name the 1,000-name bound or each invalid key instead of the rule the sensor broke.
     printed: dict[str, object] = {"id": "x", "title": "t", "fields": {f"Key {n}": n for n in range(100_000)}}
-    message = "record 1: sensors must output @type, relations and attributes, not fields; nothing was written"
+    message = "record 1: collectors must output @type, relations and attributes, not fields; nothing was written"
     with pytest.raises(Error, match=re.escape(message)):
         collect(
             configured, "sample", start=START, end=END, runner=lambda *_: emit({"id": "ok", "title": "OK"}, printed)
@@ -203,9 +210,9 @@ def test_the_observed_stamp_cannot_push_a_record_over_the_size_bound(configured:
 def test_collection_requires_a_known_enabled_source_and_a_window(configured: Store, tmp_path: Path) -> None:
     # An unknown name suggests only sensors that can run; a disabled one says how to enable it.
     for name, message in [
-        ("sampel", "unknown sensor sampel; check names in bf.yaml; did you mean sample?"),
-        ("absent", "unknown sensor absent; check names in bf.yaml"),
-        ("disabled", "sensor disabled is disabled in bf.yaml; set enabled: true to run it"),
+        ("sampel", "unknown job sampel; check jobs in bf.yaml; did you mean sample?"),
+        ("absent", "unknown job absent; check jobs in bf.yaml"),
+        ("disabled", "job disabled is disabled in bf.yaml; set enabled: true to run it"),
     ]:
         with pytest.raises(Error, match=f"^{re.escape(message)}$"):
             collect(configured, name, start=START, end=END, runner=lambda *_: b"[]")
@@ -237,17 +244,17 @@ def test_due_windows_resume_with_overlap_and_catch_up_at_most_30_days(configured
 
 
 def test_update_isolates_failures_and_refreshes_the_cache(configured: Store) -> None:
-    def fake(_argv: list[str], source: Command, *_: object) -> bytes:
-        if isinstance(source, Sensor) and source.mode == "snapshot":
+    def fake(_argv: list[str], source: Job, *_: object) -> bytes:
+        if isinstance(source, Job) and source.mode == "snapshot":
             raise Error("provider unavailable")
         return emit({"id": "x", "title": "Collected zirconium", "time": "2026-09-01T10:00:00Z"})
 
     planned = cast("Any", update(configured, dry_run=True, now=NOW))
-    assert [s["status"] for s in planned["sensors"]] == ["due", "due"]
+    assert [s["status"] for s in planned["jobs"]] == ["due", "due"]
     assert "index" not in planned
     report = cast("Any", update(configured, now=NOW, runner=fake))
     assert not report["ok"]
-    sources = report["sensors"]
+    sources = report["jobs"]
     assert [s["status"] for s in sources] == ["failed", "collected"]
     assert "provider unavailable" in sources[0]["error"]
     assert report["index"]["changed"] >= 1
@@ -274,7 +281,7 @@ def test_failed_programs_back_off_exponentially_up_to_their_refresh(configured: 
         (row,) = [row for row in snapshot(configured) if row.name == "folders"]
         assert (row.status, row.next_due) == ("failed", timestamp((at + delay).isoformat()))
         at += delay
-    assert state(configured)["folders"]["failures"] == 12
+    assert Queue(configured).all_states()["folders"]["error_count"] == 12
     # A success resets the count: the next failure retries after one minute again.
     collect(configured, "folders", start=START, end=END, runner=catalog(1), clock=lambda: at)
     assert not pending(at + timedelta(hours=23))
@@ -318,7 +325,7 @@ def test_real_process_boundary(configured: Store, tmp_path: Path, monkeypatch: p
     monkeypatch.setenv("LD_PRELOAD", "/bad.so")
     log = configured.root / log_path("sample")
     finished = tmp_path / "finished"
-    source = Sensor(command=["sh"], timeout=1, max_bytes=128)
+    source = Job(run=["sh"], emit="records", timeout=1, max_bytes=128)
     script = background(finished) + 'printf "[]"; printf "$LD_PRELOAD note" >&2'
     assert run(["sh", "-c", script], source, configured, "sample") == b"[]"
     # A finished program's whole process group ends with it, as after any failure below.
@@ -372,7 +379,7 @@ def test_programs_select_the_executing_brain(
     # An inherited selection would make a nested `bf read` without --brain read another brain.
     monkeypatch.setenv("BF_BRAIN", str(tmp_path / "other"))
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    source = Sensor(command=["sh"])
+    source = Job(run=["sh"], emit="records")
     output = run(["sh", "-c", 'printf "%s" "$BF_BRAIN"'], source, configured, "sample")
     assert output == str(configured.root).encode()
 
@@ -383,7 +390,7 @@ def test_background_descendants_cannot_hold_a_finished_program(
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     log = configured.root / log_path("sample")
     pidfile = tmp_path / "descendant"
-    source = Sensor(command=["sh"], timeout=30)
+    source = Job(run=["sh"], emit="records", timeout=30)
     started = time.monotonic()
     # A helper that inherits only stderr, such as an SSH master, holds diagnostics, not the result.
     script = background(pidfile, ">/dev/null") + 'printf "[]"; printf note >&2'
@@ -392,7 +399,7 @@ def test_background_descendants_cannot_hold_a_finished_program(
     assert ended(pidfile)
     # Output still open after the program exited may be incomplete: fail quickly with the cause.
     holder = tmp_path / "holder"
-    with pytest.raises(Error, match="kept its stdout open"):
+    with pytest.raises(Error, match="kept stdout open"):
         run(["sh", "-c", background(holder, "") + 'printf "[]"'], source, configured, "sample")
     assert ended(holder)
     assert time.monotonic() - started < 10
@@ -414,7 +421,7 @@ def test_a_program_killed_by_a_signal_names_it(
     # Before, the out-of-memory killer's SIGKILL read as `exited with status -9`.
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     with pytest.raises(Error, match=f"^program was killed by {name}$"):
-        run(["sh", "-c", f"kill -{int(signum)} $$"], Sensor(command=["sh"]), configured, "sample")
+        run(["sh", "-c", f"kill -{int(signum)} $$"], Job(run=["sh"], emit="records"), configured, "sample")
     assert f"program was killed by {name} after" in (configured.root / log_path("sample")).read_text()
 
 
@@ -428,7 +435,7 @@ def test_a_stopped_program_cleans_up_within_the_grace(
     script = f"touch {copy}; trap 'rm -f {copy}; exit 143' TERM; while :; do sleep 0.1; done"
     started = time.monotonic()
     with pytest.raises(Error, match=r"^program timed out after 1s$"):
-        run(["sh", "-c", script], Sensor(command=["sh"], timeout=1), configured, "sample")
+        run(["sh", "-c", script], Job(run=["sh"], emit="records", timeout=1), configured, "sample")
     assert time.monotonic() - started < 3
     assert not (tmp_path / "copy").exists()
     # BF's own stop still reads as the timeout, never as the program's `killed by SIGTERM`.
@@ -448,14 +455,14 @@ def test_a_program_ignoring_sigterm_is_killed_after_the_grace(
     configured: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str, match: str, least: float
 ) -> None:
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    monkeypatch.setattr(collect_module, "GRACE", 1.0)
+    monkeypatch.setattr(jobs, "GRACE", 1.0)
     pidfile = tmp_path / "descendant"
     started = time.monotonic()
     with pytest.raises(Error, match=match):
         # Ignored signals are inherited: the background descendant ignores SIGTERM too.
         run(
             ["sh", "-c", "trap '' TERM; " + background(pidfile) + script],
-            Sensor(command=["sh"], timeout=1, max_bytes=128),
+            Job(run=["sh"], emit="records", timeout=1, max_bytes=128),
             configured,
             "sample",
         )
@@ -466,7 +473,7 @@ def test_a_program_ignoring_sigterm_is_killed_after_the_grace(
 
 def test_a_program_bf_cannot_signal_fails_within_the_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     # A group running as another user, such as under sudo, refuses SIGTERM: fail visibly instead of waiting forever.
-    monkeypatch.setattr(collect_module, "GRACE", 0.5)
+    monkeypatch.setattr(jobs, "GRACE", 0.5)
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     killpg = os.killpg
 
@@ -479,7 +486,7 @@ def test_a_program_bf_cannot_signal_fails_within_the_grace(monkeypatch: pytest.M
     started = time.monotonic()
     try:
         with pytest.raises(Error, match=r"^cannot stop the program: permission denied$"):
-            collect_module.stop(child)
+            jobs.stop(child)
         assert time.monotonic() - started < 2
     finally:
         child.kill()
@@ -487,7 +494,7 @@ def test_a_program_bf_cannot_signal_fails_within_the_grace(monkeypatch: pytest.M
 
 
 def stubborn(store: Store, markers: list[Path]) -> dict[str, object]:
-    """Sensors that record SIGTERM in `MARKER.term`, then keep running until SIGKILL; returns their bf.yaml."""
+    """Jobs that record SIGTERM in `MARKER.term`, then keep running until SIGKILL; returns their bf.yaml."""
     store.write(
         "sensors/stubborn.sh",
         b"#!/bin/sh\n"
@@ -498,15 +505,20 @@ def stubborn(store: Store, markers: list[Path]) -> dict[str, object]:
     )
     (store.root / "sensors/stubborn.sh").chmod(0o700)
     sensors = {
-        marker.name: {"command": ["sensors/stubborn.sh", str(marker)], "refresh": 60, "timeout": 120}
+        marker.name: {
+            "run": ["sensors/stubborn.sh", str(marker)],
+            "emit": "records",
+            "on": {"every": 60},
+            "timeout": 120,
+        }
         for marker in markers
     }
-    return {"version": 9, "name": "fixture", "sensors": sensors}
+    return {"version": 10, "name": "fixture", "jobs": sensors}
 
 
 def graced(seconds: float) -> list[str]:
     """Interpreter arguments that run the bf CLI with another grace."""
-    return ["-c", f"import bf.collect; bf.collect.GRACE = {seconds}; from bf.cli import main; main()"]
+    return ["-c", f"import bf.jobs; bf.jobs.GRACE = {seconds}; from bf.cli import main; main()"]
 
 
 def test_cancelled_parallel_programs_share_one_grace(configured: Store, tmp_path: Path) -> None:
@@ -588,15 +600,15 @@ def test_brain_collectors_run_from_the_brain_root(configured: Store, monkeypatch
     configured.write("sensors/where.sh", b"#!/bin/sh\npwd\n")
     (configured.root / "sensors/where.sh").chmod(0o700)
     assert (
-        run(["sensors/where.sh"], Sensor(command=["sensors/where.sh"]), configured, log)
+        run(["sensors/where.sh"], Job(run=["sensors/where.sh"], emit="records"), configured, log)
         == f"{configured.root}\n".encode()
     )
     configured.write("sensors/bad.sh", b"#!/nonexistent/interpreter\n")
     (configured.root / "sensors/bad.sh").chmod(0o700)
-    with pytest.raises(Error, match="interpreter"):
-        run(["sensors/bad.sh"], Sensor(command=["sensors/bad.sh"]), configured, log)
+    with pytest.raises(Error, match="could not start the program"):
+        run(["sensors/bad.sh"], Job(run=["sensors/bad.sh"], emit="records"), configured, log)
     with pytest.raises(Error):
-        run(["sensors/../bf.yaml"], Sensor(command=["x"]), configured, log)
+        run(["sensors/../bf.yaml"], Job(run=["x"], emit="records"), configured, log)
 
 
 def test_program_start_preserves_signal_handlers(configured: Store) -> None:
@@ -606,16 +618,16 @@ def test_program_start_preserves_signal_handlers(configured: Store) -> None:
         signal.signal(signal.SIGTERM, signal.default_int_handler)
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
         expected = {signum: signal.getsignal(signum) for signum in signals}
-        source = Sensor(command=["echo", "[]"])
-        assert run(source.command, source, configured, "sample") == b"[]\n"
+        source = Job(run=["echo", "[]"], emit="records")
+        assert run(source.run, source, configured, "sample") == b"[]\n"
         assert {signum: signal.getsignal(signum) for signum in signals} == expected
         # Library callers can execute from a worker, where signal.signal() is forbidden.
         with ThreadPoolExecutor(max_workers=1) as executor:
-            assert executor.submit(run, source.command, source, configured, "sample").result(timeout=5) == b"[]\n"
+            assert executor.submit(run, source.run, source, configured, "sample").result(timeout=5) == b"[]\n"
         assert {signum: signal.getsignal(signum) for signum in signals} == expected
         configured.write("sensors/bad.sh", b"#!/nonexistent/interpreter\n")
         (configured.root / "sensors/bad.sh").chmod(0o700)
-        with pytest.raises(Error, match="interpreter"):
+        with pytest.raises(Error, match="could not start the program"):
             run(["sensors/bad.sh"], source, configured, "sample")
         assert {signum: signal.getsignal(signum) for signum in signals} == expected
     finally:
@@ -641,8 +653,7 @@ def test_only_a_program_using_home_needs_a_home_directory(
 ) -> None:
     configured.write(
         "bf.yaml",
-        CONFIG
-        + b"assistants:\n  ask:\n    prompt: prompts/ask.md\n    command: [cat]\n    schedules: {review: {every: 1800}}\n",
+        CONFIG + b"  ask:\n    prompt: prompts/ask.md\n    harness: [cat]\n    on: {every: 1800}\n",
     )
     configured.write("prompts/ask.md", b"Read {{home}}.\n")
 
@@ -653,17 +664,15 @@ def test_only_a_program_using_home_needs_a_home_directory(
     monkeypatch.delenv("HOME")
     monkeypatch.setattr(pwd, "getpwuid", unknown)
     report = update(configured, now=NOW, runner=lambda *_: b"[]")
-    sensors = {item["sensor"]: item for item in cast("list[dict[str, object]]", report["sensors"])}
+    sensors = {item["job"]: item for item in cast("list[dict[str, object]]", report["jobs"])}
     assert sensors["folders"]["status"] == "collected"
     missing = "cannot find the home directory for {{home}}; set HOME"
     failed = f"sample: {missing}; nothing was written; see logs/sample.log"
     assert (sensors["sample"]["status"], sensors["sample"]["error"]) == ("failed", failed)
-    # Run history records it, as for an assistant or routine: bf status used to show the sensor only as late.
-    assert (state(configured)["sample"]["failures"], state(configured)["sample"]["error"]) == (
-        1,
-        f"{missing}; nothing was written",
-    )
-    [asked] = cast("list[dict[str, object]]", report["assistants"])
+    # Run history records it: bf status shows the job failed instead of only late.
+    saved = Queue(configured).all_states()["sample"]
+    assert (saved["error_count"], saved["last_error"]) == (1, f"{missing}; nothing was written")
+    asked = sensors["ask"]
     assert asked["status"] == "failed"
     assert missing in str(asked["error"])
     monkeypatch.setattr(sys, "argv", ["bf", "collect", "sample", "--brain", str(configured.root)])
@@ -675,34 +684,37 @@ def test_only_a_program_using_home_needs_a_home_directory(
 def test_missing_source_does_not_prevent_other_sources(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n"
-        b"  a-missing:\n    command: [sensors/missing.py]\n    refresh: 3600\n"
-        b'  b-good:\n    command: [echo, "[]"]\n    refresh: 3600\n',
+        b"version: 10\nname: fixture\njobs:\n"
+        b"  a-missing:\n    run: [sensors/missing.py]\n    emit: records\n    on: {every: 3600}\n"
+        b'  b-good:\n    run: [echo, "[]"]\n    emit: records\n    on: {every: 3600}\n',
     )
     report = cast("Any", update(configured, now=NOW))
     assert not report["ok"]
-    assert [item["status"] for item in report["sensors"]] == ["failed", "collected"]
-    assert state(configured)["a-missing"]["error"]
-    assert state(configured)["b-good"]["success"]
+    assert [item["status"] for item in report["jobs"]] == ["failed", "collected"]
+    states = Queue(configured).all_states()
+    assert states["a-missing"]["last_error"]
+    assert states["b-good"]["last_success"]
 
 
 def test_success_and_failure_history_are_serialized(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    original = Store.write
-    writes = []
+    original = Queue.remember
+    writes: list[str] = []
 
-    def checked(self: Store, name: str, data: bytes, *, durable: bool = True) -> None:
-        if name == "sensors.json":
-            with pytest.raises(BusyError), writer(configured):
-                pass
-            writes.append(name)
-        original(self, name, data, durable=durable)
+    def checked(self: Queue, name: str, **values: object) -> dict[str, object]:
+        # Runtime state is never written under the brain writer lock, and stays serialized per job.
+        with writer(configured):
+            pass
+        with pytest.raises(BusyError), collecting(configured, name):
+            pass
+        writes.append(name)
+        return original(self, name, **values)
 
-    monkeypatch.setattr(Store, "write", checked)
+    monkeypatch.setattr(Queue, "remember", checked)
     collect(configured, "sample", start=START, end=END, runner=lambda *_: b"[]")
     with pytest.raises(Error, match="JSON"):
         collect(configured, "folders", start=START, end=END, runner=lambda *_: b"broken")
-    assert writes == ["sensors.json", "sensors.json"]
-    assert set(state(configured)) == {"sample", "folders"}
+    assert writes == ["sample", "folders"]
+    assert set(Queue(configured).all_states()) == {"sample", "folders"}
 
 
 def catalog(count: int, first: int = 0) -> Runner:
@@ -720,13 +732,14 @@ def test_a_shrinking_snapshot_never_erases_most_of_a_catalog(configured: Store) 
         with pytest.raises(Error, match=f"would remove {removed} of 30 records.*--allow-removal"):
             collect(configured, "folders", start=START, end=END, runner=catalog(smaller))
         assert len(records.files(configured, "folders")) == 30
-    entry = state(configured)["folders"]
-    assert "would remove 16 of 30 records" in str(entry["error"])
-    assert entry["failures"] == 2
+    entry = Queue(configured).all_states()["folders"]
+    assert "would remove 16 of 30 records" in str(entry["last_error"])
+    assert entry["error_count"] == 2
     # Half of a catalog, or at most ten records of a small one, can change like an agenda.
     for count, first, removed in ((30, 15, 15), (16, 29, 14), (6, 39, 10)):
         assert collect(configured, "folders", start=START, end=END, runner=catalog(count, first))["removed"] == removed
-    assert (state(configured)["folders"]["error"], state(configured)["folders"]["failures"]) == ("", 0)
+    final = Queue(configured).all_states()["folders"]
+    assert (final.get("last_error", ""), final.get("error_count", 0)) == ("", 0)
 
 
 def test_a_dry_run_previews_the_changes_and_the_removal_guard(configured: Store) -> None:
@@ -750,7 +763,11 @@ def test_a_dry_run_previews_the_changes_and_the_removal_guard(configured: Store)
 
 def test_allow_removal_accepts_one_deliberate_shrink(configured: Store) -> None:
     configured.write(
-        "bf.yaml", CONFIG.replace(b"command: [echo]\n    mode: snapshot", b'command: [echo, "[]"]\n    mode: snapshot')
+        "bf.yaml",
+        CONFIG.replace(
+            b"run: [echo]\n    emit: records\n    mode: snapshot",
+            b'run: [echo, "[]"]\n    emit: records\n    mode: snapshot',
+        ),
     )
     collect(configured, "folders", start=START, end=END, runner=catalog(30))
     command = ["collect", "folders", "--brain", str(configured.root)]
@@ -762,7 +779,7 @@ def test_allow_removal_accepts_one_deliberate_shrink(configured: Store) -> None:
     assert accepted.exit_code == 0, accepted.output
     assert json.loads(accepted.stdout)["removed"] == 30
     assert records.files(configured, "folders") == []
-    assert not state(configured)["folders"]["error"]
+    assert not Queue(configured).state_of("folders").get("last_error")
 
 
 def test_the_shrink_guard_counts_the_catalog_an_interrupted_commit_restores(configured: Store) -> None:
@@ -824,10 +841,10 @@ def test_overlapping_source_run_cannot_overwrite_newer_snapshot(configured: Stor
 def test_update_skips_a_sensor_another_process_is_collecting(configured: Store) -> None:
     # Such as a manual bf collect during bf watch: that run covers this cycle, so the cycle neither fails nor waits.
     with collecting(configured, "sample"):
-        report = update(configured, now=NOW, sensors=("sample",), runner=lambda *_: pytest.fail("ran"))
+        report = update(configured, now=NOW, jobs=("sample",), runner=lambda *_: pytest.fail("ran"))
     assert report["ok"] is True
-    [skipped] = cast("list[dict[str, object]]", report["sensors"])
-    assert (skipped["status"], skipped["skipped"]) == ("skipped", "another run of this sensor is still active")
+    [skipped] = cast("list[dict[str, object]]", report["jobs"])
+    assert (skipped["status"], skipped["skipped"]) == ("skipped", "another run of this job is still active")
 
 
 def test_environment_removes_documented_startup_variables(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -907,7 +924,7 @@ def test_interpreter_startup_injection_is_removed(
     configured.write("bin/tool", b"#!/bin/sh\necho injected\n")
     (configured.root / "bin/tool").chmod(0o700)
     monkeypatch.setenv("PATH", "bin:/usr/bin:/bin")
-    source = Sensor(command=["bash"])
+    source = Job(run=["bash"], emit="records")
     log = "sample"
     output = run(
         ["bash", "-c", 'printf "%s|%s" "$PATH" "' + "".join(f"${key}" for key in variables) + '"'],
@@ -936,9 +953,9 @@ def test_cancellation_kills_collector_and_descendants(
         "bf.yaml",
         json.dumps(
             {
-                "version": 9,
+                "version": 10,
                 "name": "fixture",
-                "sensors": {"sample": {"command": ["sensors/wait.sh", str(marker)]}},
+                "jobs": {"sample": {"run": ["sensors/wait.sh", str(marker)], "emit": "records"}},
             }
         ).encode(),
     )
@@ -1017,9 +1034,15 @@ def test_cancelled_update_stops_sensors_running_in_parallel(configured: Store, t
     (configured.root / "sensors/wait.sh").chmod(0o700)
     markers = [tmp_path / "first", tmp_path / "second"]
     sensors = {
-        marker.name: {"command": ["sensors/wait.sh", str(marker)], "refresh": 60, "timeout": 120} for marker in markers
+        marker.name: {
+            "run": ["sensors/wait.sh", str(marker)],
+            "emit": "records",
+            "on": {"every": 60},
+            "timeout": 120,
+        }
+        for marker in markers
     }
-    configured.write("bf.yaml", json.dumps({"version": 9, "name": "fixture", "sensors": sensors}).encode())
+    configured.write("bf.yaml", json.dumps({"version": 10, "name": "fixture", "jobs": sensors}).encode())
     child = subprocess.Popen(  # noqa: S603 - exercise the CLI boundary with temporary, synthetic collectors
         [sys.executable, "-m", "bf", "update", "--brain", str(configured.root)],
         stdout=subprocess.PIPE,
@@ -1041,7 +1064,7 @@ def test_cancelled_update_stops_sensors_running_in_parallel(configured: Store, t
         for pid in pids:
             assert ended(pid), f"collector process {pid} survived"
         # Stopping an update is not a sensor failure: no error, failure count or run is saved.
-        assert state(configured, SENSORS) == {}
+        assert Queue(configured).all_states() == {}
         assert all(records.files(configured, marker.name) == [] for marker in markers)
     finally:
         for leader in pids[::2]:
@@ -1053,22 +1076,14 @@ def test_cancelled_update_stops_sensors_running_in_parallel(configured: Store, t
 
 
 def test_invalid_history_and_cache_errors_do_not_stop_update(configured: Store, tmp_path: Path) -> None:
-    private_dir(configured, ".bf", "state").write(
-        "sensors.json",
-        b'{"sample":{"success":"2026-09-01T02:00:00+02:00"},"manual":{"success":"not-a-date"},'
-        b'"folders":[],"Bad Name":{}}',
-    )
-    # Each invalid entry is dropped alone, and instants read back in canonical UTC.
-    assert state(configured) == {"sample": {"success": START}}
-    private_dir(configured, ".bf", "state").write("sensors.json", b"[]")
-    assert state(configured) == {}
-    private_dir(configured, ".bf", "state").write("sensors.json", b"broken")
-    assert state(configured) == {}
+    Queue(configured).remember("sample", last_success="2026-09-01T02:00:00+02:00")
+    # Instants read back in canonical UTC.
+    assert Queue(configured).all_states() == {"sample": {"last_success": START}}
     (configured.root / ".bf/cache.sqlite3").mkdir(parents=True)
     report = cast("Any", update(configured, now=NOW, runner=lambda *_: b"[]"))
     assert not report["ok"]
     assert report["index"]["error"]
-    assert [item["status"] for item in report["sensors"]] == ["collected", "collected"]
+    assert [item["status"] for item in report["jobs"]] == ["collected", "collected"]
     # Like collect, a brain whose configuration cannot load fails before running anything.
     other = tmp_path / "broken-brain"
     other.mkdir()
@@ -1088,8 +1103,8 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
     later = NOW + timedelta(hours=1)
     # A contiguous backfill extends coverage backwards without claiming a fresher success.
     collect(configured, "sample", start="2026-08-31T00:00:00Z", end=START, runner=lambda *_: b"[]", clock=lambda: later)
-    entry = state(configured)["sample"]
-    assert (entry["start"], entry["end"], entry["success"], entry["run"]) == (
+    entry = Queue(configured).all_states()["sample"]
+    assert (entry["window_start"], entry["window_end"], entry["last_success"], entry["last_run"]) == (
         "2026-08-31T00:00:00.000000Z",
         END,
         END,
@@ -1104,8 +1119,12 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
         runner=lambda *_: b"[]",
         clock=lambda: later,
     )
-    entry = state(configured)["sample"]
-    assert (entry["start"], entry["end"], entry["success"]) == ("2026-08-31T00:00:00.000000Z", END, END)
+    entry = Queue(configured).all_states()["sample"]
+    assert (entry["window_start"], entry["window_end"], entry["last_success"]) == (
+        "2026-08-31T00:00:00.000000Z",
+        END,
+        END,
+    )
     assert due(configured, NOW + timedelta(days=1)) == [
         (
             "folders",
@@ -1126,8 +1145,12 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
         runner=lambda *_: b"[]",
         clock=lambda: newer,
     )
-    entry = state(configured)["sample"]
-    assert (entry["start"], entry["end"], entry["success"]) == ("2026-08-31T00:00:00.000000Z", END, END)
+    entry = Queue(configured).all_states()["sample"]
+    assert (entry["window_start"], entry["window_end"], entry["last_success"]) == (
+        "2026-08-31T00:00:00.000000Z",
+        END,
+        END,
+    )
     assert due(configured, newer)[-1] == (
         "sample",
         "2026-09-01T23:55:00.000000Z",
@@ -1137,11 +1160,11 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
     # A window ending after its run covers only up to the run, so later scheduled runs stay the latest.
     ahead = newer + timedelta(hours=1)
     collect(configured, "sample", start=END, end="2026-12-31T00:00:00Z", runner=lambda *_: b"[]", clock=lambda: ahead)
-    assert state(configured)["sample"]["end"] == timestamp(ahead.isoformat())
+    assert Queue(configured).all_states()["sample"]["window_end"] == timestamp(ahead.isoformat())
     after = ahead + timedelta(hours=2)
     window = due(configured, after)[-1]
     collect(configured, "sample", start=window[1], end=window[2], runner=lambda *_: b"[]", clock=lambda: after)
-    assert state(configured)["sample"]["success"] == timestamp(after.isoformat())
+    assert Queue(configured).all_states()["sample"]["last_success"] == timestamp(after.isoformat())
     # A window entirely after its run claims no coverage and no success.
     collect(
         configured,
@@ -1151,8 +1174,8 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
         runner=lambda *_: b"[]",
         clock=lambda: after,
     )
-    assert state(configured)["sample"]["success"] == timestamp(after.isoformat())
-    assert state(configured)["sample"]["end"] == window[2]
+    assert Queue(configured).all_states()["sample"]["last_success"] == timestamp(after.isoformat())
+    assert Queue(configured).all_states()["sample"]["window_end"] == window[2]
 
 
 def test_scheduled_catch_up_after_a_long_pause_is_the_latest_window(configured: Store) -> None:
@@ -1168,13 +1191,13 @@ def test_scheduled_catch_up_after_a_long_pause_is_the_latest_window(configured: 
         clock=lambda: far,
         runner=lambda *_: b"[]",
     )
-    assert state(configured)["sample"]["success"] == END
+    assert Queue(configured).all_states()["sample"]["last_success"] == END
     ((_, start, end, _),) = [window for window in due(configured, far) if window[0] == "sample"]
     assert start == timestamp((far - timedelta(days=30)).isoformat())
     # The update catches up the last 30 days only, and that window becomes the latest.
     collect(configured, "sample", start=start, end=end, runner=lambda *_: b"[]", clock=lambda: far)
-    entry = state(configured)["sample"]
-    assert (entry["start"], entry["end"], entry["success"]) == (start, end, end)
+    entry = Queue(configured).all_states()["sample"]
+    assert (entry["window_start"], entry["window_end"], entry["last_success"]) == (start, end, end)
     assert not [window for window in due(configured, far) if window[0] == "sample"]
 
 
@@ -1210,17 +1233,17 @@ def test_a_window_ending_before_its_run_extends_coverage_without_claiming_freshn
     # Ten days later, as after a pause, a backfill chunk adjacent to the coverage stops seven days short of now.
     later, chunk = NOW + timedelta(days=10), timestamp((NOW + timedelta(days=3)).isoformat())
     collect(configured, "sample", start=END, end=chunk, runner=lambda *_: b"[]", clock=lambda: later)
-    entry = state(configured)["sample"]
-    assert (entry["start"], entry["end"], entry["success"]) == (START, chunk, END)
+    entry = Queue(configured).all_states()["sample"]
+    assert (entry["window_start"], entry["window_end"], entry["last_success"]) == (START, chunk, END)
     # Before, the chunk counted as a fresh collection, which also hid the source from search replies' coverage.
     health = source_health(configured, now=later)["sample"]
     assert (health["freshness"], health["last_collected"]) == ("overdue", END)
     assert health["window"] == {"since": START, "until": chunk}
     # The next update resumes from the chunk's end, with overlap, and brings the coverage up to date.
-    report = cast("Any", update(configured, now=later, sensors=("sample",), runner=lambda *_: b"[]"))
-    assert report["sensors"][0]["start"] == timestamp((NOW + timedelta(days=3, minutes=-5)).isoformat())
-    entry, current = state(configured)["sample"], timestamp(later.isoformat())
-    assert (entry["start"], entry["end"], entry["success"]) == (START, current, current)
+    report = cast("Any", update(configured, now=later, jobs=("sample",), runner=lambda *_: b"[]"))
+    assert report["jobs"][0]["start"] == timestamp((NOW + timedelta(days=3, minutes=-5)).isoformat())
+    entry, current = Queue(configured).all_states()["sample"], timestamp(later.isoformat())
+    assert (entry["window_start"], entry["window_end"], entry["last_success"]) == (START, current, current)
 
 
 def test_a_first_window_ending_in_the_past_is_coverage_not_a_collection(configured: Store) -> None:
@@ -1238,37 +1261,30 @@ def test_a_first_window_ending_in_the_past_is_coverage_not_a_collection(configur
 
 def test_a_default_collect_covers_through_its_own_run(configured: Store) -> None:
     # The command and the collection share one clock: a run without --until reaches the instant it ran.
-    configured.write(
-        "bf.yaml", CONFIG.replace(b"  manual:\n    command: [echo]", b'  manual:\n    command: [echo, "[]"]')
-    )
+    configured.write("bf.yaml", CONFIG.replace(b"  manual:\n    run: [echo]", b'  manual:\n    run: [echo, "[]"]'))
     result = CliRunner().invoke(app, ["collect", "manual", "--brain", str(configured.root)])
     assert result.exit_code == 0, result.output
-    entry = state(configured)["manual"]
-    assert entry["success"] == entry["end"] == entry["run"]
+    entry = Queue(configured).all_states()["manual"]
+    assert entry["last_success"] == entry["window_end"] == entry["last_run"]
 
 
 def test_invalid_run_history_fails_its_write_instead_of_erasing_the_entry(configured: Store) -> None:
     collect(configured, "sample", start=START, end=END, runner=lambda *_: b"[]", clock=lambda: NOW)
-    saved = state(configured)
-    # The next read would drop the whole entry: the program would show `never` and restart its window.
-    with writer(configured):
-        for values in ({"failures": -1}, {"unexpected": 1}, {"success": "yesterday"}):
-            with pytest.raises(Error, match=r"^sample: invalid run history: "):
-                remember(configured, "sample", SENSORS, **values)
-    assert state(configured) == saved
+    saved = Queue(configured).all_states()
+    # Invalid writes fail closed and preserve the committed entry.
+    for values in ({"error_count": -1}, {"unexpected": 1}, {"last_success": "yesterday"}):
+        with pytest.raises(Error, match=r"^sample: invalid job state: "):
+            Queue(configured).remember("sample", **values)
+    assert Queue(configured).all_states() == saved
 
 
 def test_failed_run_history_reports_that_records_were_committed(
     configured: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original = Store.write
+    def fail_history(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise PermissionError("synthetic state failure")
 
-    def fail_history(self: Store, name: str, data: bytes, *, durable: bool = True) -> None:
-        if name == "sensors.json":
-            raise PermissionError("synthetic state failure")
-        original(self, name, data, durable=durable)
-
-    monkeypatch.setattr(Store, "write", fail_history)
+    monkeypatch.setattr(Queue, "remember", fail_history)
     with pytest.raises(Error, match="records were committed"):
         collect(configured, "sample", start=START, end=END, runner=lambda *_: emit({"id": "one", "title": "Saved"}))
     assert records.find(configured, "sample", "one") is not None
@@ -1276,16 +1292,18 @@ def test_failed_run_history_reports_that_records_were_committed(
 
 @pytest.mark.parametrize("previous_start", ["2026-08-01T00:00:00.000000Z", "2026-12-01T00:00:00.000000Z"])
 def test_future_run_history_cannot_block_current_collection(configured: Store, previous_start: str) -> None:
-    private_dir(configured, ".bf", "state").write(
-        "sensors.json",
-        json.dumps({"sample": {"start": previous_start, "end": "2027-01-01T00:00:00Z", "success": START}}).encode(),
+    Queue(configured).remember(
+        "sample",
+        window_start=previous_start,
+        window_end="2027-01-01T00:00:00Z",
+        last_success=START,
     )
     report = cast("Any", update(configured, now=NOW, runner=lambda *_: b"[]"))
     assert report["ok"]
-    entry = state(configured)["sample"]
-    assert entry["success"] == END
-    assert entry["end"] == END
-    assert entry["start"] == min(previous_start, START)
+    entry = Queue(configured).all_states()["sample"]
+    assert entry["last_success"] == END
+    assert entry["window_end"] == END
+    assert entry["window_start"] == min(previous_start, START)
     assert not due(configured, NOW)
 
 
@@ -1303,7 +1321,7 @@ def test_a_run_that_waited_for_a_busy_writer_does_not_wait_again_to_record_it(
     monkeypatch.setattr("bf.collect.writer", busy)
     with pytest.raises(Error, match=r"brain is busy; nothing was written; see logs/sample\.log$"):
         collect(configured, "sample", start=START, end=END, runner=lambda *_: b"[]")
-    assert waits == [120, 0]
+    assert waits == [120]
 
 
 def test_prune_sorts_timeless_records_by_observed_timestamp(configured: Store) -> None:
@@ -1322,8 +1340,9 @@ def test_line_list_file_expansion_and_oversized_text_truncation(configured: Stor
     configured.write("settings/repos.txt", b"# Tracked repositories\n\n org/alpha \norg/beta\n")
     configured.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n  scoped:\n"
-        b'    command: [echo, "{{lines:settings/repos.txt}}"]\n'
+        b"version: 10\nname: fixture\njobs:\n  scoped:\n"
+        b'    run: [echo, "{{lines:settings/repos.txt}}"]\n'
+        b"    emit: records\n"
         b"    max_text_bytes: 10\n",
     )
     seen: list[list[str]] = []
@@ -1354,14 +1373,14 @@ def test_line_list_file_expansion_and_oversized_text_truncation(configured: Stor
     assert found.exit_code == 0, found.output
     assert [item.get("partial") for item in json.loads(found.stdout)["items"]] == [True]
     with pytest.raises(Exception, match="lines placeholder"):
-        Sensor(command=["echo", "{{lines:../escape.txt}}"])
+        Job(run=["echo", "{{lines:../escape.txt}}"], emit="records")
     with pytest.raises(Exception, match="Extra inputs are not permitted"):
-        Sensor.model_validate({"command": ["echo"], "truncate_text": True})
+        Job.model_validate({"run": ["echo"], "emit": "records", "truncate_text": True})
 
 
 def test_oversized_text_fails_without_truncation_opt_in(configured: Store) -> None:
     oversized = "x" * ((4 << 20) + 1)
-    with pytest.raises(Error, match=r"set max_text_bytes on this sensor to cut longer text; nothing was written"):
+    with pytest.raises(Error, match=r"set max_text_bytes on this job to cut longer text; nothing was written"):
         collect(
             configured,
             "sample",
@@ -1375,7 +1394,8 @@ def test_oversized_text_fails_without_truncation_opt_in(configured: Store) -> No
 
 def test_truncation_leaves_invalid_unicode_text_to_record_validation(configured: Store) -> None:
     configured.write(
-        "bf.yaml", b"version: 9\nname: fixture\nsensors:\n  sample:\n    command: [echo]\n    max_text_bytes: 10\n"
+        "bf.yaml",
+        b"version: 10\nname: fixture\njobs:\n  sample:\n    run: [echo]\n    emit: records\n    max_text_bytes: 10\n",
     )
     # A lone surrogate cannot be measured in UTF-8: the run names the field, not inaccessible files.
     with pytest.raises(Error, match=r"0\.text: .*unicode.*; nothing was written"):
@@ -1388,15 +1408,15 @@ def test_truncation_leaves_invalid_unicode_text_to_record_validation(configured:
 def test_update_executes_due_sensors_concurrently(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n"
-        b"  s1:\n    command: [echo]\n    refresh: 60\n"
-        b"  s2:\n    command: [echo]\n    refresh: 60\n",
+        b"version: 10\nname: fixture\njobs:\n"
+        b"  s1:\n    run: [echo]\n    emit: records\n    on: {every: 60}\n"
+        b"  s2:\n    run: [echo]\n    emit: records\n    on: {every: 60}\n",
     )
     active = 0
     peak = 0
     both = Event()
 
-    def concurrent_runner(_argv: list[str], _source: Command, _store: Store, name: str, _stdin: bytes) -> bytes:
+    def concurrent_runner(_argv: list[str], _source: Job, _store: Store, name: str, _stdin: bytes) -> bytes:
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
@@ -1409,7 +1429,7 @@ def test_update_executes_due_sensors_concurrently(configured: Store) -> None:
     report = cast("Any", update(configured, now=NOW, runner=concurrent_runner))
     assert report["ok"] is True
     assert peak == 2
-    assert [item["sensor"] for item in report["sensors"]] == ["s1", "s2"]
+    assert [item["job"] for item in report["jobs"]] == ["s1", "s2"]
 
 
 def envelope(missed: int, of: int, *items: Mapping[str, object]) -> bytes:
@@ -1422,8 +1442,8 @@ def test_an_incomplete_run_saves_its_records_and_counts_the_runs_in_a_row(config
     first = collect(configured, "sample", start=START, end=END, runner=lambda *_: envelope(1, 3, one, two))
     assert (first["records"], first["added"], first["incomplete"]) == (2, 2, {"missed": 1, "of": 3})
     assert len(records.files(configured, "sample")) == 2
-    entry = state(configured)["sample"]
-    assert (entry["missed"], entry["of"], entry["incomplete_runs"], entry["error"]) == (1, 3, 1, "")
+    entry = Queue(configured).all_states()["sample"]
+    assert (entry["missed"], entry["of"], entry["incomplete_runs"], entry.get("last_error", "")) == (1, 3, 1, "")
     # The reply's counts reach history; the reply's own `incomplete` object does not.
     assert "incomplete" not in entry
     # Labels and reasons stay in the sensor's log, which names only the counts.
@@ -1432,7 +1452,7 @@ def test_an_incomplete_run_saves_its_records_and_counts_the_runs_in_a_row(config
         in configured.read(log_path("sample")).decode()
     )
     collect(configured, "sample", start=START, end=END, runner=lambda *_: envelope(2, 3, one))
-    assert {key: state(configured)["sample"][key] for key in ("missed", "of", "incomplete_runs")} == {
+    assert {key: Queue(configured).all_states()["sample"][key] for key in ("missed", "of", "incomplete_runs")} == {
         "missed": 2,
         "of": 3,
         "incomplete_runs": 2,
@@ -1440,22 +1460,24 @@ def test_an_incomplete_run_saves_its_records_and_counts_the_runs_in_a_row(config
     # A failed run changes neither the counts nor the streak: they describe the last committed run.
     with pytest.raises(Error, match="invalid JSON"):
         collect(configured, "sample", start=START, end=END, runner=lambda *_: b"broken")
-    assert state(configured)["sample"]["incomplete_runs"] == 2
+    assert Queue(configured).all_states()["sample"]["incomplete_runs"] == 2
     # A complete run, a plain array, resets them.
     complete = collect(configured, "sample", start=START, end=END, runner=lambda *_: emit(one, two))
     assert "incomplete" not in complete
-    assert {key: state(configured)["sample"][key] for key in ("missed", "of", "incomplete_runs")} == {
+    assert {
+        key: Queue(configured).all_states()["sample"].get(key, 0) for key in ("missed", "of", "incomplete_runs")
+    } == {
         "missed": 0,
         "of": 0,
         "incomplete_runs": 0,
     }
-    # A source that never reported missing items keeps a history an earlier 21.x release still loads.
+    # A source that never reported missing items omits the incomplete streak keys.
     collect(configured, "folders", start=START, end=END, runner=lambda *_: emit(one))
-    assert not {"missed", "of", "incomplete_runs"} & set(state(configured)["folders"])
+    assert not {"missed", "of", "incomplete_runs"} & set(Queue(configured).all_states()["folders"])
     # Update rows carry the run reply, `incomplete` included.
     later = NOW + timedelta(hours=2)
-    rows = cast("Any", update(configured, now=later, runner=lambda *_: envelope(1, 2, one)))["sensors"]
-    assert {row["sensor"]: row.get("incomplete") for row in rows}["sample"] == {"missed": 1, "of": 2}
+    rows = cast("Any", update(configured, now=later, runner=lambda *_: envelope(1, 2, one)))["jobs"]
+    assert {row["job"]: row.get("incomplete") for row in rows}["sample"] == {"missed": 1, "of": 2}
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["collect", "preview"])
@@ -1463,8 +1485,11 @@ def test_an_incomplete_run_saves_its_records_and_counts_the_runs_in_a_row(config
     ("printed", "message"),
     [
         # A provider-controlled key is never quoted.
-        ({"records": [], "incomplete": {"missed": 1, "of": 2}, "From: ceo@corp.example": 1}, "only records and"),
-        ({"records": []}, "only records and incomplete"),
+        (
+            {"records": [], "incomplete": {"missed": 1, "of": 2}, "From: ceo@corp.example": 1},
+            "only records, incomplete and cursor",
+        ),
+        ({"cursor": "c1"}, "only records, incomplete and cursor"),
         ({"records": [], "incomplete": [1, 2]}, "incomplete must be an object holding only missed and of"),
         ({"records": [], "incomplete": {"missed": 1}}, "holding only missed and of"),
         ({"records": [], "incomplete": {"missed": 1, "of": 2, "ceo@corp.example": 3}}, "holding only missed and of"),
@@ -1491,9 +1516,9 @@ def test_an_invalid_envelope_fails_before_saving_anything(
     assert "ceo@corp" not in str(failure.value)
     assert "nothing was written" in str(failure.value)
     assert sorted((configured.root / "memories/folders").iterdir()) == before
-    entry = state(configured)["folders"]
+    entry = Queue(configured).state_of("folders")
     assert "ceo@corp" not in json.dumps(entry)
-    assert bool(entry["error"]) is not dry_run
+    assert bool(entry.get("last_error")) is not dry_run
     assert "incomplete_runs" not in entry
 
 
@@ -1514,7 +1539,7 @@ def test_an_incomplete_snapshot_removes_no_record(configured: Store) -> None:
     result = collect(configured, "folders", start=START, end=END, runner=lambda *_: partial, allow_removal=True)
     assert (result["removed"], result["incomplete"]) == (0, {"missed": 1, "of": 2})
     assert set(records.files(configured, "folders")) == files | {records.path("folders", "item-99")}
-    assert state(configured)["folders"]["error"] == ""
+    assert not Queue(configured).state_of("folders").get("last_error")
     # The next complete snapshot removes what it no longer lists, behind the same guard as before.
     with pytest.raises(Error, match="would remove 26 of 31 records"):
         collect(configured, "folders", start=START, end=END, runner=catalog(5))
@@ -1551,7 +1576,7 @@ def test_saved_output_checks_accept_the_incomplete_envelope(configured: Store, t
     reply = json.loads(result.stdout)
     assert (reply["records"], reply["incomplete"]) == (1, {"missed": 1, "of": 4})
     assert records.files(configured, "sample") == []
-    assert state(configured) == {}
+    assert Queue(configured).all_states() == {}
     fixture.write_bytes(json.dumps({"records": [], "incomplete": {"missed": 5, "of": 4}}).encode())
     invalid = CliRunner().invoke(app, ["collect", "sample", "--input", str(fixture), "--brain", str(configured.root)])
     assert invalid.exit_code == 1
@@ -1559,27 +1584,24 @@ def test_saved_output_checks_accept_the_incomplete_envelope(configured: Store, t
 
 
 def test_run_history_of_an_earlier_release_keeps_loading(configured: Store) -> None:
-    # Every key a 21.3.0 sensor entry could hold, none of the newer ones.
+    # A baseline job state without incomplete counters loads cleanly and starts counting on the next incomplete run.
     entry = {
-        "run": END,
-        "success": END,
-        "start": START,
-        "end": END,
-        "error": "",
-        "failures": 0,
+        "last_run": END,
+        "last_success": END,
+        "window_start": START,
+        "window_end": END,
         **dict.fromkeys(("records", "added", "updated", "unchanged", "removed", "forgotten", "expired"), 1),
         "requested_start": START,
         "requested_end": END,
-        "reconcile": False,
-        "reconciled": END,
+        "last_reconcile": END,
         "elapsed_seconds": 0.5,
         "output_bytes": 10,
     }
-    private_dir(configured, ".bf", "state").write(SENSORS, encode({"sample": entry}))
-    assert state(configured)["sample"] == entry
+    Queue(configured).remember("sample", **entry)
+    assert Queue(configured).all_states()["sample"] == entry
     assert "degraded" not in source_health(configured, now=NOW)["sample"]
     collect(configured, "sample", start=START, end=END, runner=lambda *_: envelope(1, 2), clock=lambda: NOW)
-    assert state(configured)["sample"]["incomplete_runs"] == 1
+    assert Queue(configured).all_states()["sample"]["incomplete_runs"] == 1
     assert source_health(configured, now=NOW)["sample"]["degraded"] == {"runs": 1, "missed": 1, "of": 2}
 
 
@@ -1618,8 +1640,6 @@ def test_collect_accepts_jsonl_single_object_empty_and_reports_bad_jsonl_lines(
         collect(configured, "sample", start=START, end=END, runner=lambda *_: b'{"id":"a","title":"A"}\n[1, 2]\n')
 
     # validate_action_markdown enforces brain validation policies and OKF type: action.
-    from bf.models import ValidateSettings
-
     policy_cfg = collect_module.load(configured).model_copy(
         update={
             "validation": ValidateSettings(
@@ -1628,24 +1648,125 @@ def test_collect_accepts_jsonl_single_object_empty_and_reports_bad_jsonl_lines(
         }
     )
     with pytest.raises(Error, match="requires type: action"):
-        collect_module.validate_action_markdown(
+        validate_module.validate_action_markdown(
             configured, policy_cfg, "actions/2026-09-02_x/ACTION.md", b"---\ntype: project\nstatus: draft\n---\n# X\n"
         )
     with pytest.raises(Error, match="frontmatter status must be explicitly set"):
-        collect_module.validate_action_markdown(
+        validate_module.validate_action_markdown(
             configured, policy_cfg, "actions/2026-09-02_x/ACTION.md", b"---\ntype: action\nstatus: stable\n---\n# X\n"
         )
     with pytest.raises(Error, match="stale_after exceeds max_stale_days"):
-        collect_module.validate_action_markdown(
+        validate_module.validate_action_markdown(
             configured,
             policy_cfg,
             "actions/2026-09-02_x/ACTION.md",
             b"---\ntype: action\nstatus: draft\nstale_after: 2099-01-01T00:00:00Z\n---\n# X\n",
         )
     with pytest.raises(Error, match="matches forbidden pattern"):
-        collect_module.validate_action_markdown(
+        validate_module.validate_action_markdown(
             configured,
             policy_cfg,
             "actions/2026-09-02_x/ACTION.md",
             b"---\ntype: action\nstatus: draft\n---\n# X\n\nTODO-SECRET\n",
         )
+
+
+def test_collect_edge_paths_reproject_and_due_recovery(configured: Store) -> None:
+    # _parse_collector_output whitespace, cursor-only envelope, and non-string cursor rejection.
+    assert collect_module._parse_collector_output(b"   \n") == ([], {}, None)  # noqa: SLF001
+    recs, inc, cur = collect_module._parse_collector_output(b'{"records": [], "cursor": "c-1"}')  # noqa: SLF001
+    assert (recs, inc, cur) == ([], {}, "c-1")
+    with pytest.raises(Error, match="cursor must be a string"):
+        collect_module._parse_collector_output(b'{"records": [], "cursor": 123}')  # noqa: SLF001
+
+    # Non-list JSON hits _truncate_text guard cleanly before schema failure.
+    with pytest.raises(Error, match="one JSON array of records"):
+        collect(configured, "sample", start=START, end=END, runner=lambda *_: b'"not-a-list"')
+
+    # Default window continuation uses prior window_end - overlap; errors guard non-record/non-reconcile jobs.
+    configured.write(
+        "bf.yaml",
+        CONFIG
+        + b"""  logjob:
+    run: [echo]
+    emit: log
+  mapped:
+    run: [echo]
+    emit: records
+    source: aliased
+    keep: 1
+    map: {items: /items, id: /id, title: /title}
+""",
+    )
+    with pytest.raises(Error, match="does not emit records"):
+        collect(configured, "logjob")
+    with pytest.raises(Error, match="reconciliation requires"):
+        collect(configured, "sample", start=START, end=END, reconcile=True)
+
+    Queue(configured).remember("sample", window_end=timestamp((NOW - timedelta(minutes=10)).isoformat()))
+    resumed = collect(configured, "sample", runner=lambda *_: b"[]", clock=lambda: NOW)
+    assert resumed["requested_end"] == timestamp(NOW.isoformat())
+    assert str(resumed["requested_start"]) < str(resumed["requested_end"])
+
+    # Map + keep retention + advancing clock stamping observed at commit time.
+    ticks = iter([NOW, NOW, NOW + timedelta(seconds=1)])
+    mapped = collect(
+        configured,
+        "mapped",
+        start=START,
+        end=END,
+        runner=lambda *_: b'{"items":[{"id":"k1","title":"One"},{"id":"k2","title":"Two"}]}',
+        clock=lambda: next(ticks),
+        live=True,
+    )
+    assert mapped["records"] == 2
+    assert mapped["expired"] == 1
+    pruned = collect(
+        configured,
+        "mapped",
+        start=START,
+        end=timestamp((NOW + timedelta(seconds=2)).isoformat()),
+        runner=lambda *_: b'{"items":[{"id":"k3","title":"Three"}]}',
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert pruned["expired"] == 1
+
+    # Unknown fixture, snapshot default window, future window_end clamp, same commit_obs, and reconcile lookback.
+    with pytest.raises(Error, match="unknown job missing"):
+        collect(configured, "missing", fixture=b"[]")
+    future = datetime(2099, 1, 1, tzinfo=UTC)
+    assert collect(configured, "folders", runner=lambda *_: b"[]", clock=lambda: future, live=True)["records"] == 0
+    Queue(configured).remember("sample", window_end=timestamp((NOW + timedelta(minutes=10)).isoformat()))
+    assert collect(configured, "sample", runner=lambda *_: b"[]", clock=lambda: NOW)["records"] == 0
+
+    configured.write(
+        "bf.yaml",
+        configured.read("bf.yaml")
+        + b"  reconciled:\n    run: [echo]\n    emit: records\n    mode: window\n    on: {every: 3600}\n"
+        + b"    reconcile: {every: 86400, lookback: 7200}\n",
+    )
+    with pytest.raises(Error, match="reconciliation must cover its lookback"):
+        collect(
+            configured,
+            "reconciled",
+            start=timestamp((NOW - timedelta(seconds=60)).isoformat()),
+            end=END,
+            reconcile=True,
+            clock=lambda: NOW,
+        )
+    assert [item[0] for item in due(configured, NOW + timedelta(seconds=120)) if item[0] == "reconciled"] == [
+        "reconciled"
+    ]
+
+    # reproject resolves source aliases and truncates > LIMIT problems while reporting problems_truncated.
+    with writer(configured):
+        for i in range(collect_module.LIMIT + 2):
+            configured.write(f"{records.path('aliased', f'bad-{i}')}", b"{invalid-json", durable=False)
+    reproj = collect_module.reproject(configured, "aliased", dry_run=True)
+    assert reproj["failed"] == collect_module.LIMIT + 2
+    assert len(cast("list[object]", reproj["problems"])) == collect_module.LIMIT
+    assert reproj["problems_truncated"] is True
+
+    # next_due returns now when last has an error without a last_run anchor.
+    job = collect_module.load(configured).jobs["sample"]
+    assert collect_module.next_due(job, {"last_error": "boom"}, NOW) == NOW

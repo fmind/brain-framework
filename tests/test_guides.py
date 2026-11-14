@@ -23,7 +23,7 @@ REPLACE = re.compile(r"replace the `([^`]+)` entry under `([^`]+):`")
 POINT = re.compile(r"In `([^`]+)`, point the (\w+) line")
 INSTALL = "uv tool install --python 3.14 brain-framework"
 REPOSITORY = "https://raw.githubusercontent.com/fmind/brain-framework/"
-QUEUE_ERROR = re.compile(r"`(assistant queue [^`]*)`")
+QUEUE_ERROR = re.compile(r"`(runtime (?:queue|database) [^`]*)`")
 
 
 def _merge(config: Path, fragment: str, prose: str) -> None:

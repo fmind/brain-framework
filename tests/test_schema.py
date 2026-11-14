@@ -32,15 +32,15 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize(
     "value",
     [
-        {"version": 9, "name": "brain\n"},
-        {"version": 9, "name": "brain", "sensors": {"Invalid Name": {"nonsense": True}}},
-        {"version": 9, "name": "brain", "sensors": {"demo\n": {"command": ["echo"]}}},
-        {"version": 9, "name": "brain", "routines": {"bad--slug": {"command": ["echo"]}}},
-        {"version": 9, "name": "brain", "brains": {"team": {"path": "../team"}}},
-        {"version": 9, "name": "brain", "fields": {"Invalid Name": {"description": "Kind"}}},
-        {"version": 9, "name": "brain", "fields": {"owner": {"description": "Owner", "type": "identity"}}},
+        {"version": 10, "name": "brain\n"},
+        {"version": 10, "name": "brain", "jobs": {"Invalid Name": {"nonsense": True}}},
+        {"version": 10, "name": "brain", "jobs": {"demo\n": {"run": ["echo"]}}},
+        {"version": 10, "name": "brain", "jobs": {"bad_slug": {"run": ["echo"]}}},
+        {"version": 10, "name": "brain", "brains": {"team": {"path": "../team"}}},
+        {"version": 10, "name": "brain", "fields": {"Invalid Name": {"description": "Kind"}}},
+        {"version": 10, "name": "brain", "fields": {"owner": {"description": "Owner", "type": "identity"}}},
         *(
-            {"version": 9, "name": "brain", "fields": {"owner": {"description": "Owner", **extra}}}
+            {"version": 10, "name": "brain", "fields": {"owner": {"description": "Owner", **extra}}}
             for extra in (
                 {"targets": []},
                 {"targets": ["Repo:"]},
@@ -49,13 +49,9 @@ ROOT = Path(__file__).resolve().parents[1]
                 {"broader": "Owner"},
             )
         ),
-        {
-            "version": 9,
-            "name": "brain",
-            "sensors": {"demo": {"command": ["echo"], "mode": "snapshot", "reconcile": {"refresh": 1, "lookback": 1}}},
-        },
+        {"version": 10, "name": "brain", "jobs": {"demo": {"run": ["echo"], "emit": "invalid"}}},
         *(
-            {"version": 9, "name": "brain", "watch": watch}
+            {"version": 10, "name": "brain", "watch": watch}
             for watch in (
                 [],
                 {"interval": 0},
@@ -68,13 +64,13 @@ ROOT = Path(__file__).resolve().parents[1]
             )
         ),
         {"name": "brain"},
-        {"version": 8, "name": "brain"},
+        {"version": 9, "name": "brain"},
         *(
-            {"version": 9, "name": "brain", "sensors": {"demo": {"command": [executable]}}}
+            {"version": 10, "name": "brain", "jobs": {"demo": {"run": [executable]}}}
             for executable in ("/usr/bin/env", "../escape.sh", "sensors/../x", "sensors//x", "bin/x", ".", "a{b")
         ),
-        {"version": 9, "name": "brain", "routines": {"digest": {"command": ["routines/./digest.py"]}}},
-        {"version": 9, "name": "brain", "sensors": []},
+        {"version": 10, "name": "brain", "jobs": {"digest": {"run": ["routines/./digest.py"]}}},
+        {"version": 10, "name": "brain", "jobs": []},
     ],
 )
 def test_editor_and_runtime_reject_invalid_structure(value: dict) -> None:
@@ -87,19 +83,19 @@ def test_editor_and_runtime_reject_invalid_structure(value: dict) -> None:
     ("kind", "data", "expected"),
     [
         *(
-            ("brain", f"version: 9\nname: brain\n{key}:\n  # demo: {{}}\n".encode(), {"version": 9, "name": "brain"})
-            for key in ("fields", "sensors", "watch", "routines", "channels", "assistants")
+            ("brain", f"version: 10\nname: brain\n{key}:\n  # demo: {{}}\n".encode(), {"version": 10, "name": "brain"})
+            for key in ("fields", "defaults", "watch", "validate", "jobs")
         ),
         (
             "brain",
             (
-                b"version: 9\nname: brain\nassistants:\n  helper:\n    prompt: prompts/helper.md\n    command: [echo]\n"
-                b"    schedules:\n      # daily: {at: '09:00'}\n"
+                b"version: 10\nname: brain\njobs:\n  helper:\n    prompt: prompts/helper.md\n    harness: [echo]\n"
+                b"    on:\n      # every: 3600\n"
             ),
             {
-                "version": 9,
+                "version": 10,
                 "name": "brain",
-                "assistants": {"helper": {"prompt": "prompts/helper.md", "command": ["echo"]}},
+                "jobs": {"helper": {"prompt": "prompts/helper.md", "harness": ["echo"]}},
             },
         ),
         ("registry", b"brains:\n  # brain:\n  #   path: ~/brain\n", {}),
@@ -125,15 +121,33 @@ def test_a_mapping_whose_entries_are_all_commented_out_is_empty(kind: Kind, data
             "fields.owner.broader: name another declared relation without its own broader",
         ),
         (
-            {"sensors": {"digest": {"command": ["echo"]}}, "routines": {"digest": {"command": ["echo"]}}},
-            "sensors.digest and routines.digest: sensor and routine names must be distinct",
+            {
+                "jobs": {
+                    "a": {"run": ["echo"], "emit": "records", "source": "shared"},
+                    "b": {"run": ["echo"], "emit": "records", "source": "shared"},
+                }
+            },
+            "jobs.b: record source shared is already used by jobs.a",
+        ),
+        (
+            {
+                "jobs": {
+                    "demo": {
+                        "run": ["echo"],
+                        "emit": "records",
+                        "mode": "snapshot",
+                        "reconcile": {"every": 1, "lookback": 1},
+                    }
+                }
+            },
+            "jobs.demo: reconcile requires emit: records and mode: window",
         ),
     ],
-    ids=["target-prefix", "missing-broader", "program-name"],
+    ids=["target-prefix", "missing-broader", "record-source", "snapshot-reconcile"],
 )
 def test_invalid_literal_values_and_shared_names_are_located(brain: Store, value: dict, message: str) -> None:
-    # JSON is YAML: the configuration names the key to fix among several fields or programs.
-    brain.write("bf.yaml", json.dumps({"version": 9, "name": "fixture", **value}).encode())
+    # JSON is YAML: the configuration names the key to fix among several fields or jobs.
+    brain.write("bf.yaml", json.dumps({"version": 10, "name": "fixture", **value}).encode())
     with pytest.raises(Error, match=rf"^invalid bf\.yaml: {re.escape(message)}"):
         load(brain)
 
@@ -146,11 +160,15 @@ def test_invalid_literal_values_and_shared_names_are_located(brain: Store, value
         {"fields": {"owner": {"description": "Owner", "relation": True}}},
         {"fields": {"owner": {"description": "Owner", "examples": ["person:alice"]}}},
         {"fields": {"owner": {"description": "Owner", "path": "/attributes/owner"}}},
-        {"sensors": {"demo": {"command": ["echo"], "fields": {"owner": {"path": "/a"}}}}},
+        {"jobs": {"demo": {"run": ["echo"], "fields": {"owner": {"path": "/a"}}}}},
+        {"sensors": {}},
+        {"routines": {}},
+        {"assistants": {}},
+        {"channels": {}},
     ],
 )
 def test_editor_rejects_legacy_field_and_mapping_keys(legacy: dict) -> None:
-    value = {"version": 9, "name": "brain", **legacy}
+    value = {"version": 10, "name": "brain", **legacy}
     with pytest.raises(ValidationError):
         Config.model_validate(value)
     assert not Draft202012Validator(Config.model_json_schema()).is_valid(value)
@@ -161,7 +179,7 @@ def test_editor_rejects_legacy_field_and_mapping_keys(legacy: dict) -> None:
 def test_evaluation_rejects_blank_labels_and_assertions(brain: Store, field: str, blank: str) -> None:
     case = {"name": "missing-evidence", "query": "absentneedle947ab3", "text": ["required evidence"]}
     case[field] = blank if field == "name" else [blank]
-    brain.write("evals/retrieval.yaml", json.dumps({"version": 9, "cases": [case]}).encode())
+    brain.write("evals/retrieval.yaml", json.dumps({"version": 10, "cases": [case]}).encode())
     with pytest.raises(Error, match=r"evals/retrieval.yaml"):
         evaluate(brain)
 
@@ -186,7 +204,7 @@ def test_yaml_other_than_utf8_is_named_not_decoded(encoding: str) -> None:
 
 
 LIBYAML = (
-    r"^reading YAML needs PyYAML built with libyaml, which this installation lacks; .*: "
+    r"reading YAML needs PyYAML built with libyaml, which this installation lacks; .*: "
     r"uv tool install --reinstall --python 3\.14 brain-framework, or 'brain-framework\[mcp\]' with MCP$"
 )
 
@@ -195,24 +213,30 @@ def test_yaml_is_read_only_through_libyaml(brain: Store, monkeypatch: pytest.Mon
     # PyYAML built without libyaml lacks CSafeLoader: its pure-Python parser is slower and rejects some YAML libyaml
     # accepts, so BF names the reinstall instead of loading a file differently.
     brain.write("projects/plan.md", b"---\ntype: project\n---\n# Plan\n")
-    brain.write("evals/retrieval.yaml", b"version: 9\ncases: [{name: plan, query: plan, expect: [projects/plan.md]}]\n")
+    brain.write(
+        "evals/retrieval.yaml", b"version: 10\ncases: [{name: plan, query: plan, expect: [projects/plan.md]}]\n"
+    )
     monkeypatch.delattr(yaml, "CSafeLoader")
     # A configuration this process already validated is reused by its digest: drop them, as a new process would.
     monkeypatch.setattr("bf.config._LOADED", {})
-    # bf.yaml, the registry, eval suites and note frontmatter all parse through yaml_object; none names its file.
+    # bf.yaml, the registry, eval suites and note frontmatter all parse through yaml_object and name their file.
     for name, data, kwargs in (
-        ("bf.yaml", b"version: 9\nname: brain\n", {}),
+        ("bf.yaml", b"version: 10\nname: brain\n", {}),
         ("config.yaml", b"brains: {}\n", {}),
-        ("evals/retrieval.yaml", b"version: 9\n", {}),
+        ("evals/retrieval.yaml", b"version: 10\n", {}),
         ("projects/plan.md", b"type: project\n", {"line": 2}),
     ):
-        with pytest.raises(Error, match=LIBYAML):
+        with pytest.raises(Error, match=rf"^{re.escape(name)}: {LIBYAML}"):
             yaml_object(data, name, **kwargs)
-    for arguments in (["search", "plan"], ["validate"], ["eval"]):
+    for arguments, prefix in (
+        (["search", "plan"], "bf.yaml"),
+        (["validate"], "bf.yaml"),
+        (["eval"], "evals/retrieval.yaml"),
+    ):
         result = CliRunner().invoke(app, [*arguments, "--brain", str(brain.root)])
         assert result.exit_code == 1, arguments
-        assert re.match(LIBYAML, str(result.exception)), arguments
-    with pytest.raises(Error, match=LIBYAML):
+        assert re.match(rf"^{re.escape(prefix)}: {LIBYAML}", str(result.exception)), arguments
+    with pytest.raises(Error, match=rf"^projects/plan\.md: {LIBYAML}"):
         markdown.parse("projects/plan.md", brain.read("projects/plan.md"))
 
 
@@ -234,31 +258,26 @@ main()
         if code:
             assert not result.stdout
             assert len(result.stderr.splitlines()) == 1
-            assert re.match(LIBYAML, result.stderr.removeprefix("bf: ").rstrip("\n"))
+            assert re.match(rf"^bf\.yaml: {LIBYAML}", result.stderr.removeprefix("bf: ").rstrip("\n"))
 
 
-@pytest.mark.parametrize(
-    ("kind", "program", "fix"),
-    [
-        ("sensors", "{command: [echo]}", "rename the sensor and move memories/bf/ to its new name"),
-        ("routines", "{command: [echo]}", "rename the routine$"),
-        ("channels", "{send: {command: [echo]}}", "rename the channel$"),
-        ("assistants", "{command: [echo], prompt: prompts/a.md}", "rename the assistant and move memories/bf/"),
-    ],
-)
-def test_no_program_is_named_bf(brain: Store, kind: str, program: str, fix: str) -> None:
-    # A sensor's or assistant's name is its records' source, whose `bf:ID` refs would read as BF addresses; one
-    # rule covers the whole program namespace.
-    brain.write("bf.yaml", f"version: 9\nname: fixture\n{kind}:\n  bf: {program}\n".encode())
-    with pytest.raises(Error, match=rf"^invalid bf\.yaml: {kind}\.bf: the name bf is reserved for BF addresses; {fix}"):
+def test_no_program_is_named_bf(brain: Store) -> None:
+    # A job's name (or explicit record source) is its records' source, whose `bf:ID` refs would read as BF addresses.
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  bf: {run: [echo]}\n")
+    with pytest.raises(
+        Error, match=r"^invalid bf\.yaml: jobs\.bf: the name bf is reserved for BF addresses; rename the job$"
+    ):
         load(brain)
     result = CliRunner().invoke(app, ["validate", "--brain", str(brain.root)])
     assert result.exit_code == 1
-    assert f"{kind}.bf: the name bf is reserved" in str(result.exception)
+    assert "jobs.bf: the name bf is reserved" in str(result.exception)
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  mail: {run: [echo], emit: records, source: bf}\n")
+    with pytest.raises(Error, match=r"^invalid bf\.yaml: jobs\.mail\.source: bf is reserved for BF addresses$"):
+        load(brain)
     # Only the exact name: a longer one starting with bf stays valid.
     for name in ("bfx", "bf-notes"):
-        brain.write("bf.yaml", f"version: 9\nname: fixture\n{kind}:\n  {name}: {program}\n".encode())
-        assert name in getattr(load(brain), kind)
+        brain.write("bf.yaml", f"version: 10\nname: fixture\njobs:\n  {name}: {{run: [echo]}}\n".encode())
+        assert name in load(brain).jobs
 
 
 def test_starter_writes_minimal_config_without_boilerplate(tmp_path: Path) -> None:
@@ -267,12 +286,11 @@ def test_starter_writes_minimal_config_without_boilerplate(tmp_path: Path) -> No
     assert result.exit_code == 0, result.output
     text = (root / "bf.yaml").read_text()
     document = yaml_object(text.encode())
-    assert document == {"version": 9, "name": "new"}
+    assert document == {"version": 10, "name": "new"}
     assert "bf.schema.json" in text
     config = load(Store(root))
     assert not config.ontology
-    assert not config.sensors
-    assert not config.routines
+    assert not config.jobs
 
 
 @pytest.mark.parametrize("kind", get_args(Kind))
@@ -347,7 +365,7 @@ def test_evaluation_structure_matches_editor_validation(case: dict, valid: bool)
 )
 def test_evaluation_suites_declare_their_format(brain: Store, header: str, problem: str) -> None:
     brain.write("evals/retrieval.yaml", f"{header}cases:\n- name: absent\n  query: word\n  empty: true\n".encode())
-    with pytest.raises(Error, match=rf"^evals/retrieval\.yaml {problem}; this release reads version: 9"):
+    with pytest.raises(Error, match=rf"^evals/retrieval\.yaml {problem}; this release reads version: 10"):
         evaluate(brain)
 
 
@@ -357,25 +375,25 @@ def test_all_evaluation_cases_are_checked_before_retrieval(brain: Store, monkeyp
 
     monkeypatch.setattr("bf.evaluate.search", unexpected)
     valid = {"name": "valid", "query": "word", "text": ["answer"]}
-    brain.write("evals/a.yaml", json.dumps({"version": 9, "cases": [valid]}).encode())
-    brain.write("evals/z.yaml", json.dumps({"version": 9, "cases": [{**valid, "read": ""}]}).encode())
+    brain.write("evals/a.yaml", json.dumps({"version": 10, "cases": [valid]}).encode())
+    brain.write("evals/z.yaml", json.dumps({"version": 10, "cases": [{**valid, "read": ""}]}).encode())
     with pytest.raises(Error, match=r"evals/z.yaml.*use either query or read"):
         evaluate(brain)
     with pytest.raises(ValidationError, match="duplicate evaluation case names"):
-        Suite.model_validate({"version": 9, "cases": [valid, valid]})
+        Suite.model_validate({"version": 10, "cases": [valid, valid]})
 
 
 @pytest.mark.parametrize(
     ("data", "problem"),
     [
-        (b"version: 9\nname: &name brain\n", "anchors and aliases are not supported"),
-        (b"version: 9\nname: brain\nname: other\n", "keys must be unique strings at line 3"),
-        (b"version: 9\nname: brain\n---\nname: other\n", "invalid YAML at line 3"),
-        (b"version: 9\nname: brain\nextra: !!python/object/apply:os.system [PRIVATE]\n", "invalid YAML at line 3"),
-        (b"version: 9\nname: brain\nsensors: !!bool PRIVATE\n", "invalid YAML"),
-        (b"version: 9\nname: brain\nsensors: " + b"[" * 33 + b"]" * 33, "structure exceeds its limit"),
-        (b"version: 9\nname: brain\nextra: [" + b"0," * 20_000 + b"]", "structure exceeds its limit"),
-        (b"version: 9\nname: brain\n#" + b"x" * (1 << 20), "exceeds 1048576 bytes"),
+        (b"version: 10\nname: &name brain\n", "anchors and aliases are not supported"),
+        (b"version: 10\nname: brain\nname: other\n", "keys must be unique strings at line 3"),
+        (b"version: 10\nname: brain\n---\nname: other\n", "invalid YAML at line 3"),
+        (b"version: 10\nname: brain\nextra: !!python/object/apply:os.system [PRIVATE]\n", "invalid YAML at line 3"),
+        (b"version: 10\nname: brain\njobs: !!bool PRIVATE\n", "invalid YAML"),
+        (b"version: 10\nname: brain\njobs: " + b"[" * 33 + b"]" * 33, "structure exceeds its limit"),
+        (b"version: 10\nname: brain\nextra: [" + b"0," * 20_000 + b"]", "structure exceeds its limit"),
+        (b"version: 10\nname: brain\n#" + b"x" * (1 << 20), "exceeds 1048576 bytes"),
     ],
     ids=["anchor", "duplicate-key", "two-documents", "python-tag", "bool-tag", "nesting", "events", "size"],
 )

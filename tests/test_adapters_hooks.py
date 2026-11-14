@@ -82,10 +82,10 @@ PROJECTS = {"page": "projects", "items": [PROJECT], "total": 1}
 HOME = {
     "page": "",
     "attention": [
-        {"kind": "sensor", "name": "github", "freshness": "overdue"},
-        {"kind": "routine", "name": "weekly-review", "freshness": "fresh", "failed": True},
-        {"kind": "assistant", "name": "assistant", "freshness": "overdue"},
-        {"kind": "channel", "name": "telegram", "freshness": "fresh", "failed": True},
+        {"kind": "job", "name": "github", "freshness": "overdue"},
+        {"kind": "job", "name": "weekly-review", "freshness": "fresh", "failed": True},
+        {"kind": "job", "name": "assistant", "freshness": "overdue"},
+        {"kind": "job", "name": "telegram", "freshness": "fresh", "failed": True},
     ],
 }
 
@@ -430,7 +430,7 @@ def test_session_context_never_prints_a_record_owner_ref(provider: Provider) -> 
 
 
 def test_session_context_bounds_the_attention_line(provider: Provider) -> None:
-    attention = [{"kind": "sensor", "name": f"source-{number}", "freshness": "never"} for number in range(7)]
+    attention = [{"kind": "job", "name": f"source-{number}", "freshness": "never"} for number in range(7)]
     install(provider, "git@github.com:fmind/brain-framework.git", home={**HOME, "attention": [*attention, 3]})
     lines = session(provider).stdout.splitlines()
     assert (
@@ -440,12 +440,12 @@ def test_session_context_bounds_the_attention_line(provider: Provider) -> None:
 
 
 def test_session_context_names_a_silent_source_only_while_it_is_otherwise_fresh(provider: Provider) -> None:
-    # 18.5.0 printed `papers fresh`. A stopped sensor falls silent too: its lateness or failure says what to repair.
+    # 18.5.0 printed `papers fresh`. A stopped job falls silent too: its lateness or failure says what to repair.
     attention = [
-        {"kind": "sensor", "name": "papers", "freshness": "fresh", "silent": True},
-        {"kind": "sensor", "name": "feeds", "freshness": "overdue", "silent": True},
-        {"kind": "sensor", "name": "mail", "freshness": "fresh", "failed": True, "silent": True},
-        {"kind": "sensor", "name": "rss", "freshness": "fresh", "degraded": True},
+        {"kind": "job", "name": "papers", "freshness": "fresh", "silent": True},
+        {"kind": "job", "name": "feeds", "freshness": "overdue", "silent": True},
+        {"kind": "job", "name": "mail", "freshness": "fresh", "failed": True, "silent": True},
+        {"kind": "job", "name": "rss", "freshness": "fresh", "degraded": True},
     ]
     install(provider, "git@github.com:fmind/brain-framework.git", home={**HOME, "attention": attention})
     lines = session(provider).stdout.splitlines()
@@ -632,20 +632,20 @@ def test_context_programs_keep_hidden_characters_visible(program: str, monkeypat
     path = ROOT / "examples" / program
     monkeypatch.syspath_prepend(path.parent)
     module = runpy.run_path(str(path))
-    assert module["plain"]("Ship\u202e it\U000e0069\u200b\x9b") == "Ship\\u202e it\\U000e0069\\u200b\\x9b"
+    assert module["plain"]("Ship\u202e it\U000e0069\u200b\x9b") == "Ship\\u202e it\\U000e0069\\u200b\\u009b"
     assert module["code"]("projects/a\u200b.md") == "`projects/a\\u200b.md`"
     # As bf replies escape them: a reader such as str.splitlines() breaks a line there.
     assert module["code"]("projects/a\u2028b\u2029.md") == "`projects/a\\u2028b\\u2029.md`"
 
 
 def test_context_programs_delegate_visible_to_the_program_kit() -> None:
-    # Context programs share `_bf.py` instead of pasting their own sanitizers.
+    # Context programs are self-contained standard-library scripts with no `_bf` dependency and define `visible`.
     for program in CONTEXT_PROGRAMS:
         source = (ROOT / "examples" / program).read_text()
         tree = ast.parse(source)
         imports = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-        assert "_bf" in imports
-        assert not [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "visible"]
+        assert "_bf" not in imports
+        assert [node.name for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "visible"]
 
 
 def test_prompt_context_mirrors_the_core_stopwords() -> None:

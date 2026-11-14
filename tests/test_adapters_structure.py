@@ -237,13 +237,16 @@ def test_incomplete_provider_snapshot_preserves_saved_records(
 ) -> None:
     script = Path(__file__).parents[1] / "examples/sensors" / adapter
     calendar = adapter == "google-calendar.py"
-    brain.write("sensors/_sensor.py", (script.parent / "_sensor.py").read_bytes())
     brain.write("sensors/demo.py", script.read_bytes())
     command = ["python3", "sensors/demo.py", *(["primary", "{{start}}", "{{end}}"] if calendar else [])]
     brain.write(
         "bf.yaml",
         yaml.safe_dump(
-            {"version": 9, "name": "fixture", "sensors": {"demo": {"mode": "snapshot", "command": command}}}
+            {
+                "version": 10,
+                "name": "fixture",
+                "jobs": {"demo": {"emit": "records", "mode": "snapshot", "run": command}},
+            }
         ).encode(),
     )
     monkeypatch.setenv(
@@ -319,7 +322,7 @@ VOCABULARY: dict[str, tuple[str, list[dict[str, object]], list[str], set[tuple[s
                 ],
             }
         ],
-        ["Acme/Widgets"],
+        ["Acme/Widgets", "{{start}}", "{{end}}"],
         {
             ("label", "label:github.com/acme/widgets/good%20first%20issue"),
             ("label", "label:github.com/acme/widgets/bug"),
@@ -339,11 +342,10 @@ def test_zero_declaration_sensors_emit_typed_relations_without_bf_yaml_fields(
     assert runner.invoke(app, ["init", str(brain), "--name", "starter"]).exit_code == 0
     config = yaml.safe_load((brain / "bf.yaml").read_text())
     assert "fields" not in config
-    config["sensors"] = {"source": {"command": ["python3", f"sensors/{adapter}", *arguments]}}
+    config["jobs"] = {"source": {"run": ["python3", f"sensors/{adapter}", *arguments], "emit": "records"}}
     (brain / "bf.yaml").write_text(yaml.safe_dump(config))
     (brain / "sensors").mkdir()
-    for name in (adapter, "_sensor.py"):
-        (brain / "sensors" / name).write_bytes((ROOT / "examples/sensors" / name).read_bytes())
+    (brain / "sensors" / adapter).write_bytes((ROOT / "examples/sensors" / adapter).read_bytes())
     provider.install(program, responses)
     collected = runner.invoke(app, ["collect", "source", "--brain", str(brain), "--since", START, "--until", END])
     assert collected.exit_code == 0, collected.output

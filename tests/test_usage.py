@@ -213,3 +213,53 @@ def test_counting_never_breaks_retrieval(brain: Store) -> None:
     (brain.root / (usage.USAGE + "-wal")).symlink_to(link)
     usage.note(brain, "search", 1, kind="none")
     assert usage.summary(brain)["7d"] == {"search": 0, "empty": 0, "read": 0}
+
+
+@pytest.mark.usefixtures("clock")
+def test_scope_variants_and_defensive_db_guards(brain: Store) -> None:
+    assert usage.scope(Query(text="x", target="person:alice", prefix="projects")) == "combined"
+    assert (
+        usage.scope(Query.model_construct(target="bf:bad", prefix="", since="", until="", undated=False)) == "identity"
+    )
+
+    # Unknown v0 schema with pre-existing table is never overwritten; unsupported versions fail closed.
+    db(brain).parent.mkdir(exist_ok=True)
+    (brain.root / ".bf").chmod(0o700)
+    with closing(sqlite3.connect(db(brain))) as connection, connection:
+        connection.execute("CREATE TABLE custom(x INTEGER)")
+    db(brain).chmod(0o600)
+    usage.note(brain, "search", 1, kind="none")
+    with closing(sqlite3.connect(db(brain))) as connection:
+        assert connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("custom",)]
+        connection.execute("PRAGMA user_version = 99")
+    usage.note(brain, "search", 1, kind="none")
+    assert usage.summary(brain, NOW)["7d"] == {"search": 0, "empty": 0, "read": 0}
+    db(brain).unlink()
+
+    # World-readable usage DB is ignored cleanly on summary reads, and mid-transaction SQL errors roll back.
+    usage.note(brain, "search", 1, kind="none")
+    db(brain).chmod(0o644)
+    assert usage.summary(brain, NOW)["7d"] == {"search": 0, "empty": 0, "read": 0}
+    db(brain).chmod(0o600)
+    with closing(sqlite3.connect(db(brain))) as connection, connection:
+        connection.execute(
+            "CREATE TRIGGER abort_write BEFORE INSERT ON usage_kinds BEGIN SELECT RAISE(ABORT, 'fail'); END"
+        )
+    before = usage.summary(brain, NOW)["7d"]
+    usage.note(brain, "search", 0, kind="folder", unmatched=["absent"])
+    assert usage.summary(brain, NOW)["7d"] == before
+
+    # Malformed dates, out-of-window 30d rows, and zero-count kind rows are handled cleanly by summary().
+    bad_day = f"{(TODAY - timedelta(days=2)):%Y-%m}-99"
+    older = (TODAY - timedelta(days=10)).isoformat()
+    with closing(sqlite3.connect(db(brain))) as connection, connection:
+        connection.execute("DROP TRIGGER abort_write")
+        for day_val in (bad_day, older):
+            connection.execute("INSERT INTO usage_days VALUES (?, 5, 1, 2)", (day_val,))
+            connection.execute("INSERT INTO usage_kinds VALUES (?, 'search', 'folder', 3, 1)", (day_val,))
+            connection.execute("INSERT INTO usage_terms VALUES (?, 'ignored', 3)", (day_val,))
+        connection.execute("INSERT INTO usage_kinds VALUES (?, 'search', 'folder', 0, 0)", (TODAY.isoformat(),))
+    assert usage.summary(brain, NOW)["7d"] == before
+    with closing(sqlite3.connect(db(brain))) as connection, connection:
+        connection.execute("DELETE FROM usage_kinds")
+    assert "kinds" not in usage.summary(brain, NOW)["7d"]

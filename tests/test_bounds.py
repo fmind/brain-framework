@@ -16,20 +16,20 @@ from typer.testing import CliRunner, Result
 from bf import cli
 from bf.cli import app
 from bf.evaluate import evaluate
-from bf.history import log_path
 from bf.models import Error, Query
 from bf.retrieve import search
+from bf.runtime import log_path
 from bf.storage import Store, writer
 from bf.validate import validate
 
 MIB = 1 << 20
-ROUTINES = b"""version: 9
+ROUTINES = b"""version: 10
 name: fixture
-routines:
+jobs:
   count:
-    command: [routines/count.sh]
+    run: [routines/count.sh]
   skip:
-    command: [routines/skip.sh]
+    run: [routines/skip.sh]
 """
 
 
@@ -64,17 +64,19 @@ def test_run_names_an_unknown_or_disabled_routine_before_reading_input(routines:
     # bf used to read the input first: an oversized or unending pipe hid the mistyped name and its suggestion.
     unknown = run(routines, "cuont", MIB + 1)
     assert unknown.exit_code == 1
-    assert "unknown routine or assistant cuont; check names in bf.yaml; did you mean count?" in str(unknown.exception)
+    assert "unknown job cuont; check jobs in bf.yaml; did you mean count?" in str(unknown.exception)
     routines.write("bf.yaml", ROUTINES.replace(b"  skip:\n", b"  skip:\n    enabled: false\n"))
     disabled = run(routines, "skip", MIB + 1)
     assert disabled.exit_code == 1
-    assert "routine skip is disabled in bf.yaml" in str(disabled.exception)
+    assert "job skip is disabled in bf.yaml; set enabled: true to run it" in str(disabled.exception)
 
 
 def test_a_routine_may_exit_without_reading_its_input(routines: Store) -> None:
     result = run(routines, "skip", MIB)
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["routines"] == [{"routine": "skip", "status": "ran"}]
+    reply = json.loads(result.stdout)
+    assert reply["job"] == "skip"
+    assert reply["status"] == "ok"
 
 
 @pytest.mark.parametrize("size", [MIB, MIB + 1])
@@ -138,7 +140,7 @@ def test_a_search_waits_two_seconds_for_a_busy_brain_then_answers_stale(brain: S
 def test_evaluation_runs_at_most_100_suites(brain: Store) -> None:
     (brain.root / "evals").mkdir()
     for number in range(101):
-        (brain.root / f"evals/suite-{number:03}.yaml").write_bytes(b"version: 9\ncases: []\n")
+        (brain.root / f"evals/suite-{number:03}.yaml").write_bytes(b"version: 10\ncases: []\n")
     with pytest.raises(Error, match="evaluation exceeds 100 suites"):
         evaluate(brain)
     # A hundred suites pass the limit, so the run reads them and rejects the first one, which has no case.

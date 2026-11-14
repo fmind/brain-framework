@@ -6,7 +6,7 @@ Standalone sensors for common providers. Copy the ones you need into a brain's `
 | ------------------------------------------------ | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | `git-history.py`                                 | `ROOT START END [--skip RELATIVE_REPO]...`                            | Commits on branches, tags and remote branches, with author and repository identities.  |
 | [`github-history.py`](github-history.md)         | `OWNER/REPO commits\|issues\|pulls START END [--branch NAME]`         | GitHub branch commits and all-age issues/PRs, with incremental refresh.                |
-| `github-issues.py`                               | `OWNER/REPO [START END]`                                              | GitHub issues updated in the window, with author, assignee and repository identities.  |
+| `github-issues.py`                               | `OWNER/REPO START END`                                                | GitHub issues updated in the window, with author, assignee and repository identities.  |
 | `local-documents.py`                             | `LABEL ROOT [--exclude GLOB]...`                                      | A snapshot of supported documents in the chosen folder.                                |
 | `highlights.py`                                  | `LABEL EXPORT.json`                                                   | Selected passages, annotations and precise source locations.                           |
 | `google-calendar.py`                             | `CALENDAR START END [--agenda-days N]`                                | Calendar events, organizer/invitee identities and an optional agenda.                  |
@@ -14,46 +14,65 @@ Standalone sensors for common providers. Copy the ones you need into a brain's `
 | `gmail-headers.py`                               | `START END [--query=SEARCH]`                                          | Gmail senders, recipients, subjects and dates with thread links; never message bodies. |
 | [Four-tool demo](../context-hub/sensors/demo.py) | `TOOL END`, where `TOOL` is `workspace`, `jira`, `github` or `gcloud` | Fictional adapter records for the four-tool walkthrough; no provider access.           |
 
-Start with the [one-file local walkthrough](../../docs/docs/getting-started.md#collect-your-first-source), which [Add a sensor](../../docs/docs/sensors.md#your-first-sensor) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). Each example imports [`_sensor.py`](_sensor.py) from the same folder. Copy `_sensor.py` and the selected script from the release tag matching `bf --version` and make the script executable, since the configuration below runs each script as a command and a download does not keep the executable bit:
+Start with the [one-file local walkthrough](../../docs/docs/getting-started.md#collect-your-first-source), which [Add a sensor](../../docs/docs/sensors.md#your-first-sensor) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). Each example is a standalone Python 3.11+ script using only the standard library. Copy the selected script from the release tag matching `bf --version` and make it executable, since the configuration below runs each script as a command and a download does not keep the executable bit:
 
 ```bash
 mkdir -p sensors
-for name in _sensor.py git-history.py; do
-  curl -fsSLo "sensors/$name" "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors/$name"
-done
+curl -fsSLo "sensors/git-history.py" "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors/git-history.py"
 chmod +x sensors/git-history.py
 ```
 
 Then merge its configuration below into `bf.yaml`. Review paths and account scope first; do not copy all sources unless you intend to run them.
 
-The [four-tool walkthrough](../context-hub/README.md) shows how differently named fields become one shared `@type`, `project` relation, and `status` attribute during collection. Its fixtures are not live integrations. Use `gh`, `gws`, `acli` or `gcloud` to implement selected provider access in a brain-owned script, as [adapt a sensor](#adapt-a-sensor) describes; the [integration table](../../docs/docs/context-hub.md#use-it-on-your-work) distinguishes reviewed examples from adapters you write.
+The [four-tool walkthrough](../context-hub/README.md) shows how differently named fields become one shared `@type`, `project` relation, and `status` attribute during collection. Its fixtures are not live integrations. Use `gh`, `gws`, `acli` or `gcloud` with [declarative `map:`](#map-json-output-without-writing-python) or selected provider access in a brain-owned script, as [adapt a sensor](#adapt-a-sensor) describes; the [integration table](../../docs/docs/context-hub.md#use-it-on-your-work) distinguishes reviewed examples from adapters you write.
 
 ```yaml
-# https://fmind.github.io/brain-framework/
-version: 9
+# https://fmind.github.io/brain-framework/docs/configuration/
+version: 10
 name: brain
-sensors:
+jobs:
   git-commits:
-    command: [sensors/git-history.py, "{{home}}/code", "{{start}}", "{{end}}"]
-    refresh: 3600
+    run: [sensors/git-history.py, "{{home}}/code", "{{start}}", "{{end}}"]
+    emit: records
+    mode: window
+    requires:
+      bins: [git]
+    on:
+      every: 3600
   google-calendar-events:
-    command: [sensors/google-calendar.py, primary, "{{start}}", "{{end}}"]
-    refresh: 3600
+    run: [sensors/google-calendar.py, primary, "{{start}}", "{{end}}"]
+    emit: records
+    mode: window
+    requires:
+      bins: [gws]
+    on:
+      every: 3600
   local-documents:
-    command: [sensors/local-documents.py, work, "{{home}}/Documents/knowledge"]
+    run: [sensors/local-documents.py, work, "{{home}}/Documents/knowledge"]
+    emit: records
     mode: snapshot
     enabled: false # select the intended folder before enabling
   highlights:
-    command: [sensors/highlights.py, reading, "{{brain}}/inputs/highlights.json"]
+    run: [sensors/highlights.py, reading, "{{brain}}/inputs/highlights.json"]
+    emit: records
     mode: snapshot
     enabled: false # select a complete export before enabling
   drive-folders:
-    command: [sensors/google-drive-folders.py]
+    run: [sensors/google-drive-folders.py]
+    emit: records
     mode: snapshot
-    refresh: 86400
+    requires:
+      bins: [gws]
+    on:
+      every: 86400
   gmail:
-    command: [sensors/gmail-headers.py, "{{start}}", "{{end}}", "--query=-category:promotions"]
-    refresh: 3600
+    run: [sensors/gmail-headers.py, "{{start}}", "{{end}}", "--query=-category:promotions"]
+    emit: records
+    mode: window
+    requires:
+      bins: [gws]
+    on:
+      every: 3600
     enabled: false # review the query before enabling
 ```
 
@@ -69,13 +88,13 @@ bf collect git-commits --since 7d --dry-run
 
 Inspect the returned samples and counts. A preview runs the sensor and may contact its provider, but does not save records. When the scope and output are correct, omit `--dry-run` to collect. Run `bf read memories/git-commits`, then pass a listed record ref to `bf read`.
 
-For scheduled window sensors, `refresh` controls the regular cadence and `overlap` protects the resume boundary. Add `reconcile: {refresh: 86400, lookback: 604800}` to revisit seven days once daily on the same source. Preview requested windows with `bf update --dry-run`; compare output bytes, elapsed seconds and changed records with `bf status`. Snapshot catalogs already replace their complete selection and cannot use `reconcile`.
+For scheduled window jobs, `on.every` controls the regular cadence and `overlap` protects the resume boundary. Add `reconcile: { every: 86400, lookback: 604800 }` to revisit seven days once daily on the same source. Preview requested windows with `bf update --dry-run`; compare output bytes, elapsed seconds and changed records with `bf status`. Snapshot catalogs already replace their complete selection and cannot use `reconcile`.
 
 ## Scope and limits
 
 GitHub history documents its scope and limits in [its guide](github-history.md#evidence-and-limits).
 
-The limits below also bound the time of each call to a provider or converter, while BF's [`timeout`](../../docs/docs/sensors.md#sensor-settings), 300 seconds by default and at most 3,600, bounds the whole run. When a large `ROOT`, many PDFs or a busy inbox fails with `program timed out after 300s`, narrow the folder or the window, or raise that sensor's `timeout`.
+The limits below also bound the time of each call to a provider or converter, while BF's [`timeout`](../../docs/docs/sensors.md#sensor-settings), 300 seconds by default and at most 3,600, bounds the whole run. When a large `ROOT`, many PDFs or a busy inbox fails with `program timed out after 300s`, narrow the folder or the window, or raise that job's `timeout`.
 
 ### Git history
 
@@ -112,20 +131,24 @@ The limits below also bound the time of each call to a provider or converter, wh
 
 - Selects events overlapping the requested interval: [Google's `timeMin` bounds event end, while `timeMax` bounds event start](https://developers.google.com/workspace/calendar/api/v3/reference/events/list). It is not a modification-time feed: reconcile past windows to revisit changed events.
 - Keeps cancellations, titled `Cancelled: SUMMARY`, so they overwrite records collected earlier.
-- Masks common credential shapes in the description and location, such as a pasted access token or `password:` pair, with the kit's [`redact`](#write-a-sensor-with-the-kit). It is best effort: keep the brain private.
+- Masks common credential shapes in the description and location, such as a pasted access token or `password:` pair, with built-in pattern redaction. It is best effort: keep the brain private.
 - An invitee entry means the person was listed, not that they attended. Participant emails become lowercase `person:email/` links.
 - Keeps at most BF's 1,000 links per event: organizer, source, attachment and agenda links first, then invitees in email order. A cut sets `attributes.participants_truncated`; `attributes.participants` keeps every address.
 - Limits: 10,000 events and 20 pages; 60 seconds per `gws` call.
 
-`--agenda-days N`, from 1 to 366, turns a run into an agenda of the events from two days before `END` through N days after it; `START` must still precede `END` but does not bound the agenda. Add it as a separate `mode: snapshot` source beside `google-calendar-events`:
+`--agenda-days N`, from 1 to 366, turns a run into an agenda of the events from two days before `END` through N days after it; `START` must still precede `END` but does not bound the agenda. Add it as a separate `mode: snapshot` job beside `google-calendar-events`:
 
 ```yaml
-# https://fmind.github.io/brain-framework/docs/sensors/
-sensors:
+# https://fmind.github.io/brain-framework/docs/configuration/
+jobs:
   google-calendar-agenda:
-    command: [sensors/google-calendar.py, primary, "{{start}}", "{{end}}", --agenda-days, "14"]
+    run: [sensors/google-calendar.py, primary, "{{start}}", "{{end}}", --agenda-days, "14"]
+    emit: records
     mode: snapshot
-    refresh: 3600
+    requires:
+      bins: [gws]
+    on:
+      every: 3600
 ```
 
 Preview it with `bf collect google-calendar-agenda --dry-run`. Expected result: each sample has an alias such as `agenda:primary/EVENT_ID` and links `calendar:primary/EVENT_ID`, the same event's identity in `google-calendar-events`. Each replacement removes events that left the range. An agenda that becomes empty, or loses more than half of its events (and more than 10) at once, for example after a long pause, trips the [removal guard](../../docs/docs/sensors.md#define-the-scope-before-adding-a-sensor) and keeps its saved records. Check the preview, then accept that one run with `bf collect google-calendar-agenda --allow-removal`.
@@ -146,37 +169,40 @@ Preview it with `bf collect google-calendar-agenda --dry-run`. Expected result: 
 - Sets `@type` to `"EmailMessage"` and asserts `sender`, `recipient`, and `cc` addresses as lowercase `person:email/` identities, thread links as `part-of` (`gmail-thread:THREAD`), and label ids as `label` (`gmail-label:ID`) directly in `relations`: `bf read gmail-label:INBOX --rel label` lists the inbox. Its alias `mid:MESSAGE-ID` ([RFC 2392](https://www.rfc-editor.org/rfc/rfc2392)) lets another tool's record name the same message.
 - Label ids are per account, like thread ids: two Gmail accounts collected into one brain share `gmail-label:INBOX`, and their own `Label_N` ids can collide. Give each account's copy its own scheme, such as `gmail-work-label:`, when that matters.
 - `url` opens the thread in the browser's default Gmail account.
-- Limits: 1,000 messages and 10 pages per window, one `gws` call per message and 60 seconds per call: keep `refresh` short so windows stay small. A message's text names every address; each relation keeps at most 1,000 identities, in input order.
+- Limits: 1,000 messages and 10 pages per window, one `gws` call per message and 60 seconds per call: keep `on.every` short so windows stay small. A message's text names every address; each relation keeps at most 1,000 identities, in input order.
 
 Preview it with `bf collect gmail --since 1d --dry-run`. Expected result: each sample's `text` starts with `Subject:`, then the `From:` and `To:` addresses, and its `relations` hold `part-of`, `label`, `sender`, `recipient`, and `cc` identities.
 
 ### GitHub issues
 
-`github-issues.py` is the smallest example built on the [sensor kit](#write-a-sensor-with-the-kit). Copy `_sensor.py` beside it:
+`github-issues.py` is a small standalone sensor calling `gh` cleanly from Python 3.11:
 
 ```bash
-for name in _sensor.py github-issues.py; do
-  curl -fsSLo "sensors/$name" "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors/$name"
-done
+curl -fsSLo "sensors/github-issues.py" "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors/github-issues.py"
 chmod +x sensors/github-issues.py
 ```
 
 ```yaml
-# https://fmind.github.io/brain-framework/docs/sensors/
-sensors:
+# https://fmind.github.io/brain-framework/docs/configuration/
+jobs:
   github-issues:
-    command: [sensors/github-issues.py, OWNER/REPO]
-    refresh: 3600
+    run: [sensors/github-issues.py, OWNER/REPO, "{{start}}", "{{end}}"]
+    emit: records
+    mode: window
+    requires:
+      bins: [gh]
+    on:
+      every: 3600
     enabled: false # replace OWNER/REPO before enabling
 ```
 
-- Selects issues of one repository whose last update falls in `[START, END)`, from BF's `BF_START` and `BF_END`; a manual run passes `START END` after `OWNER/REPO`. Pull requests stay out.
+- Selects issues of one repository whose last update falls in `[START, END)` passed explicitly as arguments after `OWNER/REPO`. Pull requests stay out.
 - Calls `gh issue list --search updated:...` with the owner's gh login, from `/`. GitHub's search index can lag a few minutes behind an edit: keep the default 300-second `overlap`, or add `reconcile`, so a late issue is collected in a later window.
-- Saves the title, `@type: "Issue"`, status (`open` or `closed`, with `attributes.reason` such as `completed`), labels and body. It masks common credential shapes in the body with the kit's `redact`, which is best effort: keep the brain private.
+- Saves the title, `@type: "Issue"`, status (`open` or `closed`, with `attributes.reason` such as `completed`), labels and body. It masks common credential shapes in the body, which is best effort: keep the brain private.
 - Asserts the repository as lowercase `repo:github.com/OWNER/REPO` and accounts as lowercase `person:github.com/LOGIN` directly in `relations` (`author`, `assignee`, `repository`). Declare `person:github.com/LOGIN` as an alias on a person's note to join it with their `person:email/` identity.
 - Asserts each label as lowercase `label:github.com/OWNER/REPO/NAME` in `relations["label"]`, with the name percent-encoded, such as `label:github.com/acme/widgets/good%20first%20issue`, while `attributes.labels` keeps the names as GitHub shows them.
-- Claims the alias `github:OWNER/REPO/issues/N`, lowercased like the id, as `github-history.py issues` does: collect a repository's issues with one of the two sensors, or the alias becomes ambiguous.
-- Limits: 500 updated issues per window and 16 MiB from `gh`, 60 seconds per call. A busier window fails and keeps saved records: shorten `refresh`.
+- Claims the alias `github:OWNER/REPO/issues/N`, lowercased like the id, as `github-history.py issues` does: collect a repository's issues with one of the two jobs, or the alias becomes ambiguous.
+- Limits: 500 updated issues per window and 16 MiB from `gh`, 60 seconds per call. A busier window fails and keeps saved records: shorten `on.every`.
 
 Preview it with `bf collect github-issues --since 7d --dry-run`. Expected result: each sample's `id` is `OWNER/REPO/issues/N`, its `text` starts with `Repository:` and its `relations` hold `repo:github.com/` and `person:github.com/` identities.
 
@@ -213,22 +239,85 @@ Preview it with `bf collect github-issues --since 7d --dry-run`. Expected result
 
 `LABEL` is a stable, lowercase scope label of up to 64 characters, starting with a letter; it prefixes every record id, as in `highlights:reading/brief-clarity`. These fields are supplied provenance, not verified facts. Unknown fields and duplicate keys fail. As a snapshot, a new export replaces the whole source: supply the complete selection.
 
-## Write a sensor with the kit
+## Map JSON output without writing Python
 
-[`_sensor.py`](_sensor.py) is a standard-library helper file to copy beside your own sensors, not a package to install: `import _sensor` works from any script in the same folder. Read it once; it then belongs to your brain like the sensors that import it. It provides:
+When a CLI already returns clean JSON, JSONL, or one object, `map:` extracts records directly from RFC 6901 JSON Pointers in `bf.yaml` (`items`, `id`, `@type`, `title`, `text`/`body`, `url`, `created`/`time`, `updated`, `relations`, and `attributes`). Transforms (`{path, prefix, lower}`) normalize identifiers, and `/*/` fans out across arrays:
 
-- `window()`, `state_dir()`, `load_state(name, default)` and `save_state(name, data)`: the run's `[START, END)` from `BF_START` and `BF_END`, and atomic JSON cursor files in the private, machine-local folder `BF_STATE_DIR` names. That folder can disappear: treat an empty one as a first run.
-- `run(argv, timeout=, max_bytes=)` and `fetch(url, timeout=, max_bytes=)` with `fetch_json`: a bounded provider CLI started from `/` without a shell, and a bounded HTTPS GET that refuses redirects to another host or to plain HTTP. Neither echoes provider output; provider failures raise `ProviderError` (carrying `.status` on nonzero exit) and validation failures raise `InvalidError`.
-- `secret(path)`: a credential read from a private regular file you own that only you can read, such as with mode `600`, outside the brain and at most 64 KiB, with one trailing newline removed; errors never quote its content ([credentials](../../docs/docs/sensors.md#credentials)).
-- `person(email)`, `account(host, login)`, `repo(host, owner, name)` and `git_remote_identity(url)`: lowercase, percent-encoded identities (including credential-free HTTPS and `git@` SSH remotes), or `""` when BF would reject one.
-- `line(value, fallback)`, `reference(value)`, `record(id, title, ...)` and `emit(records)`: records normalized to BF's [limits](../../docs/docs/limits.md#size-bounds), such as one-line titles, valid URLs, U+FFFD for a lone UTF-16 surrogate outside the id, optional `item_type` (`@type`), validated `relations`, and at most 1,000 links or targets per relation, printed as one JSON array; duplicate ids fail. A sensor that tolerates a failed feed or account counts it first and calls `emit(records, missed=1, of=3)`, which [reports what it missed](../../docs/docs/sensors.md#report-partial-coverage); name the missed parts on stderr.
-- `redact(text)`: a best-effort mask for common credential shapes, such as bearer tokens, GitHub and AWS keys, private key blocks and `password=` pairs.
-- `cli(fn, prefix, hint)`, `main(collect, failure)` and `fail(message)`: exit 1 with nothing on stdout and one content-free stderr line on `ProviderError`, `InvalidError`, `OSError`, `UnicodeError` or unexpected failures, so BF keeps the saved records.
+```yaml
+# https://fmind.github.io/brain-framework/docs/configuration/
+version: 10
+name: brain
+jobs:
+  highlights-mapped:
+    run: [cat, inputs/highlights.json]
+    emit: records
+    mode: snapshot
+    map:
+      items: /highlights
+      id:
+        path: /id
+        prefix: "reading/"
+      "@type": Highlight
+      title: /title
+      text: /selection
+      url: /source_url
+      created: /captured_at
+      relations:
+        source-document: /source_url
+      attributes:
+        annotation: /annotation
+        locator: /locator
+        source_date: /source_date
+  github-issues-mapped:
+    run:
+      - gh
+      - issue
+      - list
+      - --repo
+      - OWNER/REPO
+      - --state
+      - all
+      - --limit
+      - "100"
+      - --json
+      - number,title,body,state,author,labels,createdAt,updatedAt,url
+    emit: records
+    mode: snapshot
+    requires:
+      bins: [gh]
+    on:
+      every: 3600
+    enabled: false # replace OWNER/REPO; use github-issues.py if label names hold spaces
+    map:
+      id:
+        path: /number
+        prefix: "OWNER/REPO/issues/"
+      "@type": Issue
+      title: /title
+      text: /body
+      url: /url
+      created: /createdAt
+      updated: /updatedAt
+      relations:
+        author:
+          path: /author/login
+          prefix: "person:github.com/"
+          lower: true
+        label:
+          path: /labels/*/name
+          prefix: "label:github.com/OWNER/REPO/"
+          lower: true
+      attributes:
+        number: /number
+        status:
+          path: /state
+          lower: true
+```
 
-Use common relation names directly in `relations` (such as `author`, `repository`, `part-of`, or `label`) without requiring `bf.yaml` declarations. [`github-issues.py`](github-issues.py) shows the whole pattern in about 120 lines.
+Use declarative `map:` when the provider CLI already emits clean data within BF bounds; write a standalone script when you need pagination loops, percent-encoding, strict window filtering, or credential redaction.
 
 ## Adapt a sensor
 
-Each script needs only Python 3.11 or later and calls its provider CLI, which owns the credentials, without a shell and from `/`: `gws` loads a `.env` file from its working directory or any parent folder, so one in the brain or above it could change the account a sensor collects from. It prints one JSON array in the [record format](../../docs/docs/schema.md#record-schema), keeping each record within BF's limits, or, when anything fails or a page is missing, exits nonzero with nothing on stdout and one content-free line on stderr, so BF keeps the saved records. Keep these behaviors when you adapt a script, and test them with fake provider output. `{{start}}` and `{{end}}` are timezone-aware bounds of a half-open window. A sensor emits `@type`, `relations`, and `attributes` (never `fields`); `updated`, `observed` and `partial` are [reserved attribute keys](../../docs/docs/schema.md#record-revisions-and-provenance), such as Drive's `modifiedTime` stored in `attributes.updated`.
+Each script needs only Python 3.11 or later and calls its provider CLI, which owns the credentials, without a shell and from `/`: `gws` loads a `.env` file from its working directory or any parent folder, so one in the brain or above it could change the account a sensor collects from. Pass time windows (`{{start}}`, `{{end}}`) and optional cursors (`{{cursor}}`) explicitly in `run:`. The script prints one JSON array (or JSONL) in the [record format](../../docs/docs/schema.md#record-schema), keeping each record within BF's limits, or, when anything fails or a page is missing, exits nonzero with nothing on stdout and one content-free line on stderr, so BF keeps the saved records. Keep these behaviors when you adapt a script, and test them with fake provider output. `{{start}}` and `{{end}}` are timezone-aware bounds of a half-open window. A sensor emits `@type`, `relations`, and `attributes` (never `fields`); `updated`, `observed` and `partial` are [reserved attribute keys](../../docs/docs/schema.md#record-revisions-and-provenance), such as Drive's `modifiedTime` stored in `attributes.updated`.
 
 Typed edges work directly with zero `bf.yaml` configuration: pass `relations={"author": ..., "repository": ...}` (or `part-of`, `label`, `assignee`, `organizer`, `attendee`, `participant`, `sender`, `recipient`, `cc`) with valid explicit identities (`scheme:value` or `bf://`). Declare optional `fields:` entries in `bf.yaml` only when adding `description`, `broader`, or `targets` prefix constraints; see [schema configuration](../../docs/docs/schema.md).

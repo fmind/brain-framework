@@ -135,18 +135,18 @@ record = {
 print(json.dumps([record]))
 ```
 
-A new brain has no `sensors:` key. Add this one at the top level of `bf.yaml`:
+A new brain has no `jobs:` key. Add this one at the top level of `bf.yaml`:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
-sensors:
+jobs:
   brief:
-    command: [uv, run, --no-project, --python, "3.14", sensors/brief.py]
+    run: [uv, run, --no-project, --python, "3.14", sensors/brief.py]
+    emit: records
     mode: snapshot
-    refresh: 0
 ```
 
-`mode: snapshot` treats stdout as the full catalog, `refresh: 0` keeps runs manual, and `attributes.kind` classifies the item ([record format](schema.md#record-schema)):
+`emit: records` stores collected items under `memories/`, `mode: snapshot` treats stdout as the full catalog, and omitting `on:` keeps runs manual. `attributes.kind` classifies the item ([record format](schema.md#record-schema)):
 
 ```bash
 bf collect brief
@@ -206,11 +206,11 @@ Read `brief:website-brief` and update the project to clear the flag. [Add a sens
 
 ## Choose your next step
 
-| Goal                                 | Guide                                                                |
-| ------------------------------------ | -------------------------------------------------------------------- |
-| Understand the model                 | [Core concepts](concepts.md)                                         |
-| Author notes and track work sessions | [Write notes and actions](brain.md)                                  |
-| Connect an agent and install `/bf`   | `bf skill install --global`, then [Agent workflows](agents.md)       |
-| Collect sources and watch schedules  | [Add a sensor](sensors.md) and [Watch and schedule](schedule.md)     |
-| Wake your harness on new evidence    | [Assistants](prompts.md) and [Four-tool walkthrough](context-hub.md) |
-| Check health or troubleshoot         | [Troubleshooting](troubleshooting.md)                                |
+| Goal                                 | Guide                                                                      |
+| ------------------------------------ | -------------------------------------------------------------------------- |
+| Understand the model                 | [Core concepts](concepts.md)                                               |
+| Author notes and track work sessions | [Write notes and actions](brain.md)                                        |
+| Connect an agent and install `/bf`   | `bf skill install --global`, then [Agent workflows](agents.md)             |
+| Collect sources and watch schedules  | [Add a sensor](sensors.md) and [Watch and schedule](schedule.md)           |
+| Wake your harness on new evidence    | [Jobs and prompts](prompts.md) and [Four-tool walkthrough](context-hub.md) |
+| Check health or troubleshoot         | [Troubleshooting](troubleshooting.md)                                      |

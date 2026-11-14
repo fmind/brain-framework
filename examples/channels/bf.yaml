@@ -1,35 +1,32 @@
 # https://fmind.github.io/brain-framework/docs/channels/
-version: 9
+version: 10
 name: channel-demo
-channels:
+jobs:
   local:
-    send:
-      command: [python3, channels/local.py, send]
-    read:
-      command: [python3, channels/local.py, read, "{{start}}", "{{end}}"]
-    stream:
-      command: [python3, channels/local.py, stream]
+    run: [python3, channels/local.py, stream]
+    emit: messages
+    on: { daemon: true }
+    send: [python3, channels/local.py, send]
+  local-poll:
+    run: [python3, channels/local.py, read, "{{start}}", "{{end}}"]
+    emit: messages
   # The walkthrough's scout posts its proposals here, and its actor reads the owner's reply.
   owner-chat:
-    send:
-      command: [python3, channels/local.py, send]
-    # A stand-in for the owner's chat: printf answers every read with the owner's fictional reply, "do 2", in the
-    # thread where the fixture puts proactive posts, dated at the start of the read window.
-    read:
-      command:
-        [
-          printf,
-          '{"messages":[{"id":"reply-1","sender":"fictional-owner","conversation":"proactive-thread","time":"%s","text":"do 2"}]}',
-          "{{start}}",
-        ]
-assistants:
+    run:
+      [
+        printf,
+        '{"messages":[{"id":"reply-1","sender":"fictional-owner","conversation":"proactive-thread","time":"%s","text":"do 2"}]}',
+        "{{start}}",
+      ]
+    emit: messages
+    on: { every: 1s }
+    send: [python3, channels/local.py, send]
   personal:
     prompt: prompts/personal.md
     # A deterministic stand-in for an agent CLI; no model or network access.
-    command: [printf, "Acknowledged."]
-    # A message is answered in its own conversation; scheduled and manual runs post here.
-    inputs:
-      - channel: { name: local, mode: stream }
+    harness: [printf, "Acknowledged."]
+    emit: message
     post: local
-    schedules:
-      review: { every: 1800 }
+    on:
+      - { every: 30m }
+      - { event: { kind: [channel.received, message.received], source: local } }

@@ -16,7 +16,7 @@ from bf.storage import Store
 PROJECTION = (42, "e8a86551037824399c0aede14a304080879cff44ec397e045aee7b04278c4253")
 # Fixed input covering what indexing projects: notes, sections, tasks, links, claims, facts, records and problems.
 BRAIN = {
-    "bf.yaml": """version: 9
+    "bf.yaml": """version: 10
 name: golden
 fields:
   depends-on: {description: Needs review when the target changes.}

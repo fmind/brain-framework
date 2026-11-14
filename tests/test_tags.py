@@ -114,7 +114,10 @@ def test_invalid_tags_fail_validation_without_leaking_content(brain: Store, tag:
 
 
 def test_tag_searches_cover_no_collected_source(brain: Store) -> None:
-    brain.write("bf.yaml", b'version: 9\nname: fixture\nsensors:\n  mail:\n    command: ["fake"]\n    refresh: 3600\n')
+    brain.write(
+        "bf.yaml",
+        b'version: 10\nname: fixture\njobs:\n  mail:\n    run: ["fake"]\n    emit: records\n    on:\n      every: 3600\n',
+    )
     tag = "bf://fixture/tags/retention"
     # Tags hold notes alone: neither a tag scope nor a tag search covers a source, even a never-collected one.
     for query in (Query(text="zzabsent", **pages.scope(tag)), Query(text=tag)):

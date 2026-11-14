@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/docs/checks/
-version: 9
+version: 10
 cases:
   - name: shared-project-connects-four-tools
     read: project:new-website

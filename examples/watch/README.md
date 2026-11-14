@@ -1,6 +1,6 @@
 # Watch an offline brain
 
-This fictional example uses only Python and local files. `calendar` changes every 30 seconds, `git` stays unchanged, and `unavailable` intentionally exits 1. No provider, account or network is used. The short refresh intervals are for the demo.
+This fictional example uses only Python and local files. `calendar` changes every 30 seconds, `git` stays unchanged, and `unavailable` intentionally exits 1. No provider, account or network is used. The short schedule intervals are for the demo.
 
 With `bf` installed, retrieve the example from the release matching your installation and copy it into a disposable directory:
 
@@ -33,7 +33,7 @@ bf schema
 
 Expect a JSON Schema with `title: Config` and a `watch` property referencing `WatchSettings`, whose `interval` defaults to 60 seconds with a minimum of 5. The example overrides that default to 5. Unknown settings and invalid values fail before any program starts.
 
-Within the first cycle, `calendar` and `git` each show one added record (`1/0/0`); `unavailable` shows `failed`, and manual/disabled sensors do not run. The failed sensor does not rerun every five-second cycle: a failure waits 1, 2, 4… minutes before its retry, never longer than its `refresh`, so this 60-second demo sensor retries once a minute and its Next due column shows that retry time. After 30 seconds the calendar record shows one update (`0/1/0`). Use `j`/`k` or arrows to select a row, Tab to filter attention, `?` for help, Space to pause future checks and `q` to cancel the active update and quit. Nothing is installed in the background. The [scheduling guide](../../docs/docs/schedule.md#watch-collection) shows this dashboard sorted by state.
+Within the first cycle, `calendar` and `git` each show one added record (`1/0/0`); `unavailable` shows `failed`, and manual/disabled jobs do not run. The failed job does not rerun every five-second cycle: a failure waits 1, 2, 4… minutes before its retry, never longer than its `on.every` interval, so this 60-second demo job retries once a minute and its Next due column shows that retry time. After 30 seconds the calendar record shows one update (`0/1/0`). Use `j`/`k` or arrows to select a row, Tab to filter attention, `?` for help, Space to pause future checks and `q` to cancel the active update and quit. Nothing is installed in the background. The [scheduling guide](../../docs/docs/schedule.md#watch-collection) shows this dashboard sorted by state.
 
 Try refreshing after adding a source. In the second terminal, run `cd "$watch_demo/brain"`, then:
 
@@ -44,7 +44,7 @@ from pathlib import Path
 path = Path("bf.yaml")
 text = path.read_text()
 if "  new-calendar:" not in text:
-    path.write_text(text + "  new-calendar:\n    command: [python3, sensors/demo.py, calendar]\n    refresh: 3600\n")
+    path.write_text(text + "  new-calendar:\n    run: [python3, sensors/demo.py, calendar]\n    emit: records\n    on: { every: 3600 }\n")
 PYTHON
 ```
 

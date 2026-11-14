@@ -71,7 +71,7 @@ In shared brains where teammates or parallel sessions may start actions on the s
 
 ## Bring context into every session
 
-The [example hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) (copied alongside [`_bf.py`](https://github.com/fmind/brain-framework/blob/main/examples/hooks/_bf.py) into a private folder only you write) inject context automatically:
+The standalone [example hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) (copied into a private folder only you write) inject context automatically:
 
 - **Session hook**: prints the current repository's linked project status, review reminders, next task and program health warnings.
 - **Prompt hook**: searches up to eight content words (5s bound) and prints up to three matching note refs.

@@ -161,9 +161,9 @@ def test_github_failure_preserves_collected_evidence(
     monkeypatch.chdir(brain)
     monkeypatch.setenv("PATH", f"{provider.bin}:{os.environ['PATH']}")
     config = yaml.safe_load((brain / "bf.yaml").read_text())
-    config["sensors"] = {
+    config["jobs"] = {
         "github-issues": {
-            "command": [
+            "run": [
                 "python3",
                 str(ROOT / "examples/sensors/github-history.py"),
                 "example/project",
@@ -171,6 +171,7 @@ def test_github_failure_preserves_collected_evidence(
                 "{{start}}",
                 "{{end}}",
             ],
+            "emit": "records",
         }
     }
     (brain / "bf.yaml").write_text(yaml.safe_dump(config))

@@ -16,7 +16,7 @@ from rich.console import CONSOLE_SVG_FORMAT, Console
 
 from bf.collect import next_due
 from bf.config import load
-from bf.history import log_path
+from bf.runtime import log_path
 from bf.storage import Store
 from bf.watch import Dashboard, Row, Sort, State
 
@@ -32,10 +32,10 @@ def at(seconds: float) -> str:
 
 
 # Fictional history 42 seconds after the demo's first cycle: calendar has updated its record once, and the
-# failed sensor waits one minute of failure backoff from its first run, so later cycles complete.
+# failed job waits one minute of failure backoff from its first run, so later cycles complete.
 ROWS = [
     Row(
-        "sensor",
+        "records",
         "calendar",
         State.FRESH,
         True,
@@ -49,9 +49,9 @@ ROWS = [
         elapsed_seconds=0.04,
         output_bytes=128,
     ),
-    Row("sensor", "disabled", State.DISABLED, True, 60),
+    Row("records", "disabled", State.DISABLED, True, 60),
     Row(
-        "sensor",
+        "records",
         "git",
         State.FRESH,
         True,
@@ -65,9 +65,9 @@ ROWS = [
         elapsed_seconds=0.03,
         output_bytes=122,
     ),
-    Row("sensor", "manual", State.MANUAL, True, 0),
+    Row("records", "manual", State.MANUAL, True, 0),
     Row(
-        "sensor",
+        "records",
         "unavailable",
         State.FAILED,
         True,
@@ -81,11 +81,11 @@ ROWS = [
 
 def svg() -> str:
     names, config = {row.name for row in ROWS}, load(Store(ROOT / "examples/watch"))
-    if names != set(config.sensors):
+    if names != set(config.jobs):
         raise SystemExit("render_watch.py: rows no longer match examples/watch/bf.yaml")
     # The failed row follows update's backoff rule from its failure in the first cycle, 42 seconds ago.
     failed = next(row for row in ROWS if row.status is State.FAILED)
-    due = next_due(config.sensors[failed.name], {"error": failed.error, "run": at(-42)}, NOW)
+    due = next_due(config.jobs[failed.name], {"last_error": failed.error, "last_run": at(-42)}, NOW)
     if due is None or due.isoformat() != failed.next_due:
         raise SystemExit("render_watch.py: the failed row's next due time no longer follows the failure backoff")
     # Contributors' terminals decide fonts; the published asset uses the project's fonts without web requests.

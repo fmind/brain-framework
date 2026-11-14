@@ -1,71 +1,104 @@
 {
   "$defs": {
-    "Assistant": {
+    "Attention": {
+      "description": "A job that needs action, identified by kind and name.",
       "properties": {
-        "error": { "description": "The last attempt's diagnostic; it never quotes provider output.", "type": "string" },
-        "failed": { "const": true },
-        "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
-        "inputs": {
-          "items": {
-            "description": "A channel input as bf.yaml declares it, such as its `name` and its `mode`, `read` or `stream`; its settings may grow.",
-            "type": "object"
-          },
-          "type": "array"
+        "degraded": {
+          "const": true,
+          "description": "Three or more committed collections in a row reported missing parts; `degraded` gives counts."
         },
+        "failed": { "const": true },
+        "freshness": { "type": "string" },
+        "kind": { "enum": ["job"] },
+        "name": { "type": "string" },
+        "silent": { "const": true, "description": "Gained no new or changed record within `silent_after`." }
+      },
+      "required": ["kind", "name", "freshness"],
+      "type": "object"
+    },
+    "Job": {
+      "description": "A configured job's schedule, execution state and latest run outcome.",
+      "properties": {
+        "action": { "description": "The latest action the job wrote.", "type": "string" },
+        "added": { "minimum": 0, "type": "integer" },
+        "degraded": {
+          "description": "The source's last committed collection reported that it missed `missed` of the `of` parts it tried, such as feeds or accounts, and `runs` committed collections in a row did: its records may lack what those parts hold. A complete collection clears it.",
+          "properties": {
+            "missed": { "minimum": 1, "type": "integer" },
+            "of": { "minimum": 1, "type": "integer" },
+            "runs": { "minimum": 1, "type": "integer" }
+          },
+          "required": ["runs", "missed", "of"],
+          "type": "object"
+        },
+        "emit": { "enum": ["records", "messages", "message", "action", "log"] },
+        "enabled": { "type": "boolean" },
+        "error": { "description": "The last attempt's diagnostic; it never quotes provider output.", "type": "string" },
+        "expired": { "minimum": 0, "type": "integer" },
+        "failed": { "const": true },
+        "failures": { "description": "Consecutive failed attempts.", "minimum": 0, "type": "integer" },
+        "forgotten": { "minimum": 0, "type": "integer" },
+        "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
+        "last_collected": {
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "last_reconcile": {
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "last_run": { "$ref": "#/$defs/Run" },
         "last_success": {
           "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
           "format": "date-time",
           "type": "string"
         },
-        "log": { "description": "The program's log in the brain, such as logs/NAME.log.", "type": "string" },
+        "log": { "description": "The job's log in the brain, such as logs/NAME.log.", "type": "string" },
+        "missed": { "minimum": 0, "type": "integer" },
+        "mode": { "enum": ["window", "cursor", "snapshot"] },
+        "next_due": {
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "priority": { "enum": ["normal", "low"] },
+        "reconciled": {
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "format": "date-time",
+          "type": "string"
+        },
         "record": { "description": "The record its latest run wrote.", "type": "string" },
-        "runs": { "description": "Successful runs since its history began.", "minimum": 0, "type": "integer" },
-        "schedules": {
-          "additionalProperties": {
-            "anyOf": [{ "required": ["every"] }, { "required": ["at"] }],
-            "properties": {
-              "at": { "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$", "type": "string" },
-              "every": { "minimum": 1, "type": "integer" },
-              "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
-              "last_success": {
-                "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
-                "format": "date-time",
-                "type": "string"
-              },
-              "next_due": {
-                "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
-                "format": "date-time",
-                "type": "string"
-              }
-            },
-            "required": ["freshness"],
-            "type": "object"
-          },
-          "description": "Each named timer: its interval in seconds or wall-clock time, next due time, last success and freshness.",
-          "type": "object"
-        },
-        "state": { "enum": ["active", "disabled"] }
-      },
-      "required": ["state", "freshness", "runs", "schedules", "inputs"],
-      "type": "object"
-    },
-    "Attention": {
-      "description": "A program or channel that needs action, identified by kind and name.",
-      "properties": {
-        "degraded": {
-          "const": true,
-          "description": "Three or more committed collections in a row reported missing parts; the source's `degraded` coverage gives the counts."
-        },
-        "failed": { "const": true },
-        "freshness": { "type": "string" },
-        "kind": { "enum": ["sensor", "routine", "assistant", "channel"] },
-        "name": { "type": "string" },
+        "records": { "minimum": 0, "type": "integer" },
+        "removed": { "minimum": 0, "type": "integer" },
+        "runs": { "minimum": 0, "type": "integer" },
         "silent": {
           "const": true,
-          "description": "The source gained no new or changed record within its `silent_after`, whatever its freshness."
+          "description": "The scheduled source gained no new or changed record within its `silent_after`."
+        },
+        "source": { "type": "string" },
+        "state": { "enum": ["active", "disabled", "historical"] },
+        "unchanged": { "minimum": 0, "type": "integer" },
+        "updated": { "minimum": 0, "type": "integer" },
+        "window": {
+          "properties": {
+            "since": {
+              "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+              "format": "date-time",
+              "type": "string"
+            },
+            "until": {
+              "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          "required": ["since", "until"],
+          "type": "object"
         }
       },
-      "required": ["kind", "name", "freshness"],
+      "required": ["enabled", "state", "freshness"],
       "type": "object"
     },
     "Problem": {
@@ -74,30 +107,51 @@
       "required": ["error"],
       "type": "object"
     },
-    "Routine": {
+    "Queue": {
+      "description": "Durable run, wake and message queue summary without message bodies.",
       "properties": {
-        "action": { "description": "The latest action the routine wrote.", "type": "string" },
-        "error": { "description": "The last attempt's diagnostic; it never quotes provider output.", "type": "string" },
-        "failed": { "const": true },
-        "failures": { "description": "Consecutive failed attempts.", "minimum": 0, "type": "integer" },
-        "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
-        "last_success": {
+        "active_runs": { "minimum": 0, "type": "integer" },
+        "failed": { "minimum": 0, "type": "integer" },
+        "oldest_pending": { "format": "date-time", "type": ["string", "null"] },
+        "pending": { "minimum": 0, "type": "integer" },
+        "uncertain": { "minimum": 0, "type": "integer" },
+        "wakes": { "minimum": 0, "type": "integer" }
+      },
+      "required": ["pending", "failed", "uncertain", "wakes"],
+      "type": "object"
+    },
+    "Run": {
+      "description": "Counters of the last committed collection, backfill included.",
+      "properties": {
+        "added": { "minimum": 0, "type": "integer" },
+        "elapsed_seconds": { "minimum": 0, "type": "number" },
+        "expired": { "minimum": 0, "type": "integer" },
+        "forgotten": { "minimum": 0, "type": "integer" },
+        "output_bytes": { "minimum": 0, "type": "integer" },
+        "reconcile": { "type": "boolean" },
+        "records": { "minimum": 0, "type": "integer" },
+        "removed": { "minimum": 0, "type": "integer" },
+        "requested_end": {
           "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
           "format": "date-time",
           "type": "string"
         },
-        "log": { "description": "The program's log in the brain, such as logs/NAME.log.", "type": "string" },
-        "state": { "enum": ["active", "disabled"] }
+        "requested_start": {
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "unchanged": { "minimum": 0, "type": "integer" },
+        "updated": { "minimum": 0, "type": "integer" }
       },
-      "required": ["state", "freshness"],
       "type": "object"
     },
     "Source": {
-      "description": "A source's collection state as search coverage reports it, its indexed totals and this machine's last run.",
+      "description": "A record source's collection state, indexed totals and latest run.",
       "properties": {
         "bytes": { "description": "The size of the source's record files on disk.", "minimum": 0, "type": "integer" },
         "changed": {
-          "description": "When this brain last gained a new or changed record of the source.",
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
           "format": "date-time",
           "type": "string"
         },
@@ -120,40 +174,19 @@
           "format": "date-time",
           "type": "string"
         },
-        "last_run": {
-          "description": "Counters of the last committed collection, a backfill included; `forgotten` and `expired` only when nonzero.",
-          "properties": {
-            "added": { "minimum": 0, "type": "integer" },
-            "elapsed_seconds": { "minimum": 0, "type": "number" },
-            "expired": { "minimum": 0, "type": "integer" },
-            "forgotten": { "minimum": 0, "type": "integer" },
-            "output_bytes": { "minimum": 0, "type": "integer" },
-            "reconcile": { "type": "boolean" },
-            "records": { "minimum": 0, "type": "integer" },
-            "removed": { "minimum": 0, "type": "integer" },
-            "requested_end": {
-              "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
-              "format": "date-time",
-              "type": "string"
-            },
-            "requested_start": {
-              "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
-              "format": "date-time",
-              "type": "string"
-            },
-            "unchanged": { "minimum": 0, "type": "integer" },
-            "updated": { "minimum": 0, "type": "integer" }
-          },
-          "type": "object"
-        },
+        "last_run": { "$ref": "#/$defs/Run" },
         "latest": {
-          "description": "The newest event time of its indexed records.",
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
           "format": "date-time",
           "type": "string"
         },
-        "log": { "description": "The program's log in the brain, such as logs/NAME.log.", "type": "string" },
-        "mode": { "enum": ["window", "snapshot"] },
-        "reconciled": { "description": "The last scheduled reconciliation.", "format": "date-time", "type": "string" },
+        "log": { "description": "The job's log in the brain, such as logs/NAME.log.", "type": "string" },
+        "mode": { "enum": ["window", "cursor", "snapshot"] },
+        "reconciled": {
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "format": "date-time",
+          "type": "string"
+        },
         "records": { "minimum": 0, "type": "integer" },
         "silent": {
           "const": true,
@@ -181,12 +214,11 @@
       "type": "object"
     },
     "Usage": {
-      "description": "Local searches, searches that found nothing and reads over one window.",
+      "description": "Local search and read activity over one window.",
       "properties": {
         "empty": { "minimum": 0, "type": "integer" },
-        "empty_kinds": { "description": "Counts of searches that found nothing, per scope kind.", "type": "object" },
+        "empty_kinds": { "type": "object" },
         "empty_terms": {
-          "description": "The words searches that found nothing used most, with their counts.",
           "items": {
             "properties": { "count": { "minimum": 0, "type": "integer" }, "term": { "type": "string" } },
             "required": ["term", "count"],
@@ -194,11 +226,11 @@
           },
           "type": "array"
         },
-        "kinds": { "description": "Counts per operation, then per scope or page kind.", "type": "object" },
+        "kinds": { "type": "object" },
         "read": { "minimum": 0, "type": "integer" },
         "search": { "minimum": 0, "type": "integer" },
         "since": {
-          "description": "The oldest event counted, when an older release's rotation cut it.",
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
           "format": "date-time",
           "type": "string"
         }
@@ -209,12 +241,10 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "assistants": { "additionalProperties": { "$ref": "#/$defs/Assistant" }, "type": "object" },
     "attention": { "items": { "$ref": "#/$defs/Attention" }, "type": "array" },
     "brain": { "type": "string" },
     "cache": { "enum": ["ready", "busy", "stale", "missing"] },
     "coverage": {
-      "description": "Sources and indexed records per source state.",
       "properties": {
         "active": {
           "properties": {
@@ -244,22 +274,25 @@
       "required": ["active", "disabled", "historical"],
       "type": "object"
     },
-    "healthy": {
-      "description": "False on a problem or attention entry, or a stale or missing cache.",
-      "type": "boolean"
-    },
-    "messaging": {
-      "description": "The assistant queue as bf queue lists it, without message bodies: `jobs`, `deliveries`, `counts`, `delivery_counts`, `delivery_failures`, `transports` and `wakes`.",
+    "healthy": { "type": "boolean" },
+    "index": {
+      "properties": {
+        "cache": { "enum": ["ready", "busy", "stale", "missing"] },
+        "notes": { "minimum": 0, "type": "integer" },
+        "records": { "minimum": 0, "type": "integer" },
+        "sources": { "minimum": 0, "type": "integer" }
+      },
+      "required": ["cache", "notes"],
       "type": "object"
     },
+    "jobs": { "additionalProperties": { "$ref": "#/$defs/Job" }, "type": "object" },
     "notes": { "minimum": 0, "type": "integer" },
     "path": { "type": "string" },
     "pending_transaction": { "const": true },
     "problems": { "items": { "$ref": "#/$defs/Problem" }, "type": "array" },
+    "queue": { "$ref": "#/$defs/Queue" },
     "registered": { "type": "boolean" },
-    "routines": { "additionalProperties": { "$ref": "#/$defs/Routine" }, "type": "object" },
     "runtime": {
-      "description": "The installed bf version and the one the brain's uv.lock pins, if any.",
       "properties": { "installed": { "type": "string" }, "pinned": { "type": "string" } },
       "required": ["installed"],
       "type": "object"
@@ -270,15 +303,7 @@
       "required": ["7d", "30d"],
       "type": "object"
     },
-    "warnings": {
-      "description": "Never fail `--check`.",
-      "items": {
-        "description": "A `warning`, such as `directory nears the scan limit` with its `directory`, `entries` and `limit`.",
-        "required": ["warning"],
-        "type": "object"
-      },
-      "type": "array"
-    }
+    "warnings": { "items": { "required": ["warning"], "type": "object" }, "type": "array" }
   },
   "required": [
     "healthy",
@@ -290,8 +315,10 @@
     "notes",
     "problems",
     "attention",
+    "jobs",
     "sources",
     "coverage",
+    "queue",
     "usage"
   ],
   "title": "bf status reply",

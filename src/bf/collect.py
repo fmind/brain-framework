@@ -1,462 +1,54 @@
-"""Run configured sensors, routines and assistants with direct argv, bounded output and process-group cancellation."""
+"""Record collection (`emit: records`), declarative field mapping, retention, reprojection and due scheduling."""
 
 from __future__ import annotations
 
-import os
 import re
-import selectors
-import shutil
-import signal
-import stat
-import subprocess
 import time
-from collections.abc import Callable, Generator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager, suppress
-from contextvars import ContextVar
-from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
-from threading import current_thread, main_thread
-from types import FrameType
-from typing import Annotated, NoReturn, Protocol, cast
-from uuid import uuid4
+from collections.abc import Callable, Mapping
+from contextlib import ExitStack, suppress
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, cast
 
-from pydantic import FailFast, JsonValue, TypeAdapter, ValidationError
+from pydantic import FailFast, TypeAdapter, ValidationError
 
-from bf import ontology, records
+from bf import jobs, ontology, records
+from bf import map as mapper
 from bf.config import load
-from bf.history import ROUTINES, SENSORS, append_log, environment, log_path, remember, state
-from bf.markdown import lines as markdown_lines
-from bf.markdown import note, parse, validate_okf
-from bf.models import (
-    _CONTROL,
-    MAX_NOTE,
-    RECORD_KEYS,
-    Assistant,
-    Command,
-    Config,
-    Error,
-    Knowledge,
-    Program,
-    Record,
-    Routine,
-    Sensor,
-    decode,
-    digest,
-    explain,
-    local,
-    reason,
-    suggest,
-    timestamp,
-)
-from bf.storage import BusyError, Store, collecting, program_state, recording, relative, writer
-from bf.validate import broken_links
+from bf.models import RECORD_KEYS, Config, Error, Job, Record, decode, explain, local, suggest, timestamp
+from bf.runtime import Queue, append_log
+from bf.storage import Store, collecting, writer
 
-_LOG = 256 << 10
-# Seconds a finished program's background descendants may keep its stdout open.
-_DRAIN = 1.0
-# Seconds a stopped program's process group has between SIGTERM and SIGKILL: enough to remove private temporary files,
-# short enough that Ctrl-C stays responsive. Programs stopped together, such as parallel sensors, wait concurrently.
-GRACE = 5.0
-# Window sensors catch up at most this far after a pause.
 CATCH_UP = timedelta(days=30)
-# A failed program's first retry waits this long, doubling per consecutive failure up to its refresh.
-BACKOFF = timedelta(minutes=1)
-# A snapshot may remove half of its catalog, or up to this many records, without --allow-removal.
+SCHEDULE_BACKOFF = 60
 SHRINK_FLOOR = 10
-# The largest count a sensor may report missing or tried: replies keep it an exact JSON integer.
 MAX_COUNT = 2**53 - 1
-# Reprojected records committed per transaction; a reply lists at most LIMIT records that failed.
 REPROJECT = 1000
 LIMIT = 200
-_EXISTS = "an action for this routine already exists today"
-# The whole argument holding an expanded prompt stays below Linux's 128 KiB bound (MAX_ARG_STRLEN, NUL included).
-MAX_ARGUMENT = (128 << 10) - 1
-# An assistant run's record id: its window end in UTC and the last 8 characters of its job id. Only these records are
-# an assistant's to prune.
-RUN_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
-# A record title shows the reply's first line, shortened.
-_TITLE = 120
-# A routine's error quotes at most this many characters of its first broken link.
-_QUOTE = 200
-# The variables BF sets for a program: inherited values never leak into a run that does not set them.
-PROGRAM_ENV = ("BF_PROGRAM", "BF_STATE_DIR", "BF_START", "BF_END", "BF_TRIGGER", "BF_SCHEDULE")
-# Values the caller of `run` exposes to the program it starts, such as a sensor's window; each thread has its own.
-_EXPOSED: ContextVar[dict[str, str]] = ContextVar("bf_exposed", default={})  # noqa: B039 - never mutated
 
 
-@contextmanager
-def exposing(**values: str) -> Generator[None]:
-    """Expose `values` as BF_* environment variables to every program `run` starts in this context."""
-    unknown = set(values) - set(PROGRAM_ENV)
-    if unknown:
-        raise ValueError(f"unknown program variables: {sorted(unknown)}")
-    token = _EXPOSED.set({**_EXPOSED.get(), **{key: value for key, value in values.items() if value}})
-    try:
-        yield
-    finally:
-        _EXPOSED.reset(token)
-
-
-class Runner(Protocol):
-    def __call__(self, argv: list[str], program: Command, store: Store, name: str, stdin: bytes, /) -> bytes: ...
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _now() -> str:
-    return local(timestamp(datetime.now(UTC).isoformat()))
-
-
-def ended(code: int) -> str:
-    """How a finished program ended, from its exit code."""
-    if code >= 0:
-        return f"exited with status {code}"
-    try:
-        return f"was killed by {signal.Signals(-code).name}"
-    except ValueError:
-        # Real-time signals between SIGRTMIN and SIGRTMAX have no name.
-        return f"was killed by signal {-code}"
-
-
-def program_env(store: Store) -> dict[str, str]:
-    """The environment of a program BF starts, before it exposes any BF_ variable to that program."""
-    # Inherited values of the variables BF sets never leak into a program; a nested bf call without --brain reads
-    # the executing brain, never an inherited selection.
-    env = {key: value for key, value in environment().items() if key not in PROGRAM_ENV}
-    env["BF_BRAIN"] = str(store.root)
-    return env
-
-
-def enabled[P: Program | Assistant](programs: Mapping[str, P], kind: str, name: str) -> P:
-    """The enabled program called `name`; an unknown or disabled name fails, suggesting only programs that can run."""
-    program = programs.get(name)
-    if program is None:
-        runnable = [known for known, settings in programs.items() if settings.enabled]
-        raise Error(f"unknown {kind} {name}; check names in bf.yaml{suggest(name, runnable)}")
-    if not program.enabled:
-        raise Error(f"{kind} {name} is disabled in bf.yaml; set enabled: true to run it")
-    return program
-
-
-@contextmanager
-def starting() -> Generator[None]:
-    """Defer cancellation until the caller owns the child and can clean up its process group."""
-    if current_thread() is not main_thread():
-        yield
-        return
-    handlers: dict[int, Callable[[int, FrameType | None], object]] = {}
-    pending: tuple[int, FrameType | None] | None = None
-
-    def defer(signum: int, frame: FrameType | None) -> None:
-        nonlocal pending
-        if pending is None:
-            pending = (signum, frame)
-
-    try:
-        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            handler = signal.getsignal(signum)
-            if callable(handler):
-                handlers[signum] = handler
-                signal.signal(signum, defer)
-        # Do not block signals with pthread_sigmask: the program would inherit that mask across exec.
-        yield
-    finally:
-        for signum, handler in handlers.items():
-            signal.signal(signum, handler)
-        if pending is not None:
-            signum, frame = pending
-            handlers[signum](signum, frame)
-
-
-def stop(child: subprocess.Popen[bytes]) -> None:
-    """End a program's whole process group: SIGTERM, then SIGKILL to whatever remains after GRACE seconds.
-
-    BF reads no output meanwhile, so a program that keeps writing blocks on its full pipes until the kill. An
-    interruption during the grace, such as a second Ctrl-C, kills at once and propagates.
-    """
-    # Descendants can keep pipes open after their leader exits; end the whole session.
-    try:
-        os.killpg(child.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        child.wait()
-        return
-    except PermissionError as error:
-        # macOS refuses signals to a group left with zombies only; on Linux, the group may run as another user.
-        try:
-            child.wait(timeout=GRACE)
-        except subprocess.TimeoutExpired:
-            raise Error("cannot stop the program: permission denied") from error
-        return
-    deadline = time.monotonic() + GRACE
-    remaining = True
-    try:
-        while remaining and (left := deadline - time.monotonic()) > 0:
-            try:
-                child.wait(timeout=min(left, 0.05))
-            except subprocess.TimeoutExpired:
-                continue
-            try:
-                # Signal 0 only checks that the group still has a member, now that the leader is reaped.
-                os.killpg(child.pid, 0)
-            except ProcessLookupError, PermissionError:
-                remaining = False
-            else:
-                time.sleep(min(left, 0.05))
-    finally:
-        if remaining:
-            with suppress(ProcessLookupError, PermissionError):
-                os.killpg(child.pid, signal.SIGKILL)
-        child.wait()
-
-
-class NotStartedError(Error):
-    """The program never started, so it cannot have acted: retrying it is safe."""
-
-
-class CancelledError(Error):
-    """A cancelled update stopped the program: not a program failure, so run history keeps no error."""
-
-
-class NotStartedCancelledError(NotStartedError, CancelledError):
-    """A cancelled update stopped the program before it started."""
-
-
-class ExitError(Error):
-    """A finished program exited with a non-zero status or signal."""
-
-    def __init__(self, code: int, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-
-
-def executable(store: Store, command: str, env: Mapping[str, str]) -> str:
-    """Resolve an owner's argv executable without following brain-owned symlinks."""
-    if command.startswith(("sensors/", "routines/", "channels/")):
-        relative(command)
-        try:
-            store.fingerprint(command)
-        except FileNotFoundError as error:
-            raise NotStartedError(f"{command} does not exist; restore it or correct bf.yaml") from error
-        except (Error, OSError) as error:
-            raise NotStartedError(reason(error, f"cannot read {command}")) from error
-        return str(store.root / command)
-    if "/" in command:
-        raise NotStartedError("executable must be a bare command name or a sensors/, routines/ or channels/ path")
-    found = shutil.which(command, path=env.get("PATH"))
-    if found is None:
-        raise NotStartedError(f"{command} is not on PATH")
-    return found
-
-
-def run(
-    argv: list[str],
-    program: Command,
-    store: Store,
-    name: str,
-    stdin: bytes = b"",
-    /,
-    *,
-    cancelled: Callable[[], bool] | None = None,
-) -> bytes:
-    """Execute one sensor, routine, assistant harness or channel command from the brain root, feeding it `stdin`;
-    returns its stdout.
-
-    Its stderr, and a `log` routine's stdout, go to the program's bounded log in logs/, never to errors.
-    """
-    env = program_env(store)
-    if cancelled is not None and cancelled():
-        raise NotStartedCancelledError("program cancelled")
-    try:
-        # Machine-local and private: cursors and tokens a program keeps between runs, never evidence.
-        env.update(BF_PROGRAM=name, BF_STATE_DIR=str(program_state(store, name).root), **_EXPOSED.get())
-    except (Error, OSError) as error:
-        raise NotStartedError(f"cannot prepare the program's state directory: {error}") from error
-    command = executable(store, argv[0], env)
-    started = time.monotonic()
-    child: subprocess.Popen[bytes] | None = None
-    output, errors = bytearray(), bytearray()
-    # A log routine's stdout only feeds its log: keep a rolling tail, as for stderr, instead of failing at max_bytes.
-    logged = isinstance(program, Routine) and program.output == "log"
-    deadline = started + program.timeout
-    exited: float | None = None
-    outcome = "failed"
-    try:
-        with starting():
-            if cancelled is not None and cancelled():
-                raise NotStartedCancelledError("program cancelled")
-            try:
-                child = subprocess.Popen(  # noqa: S603
-                    # Direct argv from the owner's bf.yaml, plus a `bf run` caller's arguments; no shell interprets them.
-                    [command, *argv[1:]],
-                    cwd=store.root,
-                    env=env,
-                    stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,
-                )
-            except OSError as error:
-                # A log that cannot be written must not hide why the program did not start.
-                with suppress(Error, OSError):
-                    append_log(store, name, f"{_now()} could not start {command}")
-                raise NotStartedError(
-                    "could not start the program; check its executable bit and interpreter"
-                ) from error
-        stdout, stderr = child.stdout, child.stderr
-        if stdout is None or stderr is None:
-            raise Error("program pipes were not created")
-        with selectors.DefaultSelector() as selector:
-            for pipe, buffer in ((stdout, output), (stderr, errors)):
-                os.set_blocking(pipe.fileno(), False)
-                selector.register(pipe, selectors.EVENT_READ, buffer)
-            if child.stdin is not None:
-                # Written as the program reads it, so a large input never blocks its output.
-                os.set_blocking(child.stdin.fileno(), False)
-                selector.register(child.stdin, selectors.EVENT_WRITE, memoryview(stdin))
-            # A run ends with the program's exit and the end of its stdout. Stderr only feeds the log,
-            # so a background descendant holding it cannot delay or fail a finished program.
-            while stdout in selector.get_map() or child.poll() is None:
-                if cancelled is not None and cancelled():
-                    raise CancelledError("program cancelled")
-                now = time.monotonic()
-                if exited is None and child.poll() is not None:
-                    exited = now
-                if exited is not None and now >= exited + _DRAIN:
-                    raise Error(
-                        "program exited but a background process kept its stdout open; redirect its descendants' output"
-                    )
-                if now >= deadline:
-                    raise Error(f"program timed out after {program.timeout}s")
-                if stdout not in selector.get_map():
-                    with suppress(subprocess.TimeoutExpired):
-                        child.wait(timeout=0.05)
-                for key, events in selector.select(0.05):
-                    if events & selectors.EVENT_WRITE:
-                        try:
-                            written = os.write(key.fd, key.data[:65536])
-                        except BrokenPipeError:
-                            # The program ended or closed its input without reading all of it.
-                            written = len(key.data)
-                        if written < len(key.data):
-                            selector.modify(key.fileobj, selectors.EVENT_WRITE, key.data[written:])
-                        elif child.stdin is not None:
-                            selector.unregister(child.stdin)
-                            child.stdin.close()
-                        continue
-                    chunk = os.read(key.fd, 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    key.data.extend(chunk)
-                    if logged:
-                        del output[:-_LOG]
-                    elif len(output) > program.max_bytes:
-                        raise Error("program output exceeded max_bytes")
-                    del errors[:-_LOG]
-        # Keep diagnostics written before the exit; a bounded read never waits for descendants.
-        with suppress(BlockingIOError):
-            for _ in range(_LOG // 65536 + 1):
-                if not (chunk := os.read(stderr.fileno(), 65536)):
-                    break
-                errors.extend(chunk)
-        code = child.wait()
-        if code:
-            # BF's own kills fail above: a signal means the program crashed, or another process, such as the
-            # out-of-memory killer, ended it.
-            raise ExitError(code, f"program {ended(code)}")
-        outcome = ended(code)
-        return bytes(output)
-    except Error as error:
-        outcome = str(error)
-        raise
-    finally:
-        if child is not None:
-            try:
-                stop(child)
-            finally:
-                # A second interruption during the grace still closes the pipes and logs the run.
-                for pipe in (child.stdin, child.stdout, child.stderr):
-                    if pipe is not None and not pipe.closed:
-                        pipe.close()
-                shown = bytes(output[-_LOG:]) if logged else b""
-                diagnostics = bytes(errors[-_LOG:])
-                body = shown + (b"-- stderr --\n" + diagnostics if shown and diagnostics else diagnostics)
-                # A log is a diagnostic: failing to write it never changes the run's own outcome.
-                with suppress(Error, OSError):
-                    append_log(store, name, f"{_now()} {outcome} after {time.monotonic() - started:.1f}s", body)
+    return local(timestamp(_utc_now().isoformat()))
 
 
 def _window(start: str, end: str) -> tuple[str, str]:
     try:
-        start, end = timestamp(start), timestamp(end)
+        s, e = timestamp(start), timestamp(end)
     except ValueError as error:
         raise Error("start and end require timezone-aware timestamps") from error
-    if start >= end:
+    if s >= e:
         raise Error("start must be earlier than end")
-    return start, end
+    return s, e
 
 
-def _failed(
-    store: Store, name: str, file: str, started: datetime, message: str, cause: BaseException, *, dry_run: bool
-) -> NoReturn:
-    """Remember a failed run, then name its log; provider output never enters the message."""
-    if isinstance(cause, CancelledError):
-        # Stopping an update is not a program failure, as when a serial run is interrupted: keep its history.
-        raise cause
-    with suppress(Error, OSError):
-        append_log(store, name, f"{_now()} failed: {message}")
-    if not dry_run:
-        busy = isinstance(cause, BusyError)
-        # Routine history lives outside the brain: saving it never waits for the brain's readers and writers.
-        lock = recording if file == ROUTINES else writer
-        try:
-            # A run that already waited for a busy lock records its failure only if the lock is free now.
-            with lock(store, wait=0 if busy else 120):
-                failures = int(str(state(store, file).get(name, {}).get("failures", 0))) + 1
-                remember(store, name, file, run=timestamp(started.isoformat()), error=message, failures=failures)
-        except (Error, OSError) as history_error:
-            if not (busy and isinstance(history_error, BusyError)):
-                raise Error(f"{name}: {message}; run history could not be saved") from history_error
-    raise Error(f"{name}: {message}; see {log_path(name)}") from cause
-
-
-def _coverage(
-    previous: dict[str, object], start: str, end: str, observed: str, sensor: Sensor
-) -> tuple[dict[str, str], bool]:
-    """The contiguous collected interval after a run, and whether the run is the latest: a fresh success.
-
-    Coverage never extends past the run itself: later items can still appear upstream. A run contiguous with the
-    coverage extends it, a backfill that ends before it keeps the resume point, and coverage never claims an
-    uncollected gap. When updates resume from the coverage (scheduled window sensors), a later run leaving a gap
-    inside the catch-up horizon is not contiguous, so the next update still fills that gap; nothing revisits a
-    manual sensor's gap, so its later run counts as contiguous. A window run is the latest only when its end also
-    reaches the time it ran: an earlier window, even a first or adjacent one, never claims fresh evidence, and the
-    next update resumes from its end. A snapshot replaces its whole catalog, so its end need not reach the run.
-    """
-    covered = min(end, observed)
-    before_start, before_end = str(previous.get("start", "")), str(previous.get("end", ""))
-    if before_end:
-        # Saved state may predate the coverage bound or follow a clock correction. It cannot prove coverage
-        # beyond the last run, which recorded it, nor prevent a current run becoming fresh.
-        last = previous.get("run") or previous.get("success") or observed
-        before_end = min(timestamp(before_end), timestamp(str(last)), observed)
-        before_start = timestamp(before_start) if before_start else ""
-        if before_start >= before_end:
-            before_start = before_end = ""
-    if start >= covered:
-        return ({"start": before_start, "end": before_end} if before_end else {}), False
-    horizon = timestamp((datetime.fromisoformat(observed) - CATCH_UP).isoformat())
-    resumes = sensor.mode == "window" and sensor.refresh > 0
-    contiguous = not before_end or (covered >= before_end and (not resumes or start <= max(before_end, horizon)))
-    interval = (start, covered) if contiguous else (before_start, before_end)
-    if before_start and before_end and start <= before_end and covered >= before_start:
-        interval = (min(start, before_start), max(covered, before_end))
-    return {"start": interval[0], "end": interval[1]}, contiguous and (sensor.mode == "snapshot" or end >= observed)
-
-
-def _parse_collector_output(raw: bytes) -> tuple[object, dict[str, int]]:
-    """Parse a sensor's stdout or `--input` file: a JSON array, `{records, incomplete}`, or JSON Lines."""
+def _parse_collector_output(raw: bytes) -> tuple[object, dict[str, int], str | None]:
+    """Parse JSON array, `{records, incomplete?, cursor?}`, single JSON object, or JSON Lines."""
     stripped = raw.strip()
     if not stripped:
-        return [], {}
+        return [], {}, None
     try:
         printed = decode(raw)
     except Error:
@@ -471,190 +63,212 @@ def _parse_collector_output(raw: bytes) -> tuple[object, dict[str, int]]:
                 if not isinstance(obj, dict):
                     raise Error(f"line {index}: collector JSONL line must be a JSON object") from None
                 items.append(obj)
-            return items, {}
+            return items, {}, None
         raise
-    if isinstance(printed, dict):
-        if "records" in printed or "incomplete" in printed:
-            return _envelope(printed)
-        return [printed], {}
-    return printed, {}
+    if isinstance(printed, dict) and ({"records", "incomplete", "cursor"} & printed.keys()):
+        return _envelope(printed)
+    return ([printed] if isinstance(printed, dict) else printed), {}, None
 
 
-def _envelope(printed: object) -> tuple[object, dict[str, int]]:
-    """The records a sensor printed and what it reported missing: a JSON array alone, or the object
-    `{"records": [...], "incomplete": {"missed": N, "of": M}}` with integers 1 <= N <= M and no other keys.
-
-    Errors name the field, never a value or an unknown key, which the provider's output controls.
-    """
-    if not isinstance(printed, dict):
-        return printed, {}
-    if printed.keys() != {"records", "incomplete"}:
-        raise Error("collector must print one JSON array of records, or an object holding only records and incomplete")
-    incomplete = printed["incomplete"]
-    if not isinstance(incomplete, dict) or incomplete.keys() != {"missed", "of"}:
-        raise Error("incomplete must be an object holding only missed and of")
-    for key in ("of", "missed"):
-        # A bool is an int to Python, and 1.0 is no count.
-        if type(incomplete[key]) is not int or not 1 <= incomplete[key] <= MAX_COUNT:
-            raise Error(f"incomplete.{key} must be an integer from 1 to {MAX_COUNT}")
-    if incomplete["missed"] > incomplete["of"]:
-        raise Error("incomplete.missed must not exceed incomplete.of")
+def _envelope(printed: dict[str, object]) -> tuple[object, dict[str, int], str | None]:
+    if not (printed.keys() <= {"records", "incomplete", "cursor"}) or "records" not in printed:
+        raise Error("collector object may hold only records, incomplete and cursor")
+    incomplete: dict[str, int] = {}
+    if "incomplete" in printed:
+        raw_inc = printed["incomplete"]
+        if not isinstance(raw_inc, dict) or raw_inc.keys() != {"missed", "of"}:
+            raise Error("incomplete must be an object holding only missed and of")
+        for key in ("of", "missed"):
+            if type(raw_inc[key]) is not int or not 1 <= raw_inc[key] <= MAX_COUNT:
+                raise Error(f"incomplete.{key} must be an integer from 1 to {MAX_COUNT}")
+        if raw_inc["missed"] > raw_inc["of"]:
+            raise Error("incomplete.missed must not exceed incomplete.of")
+        incomplete = {"missed": raw_inc["missed"], "of": raw_inc["of"]}
     if not isinstance(printed["records"], list):
         raise Error("records must be one JSON array of records")
-    return printed["records"], {"missed": incomplete["missed"], "of": incomplete["of"]}
+    cursor = printed.get("cursor")
+    if cursor is not None and not isinstance(cursor, str):
+        raise Error("cursor must be a string")
+    return printed["records"], incomplete, cursor
 
 
 def _prepare(position: int, record: Record, config: Config, observed: str) -> Record:
-    """Validate optional constraints and stamp when observed; an error names zero-based position, never a value."""
     try:
         ontology.validate(record, config)
         stamped = record.model_copy(update={"attributes": {**record.attributes, "observed": observed}})
-        # Already valid, and `observed` is BF's own canonical instant: the stamp can only exceed the size bound.
-        return stamped.readable()
+        return cast("Callable[[], Record]", stamped.readable)()
     except (Error, ValueError) as error:
         raise Error(f"record {position}: {error}") from error
 
 
-def _shrink(store: Store, name: str, retention: records.Retention) -> str:
-    """Why a snapshot's removal needs --allow-removal, or "": a wrong account, a lost folder or a truncated listing
-    also looks like a smaller catalog. Forgotten and expired records leave on purpose and count neither way."""
+def _shrink(store: Store, src: str, job_name: str, retention: records.Retention) -> str:
     exempt = set(retention.removals)
-    existing = [file for file in records.files(store, name) if file not in exempt]
-    kept = {records.path(name, record.id) for record in retention.kept}
+    existing = [file for file in records.files(store, src) if file not in exempt]
+    kept = {records.path(src, record.id) for record in retention.kept}
     removed = sum(file not in kept for file in existing)
     if removed and (not retention.kept or (removed > len(existing) / 2 and removed > SHRINK_FLOOR)):
         return (
             f"snapshot would remove {removed} of {len(existing)} records; kept the existing catalog. "
-            f"Check the sensor's scope, then run bf collect {name} --allow-removal to accept the removal"
+            f"Check the job's scope, then run bf collect {job_name} --allow-removal to accept the removal"
         )
     return ""
 
 
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
+def _retention(retention: records.Retention) -> dict[str, int]:
+    return {k: v for k, v in (("forgotten", retention.forgotten), ("expired", retention.expired)) if v}
+
+
+def _coverage(
+    previous: Mapping[str, object], start: str, end: str, observed: str, job: Job
+) -> tuple[dict[str, str], bool]:
+    """Compute updated contiguous window coverage `[window_start, window_end]` and whether this run is latest."""
+    mode = job.mode or "window"
+    covered = min(end, observed)
+    before_start, before_end = str(previous.get("window_start", "")), str(previous.get("window_end", ""))
+    if before_end:
+        last = previous.get("last_run") or previous.get("last_success") or observed
+        before_end = min(timestamp(before_end), timestamp(str(last)), observed)
+        before_start = timestamp(before_start) if before_start else ""
+        if before_start >= before_end:
+            before_start = before_end = ""
+    if start >= covered:
+        return ({"window_start": before_start, "window_end": before_end} if before_end else {}), False
+    horizon = timestamp((datetime.fromisoformat(observed) - CATCH_UP).isoformat())
+    resumes = mode == "window" and any(t.every is not None or t.at is not None for t in job.triggers)
+    contiguous = not before_end or (covered >= before_end and (not resumes or start <= max(before_end, horizon)))
+    interval = (start, covered) if contiguous else (before_start, before_end)
+    if before_start and before_end and start <= before_end and covered >= before_start:
+        interval = (min(start, before_start), max(covered, before_end))
+    latest = contiguous and (mode in {"snapshot", "cursor"} or end >= observed)
+    return {"window_start": interval[0], "window_end": interval[1]}, latest
+
+
+def _truncate_text(store: Store, name: str, job: Job, printed: object) -> None:
+    if not isinstance(printed, list):
+        return
+    truncated = 0
+    for pos, item in enumerate(printed):
+        if isinstance(item, dict) and "fields" in item:
+            raise Error(f"record {pos}: collectors must output @type, relations and attributes, not fields")
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            try:
+                encoded = item["text"].encode("utf-8")
+            except UnicodeEncodeError:
+                continue
+            if job.max_text_bytes is not None and len(encoded) > job.max_text_bytes:
+                cut = encoded[: job.max_text_bytes].decode("utf-8", errors="ignore")
+                attrs = item.get("attributes")
+                new_attrs = {**(attrs or {}), "partial": True} if attrs is None or isinstance(attrs, dict) else attrs
+                printed[pos] = {**item, "text": cut, "attributes": new_attrs}
+                truncated += 1
+            elif job.max_text_bytes is None and len(encoded) > 4 << 20:
+                raise Error(f"record {pos}: text exceeds 4 MiB; set max_text_bytes on this job to cut longer text")
+    if truncated and job.max_text_bytes is not None:
+        with suppress(Error, OSError):
+            append_log(
+                store,
+                name,
+                f"{_now()} truncated {truncated} oversized record text value(s) to {job.max_text_bytes} bytes",
+            )
+
+
+def _default_window(job: Job, prev: Mapping[str, object], started: datetime, start: str, end: str) -> tuple[str, str]:
+    resolved_end = timestamp(started.isoformat()) if end in {"", "now"} else end
+    if start:
+        return _window(start, resolved_end)
+    anchor = started - timedelta(seconds=job.lookback)
+    if (job.mode or "window") == "window" and prev.get("window_end"):
+        floor = started - CATCH_UP
+        resumed = max(datetime.fromisoformat(str(prev["window_end"])), floor) - timedelta(seconds=job.overlap)
+        if resumed < started:
+            anchor = max(resumed, floor)
+    return _window(timestamp(anchor.isoformat()), resolved_end)
 
 
 def collect(
     store: Store,
     name: str,
     *,
-    start: str,
-    end: str,
+    start: str = "",
+    end: str = "",
     dry_run: bool = False,
     reconcile: bool = False,
     allow_removal: bool = False,
-    runner: Runner = run,
+    runner: jobs.Runner = jobs.run,
     clock: Callable[[], datetime] = _utc_now,
     live: bool = False,
     fixture: bytes | None = None,
 ) -> dict[str, object]:
-    """Run one sensor over [start, end) and upsert its records; failures write nothing.
-
-    A snapshot that would empty its catalog, or remove more than half of it and more than SHRINK_FLOOR
-    records, fails unless `allow_removal` accepts it for this run. Records of the source's forgotten list, and with
-    `expire_after` records older than its cutoff, are removed and never stored again. A run whose sensor reports
-    `incomplete` removes no other record, whatever its mode or `allow_removal`: a lost feed or account must not
-    erase evidence. A `fixture` replaces the sensor's output in a preview that runs nothing, even for a disabled
-    sensor: a contract test of saved output.
-    """
-    start, end = _window(start, end)
+    """Run one `emit: records` job over `[start, end)` and upsert its records; locks never mix `writer` and SQLite."""
     config = load(store)
     if fixture is None:
-        sensor = enabled(config.sensors, "sensor", name)
+        job = jobs.enabled(config.jobs, name)
     else:
-        if (declared := config.sensors.get(name)) is None:
-            raise Error(f"unknown sensor {name}; check names in bf.yaml{suggest(name, list(config.sensors))}")
-        sensor, dry_run = declared, True
-        runner = cast("Runner", lambda *_: fixture)
-    if reconcile and sensor.reconcile is None:
-        raise Error("reconciliation requires the sensor's reconcile setting")
+        if (declared := config.jobs.get(name)) is None:
+            raise Error(f"unknown job {name}; check jobs in bf.yaml{suggest(name, list(config.jobs))}")
+        job, dry_run = declared, True
+        runner = cast("jobs.Runner", lambda *_: fixture)
+    if job.emit != "records":
+        raise Error(f"job {name} does not emit records (emit: {job.emit})")
+    if reconcile and job.reconcile_spec is None:
+        raise Error("reconciliation requires the job's reconcile setting")
+
+    src, mode = job.source or name, job.mode or "window"
+    previous = Queue(store).state_of(name) if fixture is None else {}
+    started = clock()
+    start, end = _default_window(job, previous, started, start, end)
+    observed, measured = timestamp(started.isoformat()), time.monotonic()
+
     with collecting(store, name):
-        started = clock()
-        observed = timestamp(started.isoformat())
-        measured = time.monotonic()
-        if reconcile and sensor.reconcile is not None:
-            horizon = timestamp((started - timedelta(seconds=sensor.reconcile.lookback)).isoformat())
-            if start > horizon or end < observed:
-                raise Error("reconciliation must cover its lookback through the current run")
         committed = False
         try:
-            # A {{home}} that cannot resolve fails the run in its history, as for routines.
-            with exposing(BF_START=start, BF_END=end):
-                # A fixture runs nothing, so its placeholders never need this machine's line files or HOME.
-                argv = [] if fixture is not None else arguments(store, sensor, start, end)
-                raw = runner(argv, sensor, store, name, b"")
-            printed, incomplete = _parse_collector_output(raw)
-            truncated_count = 0
-            if isinstance(printed, list):
-                for position, item in enumerate(printed):
-                    if isinstance(item, dict) and "fields" in item:
-                        raise Error(
-                            f"record {position}: sensors must output @type, relations and attributes, not fields"
-                        )
-                    if isinstance(item, dict) and isinstance(item.get("text"), str):
-                        try:
-                            encoded_text = item["text"].encode("utf-8")
-                        except UnicodeEncodeError:
-                            continue  # A lone surrogate: record validation names the invalid field.
-                        if sensor.max_text_bytes is not None:
-                            if len(encoded_text) > sensor.max_text_bytes:
-                                cut = encoded_text[: sensor.max_text_bytes].decode("utf-8", errors="ignore")
-                                attrs = item.get("attributes")
-                                # Cut text is incomplete evidence, which retrieval reports from `partial`. Validation
-                                # still rejects attributes that are not an object.
-                                updated_attrs = (
-                                    {**(attrs or {}), "partial": True}
-                                    if attrs is None or isinstance(attrs, dict)
-                                    else attrs
-                                )
-                                printed[position] = {**item, "text": cut, "attributes": updated_attrs}
-                                truncated_count += 1
-                        elif len(encoded_text) > 4 << 20:
-                            raise Error(
-                                f"record {position}: text exceeds 4 MiB; set max_text_bytes on this sensor to cut "
-                                "longer text"
-                            )
-            if truncated_count and sensor.max_text_bytes is not None:
-                with suppress(Error, OSError):
-                    append_log(
-                        store,
-                        name,
-                        f"{_now()} truncated {truncated_count} oversized record text value(s) to "
-                        f"{sensor.max_text_bytes} bytes",
-                    )
+            if reconcile and job.reconcile_spec is not None:
+                lb = job.reconcile_spec.lookback or job.lookback
+                if start > timestamp((started - timedelta(seconds=lb)).isoformat()) or end < observed:
+                    raise Error("reconciliation must cover its lookback through the current run")
+            prev_cursor = str(previous.get("cursor") or "")
+            argv = (
+                []
+                if fixture is not None
+                else jobs.expand_argv(store, job.run, name, start=start, end=end, cursor=prev_cursor)
+            )
+            raw = runner(argv, job, store, name, b"")
+            if not raw.strip():
+                printed, incomplete, cursor_out = [], {}, None
+            elif job.map is not None:
+                printed, cursor_out = mapper.extract(raw, job.map)
+                incomplete = {}
+            else:
+                printed, incomplete, cursor_out = _parse_collector_output(raw)
+            _truncate_text(store, name, job, printed)
             try:
-                # Stop at the first invalid record: a large invalid array must not build one diagnostic per item.
                 incoming = TypeAdapter(Annotated[list[Record], FailFast()]).validate_python(printed)
             except ValidationError as error:
                 raise Error("collector must print one JSON array of records: " + explain(error, RECORD_KEYS)) from error
-            incoming = [_prepare(position, record, config, observed) for position, record in enumerate(incoming)]
+            incoming = [_prepare(pos, rec, config, observed) for pos, rec in enumerate(incoming)]
             if len({r.id for r in incoming}) != len(incoming):
                 raise Error("collector returned duplicate record ids")
-            cutoff = (
-                timestamp((started - timedelta(seconds=sensor.expire_after)).isoformat()) if sensor.expire_after else ""
-            )
+            cutoff = timestamp((started - timedelta(seconds=job.expire_after)).isoformat()) if job.expire_after else ""
+            next_cursor = cursor_out if cursor_out is not None else prev_cursor
             result: dict[str, object] = {
-                "sensor": name,
+                "job": name,
+                "source": src,
                 "records": len(incoming),
                 "requested_start": start,
                 "requested_end": end,
                 "reconcile": reconcile,
                 "output_bytes": len(raw),
                 **({"incomplete": incomplete} if incomplete else {}),
+                **({"cursor": next_cursor} if cursor_out is not None else {}),
             }
-            # An incomplete snapshot updates what it printed, like a window: absent records may sit in the lost part.
-            snapshot = sensor.mode == "snapshot" and not incomplete
-            expire_stored = not incomplete
+            snapshot, expire_stored = mode == "snapshot" and not incomplete, not incomplete
             if dry_run:
-                # What a real run would change, from the records as they are: an interrupted commit that the run
-                # would first recover fails the preview instead, as reads do.
                 with records.reading(store):
-                    kept = records.retention(store, name, incoming, cutoff=cutoff, expire_stored=expire_stored)
-                    counts, _ = records.plan(store, name, kept.kept, snapshot=snapshot)
+                    kept = records.retention(store, src, incoming, cutoff=cutoff, expire_stored=expire_stored)
+                    counts, _ = records.plan(store, src, kept.kept, snapshot=snapshot)
                     if snapshot:
-                        # The plan also removes these files; a real run counts them as forgotten or expired.
                         counts["removed"] -= len(kept.removals)
-                    refused = snapshot and not allow_removal and bool(_shrink(store, name, kept))
+                    refused = snapshot and not allow_removal and bool(_shrink(store, src, name, kept))
                 return {
                     **result,
                     "records": len(kept.kept),
@@ -664,101 +278,109 @@ def collect(
                     "elapsed_seconds": round(time.monotonic() - measured, 6),
                     "samples": [r.model_dump(exclude_defaults=True) for r in kept.kept[:3]],
                 }
+            # Critical invariant: NEVER open/lock `.bf/runtime.sqlite3` inside `with writer(store):`.
             with writer(store, wait=120):
-                # An interrupted commit may have removed files already: count the catalog it restores.
                 records.recover(store)
                 if clock is _utc_now or live:
-                    commit_observed = timestamp(max(started, datetime.now(UTC)).isoformat())
-                    if commit_observed != observed:
+                    commit_obs = timestamp(max(started, _utc_now()).isoformat())
+                    if commit_obs != observed:
                         incoming = [
-                            record.model_copy(update={"attributes": {**record.attributes, "observed": commit_observed}})
-                            for record in incoming
+                            r.model_copy(update={"attributes": {**r.attributes, "observed": commit_obs}})
+                            for r in incoming
                         ]
-                # Read under the lock, so a concurrent bf forget is either seen or waits for this run.
-                kept = records.retention(store, name, incoming, cutoff=cutoff, expire_stored=expire_stored)
-                # Forgotten and expired records leave on purpose: only other removals need --allow-removal.
-                if snapshot and not allow_removal and (refusal := _shrink(store, name, kept)):
+                kept = records.retention(store, src, incoming, cutoff=cutoff, expire_stored=expire_stored)
+                if snapshot and not allow_removal and (refusal := _shrink(store, src, name, kept)):
                     raise Error(refusal)
-                result.update(records.upsert(store, name, kept.kept, snapshot=snapshot, removals=kept.removals))
-                result.update(records=len(kept.kept), **_retention(kept))
+                result.update(records.upsert(store, src, kept.kept, snapshot=snapshot, removals=kept.removals))
+                if job.keep is not None:
+                    pruned = records.prune(store, src, job.keep, re.compile(r".*"))
+                    result["expired"] = kept.expired + pruned
+                else:
+                    result["expired"] = kept.expired
+                result.update(records=len(kept.kept), forgotten=kept.forgotten)
+                if not result["expired"]:
+                    result.pop("expired")
+                if not result["forgotten"]:
+                    result.pop("forgotten")
                 committed = True
                 result["elapsed_seconds"] = round(time.monotonic() - measured, 6)
-                previous = state(store).get(name, {})
-                coverage, latest = _coverage(previous, start, end, observed, sensor)
-                streak = cast(int, previous.get("incomplete_runs", 0))
-                remember(
-                    store,
-                    name,
-                    SENSORS,
-                    run=observed,
-                    **coverage,
-                    error="",
-                    failures=0,
-                    **({"success": observed} if latest else {}),
-                    **({"reconciled": observed} if reconcile and latest else {}),
-                    # Retention counters reset each run: one without forgotten or expired records stores 0.
-                    **{
-                        "forgotten": 0,
-                        "expired": 0,
-                        **{key: value for key, value in result.items() if key not in {"sensor", "incomplete"}},
-                    },
-                    # A complete run resets an incomplete streak; history without one gains no keys, so an earlier
-                    # 21.x release still loads it.
-                    **(
-                        {**incomplete, "incomplete_runs": streak + 1}
-                        if incomplete
-                        else {"missed": 0, "of": 0, "incomplete_runs": 0}
-                        if streak
-                        else {}
-                    ),
-                )
+
+            coverage, latest = _coverage(previous, start, end, observed, job)
+            streak = int(cast("int", previous.get("incomplete_runs", 0)))
+            runs = int(cast("int", previous.get("runs", 0))) + 1
+            metrics = {k: v for k, v in result.items() if k not in {"job", "source", "incomplete", "cursor"}}
+            queue = Queue(store)
+            state_patch: dict[str, object] = {
+                "last_run": observed,
+                **coverage,
+                "last_error": "",
+                "error_count": 0,
+                "runs": runs,
+                "forgotten": 0,
+                "expired": 0,
+                **({"last_success": observed} if latest else {}),
+                **({"last_reconcile": observed} if reconcile and latest else {}),
+                **({"cursor": next_cursor} if cursor_out is not None else {}),
+                **metrics,
+                **(
+                    {**incomplete, "incomplete_runs": streak + 1}
+                    if incomplete
+                    else {"missed": 0, "of": 0, "incomplete_runs": 0}
+                    if streak
+                    else {}
+                ),
+            }
+            queue.remember(name, **state_patch)
+            for ev_kind, key in (
+                ("record.created", "added"),
+                ("record.updated", "updated"),
+                ("record.removed", "removed"),
+            ):
+                if count := cast("int", result.get(key, 0)):
+                    queue.record_event(ev_kind, src, {"source": src, "job": name, "count": count})
+            queue.record_event(
+                "job.completed", name, {"job": name, "emit": "records", "source": src, "records": result["records"]}
+            )
         except (Error, OSError, UnicodeError) as error:
-            message = (
+            base = (
                 str(error)
                 if isinstance(error, Error)
-                else "collector files are inaccessible; check its executable, record permissions and free space"
+                else "collector files are inaccessible; check executable, record permissions and free space"
             )
-            # A failed collection never changes evidence: say so, unless the records were already committed.
-            message = (
+            msg = (
                 "records were committed but local run history could not be saved; retry is safe"
                 if committed
-                else f"{message}; nothing was written"
+                else f"{base}; nothing was written"
             )
-            _failed(store, name, SENSORS, started, message, error, dry_run=dry_run)
-        counts = ", ".join(f"{result.get(key, 0)} {key}" for key in ("added", "updated", "unchanged", "removed"))
+            jobs.record_failure(store, name, error, msg, dry_run=dry_run, at=observed)
+        counts_msg = ", ".join(f"{result.get(k, 0)} {k}" for k in ("added", "updated", "unchanged", "removed"))
         missing = f"; missed {incomplete['missed']} of {incomplete['of']}" if incomplete else ""
         with suppress(Error, OSError):
-            append_log(store, name, f"{_now()} collected {result['records']} records: {counts}{missing}")
+            append_log(store, name, f"{_now()} collected {result['records']} records: {counts_msg}{missing}")
         return result
 
 
-def _retention(retention: records.Retention) -> dict[str, int]:
-    """The distinct forgotten and expired records a run removed or skipped, when there are any."""
-    counts = (("forgotten", retention.forgotten), ("expired", retention.expired))
-    return {key: value for key, value in counts if value}
-
-
 def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, object]:
-    """Re-validate and normalize a sensor's stored records against current ontology constraints; never deletes.
-
-    Changed records are committed in transactions of up to REPROJECT records that keep memory bounded: an interrupted
-    run leaves each record either normalized or as it was, and a rerun completes it. Records failing validation keep
-    their stored files and are counted as failed.
-    """
+    """Re-validate and normalize stored records for job or source `name`; never deletes."""
     config = load(store)
-    if name not in config.sensors:
-        raise Error(f"sensor {name} is not declared in bf.yaml")
+    sources = config.record_sources()
+    if name in config.jobs and config.jobs[name].emit == "records":
+        job_name, src = name, config.jobs[name].source or name
+    elif name in sources:
+        job_name, src = sources[name][0], name
+    else:
+        raise Error(f"record job or source {name} is not declared in bf.yaml")
     counts = {"records": 0, "changed": 0, "unchanged": 0, "failed": 0}
     problems: list[dict[str, str]] = []
     with ExitStack() as stack:
-        stack.enter_context(collecting(store, name))
+        stack.enter_context(collecting(store, job_name))
         if dry_run:
             stack.enter_context(records.reading(store))
         else:
             stack.enter_context(writer(store, wait=120))
             records.recover(store)
         changed: list[Record] = []
-        for file in records.files(store, name):
+        for file in records.files(store, src):
             counts["records"] += 1
             try:
                 stored = records.load(store, file)
@@ -767,8 +389,8 @@ def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, ob
             except (Error, ValidationError) as error:
                 counts["failed"] += 1
                 if len(problems) <= LIMIT:
-                    message = explain(error, RECORD_KEYS) if isinstance(error, ValidationError) else str(error)
-                    problems.append({"file": file, "error": message.removeprefix(f"{file}: ")})
+                    msg = explain(error, RECORD_KEYS) if isinstance(error, ValidationError) else str(error)
+                    problems.append({"file": file, "error": msg.removeprefix(f"{file}: ")})
                 continue
             if normalized == stored:
                 counts["unchanged"] += 1
@@ -778,12 +400,13 @@ def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, ob
                 continue
             changed.append(normalized)
             if len(changed) >= REPROJECT:
-                records.upsert(store, name, changed, snapshot=False)
+                records.upsert(store, src, changed, snapshot=False)
                 changed = []
         if changed and not dry_run:
-            records.upsert(store, name, changed, snapshot=False)
+            records.upsert(store, src, changed, snapshot=False)
     return {
-        "sensor": name,
+        "job": job_name,
+        "source": src,
         "dry_run": dry_run,
         **counts,
         **({"problems": problems[:LIMIT]} if problems else {}),
@@ -791,435 +414,70 @@ def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, ob
     }
 
 
-def home_folder() -> str:
-    """The folder {{home}} names, resolved only for a program that uses it: a container user without HOME or a passwd
-    entry still runs the others."""
-    try:
-        return str(Path.home())
-    except RuntimeError as error:
-        raise NotStartedError("cannot find the home directory for {{home}}; set HOME") from error
-
-
-def expand_lines(store: Store, path: str) -> list[str]:
-    """Read a brain-relative line-list file, ignoring blank lines and `#` comments."""
-    relative(path)
-    try:
-        raw = store.read(path, MAX_NOTE)
-    except FileNotFoundError as error:
-        raise NotStartedError(f"{path} does not exist; restore it or correct bf.yaml") from error
-    except (Error, OSError) as error:
-        raise NotStartedError(reason(error, f"cannot read {path}")) from error
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeError as error:
-        raise NotStartedError(f"{path} is not valid UTF-8") from error
-    items = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if "\x00" in stripped or len(stripped) > 16_384:
-            raise NotStartedError(f"{path}: line exceeds 16384 characters or contains NUL")
-        items.append(stripped)
-    return items
-
-
-def arguments(
-    store: Store,
-    program: Command,
-    start: str,
-    end: str,
-    prompt: str = "",
-    schema: str = "",
-    extra_args: Sequence[str] = (),
-) -> list[str]:
-    values = {"brain": str(store.root), "start": start, "end": end, "prompt": prompt, "schema": schema}
-    # One pass: an expanded prompt that mentions a placeholder keeps it as text.
-    expanded: list[str] = []
-    for index, arg in enumerate([*program.command, *extra_args]):
-        if index > 0 and (lines_match := re.fullmatch(r"\{\{lines:([^{}\\]+)\}\}", arg)):
-            expanded.extend(expand_lines(store, lines_match[1]))
-        else:
-            expanded.append(
-                re.sub(
-                    r"\{\{(brain|home|start|end|prompt|schema)\}\}",
-                    lambda match: home_folder() if match[1] == "home" else values[match[1]],
-                    arg,
-                )
-            )
-    if len(expanded) > 128:
-        raise NotStartedError("command arguments exceed 128 items after expanding line files")
-    return expanded
-
-
-def validate_action_markdown(
-    store: Store,
-    config: Config,
-    path: str,
-    raw: bytes,
-    *,
-    require_draft: bool = False,
-) -> None:
-    """Validate an `actions/.../ACTION.md` note against OKF, ontology, brain policies and relative links."""
-    if len(raw) > MAX_NOTE:
-        raise Error("action note exceeds 4 MiB")
-    markdown = parse(path, raw)
-    action = note(path, markdown)
-    ontology.note_claims(action, config, strict=True)
-    validate_okf(path, markdown)
-    if action.knowledge.type != "action":
-        raise Error(f"{path}: action note requires type: action")
-    if require_draft and markdown.attributes.get("status") != "draft":
-        raise Error(f"{path}: proposed action requires status: draft")
-    for key in sorted(markdown.attributes):
-        if key in config.ontology and key not in Knowledge.model_fields:
-            raise Error(f"{path}: {key}: relations belong under relations:, such as relations: {{{key}: ...}}")
-    rules = config.validation
-    if rules.required_status is not None and markdown.attributes.get("status") not in rules.required_status:
-        allowed = ", ".join(rules.required_status)
-        raise Error(f"{path}: frontmatter status must be explicitly set to one of: {allowed}")
-    if action.knowledge.stale_after and rules.max_stale_days is not None:
-        due_days = (date.fromisoformat(action.knowledge.stale_after[:10]) - date.today()).days
-        if due_days > rules.max_stale_days:
-            raise Error(f"{path}: stale_after exceeds max_stale_days ({rules.max_stale_days} days)")
-    for pattern in rules.forbid_patterns:
-        compiled = re.compile(pattern)
-        for line_number, line in enumerate((item.rstrip("\r\n") for item in markdown_lines(markdown.text)), 1):
-            if compiled.search(line):
-                raise Error(f"{path}: line {line_number}: matches forbidden pattern {pattern}")
-    if broken := broken_links(store, action):
-        first = broken[0] if len(broken[0]) <= _QUOTE else broken[0][: _QUOTE - 1] + "…"
-        raise Error(first + (f" and {len(broken) - 1} more" if len(broken) > 1 else ""))
-
-
-def allocate_action_path(store: Store, slug: str, day: str, *, unique: bool = False) -> str:
-    """Allocate a new `actions/YYYY-MM-DD_<slug>/ACTION.md` path, appending a 12-hex suffix on collision or `unique`."""
-    with suppress(FileNotFoundError):
-        if not stat.S_ISDIR(store.mode("actions")):
-            raise Error("actions: expected a directory; symlinks and special files are forbidden")
-    candidates = ([] if unique else [f"actions/{day}_{slug}"]) + [
-        f"actions/{day}_{slug}-{uuid4().hex[-12:]}" for _ in range(5)
-    ]
-    for folder in candidates:
-        try:
-            store.mode(folder)
-        except FileNotFoundError:
-            return f"{folder}/ACTION.md"
-    raise Error(f"could not allocate a unique action folder for {slug}")
-
-
-def _written(store: Store, prefix: str) -> bool:
-    """Whether an `actions/{prefix}SUFFIX` folder holds an ACTION.md, which alone makes it an action.
-
-    Folder names, not run history, find it: a retry counts an action whose run history was never saved. An ACTION.md
-    link, or a linked or unreadable folder BF cannot look into, also counts; a linked or unreadable `actions/` fails
-    by name. A folder holding only the temporary file of a killed write, or an editor's lock, does not stop today's
-    action.
-    """
-    skipped: dict[str, tuple[int, int, int, int]] = {}
-    found = store.files("actions", skipped=skipped)
-    if "actions" in skipped:
-        # The scan skips a folder it cannot read as it skips a link: name the cause the owner must fix.
-        if stat.S_ISDIR(store.mode("actions")):
-            raise Error("actions: unreadable folder; grant read and search permission")
-        raise Error("actions: expected a directory; symlinks and special files are forbidden")
-    today = re.compile(re.escape(f"actions/{prefix}") + r"[0-9a-f]{8}(?:/ACTION\.md)?")
-    return any(today.fullmatch(name) for name in (*found, *skipped))
-
-
-def _prune_reports(store: Store, name: str, keep: int, written: dict[str, str]) -> tuple[dict[str, str], int]:
-    """Remove the routine's actions older than its newest `keep` that still hold only the ACTION.md BF wrote.
-
-    `written` maps each action this machine wrote to the SHA-256 of its bytes; it returns the entries still worth
-    checking and how many folders were removed. An edited action, one holding other files and one written before
-    `keep` was set or on another machine stay: they are a person's work, not a disposable report. A folder BF cannot
-    read or change stays too, and the routine's log names it.
-    """
-    reports = {**cast(dict[str, str], state(store, ROUTINES).get(name, {}).get("reports", {})), **written}
-    pattern = re.compile(rf"actions/\d{{4}}-\d{{2}}-\d{{2}}_{re.escape(name)}-[0-9a-f]{{8}}/ACTION\.md")
-    try:
-        found = store.files("actions")
-    except (Error, OSError) as error:
-        # An incomplete listing could miscount the newest actions: remove none this run.
-        with suppress(Error, OSError):
-            append_log(store, name, f"{_now()} kept older actions: {error}")
-        return reports, 0
-    # Folder dates order the actions, but the ones this run wrote are the newest whatever their date: another clone
-    # in a time zone ahead, or a clock that ran ahead, can date a folder after today.
-    actions = sorted((file for file in found if pattern.fullmatch(file)), key=lambda file: (file in written, file))
-    removed = 0
-    for path in actions[: max(0, len(actions) - keep)]:
-        # Only an action this machine wrote can be a disposable report: never read the others.
-        if (expected := reports.pop(path, None)) is None:
-            continue
-        folder = path.removesuffix("/ACTION.md")
-        try:
-            # Exactly one entry: an empty inputs/ folder or another file makes it the owner's.
-            data = store.read(path, MAX_NOTE) if store.entries(folder) == ["ACTION.md"] else b""
-            if data and digest(data) == expected:
-                store.delete(path)
-                try:
-                    store.rmdir(folder)
-                    removed += 1
-                except Error, OSError:
-                    # An entry appeared meanwhile: put the report back rather than leave a folder without it.
-                    store.write(path, data)
-        except (Error, OSError) as error:
-            # The new action is written: a report BF cannot read or remove stays, and never fails the run.
-            with suppress(Error, OSError):
-                append_log(store, name, f"{_now()} kept {folder}: {error}")
-    listed = set(actions)
-    return {path: value for path, value in reports.items() if path in listed}, removed
-
-
-def routine(
-    store: Store,
-    name: str,
-    *,
-    start: str,
-    end: str,
-    dry_run: bool = False,
-    args: tuple[str, ...] = (),
-    stdin: bytes = b"",
-    when_cursor: str = "",
-    runner: Runner = run,
-    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-) -> dict[str, object]:
-    """Run one routine over [start, end), appending `args` to its command and feeding it `stdin`.
-
-    A `log` routine keeps its output in its log. An `action` routine's Markdown becomes today's action, written only
-    after success in a new folder; empty output means there is nothing to review. While today's action exists, a run
-    skips, so an action routine keeps at most one action per local day in this brain and never replaces a person's
-    edits. A dry run reports the same skip.
-    """
-    start, end = _window(start, end)
-    config = load(store)
-    program = enabled(config.routines, "routine", name)
-    with collecting(store, name):
-        started = clock()
-        day = started.astimezone().date().isoformat()
-        # A short random suffix keeps actions written the same day by different clones apart.
-        folder = f"actions/{day}_{name}-{uuid4().hex[-8:]}"
-        path = f"{folder}/ACTION.md"
-        written = False
-        try:
-            with exposing(BF_START=start, BF_END=end):
-                raw = runner([*arguments(store, program, start, end), *args], program, store, name, stdin)
-            result: dict[str, object] = {"routine": name}
-            text = ""
-            if program.output == "action":
-                try:
-                    text = raw.decode("utf-8")
-                except UnicodeError as error:
-                    raise Error("routine must print UTF-8 Markdown") from error
-                if text.strip():
-                    # Validate the action's OKF metadata, declared relations, policies and relative links before
-                    # anything is written: an action bf validate rejects would block the brain's next checked commit.
-                    validate_action_markdown(store, config, path, raw)
-            if dry_run:
-                # A preview predicts the skip, but names no action: the real run draws its own folder suffix.
-                if text.strip() and _written(store, f"{day}_{name}-"):
-                    result["skipped"] = _EXISTS
-                return {**result, **({"text": text} if text.strip() else {})}
-            with ExitStack() as locks:
-                if text.strip():
-                    # Only an action changes the brain; run history alone stays outside it, so a log routine never
-                    # waits for the brain's readers, such as a long bf validate. Locks order: writer, then history.
-                    locks.enter_context(writer(store, wait=120))
-                locks.enter_context(recording(store))
-                if text.strip() and _written(store, f"{day}_{name}-"):
-                    result["skipped"] = _EXISTS
-                elif text.strip():
-                    store.write(path, raw)
-                    written = True
-                    result["action"] = path
-                    if program.keep is not None:
-                        reports, result["removed"] = _prune_reports(store, name, program.keep, {path: digest(raw)})
-                # A skipped review keeps its window open, so the next written action covers it.
-                reviewed = {} if "skipped" in result else {"start": start, "end": end}
-                at = timestamp(started.isoformat())
-                remember(
-                    store,
-                    name,
-                    ROUTINES,
-                    run=at,
-                    success=at,
-                    **reviewed,
-                    error="",
-                    failures=0,
-                    **({"action": path} if "action" in result else {}),
-                    **({"reports": reports} if "removed" in result else {}),
-                    **({"when_cursor": when_cursor} if when_cursor and "skipped" not in result else {}),
-                )
-            outcome = f"wrote {path}" if "action" in result else str(result.get("skipped", "succeeded"))
-            with suppress(Error, OSError):
-                append_log(store, name, f"{_now()} {outcome}")
-        except (Error, OSError, UnicodeError) as error:
-            message = (
-                str(error)
-                if isinstance(error, Error)
-                else "routine files are inaccessible; check its executable, action folder permissions and free space"
-            )
-            if written:
-                message = f"wrote {path} but local run history could not be saved"
-            elif program.output == "action":
-                message += "; no action was written"
-            _failed(store, name, ROUTINES, started, message, error, dry_run=dry_run)
-        return result
-
-
-def parse_reply(raw: bytes) -> str:
-    """A plain-text reply; the error never quotes the output."""
-    try:
-        return raw.decode("utf-8").strip()
-    except UnicodeError as error:
-        raise Error("assistant command must print UTF-8") from error
-
-
-def _pointer(document: JsonValue, path: str) -> JsonValue:
-    """Read a JSON Pointer; a missing member is absent, an invalid traversal is an error."""
-    value = document
-    for encoded in path[1:].split("/"):
-        key = encoded.replace("~1", "/").replace("~0", "~")
-        if isinstance(value, dict):
-            if key not in value:
-                return None
-            value = value[key]
-        elif isinstance(value, list) and key.isascii() and key.isdecimal() and (key == "0" or not key.startswith("0")):
-            if int(key) >= len(value):
-                return None
-            value = value[int(key)]
-        else:
-            raise Error("reply pointer cannot traverse the assistant output")
-    return value
-
-
-def structured_reply(raw: bytes, pointer: str) -> tuple[JsonValue, dict[str, JsonValue]]:
-    """The value at `pointer` of a JSON reply, and the reply's other members; the error never quotes the output."""
-    try:
-        document = decode(raw)
-    except Error as error:
-        raise Error("assistant command must print one JSON object when reply is set") from error
-    if not isinstance(document, dict):
-        raise Error("assistant command must print one JSON object when reply is set")
-    if not pointer:
-        return cast(JsonValue, document), {}
-    try:
-        value = _pointer(cast(JsonValue, document), pointer)
-    except Error:
-        # A pointer into a string, a number or a non-decimal array index finds no reply: report it as missing.
-        return None, cast(dict[str, JsonValue], document)
-    parent, _, key = pointer.rpartition("/")
-    holder = _pointer(cast(JsonValue, document), parent) if parent else document
-    if isinstance(holder, dict):
-        # The answer becomes the record's text: keep it once.
-        holder.pop(key.replace("~1", "/").replace("~0", "~"), None)
-    elif isinstance(holder, list) and value is not None:
-        # Preserve the other elements' positions without duplicating a potentially large answer.
-        holder[int(key)] = None
-    return value, cast(dict[str, JsonValue], document)
-
-
-def reply_title(name: str, reply: str) -> str:
-    """The reply's first line without Markdown heading marks or control characters, else a neutral title."""
-    for line in reply.splitlines():
-        if line := _CONTROL.sub(" ", line).strip().lstrip("#").strip():
-            return line if len(line) <= _TITLE else line[: _TITLE - 1].rstrip() + "…"
-    return f"{name} run without a reply"
-
-
-def hooked(config: Config, hook: str) -> list[str]:
-    """The enabled routines a hook runs, in name order."""
-    return sorted(name for name, program in config.routines.items() if program.enabled and hook in program.hooks)
-
-
-def window(store: Store, name: str, now: datetime) -> tuple[str, str]:
-    """The window a routine run covers now: since the end of its last reviewed window, else its lookback."""
-    config = load(store)
-    program, last = config.routines[name], state(store, ROUTINES).get(name, {})
-    start = now - timedelta(seconds=program.lookback)
-    if last.get("end") and (reviewed := datetime.fromisoformat(str(last["end"]))) < now:
-        start = reviewed
-    return timestamp(start.isoformat()), timestamp(now.isoformat())
-
-
-def next_due(program: Program, last: dict[str, object], now: datetime) -> datetime | None:
-    """When an enabled scheduled program is next due; None when it is manual or disabled.
-
-    Sensors and interval routines are due one refresh after their last success; wall-clock routines follow `at` and
-    `days`. After consecutive failures, a program retries after BACKOFF, doubling per failure up to its refresh (or
-    24h for wall-clock routines).
-    """
-    if not program.enabled:
+def next_due(job: Job, last: Mapping[str, object], now: datetime, *, default_tz: str | None = None) -> datetime | None:
+    """UTC instant when an enabled scheduled job is next due; None when manual or disabled."""
+    if not job.enabled:
         return None
-    if isinstance(program, Routine):
-        if not program.scheduled:
-            return None
-        cap = timedelta(seconds=program.refresh or 86_400)
-        if last.get("error"):
-            anchor = str(last.get("run", ""))
-            failures = max(1, int(str(last.get("failures", 1))))
-            delay = min(cap, BACKOFF * 2 ** min(failures - 1, 30))
-            if not anchor:
-                return now
-            since = datetime.fromisoformat(anchor)
-            return now if since > now else since + delay
-        return program.schedule_due(now, str(last.get("success", "")))
-    if not program.refresh:
+    timed = [t for t in job.triggers if t.every is not None or t.at is not None]
+    if not timed:
         return None
-    refresh = timedelta(seconds=program.refresh)
-    anchor, delay = str(last.get("success", "")), refresh
-    if last.get("error"):
-        failures = max(1, int(str(last.get("failures", 1))))
-        anchor, delay = str(last.get("run", "")), min(refresh, BACKOFF * 2 ** min(failures - 1, 30))
-    if not anchor:
-        return now
-    since = datetime.fromisoformat(anchor)
-    # Clock corrections must not suppress work until a future timestamp catches up.
-    return now if since > now else since + delay
+    if last.get("last_error") or last.get("error"):
+        cap = timedelta(seconds=min(t.every or 86_400 for t in timed))
+        errs = max(1, int(str(last.get("error_count", last.get("failures", 1)))))
+        delay = min(cap, timedelta(seconds=SCHEDULE_BACKOFF * 2 ** min(errs - 1, 30)))
+        anchor = str(last.get("last_run") or last.get("run") or "")
+        if not anchor:
+            return now
+        since = datetime.fromisoformat(anchor)
+        return now if since > now else since + delay
+    last_success = str(last.get("last_success") or last.get("success") or "")
+    return min(t.schedule_due(now, last_success, timezone=default_tz) for t in timed)
 
 
-def _due(program: Program, last: dict[str, object], now: datetime) -> bool:
-    return (due_at := next_due(program, last, now)) is not None and due_at <= now
-
-
-def _due_windows(store: Store, programs: Mapping[str, Program], file: str, now: datetime) -> list[tuple[str, str, str]]:
-    history = state(store, file)
-    return [
-        (name, *window(store, name, now))
-        for name, program in sorted(programs.items())
-        if _due(program, history.get(name, {}), now)
-    ]
-
-
-def due_routines(store: Store, now: datetime) -> list[tuple[str, str, str]]:
-    """Due routines; each covers the time since the end of its last reviewed window."""
-    return _due_windows(store, load(store).routines, ROUTINES, now)
+def _is_due(job: Job, last: Mapping[str, object], now: datetime, tz: str | None) -> bool:
+    return (due_at := next_due(job, last, now, default_tz=tz)) is not None and due_at <= now
 
 
 def due(store: Store, now: datetime) -> list[tuple[str, str, str, bool]]:
-    """Due sensors, with the window each should collect."""
-    config, history = load(store), state(store)
-    windows = []
-    for name, sensor in sorted(config.sensors.items()):
-        last = history.get(name, {})
-        if not _due(sensor, last, now):
+    """Due `emit: records` jobs with their `[start, end)` window and reconcile flag."""
+    config, states = load(store), Queue(store).all_states()
+    windows: list[tuple[str, str, str, bool]] = []
+    for name, job in sorted(config.jobs.items()):
+        if job.emit != "records":
             continue
-        start = now - timedelta(seconds=sensor.lookback)
-        if last.get("end") and sensor.mode == "window":
-            # Resume after the last window with overlap for late arrivals (upserts make it harmless),
-            # catching up at most CATCH_UP after a long pause.
+        last = states.get(name, {})
+        if not _is_due(job, last, now, config.defaults.timezone):
+            continue
+        start = now - timedelta(seconds=job.lookback)
+        if last.get("window_end") and (job.mode or "window") == "window":
             floor = now - CATCH_UP
-            resumed = max(datetime.fromisoformat(str(last["end"])), floor) - timedelta(seconds=sensor.overlap)
+            resumed = max(datetime.fromisoformat(str(last["window_end"])), floor) - timedelta(seconds=job.overlap)
             if resumed < now:
                 start = max(resumed, floor)
-        reconciliation = sensor.reconcile
-        reconciled = str(last.get("reconciled", ""))
-        revisit = reconciliation is not None and (
+        rec = job.reconcile_spec
+        reconciled = str(last.get("last_reconcile") or "")
+        revisit = rec is not None and (
             not reconciled
-            or not timedelta(0) <= now - datetime.fromisoformat(reconciled) < timedelta(seconds=reconciliation.refresh)
+            or not timedelta(0) <= now - datetime.fromisoformat(reconciled) < timedelta(seconds=rec.every)
         )
-        if revisit and reconciliation is not None:
-            start = min(start, now - timedelta(seconds=reconciliation.lookback))
+        if revisit and rec is not None:
+            start = min(start, now - timedelta(seconds=rec.lookback or job.lookback))
         windows.append((name, timestamp(start.isoformat()), timestamp(now.isoformat()), revisit))
     return windows
+
+
+def due_jobs(store: Store, now: datetime) -> list[tuple[str, str, str]]:
+    """Due scheduled jobs that do not emit records (`emit != "records"`)."""
+    config, states = load(store), Queue(store).all_states()
+    items: list[tuple[str, str, str]] = []
+    for name, job in sorted(config.jobs.items()):
+        if job.emit == "records":
+            continue
+        last = states.get(name, {})
+        if not _is_due(job, last, now, config.defaults.timezone):
+            continue
+        start = now - timedelta(seconds=job.lookback)
+        if last.get("window_end") and (reviewed := datetime.fromisoformat(str(last["window_end"]))) < now:
+            start = reviewed
+        items.append((name, timestamp(start.isoformat()), timestamp(now.isoformat())))
+    return items

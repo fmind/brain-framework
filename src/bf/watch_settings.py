@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from bf.config import load
-from bf.history import environment
 from bf.models import Error, WatchSettings, explain
+from bf.runtime import environment
 from bf.storage import Store
 
 

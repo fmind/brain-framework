@@ -9,7 +9,7 @@ from contextlib import suppress
 from datetime import date
 from functools import cache
 
-from bf import links, ontology, pages, records
+from bf import links, ontology, records
 from bf.config import load
 from bf.markdown import (
     Note,
@@ -30,7 +30,6 @@ from bf.models import (
     IDENTITY,
     MAX_NOTE,
     MAX_PROMPT,
-    Assistant,
     Config,
     Error,
     Knowledge,
@@ -83,6 +82,57 @@ def broken_links(store: Store, item: Note) -> list[str]:
             with suppress(Error, OSError, UnicodeError):
                 slugs[entry] = note(entry, store.read(entry, MAX_NOTE)).slugs
     return broken(item, lambda name: name == item.path or kind(name) in {stat.S_IFREG, stat.S_IFDIR}, slugs)
+
+
+def note_policy_errors(
+    config: Config, name: str, text: str, attributes: dict[str, object], parsed_note: Note, *, check_okf: bool = False
+) -> list[str]:
+    """Check note frontmatter, stale_after, forbidden patterns and misplaced relation keys against brain policy."""
+    errors: list[str] = []
+    if check_okf:
+        errors.extend(
+            f"{key}: relations belong under relations:, such as relations: {{{key}: ...}}"
+            for key in sorted(attributes)
+            if key in config.ontology and key not in Knowledge.model_fields
+        )
+    rules = config.validation
+    if entry_note(name):
+        if rules.required_status is not None and attributes.get("status") not in rules.required_status:
+            errors.append(f"frontmatter status must be explicitly set to one of: {', '.join(rules.required_status)}")
+        if (
+            parsed_note.knowledge.stale_after
+            and rules.max_stale_days is not None
+            and (date.fromisoformat(parsed_note.knowledge.stale_after[:10]) - date.today()).days > rules.max_stale_days
+        ):
+            errors.append(f"stale_after exceeds max_stale_days ({rules.max_stale_days} days)")
+    for pattern in rules.forbid_patterns:
+        compiled = re.compile(pattern)
+        for line_number, line in enumerate((item.rstrip("\r\n") for item in markdown_lines(text)), 1):
+            if compiled.search(line):
+                errors.append(f"line {line_number}: matches forbidden pattern {pattern}")
+                break
+    return errors
+
+
+def validate_action_markdown(
+    store: Store, config: Config, path: str, raw: bytes, *, require_draft: bool = False
+) -> None:
+    """Validate an `actions/.../ACTION.md` note against OKF, ontology, brain policies and relative links."""
+    if len(raw) > MAX_NOTE:
+        raise Error("action note exceeds 4 MiB")
+    md = parse(path, raw)
+    action = note(path, md)
+    ontology.note_claims(action, config, strict=True)
+    validate_okf(path, md)
+    if action.knowledge.type != "action":
+        raise Error(f"{path}: action note requires type: action")
+    if require_draft and md.attributes.get("status") != "draft":
+        raise Error(f"{path}: proposed action requires status: draft")
+    if errs := note_policy_errors(config, path, md.text, md.attributes, action, check_okf=True):
+        raise Error(f"{path}: {errs[0]}")
+    if links_bad := broken_links(store, action):
+        first = links_bad[0] if len(links_bad[0]) <= 200 else links_bad[0][:199] + "…"
+        raise Error(first + (f" and {len(links_bad) - 1} more" if len(links_bad) > 1 else ""))
 
 
 def _problem(file: str, message: str) -> dict[str, str]:
@@ -154,111 +204,70 @@ def _script(argument: str) -> bool:
     )
 
 
-def _programs(store: Store, config: Config) -> list[dict[str, str]]:
-    """Each enabled program the brain holds exists, with its prompt file; commands on PATH vary by machine.
-
-    A script run directly is an executable regular file. Behind a command on PATH, such as an interpreter, only the
-    first brain path among the arguments is checked: a script or a folder, such as a `uv run --project` project. Later
-    ones may name files the program creates.
-    """
-    from bf.collect import expand_lines
-
-    problems = []
-    for name, prompt in sorted(config.assistants.items()):
+def _check_cmd(
+    store: Store,
+    problems: list[dict[str, str]],
+    label: str,
+    cmd: list[str],
+    expand_fn: Callable[[Store, str], list[str]],
+) -> None:
+    direct = cmd[0].startswith(("sensors/", "routines/", "channels/"))
+    if path := (cmd[0] if direct else next(filter(_script, cmd[1:]), "")):
         try:
-            readable = prompt.enabled and stat.S_ISREG(store.mode(prompt.prompt))
-            size = store.lstat(prompt.prompt).st_size if readable else 0
-        except Error, OSError:
-            readable, size = False, 0
-        if prompt.enabled and not readable:
-            problems.append(_problem("bf.yaml", f"assistants.{name}.prompt: {prompt.prompt} is not a regular file"))
-        elif size > MAX_PROMPT:
-            # Every run would fail on it: say so before the schedule does.
-            problems.append(
-                _problem("bf.yaml", f"assistants.{name}.prompt: {prompt.prompt} exceeds {MAX_PROMPT} bytes")
+            mode = store.mode(path)
+            usable = (
+                stat.S_ISREG(mode) and bool(mode & stat.S_IXUSR)
+                if direct
+                else (stat.S_ISREG(mode) or stat.S_ISDIR(mode))
             )
-    channel_commands = {
-        f"{name}.{kind}": command
-        for name, channel in config.channels.items()
-        for kind in ("send", "read", "stream")
-        if (command := getattr(channel, kind)) is not None
-    }
-    gate_commands = {
-        f"{name}.schedules.{key}.gate": schedule.gate
-        for name, assistant in config.assistants.items()
-        if assistant.enabled
-        for key, schedule in assistant.schedules.items()
-        if schedule.gate is not None
-    }
-    for kind, programs in (
-        ("sensors", config.sensors),
-        ("routines", config.routines),
-        ("assistants", config.assistants),
-        ("assistants", gate_commands),
-        ("channels", channel_commands),
-    ):
-        for name, program in sorted(programs.items()):
-            if not getattr(program, "enabled", True):
-                continue
-            # Program.command already requires a normalized path when the brain's own script runs directly.
-            direct = program.command[0].startswith(("sensors/", "routines/", "channels/"))
-            path = program.command[0] if direct else next(filter(_script, program.command[1:]), "")
-            if path:
-                try:
-                    mode = store.mode(path)
-                    usable = (
-                        stat.S_ISREG(mode) and bool(mode & stat.S_IXUSR)
-                        if direct
-                        else stat.S_ISREG(mode) or stat.S_ISDIR(mode)
-                    )
-                except Error, OSError:
-                    usable = False
-                if not usable:
-                    required = "an executable regular file" if direct else "a regular file or folder"
-                    problems.append(_problem("bf.yaml", f"{kind}.{name}.command: {path} is not {required}"))
+        except Error, OSError:
+            usable = False
+        if not usable:
+            req = "an executable regular file" if direct else "a regular file or folder"
+            problems.append(_problem("bf.yaml", f"{label}: {path} is not {req}"))
+    count = 1
+    for arg in cmd[1:]:
+        if lines_match := re.fullmatch(r"\{\{lines:([^{}\\]+)\}\}", arg):
+            try:
+                count += len(expand_fn(store, lines_match[1]))
+            except Error as error:
+                problems.append(_problem("bf.yaml", f"{label}: {error}"))
+        else:
+            count += 1
+    if count > 128:
+        problems.append(_problem("bf.yaml", f"{label}: command arguments exceed 128 items after expanding line files"))
 
-            def _expanded_count(
-                label: str, extra: list[str], base: tuple[str, ...] = tuple(program.command[1:])
-            ) -> int:
-                count = 1
-                for argument in [*base, *extra]:
-                    if lines_match := re.fullmatch(r"\{\{lines:([^{}\\]+)\}\}", argument):
-                        try:
-                            count += len(expand_lines(store, lines_match[1]))
-                        except Error as error:
-                            problems.append(_problem("bf.yaml", f"{label}: {error}"))
-                    else:
-                        count += 1
-                return count
 
-            if _expanded_count(f"{kind}.{name}.command", []) > 128:
-                problems.append(
-                    _problem(
-                        "bf.yaml",
-                        f"{kind}.{name}.command: command arguments exceed 128 items after expanding line files",
-                    )
-                )
-            if isinstance(program, Assistant):
-                if program.input_args and _expanded_count(f"assistants.{name}.input_args", program.input_args) > 128:
-                    problems.append(
-                        _problem(
-                            "bf.yaml",
-                            f"assistants.{name}.input_args: command arguments exceed 128 items after expanding line files",
-                        )
-                    )
-                for schedule_name, spec in sorted(program.schedules.items()):
-                    combined = [*program.schedule_args, *spec.args]
-                    if (
-                        combined
-                        and _expanded_count(f"assistants.{name}.schedules.{schedule_name}.args", combined) > 128
-                    ):
-                        problems.append(
-                            _problem(
-                                "bf.yaml",
-                                f"assistants.{name}.schedules.{schedule_name}.args: command arguments exceed 128 "
-                                "items after expanding line files",
-                            )
-                        )
+def _programs(store: Store, config: Config) -> list[dict[str, str]]:
+    """Verify every enabled job's script, prompt, cwd and `{{lines:...}}` file cleanly."""
+    from bf.jobs import expand_lines
+
+    problems: list[dict[str, str]] = []
+    if config.defaults.harness:
+        _check_cmd(store, problems, "defaults.harness", config.defaults.harness, expand_lines)
+    for name, job in sorted(config.jobs.items()):
+        if not job.enabled:
+            continue
+        if job.prompt:
+            try:
+                readable = stat.S_ISREG(store.mode(job.prompt))
+                size = store.lstat(job.prompt).st_size if readable else 0
+            except Error, OSError:
+                readable, size = False, 0
+            if not readable:
+                problems.append(_problem("bf.yaml", f"jobs.{name}.prompt: {job.prompt} is not a regular file"))
+            elif size > MAX_PROMPT:
+                problems.append(_problem("bf.yaml", f"jobs.{name}.prompt: {job.prompt} exceeds {MAX_PROMPT} bytes"))
+        if job.cwd:
+            try:
+                is_dir = stat.S_ISDIR(store.mode(job.cwd))
+            except Error, OSError:
+                is_dir = False
+            if not is_dir:
+                problems.append(_problem("bf.yaml", f"jobs.{name}.cwd: {job.cwd} is not a directory"))
+        for field, cmd in (("run", job.run), ("harness", job.harness), ("send", job.send), ("gate", job.gate)):
+            if cmd:
+                _check_cmd(store, problems, f"jobs.{name}.{field}", cmd, expand_lines)
     return problems
 
 
@@ -366,13 +375,8 @@ class _Validation:
             except Error:
                 # An alias that cannot name it or a malformed link, as reported above: retrieval drops the record.
                 continue
-            try:
-                # A record's ref is one of its names: a note alias repeating it is ambiguous.
-                identities = [links.target(alias) for alias in [ref, ontology.qualify(config, ref), *record.aliases]]
-            except Error as error:
-                # Only the ref of a source named bf, which reads as a malformed BF address.
-                self.problems.append(_problem(name, str(error)))
-                continue
+            # A record's ref is one of its names: a note alias repeating it is ambiguous.
+            identities = [links.target(alias) for alias in [ref, ontology.qualify(config, ref), *record.aliases]]
             for identity in identities:
                 self.owners.setdefault(identity, {})[ref] = name
             for claim in claims:
@@ -425,51 +429,35 @@ class _Validation:
                 names = [*parsed_note.knowledge.names, parsed_note.knowledge.entity]
                 self.spellings.add({*(links.target(v) for v in names if v), *(claim.target for claim in claims)})
                 self.targeted.extend((name, claim) for claim in claims if ontology.outside(config, claim))
-            if okf(name):
+            if is_okf := okf(name):
                 try:
                     validate_okf(name, markdown)
                 except Error as error:
                     self.problems.append(_problem(name, str(error)))
-                # OKF ignores unknown keys: a relation named at the top level would silently assert nothing.
-                self.problems.extend(
-                    _problem(name, f"{key}: relations belong under relations:, such as relations: {{{key}: ...}}")
-                    for key in sorted(markdown.attributes)
-                    if key in config.ontology and key not in Knowledge.model_fields
-                )
-            self._policy(name, markdown.text, markdown.attributes, parsed_note)
+            self._policy(name, markdown.text, markdown.attributes, parsed_note, check_okf=is_okf)
         if config.validation.index_note is not None:
             self._check_index_note(config.validation.index_note)
         self.slugs = {n.path: n.slugs for n in self.parsed}
         self.tagged = {tag for item in self.parsed for tag in item.knowledge.tags}
 
-    def _policy(self, name: str, text: str, attributes: dict[str, object], parsed_note: Note) -> None:
+    def _policy(
+        self, name: str, text: str, attributes: dict[str, object], parsed_note: Note, *, check_okf: bool = False
+    ) -> None:
         rules = self.config.validation
-        today = date.today()
-        if entry_note(name):
-            if rules.required_status is not None and attributes.get("status") not in rules.required_status:
-                allowed = ", ".join(rules.required_status)
-                self.problems.append(_problem(name, f"frontmatter status must be explicitly set to one of: {allowed}"))
-            if parsed_note.knowledge.stale_after:
-                due_days = (date.fromisoformat(parsed_note.knowledge.stale_after[:10]) - today).days
-                if rules.max_stale_days is not None and due_days > rules.max_stale_days:
-                    self.problems.append(
-                        _problem(name, f"stale_after exceeds max_stale_days ({rules.max_stale_days} days)")
-                    )
-                if rules.warn_stale_days is not None and due_days <= rules.warn_stale_days:
-                    self.stale_warnings.append(
-                        {
-                            "warning": f"stale_after is within {rules.warn_stale_days} days",
-                            "file": name,
-                            "stale_after": parsed_note.knowledge.stale_after[:10],
-                        }
-                    )
-        for pattern in rules.forbid_patterns:
-            compiled = re.compile(pattern)
-            # Numbered by CR/LF like every other note diagnostic: Markdown ignores Unicode line separators.
-            for line_number, line in enumerate((item.rstrip("\r\n") for item in markdown_lines(text)), 1):
-                if compiled.search(line):
-                    self.problems.append(_problem(name, f"line {line_number}: matches forbidden pattern {pattern}"))
-                    break
+        self.problems.extend(
+            _problem(name, msg)
+            for msg in note_policy_errors(self.config, name, text, attributes, parsed_note, check_okf=check_okf)
+        )
+        if entry_note(name) and parsed_note.knowledge.stale_after and rules.warn_stale_days is not None:
+            due_days = (date.fromisoformat(parsed_note.knowledge.stale_after[:10]) - date.today()).days
+            if due_days <= rules.warn_stale_days:
+                self.stale_warnings.append(
+                    {
+                        "warning": f"stale_after is within {rules.warn_stale_days} days",
+                        "file": name,
+                        "stale_after": parsed_note.knowledge.stale_after[:10],
+                    }
+                )
 
     def _check_index_note(self, index_path: str) -> None:
         by_path = {item.path: item for item in self.parsed}
@@ -507,6 +495,8 @@ class _Validation:
 
     def _page(self, path: str) -> bool:
         """Whether `bf read` opens this same-brain path as a page with evidence, following pages.route."""
+        from bf import pages
+
         parts = path.split("/")
         try:
             if path in {"", "review", "tasks", "tags", "memories", *AUTHORED} or pages.period(path):
@@ -515,7 +505,7 @@ class _Validation:
                 # A label no note declares opens an empty page: most likely a typo.
                 return len(parts) == 2 and parts[1] in self.tagged
             if parts[0] == "memories":
-                known = parts[1] in self.ids or parts[1] in self.config.sensors or parts[1] in self.config.assistants
+                known = parts[1] in self.ids or parts[1] in self.config.record_sources()
                 if len(parts) > 3 or not known:
                     return False
                 name = parts[2] if len(parts) == 3 else ""
@@ -559,7 +549,7 @@ class _Validation:
             for target in item.targets:
                 source = scheme(item.path, target)
                 written_source, _, record_id = target.partition(":")
-                collected = source in ids or source in config.sensors or source in config.assistants
+                collected = source in ids or source in config.record_sources()
                 if collected and written_source != source:
                     # A URL scheme ignores case, but a record ref names its source exactly: Mail:m1 never links
                     # mail:m1.

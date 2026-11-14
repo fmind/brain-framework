@@ -12,7 +12,7 @@ cd ~/brain
 bf read projects/new-website.md#decision
 ```
 
-`bf.yaml` declares format `version: 9`, `name`, and optional [`fields`](schema.md#shared-fields-and-sensor-mappings), [`sensors`](sensors.md#sensor-settings), [`routines`](routines.md#routine-settings), [`assistants`](prompts.md#assistant-settings), [`channels`](channels.md), [`watch`](schedule.md#watch-preferences) and [`validate`](checks.md#validate) sections ([JSON Schema](../bf.schema.json)). Unknown keys, invalid values and duplicate YAML keys fail visibly naming the file and location.
+`bf.yaml` declares format `version: 10`, `name`, and optional [`fields`](schema.md#shared-fields-and-sensor-mappings), [`defaults`](prompts.md#assistant-settings), [`jobs`](prompts.md), [`watch`](schedule.md#watch-preferences) and [`validate`](checks.md#validate) sections ([JSON Schema](../bf.schema.json)). Unknown keys, invalid values and duplicate YAML keys fail visibly naming the file and location.
 
 | File                       | Purpose                                            | Required                                |
 | -------------------------- | -------------------------------------------------- | --------------------------------------- |
@@ -24,15 +24,15 @@ bf read projects/new-website.md#decision
 
 Every command acts on **one** selected brain, resolved in strict precedence order (an invalid explicit choice fails immediately rather than falling back):
 
-| Precedence              | Retrieval, checks, `status`                  | Execution (`collect`, `run`, `channel`, `queue`, `update`, `watch`) |
-| ----------------------- | -------------------------------------------- | ------------------------------------------------------------------- |
-| 1. `--brain NAME\|PATH` | Named or path brain.                         | Named (registered or enclosing) or path brain.                      |
-| 2. `BF_BRAIN`           | Named or path brain.                         | Same single-brain rule.                                             |
-| 3. Enclosing directory  | Nearest parent holding user-owned `bf.yaml`. | Same.                                                               |
-| 4. Registry `default`   | Registered `default` brain, else fail.       | Never uses `default`: pass `--brain` or run inside the brain.       |
+| Precedence              | Retrieval, checks, `status`                  | Execution (`collect`, `run`, `post`, `wake`, `queue`, `update`, `watch`) |
+| ----------------------- | -------------------------------------------- | ------------------------------------------------------------------------ |
+| 1. `--brain NAME\|PATH` | Named or path brain.                         | Named (registered or enclosing) or path brain.                           |
+| 2. `BF_BRAIN`           | Named or path brain.                         | Same single-brain rule.                                                  |
+| 3. Enclosing directory  | Nearest parent holding user-owned `bf.yaml`. | Same.                                                                    |
+| 4. Registry `default`   | Registered `default` brain, else fail.       | Never uses `default`: pass `--brain` or run inside the brain.            |
 
 - `--brain ""` exits 2; selecting a subfolder without `bf.yaml` fails naming the root requirement; enclosing directories owned by another OS user are refused (`is not a regular file owned by you`).
-- Execution commands (`collect`, `run`, `channel`, `queue`, `update`, `watch`) never fall back to the registry `default`.
+- Execution commands (`collect`, `run`, `post`, `wake`, `queue`, `update`, `watch`) never fall back to the registry `default`.
 
 ## Optional machine registration {#related-brains}
 
@@ -55,13 +55,13 @@ To rename a brain: drain `bf queue`, update `name:` in `bf.yaml` and `bf://` lin
 | --------------------------------- | ------------------------------------------------------ | ---------- |
 | `<brain>/.bf/cache.sqlite3`       | SQLite search and graph cache                          | Yes        |
 | `<brain>/.bf/locks/` and `state/` | Brain locks and per-program run history                | —          |
-| `<brain>/.bf/runtime.sqlite3`     | Durable [assistant queues](#assistant-queue-state)     | **No**     |
+| `<brain>/.bf/runtime.sqlite3`     | Durable [runtime queue](#assistant-queue-state)        | **No**     |
 | `<brain>/.bf/usage.sqlite3`       | Aggregate usage counts (no queries, refs or paths)     | Yes        |
-| `<brain>/logs/`                   | Bounded program stderr logs (gitignored)               | Yes        |
+| `<brain>/logs/`                   | Bounded job stderr logs (gitignored)                   | Yes        |
 | `$XDG_CONFIG_HOME/bf/config.yaml` | Optional machine registry (`~/.config/bf/config.yaml`) | —          |
 
-`<brain>/.bf/` is mode `700`, owned by your OS user, gitignored, and rejects symlinks. Moving a brain whose queue still holds unresolved work from its previous path or name refuses assistant commands until `bf queue` is drained ([move or rename a brain](channels.md#move-or-rename-a-brain)).
+`<brain>/.bf/` is mode `700`, owned by your OS user, gitignored, and rejects symlinks. Moving a brain whose queue still holds unresolved work from its previous path or name refuses job execution until `bf queue` is drained ([move or rename a brain](channels.md#move-or-rename-a-brain)).
 
-### Assistant queue state
+### Runtime queue state {#assistant-queue-state}
 
-`<brain>/.bf/runtime.sqlite3` holds durable assistant jobs, channel deliveries and per-slot wakes — back it up with your brain and never delete it with disposable `.bf/cache.sqlite3` ([where the queue lives](channels.md#where-the-queue-lives)).
+`<brain>/.bf/runtime.sqlite3` holds durable job state, deliveries, events and wakes — back it up with your brain and never delete it with disposable `.bf/cache.sqlite3` ([where the queue lives](channels.md#where-the-queue-lives)).

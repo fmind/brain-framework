@@ -27,9 +27,9 @@ from bf.storage import BusyError, Store, building, writer
 from bf.validate import validate
 from conftest import records_file
 
-FIELDS = b"""version: 9
+FIELDS = b"""version: 10
 name: fixture
-sensors: {}
+jobs: {}
 fields:
   owner:
     description: Who answers for the work.
@@ -38,13 +38,13 @@ fields:
 REVIEWER = b"""  reviewer:
     description: Who checks the work.
 """
-# Documentation, `broader`, `targets` and sensors leave the cached rows as they are: no rebuild follows.
-REWORDED = b"""version: 9
+# Documentation, `broader`, `targets` and jobs leave the cached rows as they are: no rebuild follows.
+REWORDED = b"""version: 10
 name: fixture
-sensors:
+jobs:
   tickets:
-    command: [true-command]
-    refresh: 0
+    run: [true-command]
+    emit: records
 fields:
   owner:
     description: The accountable owner.
@@ -328,7 +328,7 @@ def test_bf_yaml_changed_during_a_refresh_rebuilds_at_the_next_one(
     indexing = index._index  # noqa: SLF001 - rename the brain while the note is indexed
 
     def renaming(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
-        brain.write("bf.yaml", b"version: 9\nname: renamed\n")
+        brain.write("bf.yaml", b"version: 10\nname: renamed\n")
         indexing(connection, store, path, config)
 
     with monkeypatch.context() as patch:
@@ -1098,7 +1098,7 @@ def test_a_first_build_publishes_by_its_rename_alone(brain: Store, monkeypatch: 
 
 
 def test_rewording_schema_documentation_keeps_the_cache(brain: Store) -> None:
-    schema = b"version: 9\nname: fixture\nfields:\n  owner:\n    description: Who owns it.\n"
+    schema = b"version: 10\nname: fixture\nfields:\n  owner:\n    description: Who owns it.\n"
     brain.write("bf.yaml", schema)
     index.refresh(brain)
     generation = cache_file(brain)
@@ -1107,10 +1107,10 @@ def test_rewording_schema_documentation_keeps_the_cache(brain: Store) -> None:
     assert index.refresh(brain)["changed"] == 0
     assert cache_file(brain) == generation
     # Adding or removing relation metadata also keeps the cache; renaming the brain rebuilds it.
-    brain.write("bf.yaml", b"version: 9\nname: fixture\n")
+    brain.write("bf.yaml", b"version: 10\nname: fixture\n")
     assert index.refresh(brain)["changed"] == 0
     assert cache_file(brain) == generation
-    brain.write("bf.yaml", b"version: 9\nname: renamed\n")
+    brain.write("bf.yaml", b"version: 10\nname: renamed\n")
     assert index.refresh(brain)["changed"] == 4
     assert cache_file(brain) != generation
 

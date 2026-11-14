@@ -5,7 +5,7 @@ Usage: desktop.py send [--title TITLE] [--notifier notify-send|osascript]
 
 BF pipes one outgoing message to `send`. The script shows its text with notify-send on Linux or osascript on macOS,
 passing the text as an argument, never as script code, and prints the receipt BF expects. A notification is a
-pointer, not the answer: text beyond 1,000 characters ends with an ellipsis, and the assistant's record keeps it all.
+pointer, not the answer: text beyond 1,000 characters ends with an ellipsis, and a brain note or log keeps details.
 Arguments show in process listings while the notifier runs: on a computer other people log into, they can read that
 text, so hide other users' processes, such as with Linux's `hidepid` mount option, or use another channel.
 """
@@ -14,16 +14,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from typing import Any, NoReturn
 
-import _bf
-
 # Outgoing text holds up to 4 MiB; its JSON escapes can take six bytes per character.
-INPUT_BYTES = _bf.ENVELOPE_BYTES
+INPUT_BYTES = 25 << 20
 BODY_CHARS = 1000
 TITLE_CHARS = 100
 TIMEOUT = 10
@@ -33,24 +33,61 @@ APPLESCRIPT = ("on run argv", "display notification (item 1 of argv) with title 
 
 def fail(message: str, code: int = 1) -> NoReturn:
     """Stop with one diagnostic that names the failure and never quotes the message."""
-    _bf.fail(message, code, prefix="desktop")
+    sys.stderr.write(f"desktop: {message}\n")
+    sys.exit(code)
+
+
+def visible(value: str) -> str:
+    """Escape control and invisible Unicode format characters so hidden controls stay explicit."""
+    parts: list[str] = []
+    for ch in value:
+        cat = unicodedata.category(ch)
+        if cat in {"Cc", "Cf", "Cs"}:
+            code = ord(ch)
+            parts.append(f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}")
+        else:
+            parts.append(ch)
+    return "".join(parts)
 
 
 def shown(text: str, limit: int) -> str:
     """Text a notification can show: bounded, hidden characters made visible, never read as an option."""
     if len(text) > limit:
         text = text[: limit - 1] + "…"
-    text = "\n".join(_bf.visible(part) for part in text.split("\n"))
+    text = "\n".join(visible(part) for part in text.split("\n"))
     # osascript stops reading options at its first other argument; a leading dash would make the text one.
     return f" {text}" if text.startswith("-") else text
 
 
+def _unique_pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key, val in items:
+        if key in out:
+            raise ValueError("duplicate key")
+        out[key] = val
+    return out
+
+
 def outgoing() -> dict[str, Any]:
     """The message BF pipes on stdin: a nonempty `id` and `text`, and an optional `conversation`."""
+    raw = sys.stdin.buffer.read(INPUT_BYTES + 1)
+    if not raw or len(raw) > INPUT_BYTES:
+        fail("expected a JSON message envelope on stdin", 2)
     try:
-        return _bf.read_envelope(max_bytes=INPUT_BYTES)
-    except _bf.BfError as error:
-        fail(str(error), error.status)
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_pairs, parse_constant=lambda _: 1 / 0)
+    except (UnicodeDecodeError, ValueError, RecursionError, ZeroDivisionError):
+        fail("stdin must be a valid JSON object", 2)
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("id"), str)
+        or not data["id"].strip()
+        or not isinstance(data.get("text"), str)
+        or not data["text"]
+    ):
+        fail("message envelope requires nonempty string id and text", 2)
+    if "conversation" in data and data["conversation"] is not None and not isinstance(data["conversation"], str):
+        fail("conversation must be a string when present", 2)
+    return data
 
 
 def main(argv: list[str]) -> None:
@@ -85,7 +122,8 @@ def main(argv: list[str]) -> None:
         fail(f"{args.notifier} exited with status {result.returncode}; nothing was confirmed")
     # The notification has no provider id: name it by its message and the moment it was shown.
     digest = hashlib.sha256(f"{message['id']}\n{time.time_ns()}\n{message['text']}".encode()).hexdigest()
-    _bf.emit_receipt(f"desktop-{digest[:32]}", conversation=message.get("conversation") or "desktop")
+    conversation = str(message.get("conversation") or "desktop")
+    sys.stdout.write(json.dumps({"id": f"desktop-{digest[:32]}", "conversation": conversation}) + "\n")
 
 
 if __name__ == "__main__":

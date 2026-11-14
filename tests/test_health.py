@@ -1,4 +1,4 @@
-"""Coverage reports distinguish maintained sources from retained historical evidence."""
+"""Coverage, job health, queue diagnostics and preflight doctor checks."""
 
 from __future__ import annotations
 
@@ -17,27 +17,25 @@ from typing import cast
 import pytest
 from typer.testing import CliRunner
 
-from bf import assistants, health, index, records, usage
+from bf import health, index, jobs, records, usage
 from bf.cli import app
-from bf.collect import collect, routine
+from bf.collect import collect
 from bf.config import ABSENT, load, register
-from bf.health import assistant_health, attention, source_health
-from bf.history import log_path
-from bf.messages import Message
-from bf.models import WEEKDAYS, Error, Query, encode, timestamp
+from bf.health import attention, doctor, source_health
+from bf.models import WEEKDAYS, Error, Query, timestamp
 from bf.retrieve import read, search
-from bf.runtime import Queue
-from bf.storage import QUEUE, Store, private_dir
-from bf.update import update
+from bf.runtime import Message, Outgoing, Queue, log_path
+from bf.storage import QUEUE, Store
 
 
 def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n"
-        b"  mail:\n    command: [echo]\n    refresh: 3600\n    reconcile: {refresh: 86400, lookback: 604800}\n"
-        b"  folders:\n    command: [echo]\n    mode: snapshot\n    refresh: 86400\n"
-        b"routines:\n  review:\n    command: [review]\n    refresh: 86400\n",
+        b"version: 10\nname: fixture\njobs:\n"
+        b"  mail:\n    run: [echo]\n    emit: records\n    mode: window\n    on: {every: 3600}\n"
+        b"    reconcile: {every: 86400, lookback: 604800}\n"
+        b"  folders:\n    run: [echo]\n    emit: records\n    mode: snapshot\n    on: {every: 86400}\n"
+        b"  review:\n    run: [review]\n    emit: log\n    on: {every: 86400}\n",
     )
     now = datetime(2026, 9, 23, 13, tzinfo=UTC)
     at = "2026-09-23T13:00:00.000000Z"
@@ -46,7 +44,7 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
     collect(brain, "mail", start=week, end=at, reconcile=True, runner=lambda *_: one, clock=lambda: now)
     with pytest.raises(Error, match="invalid JSON"):
         collect(brain, "folders", start=week, end=at, runner=lambda *_: b"broken", clock=lambda: now)
-    routine(brain, "review", start=week, end=at, runner=lambda *_: b"", clock=lambda: now)
+    jobs.run_job(brain, "review", since=week, until=at, runner=lambda *_: b"")
     status = cast("dict", health.report(brain, now=now))
     mail = status["sources"]["mail"]
     # The coverage shape shared with search and read, plus indexed totals and local run details.
@@ -76,11 +74,19 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
         "failures": 1,
         "log": log_path("folders"),
     }
-    assert status["routines"]["review"] == {"state": "active", "freshness": "fresh", "last_success": at}
-    # Before 17 an unhealthy brain listed no reason: attention names the programs, as the home page does.
-    assert status["attention"] == [{"kind": "sensor", "name": "folders", "freshness": "never", "failed": True}]
+    assert status["jobs"]["review"] == {
+        "enabled": True,
+        "emit": "log",
+        "priority": "normal",
+        "state": "active",
+        "freshness": "fresh",
+        "last_success": at,
+        "next_due": "2026-09-24T13:00:00.000000Z",
+        "runs": 1,
+    }
+    assert status["attention"] == [{"kind": "job", "name": "folders", "freshness": "never", "failed": True}]
     assert status["problems"] == []
-    assert not cast("dict", health.report(brain, now=now))["healthy"]
+    assert not status["healthy"]
     # Every reply instant uses one canonical UTC form, so clients can compare them as strings.
     instants = re.findall(r'"(\d{4}-\d\d-\d\dT[^"]*)"', json.dumps(status))
     assert instants
@@ -90,18 +96,16 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
 def test_history_offsets_read_back_as_canonical_utc_in_status_and_home(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n"
-        b"routines:\n  review:\n    command: [review]\n    refresh: 60\n",
+        b"version: 10\nname: fixture\njobs:\n"
+        b"  mail:\n    run: [echo]\n    emit: records\n    mode: window\n    on: {every: 3600}\n"
+        b"  review:\n    run: [review]\n    emit: log\n    on: {every: 60}\n",
     )
     local = "2026-09-23T15:00:00+02:00"
-    private_dir(brain, ".bf", "state").write(
-        "sensors.json", encode({"mail": {"success": local, "start": local, "end": local, "run": local}})
-    )
-    private_dir(brain, ".bf", "state").write(
-        "routines.json", encode({"review": {"success": local, "run": local, "error": "failed"}})
-    )
+    queue = Queue(brain)
+    queue.remember("mail", last_success=local, window_start=local, window_end=local, last_run=local)
+    queue.remember("review", last_success=local, last_run=local, last_error="failed", error_count=1)
     now = datetime(2026, 9, 23, 14, tzinfo=UTC)
-    # Status and the home page's attention list read the same private history.
+    # Status and the home page's attention list read the same runtime job state.
     replies = [health.report(brain, now=now), read(brain)]
     instants = re.findall(r'"(\d{4}-\d\d-\d\dT[^"]*)"', json.dumps(replies))
     assert "2026-09-23T13:00:00.000000Z" in instants
@@ -139,30 +143,30 @@ def test_invalid_usage_counts_do_not_break_health_or_hide_valid_events(brain: St
 def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n"
-        b"  current:\n    command: [echo]\n    refresh: 3600\n"
-        b"  missing:\n    command: [echo]\n    refresh: 3600\n"
-        b"  paused:\n    command: [echo]\n    enabled: false\n"
-        b"  manual:\n    command: [echo]\n",
+        b"version: 10\nname: fixture\njobs:\n"
+        b"  current:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n"
+        b"  missing:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n"
+        b"  paused:\n    run: [echo]\n    emit: records\n    enabled: false\n"
+        b"  manual:\n    run: [echo]\n    emit: records\n"
+        b"  cursor:\n    run: [echo]\n    emit: records\n    mode: cursor\n    on: {every: 3600}\n",
     )
-    private_dir(brain, ".bf", "state").write(
-        "sensors.json",
-        encode(
-            {
-                "current": {
-                    "success": "2026-09-23T12:00:00Z",
-                    "start": "2026-09-22T12:00:00Z",
-                    "end": "2026-09-23T12:00:00Z",
-                }
-            }
-        ),
+    queue = Queue(brain)
+    queue.remember(
+        "current",
+        last_success="2026-09-23T12:00:00Z",
+        window_start="2026-09-22T12:00:00Z",
+        window_end="2026-09-23T12:00:00Z",
     )
+    queue.remember("cursor", last_success="2026-09-23T12:00:00Z", cursor="tok-1")
     report = source_health(brain, ["archive"], now=datetime(2026, 9, 23, 13, tzinfo=UTC))
     assert report["current"]["freshness"] == "fresh"
     assert report["current"]["window"] == {
         "since": "2026-09-22T12:00:00.000000Z",
         "until": "2026-09-23T12:00:00.000000Z",
     }
+    assert report["cursor"]["mode"] == "cursor"
+    assert report["cursor"]["freshness"] == "fresh"
+    assert "window" not in report["cursor"]
     assert report["missing"]["freshness"] == "never"
     assert report["paused"]["state"] == "disabled"
     assert report["archive"] == {"state": "historical", "freshness": "unknown"}
@@ -171,7 +175,7 @@ def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> 
 
 
 def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 9\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  current:\n    run: [echo]\n    emit: records\n")
     brain.write(
         "memories/current/ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb.json",
         b'{"id":"a","title":"First"}\n',
@@ -180,7 +184,7 @@ def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store)
         "memories/current/3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d.json",
         b'{"id":"b","title":"Second"}\n',
     )
-    private_dir(brain, ".bf", "state").write("sensors.json", encode({"current": {"records": 1, "unchanged": 1}}))
+    Queue(brain).remember("current", records=1, unchanged=1)
     result = CliRunner().invoke(app, ["status", "--brain", str(brain.root)])
     assert result.exit_code == 0, result.output
     report = json.loads(result.stdout)
@@ -192,27 +196,31 @@ def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store)
 def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failures_are_inactive(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n  agenda:\n    command: [echo]\n    mode: snapshot\n    enabled: false\n",
+        b"version: 10\nname: fixture\njobs:\n  agenda:\n    run: [echo]\n    emit: records\n    mode: snapshot\n    enabled: false\n",
     )
-    private_dir(brain, ".bf", "state").write(
-        "sensors.json",
-        encode({"agenda": {"start": "2026-09-22T00:00:00Z", "end": "2026-09-23T00:00:00Z", "error": "old failure"}}),
+    Queue(brain).remember(
+        "agenda",
+        window_start="2026-09-22T00:00:00Z",
+        window_end="2026-09-23T00:00:00Z",
+        last_error="old failure",
+        error_count=1,
     )
-    health = source_health(brain)["agenda"]
-    assert health["mode"] == "snapshot"
-    assert "window" not in health
+    entry = source_health(brain)["agenda"]
+    assert entry["mode"] == "snapshot"
+    assert "window" not in entry
     result = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
     assert result.exit_code == 0, result.output
 
 
 def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) -> None:
     brain.write(
-        "bf.yaml", b"version: 9\nname: fixture\nsensors:\n  meetings:\n    command: [echo]\n    refresh: 3600\n"
+        "bf.yaml",
+        b"version: 10\nname: fixture\njobs:\n  meetings:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n",
     )
     record = cast("dict[str, object]", read(brain, "meetings:decision-1")["collection"])
     found = cast("list[dict[str, object]]", search(brain, Query(text="offline retrieval"))["sources"])
     status = source_health(brain)["meetings"]
-    # The scheduled sensor never succeeded on this machine: every reply says so.
+    # The scheduled job never succeeded on this machine: every reply says so.
     assert record["freshness"] == found[0]["freshness"] == status["freshness"] == "never"
     register(brain)
     record = cast("dict[str, object]", read(brain, "meetings:decision-1")["collection"])
@@ -222,9 +230,9 @@ def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) ->
 def test_status_fails_on_a_broken_brain(tmp_path: Path) -> None:
     (tmp_path / "other-dir").mkdir()
     other = Store(tmp_path / "other-dir")
-    other.write("bf.yaml", b"version: 9\nname: other\n")
+    other.write("bf.yaml", b"version: 10\nname: other\n")
     register(other, default=True)
-    other.write("bf.yaml", b"version: 9\nname: [broken\n")
+    other.write("bf.yaml", b"version: 10\nname: [broken\n")
     for command in (["status"], ["status", "--check"], ["status", "--brain", str(other.root)]):
         result = CliRunner().invoke(app, command)
         assert result.exit_code == 1
@@ -234,7 +242,7 @@ def test_status_fails_on_a_broken_brain(tmp_path: Path) -> None:
 def test_status_fails_when_the_default_brain_is_absent(tmp_path: Path) -> None:
     (tmp_path / "moved").mkdir()
     moved = Store(tmp_path / "moved")
-    moved.write("bf.yaml", b"version: 9\nname: moved\n")
+    moved.write("bf.yaml", b"version: 10\nname: moved\n")
     register(moved, default=True)
     (tmp_path / "moved").rename(tmp_path / "elsewhere")
     result = CliRunner().invoke(app, ["status", "--check"])
@@ -277,7 +285,7 @@ def test_status_reports_an_interrupted_transaction_instead_of_failing(brain: Sto
     assert entry["problems"][0]["error"].endswith("run bf update or bf build to recover it")
     assert (entry["cache"], entry["notes"]) == (("stale", 2) if cached else ("missing", 0))
     assert brain.read("memories/.pending/manifest.json")
-    assert update(brain)["ok"]
+    assert CliRunner().invoke(app, ["build", "--brain", str(brain.root)]).exit_code == 0
     recovered = json.loads(CliRunner().invoke(app, command).stdout)
     assert "pending_transaction" not in recovered
     assert (recovered["cache"], recovered["problems"]) == ("ready", [])
@@ -292,16 +300,16 @@ def test_status_reports_the_bytes_each_source_holds(brain: Store) -> None:
 def test_a_source_that_succeeds_without_new_evidence_falls_silent(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n"
-        b"  papers:\n    command: [echo]\n    refresh: 86400\n    silent_after: 345600\n"
-        b"  quiet:\n    command: [echo]\n    refresh: 86400\n",
+        b"version: 10\nname: fixture\njobs:\n"
+        b"  papers:\n    run: [echo]\n    emit: records\n    on: {every: 86400}\n    silent_after: 345600\n"
+        b"  quiet:\n    run: [echo]\n    emit: records\n    on: {every: 86400}\n",
     )
     first = datetime(2026, 9, 20, 13, tzinfo=UTC)
-    one = b'[{"id":"one","title":"One","time":"2026-09-10T00:00:00Z"}]'
-    for sensor in ("papers", "quiet"):
+    one = b'[{"id":"one","title":"One","attributes":{"time":"2026-09-10T00:00:00Z"}}]'
+    for source in ("papers", "quiet"):
         collect(
             brain,
-            sensor,
+            source,
             start="2026-09-19T13:00:00Z",
             end="2026-09-20T13:00:00Z",
             runner=lambda *_: one,
@@ -309,10 +317,10 @@ def test_a_source_that_succeeds_without_new_evidence_falls_silent(brain: Store) 
         )
     # Daily runs keep succeeding with the same record: fresh, but nothing new for five days.
     later = datetime(2026, 9, 25, 13, tzinfo=UTC)
-    for sensor in ("papers", "quiet"):
+    for source in ("papers", "quiet"):
         collect(
             brain,
-            sensor,
+            source,
             start="2026-09-20T13:00:00Z",
             end="2026-09-25T13:00:00Z",
             runner=lambda *_: one,
@@ -320,15 +328,14 @@ def test_a_source_that_succeeds_without_new_evidence_falls_silent(brain: Store) 
         )
     index.refresh(brain)
     full = cast("dict", health.report(brain, now=later))
-    status = full
-    papers = status["sources"]["papers"]
+    papers = full["sources"]["papers"]
     # The event time is old, the change is when this brain first saw the record.
     assert (papers["freshness"], papers["silent"], papers["changed"]) == ("fresh", True, "2026-09-20T13:00:00.000000Z")
-    assert "silent" not in status["sources"]["quiet"]
-    assert status["attention"] == [{"kind": "sensor", "name": "papers", "freshness": "fresh", "silent": True}]
+    assert "silent" not in full["sources"]["quiet"]
+    assert full["attention"] == [{"kind": "job", "name": "papers", "freshness": "fresh", "silent": True}]
     assert full["healthy"] is False
     # A changed record ends the silence.
-    two = b'[{"id":"one","title":"One, revised","time":"2026-09-10T00:00:00Z"}]'
+    two = b'[{"id":"one","title":"One, revised","attributes":{"time":"2026-09-10T00:00:00Z"}}]'
     collect(
         brain,
         "papers",
@@ -357,28 +364,31 @@ def test_status_names_the_installed_and_pinned_runtime(brain: Store) -> None:
         assert "pinned" not in cast("dict", health.report(brain))["runtime"]
 
 
-ASSISTED = b"""version: 9
+DISPATCH = b"""version: 10
 name: fixture
-sensors: {}
-channels:
-  chat:
-    send: {command: [send-chat]}
-    stream: {command: [receive-chat]}
-assistants:
+defaults:
+  harness: [harness]
+jobs:
+  chat-send:
+    send: [send-chat]
+    idempotent: true
+  chat-in:
+    send: [receive-chat]
+    on: {daemon: true}
+    emit: messages
   personal:
     prompt: prompts/personal.md
-    command: [harness]
-    inputs:
-      - channel: {name: chat, mode: stream}
+    emit: message
+    on: {event: {kind: [message.received]}}
   notes:
     prompt: prompts/personal.md
-    command: [harness]
+    emit: message
 """
 
 
-def assisted(brain: Store) -> Store:
-    brain.write("bf.yaml", ASSISTED)
-    brain.write("prompts/personal.md", b"Answer {{input}}.\n")
+def dispatched(brain: Store) -> Store:
+    brain.write("bf.yaml", DISPATCH)
+    brain.write("prompts/personal.md", b"Answer {{context}}.\n")
     return brain
 
 
@@ -389,7 +399,7 @@ def incoming(key: str = "message-1") -> Message:
 
 
 def test_retrieval_and_status_never_create_or_write_lock_the_queue(brain: Store) -> None:
-    assisted(brain)
+    dispatched(brain)
     database = brain.root / QUEUE
     search(brain, Query(text="offline retrieval"))
     read(brain, "meetings:decision-1")
@@ -397,7 +407,19 @@ def test_retrieval_and_status_never_create_or_write_lock_the_queue(brain: Store)
     assert health.report(brain)["healthy"]
     # Reading reports nothing yet: only execution creates and binds the queue.
     assert not database.exists()
-    assistants.accept(brain, "chat", [incoming()], {"personal"})
+    queue = Queue(brain)
+    queue.admit("chat-in", [incoming()])
+    _key, _ = queue.enqueue_delivery(
+        "chat-send",
+        Outgoing(
+            id="out-1",
+            conversation="thread-1",
+            text="hi",
+        ),
+        ["send-chat"],
+        idempotent=True,
+        job="personal",
+    )
     # An execution transaction holds the queue's write lock: readers neither wait for it nor take it.
     writer = sqlite3.connect(database, isolation_level=None)
     try:
@@ -408,204 +430,175 @@ def test_retrieval_and_status_never_create_or_write_lock_the_queue(brain: Store)
         assert time.monotonic() - started < 5
     finally:
         writer.close()
-    assert status["messaging"]["counts"] == {"pending": 1}
+    assert status["queue"]["pending"] == 1
 
 
-def test_a_queue_execution_refuses_still_leaves_reads_and_status_working(brain: Store) -> None:
-    assisted(brain)
-    assistants.accept(brain, "chat", [incoming()], {"personal"})
+def test_a_queue_execution_refusal_still_leaves_reads_and_status_working(brain: Store) -> None:
+    dispatched(brain)
+    index.refresh(brain)
+    queue = Queue(brain)
+    key, _ = queue.enqueue_delivery(
+        "chat-send",
+        Outgoing(
+            id="out-1",
+            conversation="thread-1",
+            text="hi",
+        ),
+        ["send-chat"],
+        idempotent=True,
+        job="personal",
+    )
     # Renaming the brain leaves its queue bound to the former name.
-    brain.write("bf.yaml", ASSISTED.replace(b"name: fixture", b"name: renamed"))
+    brain.write("bf.yaml", DISPATCH.replace(b"name: fixture", b"name: renamed"))
     assert read(brain, "meetings:decision-1")["ref"] == "meetings:decision-1"
     status = cast("dict", health.report(brain))
-    entry = status
     assert not status["healthy"]
-    # Status names the reason instead of failing, and claims no freshness it cannot read.
-    refused = (
-        "assistant queue holds unresolved work admitted under this brain's previous path or name; restore them, "
-        "resolve the work with bf queue, then move or rename the brain again"
-    )
-    assert [problem["error"] for problem in entry["problems"]] == [refused]
-    assert entry["assistants"]["personal"]["freshness"] == "unknown"
-    assert "messaging" not in entry
-    # Drained under its former name, the queue follows the renamed brain: status reads it without a problem.
-    brain.write("bf.yaml", ASSISTED)
-    for job in cast("list[dict]", Queue(brain).report()["jobs"]):
-        Queue(brain).retry(str(job["id"]), cancel=True)
-    brain.write("bf.yaml", ASSISTED.replace(b"name: fixture", b"name: renamed"))
-    entry = cast("dict", health.report(brain))
-    assert entry["problems"] == []
-    assert "messaging" in entry
+    refused = "runtime queue holds unresolved work under a previous path or name; resolve via bf queue first"
+    assert [problem["error"] for problem in status["problems"]] == [refused]
+    assert status["jobs"]["personal"]["freshness"] == "manual"
+    # Drained under its former name, the queue follows the renamed brain cleanly.
+    brain.write("bf.yaml", DISPATCH)
+    queue.retry(key, cancel=True)
+    brain.write("bf.yaml", DISPATCH.replace(b"name: fixture", b"name: renamed"))
+    recovered = cast("dict", health.report(brain))
+    assert recovered["problems"] == []
+    assert recovered["healthy"]
 
 
 def test_status_names_unresolved_work_and_recovers_once_it_is_resolved(brain: Store) -> None:
-    assisted(brain)
+    dispatched(brain)
+    index.refresh(brain)
     queue = Queue(brain)
 
     def failing(*_: object) -> bytes:
         raise Error("harness timed out")
 
-    # A manual run that failed, and a message whose answer could not be sent.
-    assert not assistants.manual(brain, "notes", runner=failing)["ok"]
-    assistants.accept(brain, "chat", [incoming()], {"personal"})
-    key = queue.next(True, {"personal"})
-    assert key
+    # A manual job run that failed, and a reply delivery whose transport failed.
+    with pytest.raises(Error, match="harness timed out"):
+        jobs.run_job(brain, "notes", runner=failing)
 
-    def sent(argv: list[str], *_: object) -> bytes:
+    def send_failing(argv: list[str], *_: object) -> bytes:
         if argv[0] == "send-chat":
             raise Error("send failed")
         return b"Because."
 
-    assistants.execute(brain, key, runner=sent)
-    assistants.deliver(brain, runner=sent)
-    # A dispatcher's lane checkpoint repeats what the durable job already says.
-    queue.set_progress("health:reactive", {"error": "harness timed out", "at": "2026-10-17T00:00:00.000000Z"})
-    status = cast("dict", health.report(brain))
-    attention = status["attention"]
-    assert not status["healthy"]
-    assert attention == [
-        {"kind": "assistant", "name": "notes", "freshness": "manual", "failed": True},
-        {"kind": "channel", "name": "chat", "freshness": "unknown", "failed": True},
-    ]
-    for job in cast("list[dict]", queue.report()["jobs"]):
-        if job["state"] in {"failed", "uncertain"}:
-            queue.retry(str(job["id"]), cancel=True)
-    for delivery in cast("list[dict]", queue.report()["deliveries"]):
-        queue.retry(str(delivery["id"]), cancel=True)
-    # Resolved work no longer fails the check, whatever a stopped dispatcher's lane checkpoints still hold.
-    status = cast("dict", health.report(brain))
-    assert status["attention"] == []
-    assert status["healthy"]
-    # A running stream's error names its channel until watch clears it.
-    queue.set_progress("health:channel:chat", {"error": "stream exited", "at": "2026-10-17T00:00:00.000000Z"})
-    status = cast("dict", health.report(brain))
-    assert status["attention"] == [{"kind": "channel", "name": "chat", "freshness": "unknown", "failed": True}]
-    assert not status["healthy"]
-
-
-def test_status_names_an_assistant_whose_work_cannot_start(brain: Store) -> None:
-    assisted(brain)
-    queue = Queue(brain)
-    # A schedule the full queue refused: the dispatcher records it per assistant and retries after a backoff.
-    queue.set_progress(
-        "health:assistant:notes", {"error": "assistant queue is full", "at": "2026-10-17T00:00:00.000000Z"}
-    )
+    post = jobs.post_command(brain, "Because.", to="chat-send", thread="thread-1", deliver=True, runner=send_failing)
+    delivery_id = str(post["id"])
+    queue.set_progress("health:daemon:chat-in", {"error": "stream exited", "at": "2026-10-17T00:00:00.000000Z"})
     status = cast("dict", health.report(brain))
     assert not status["healthy"]
-    assert {"kind": "assistant", "name": "notes", "freshness": "manual", "failed": True} in status["attention"]
-    # Once admission succeeds, the dispatcher records an empty error and status recovers.
-    queue.set_progress("health:assistant:notes", {"error": "", "at": "2026-10-17T00:01:00.000000Z"})
-    status = cast("dict", health.report(brain))
-    assert status["attention"] == []
-    assert status["healthy"]
+    assert {"kind": "job", "name": "notes", "freshness": "manual", "failed": True} in status["attention"]
+    assert {"kind": "job", "name": "chat-in", "freshness": "manual", "failed": True} in status["attention"]
+    assert {"kind": "job", "name": "chat-send", "freshness": "manual", "failed": True} in status["attention"]
+    # Clear the failed run state, cancel the pending delivery and clear the daemon error.
+    queue.remember("notes", last_error="", error_count=0)
+    queue.retry(delivery_id, cancel=True)
+    queue.set_progress("health:daemon:chat-in", {"error": "", "at": "2026-10-17T00:01:00.000000Z"})
+    recovered = cast("dict", health.report(brain))
+    assert recovered["attention"] == []
+    assert recovered["healthy"]
 
 
 def test_a_wall_clock_schedule_is_overdue_once_a_slot_after_its_last_success_passes_unrun(brain: Store) -> None:
-    assisted(brain)
     brain.write(
         "bf.yaml",
-        ASSISTED.replace(
-            b"  notes:\n",
-            b"  notes:\n    schedules:\n      daily: {at: '09:00', timezone: UTC}\n      weekly: {at: '09:00', timezone: UTC, days: [mon]}\n",
-        ),
+        b"version: 10\nname: fixture\njobs:\n"
+        b"  daily:\n    run: [daily]\n    emit: log\n    on: {at: '09:00', timezone: UTC}\n"
+        b"  weekly:\n    run: [weekly]\n    emit: log\n    on: {at: '09:00', timezone: UTC, days: [mon]}\n",
     )
     queue, now = Queue(brain), datetime(2026, 9, 27, 9, 30, tzinfo=UTC)  # a Sunday
 
     def freshness(name: str, success: datetime) -> object:
-        queue.set_progress(f"schedule:notes:schedule:{name}", {"success": timestamp(success.isoformat())})
-        return cast("dict", assistant_health(brain, now=now)["notes"]["schedules"])[name]["freshness"]
+        queue.remember(name, last_success=timestamp(success.isoformat()))
+        return cast("dict", health.report(brain, now=now)["jobs"])[name]["freshness"]
 
     # Three missed daily slots, measured from the first slot after the last success rather than the next one.
     assert freshness("daily", datetime(2026, 9, 24, 9, 0, 5, tzinfo=UTC)) == "overdue"
-    assert {"kind": "assistant", "name": "notes", "freshness": "overdue"} in attention(brain, now=now)
+    assert {"kind": "job", "name": "daily", "freshness": "overdue"} in attention(brain, now=now)
     # A success just after today's slot, or yesterday's while today's runs, stays fresh.
     assert freshness("daily", datetime(2026, 9, 27, 9, 0, 5, tzinfo=UTC)) == "fresh"
     assert freshness("daily", datetime(2026, 9, 26, 9, 0, 5, tzinfo=UTC)) == "fresh"
-    # A weekly schedule that ran last Monday is fresh on Sunday, and overdue after five missed weeks.
+    # A weekly job that ran last Monday is fresh on Sunday, and overdue after five missed weeks.
     assert freshness("weekly", datetime(2026, 9, 21, 9, 0, 5, tzinfo=UTC)) == "fresh"
     assert freshness("weekly", datetime(2026, 8, 24, 9, 0, 5, tzinfo=UTC)) == "overdue"
 
 
 def test_a_schedule_without_a_success_needs_attention_only_once_due(brain: Store) -> None:
-    assisted(brain)
-    weekdays = b"      morning: {at: '07:30', timezone: UTC, days: [mon, tue, wed, thu, fri]}\n"
-    brain.write("bf.yaml", ASSISTED.replace(b"  notes:\n", b"  notes:\n    schedules:\n" + weekdays))
+    morning = b"  morning:\n    run: [morning]\n    emit: log\n    on: {at: '07:30', timezone: UTC, days: [mon, tue, wed, thu, fri]}\n"
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + morning)
     sunday, monday = datetime(2026, 9, 27, 19, 5, tzinfo=UTC), datetime(2026, 9, 28, 7, 31, tzinfo=UTC)
     # Declared on Sunday evening: it has not run, which its freshness says, but its first slot is Monday morning.
     status = cast("dict", health.report(brain, now=sunday))
-    notes = status["assistants"]["notes"]
-    assert (notes["freshness"], notes["schedules"]["morning"]["freshness"]) == ("never", "never")
-    assert notes["schedules"]["morning"]["next_due"] == timestamp(monday.replace(minute=30).isoformat())
+    job_entry = status["jobs"]["morning"]
+    assert job_entry["freshness"] == "never"
+    assert job_entry["next_due"] == timestamp(monday.replace(minute=30).isoformat())
     assert (status["attention"], status["healthy"]) == ([], True)
     assert attention(brain, now=sunday) == []
-    # Monday's slot passed without a run: the dispatcher would start it now, so it is late.
-    late = [{"kind": "assistant", "name": "notes", "freshness": "never"}]
+    # Monday's slot passed without a run: the scheduler would start it now, so it is late.
+    late = [{"kind": "job", "name": "morning", "freshness": "never"}]
     status = cast("dict", health.report(brain, now=monday))
     assert (status["attention"], status["healthy"]) == (late, False)
     assert attention(brain, now=monday) == late
-    # An interval schedule without a success is due at once, even beside one that waits.
-    brain.write(
-        "bf.yaml",
-        ASSISTED.replace(b"  notes:\n", b"  notes:\n    schedules:\n" + weekdays + b"      hourly: {every: 3600}\n"),
-    )
-    assert attention(brain, now=sunday) == late
-    # One that ran keeps its own freshness: the waiting schedule alone never makes the assistant late.
-    Queue(brain).set_progress("schedule:notes:schedule:hourly", {"success": timestamp(sunday.isoformat())})
-    assert assistant_health(brain, now=sunday)["notes"]["freshness"] == "never"
+    # An interval schedule without a success is due at once beside a waiting wall-clock job.
+    hourly = b"  hourly:\n    run: [hourly]\n    emit: log\n    on: {every: 3600}\n"
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + morning + hourly)
+    assert attention(brain, now=sunday) == [{"kind": "job", "name": "hourly", "freshness": "never"}]
+    Queue(brain).remember("hourly", last_success=timestamp(sunday.isoformat()))
     assert attention(brain, now=sunday) == []
 
 
 def test_status_check_passes_before_a_new_schedule_first_falls_due(brain: Store) -> None:
-    assisted(brain)
     # A weekday three days away is never today, even if the test crosses midnight.
     later = WEEKDAYS[(datetime.now(UTC).weekday() + 3) % 7]
-    waiting = f"      weekly: {{at: '00:00', timezone: UTC, days: [{later}]}}\n".encode()
+    waiting = f"  weekly:\n    run: [weekly]\n    emit: log\n    on: {{at: '00:00', timezone: UTC, days: [{later}]}}\n".encode()
     command = ["status", "--check", "--brain", str(brain.root)]
-    brain.write("bf.yaml", ASSISTED.replace(b"  notes:\n", b"  notes:\n    schedules:\n" + waiting))
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + waiting)
     result = CliRunner().invoke(app, command)
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["assistants"]["notes"]["freshness"] == "never"
-    brain.write(
-        "bf.yaml",
-        ASSISTED.replace(b"  notes:\n", b"  notes:\n    schedules:\n" + waiting + b"      hourly: {every: 3600}\n"),
-    )
+    assert json.loads(result.stdout)["jobs"]["weekly"]["freshness"] == "never"
+    hourly = b"  hourly:\n    run: [hourly]\n    emit: log\n    on: {every: 3600}\n"
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + waiting + hourly)
     result = CliRunner().invoke(app, command)
     assert result.exit_code == 1
-    assert json.loads(result.stdout)["attention"] == [{"kind": "assistant", "name": "notes", "freshness": "never"}]
+    assert json.loads(result.stdout)["attention"] == [{"kind": "job", "name": "hourly", "freshness": "never"}]
 
 
-def test_coverage_marks_an_assistant_with_unresolved_failed_work_as_failed(brain: Store) -> None:
-    assisted(brain)
-    queue = Queue(brain)
-
-    def failing(*_: object) -> bytes:
-        raise Error("harness timed out")
-
-    assert assistants.manual(brain, "notes", runner=lambda *_: b"Checked.")["ok"]
-    assert not assistants.manual(brain, "notes", runner=failing)["ok"]
+def test_coverage_marks_a_record_job_with_failed_latest_run_as_failed(brain: Store) -> None:
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  notes:\n    run: [echo]\n    emit: records\n")
+    now = datetime(2026, 9, 23, 13, tzinfo=UTC)
+    start, end = "2026-09-22T13:00:00Z", "2026-09-23T13:00:00Z"
+    collect(
+        brain, "notes", start=start, end=end, runner=lambda *_: b'[{"id":"n1","title":"Checked"}]', clock=lambda: now
+    )
+    with pytest.raises(Error, match="collector timed out"):
+        collect(
+            brain,
+            "notes",
+            start=start,
+            end=end,
+            runner=lambda *_: (_ for _ in ()).throw(Error("collector timed out")),
+            clock=lambda: now,
+        )
 
     def coverage(reply: dict[str, object]) -> dict[str, object]:
         return next(entry for entry in cast("list[dict]", reply["sources"]) if entry["source"] == "notes")
 
-    # Search and read coverage say what status says: the latest run failed, however fresh its last record.
+    # Search coverage and status say what the latest run did, even with a stored record present.
     assert coverage(search(brain, Query(text="Checked", prefix="memories/notes")))["failed"] is True
-    # An unscoped search that returns none of its records still lists it.
-    assert coverage(search(brain, Query(text="Durable evidence")))["failed"] is True
+    assert coverage(search(brain, Query(text="offline retrieval")))["failed"] is True
     assert cast("dict", health.report(brain))["sources"]["notes"]["failed"] is True
-    for job in cast("list[dict]", queue.report()["jobs"]):
-        if job["state"] in {"failed", "uncertain"}:
-            queue.retry(str(job["id"]), cancel=True)
+    Queue(brain).remember("notes", last_error="", error_count=0)
     assert "failed" not in coverage(search(brain, Query(text="Checked", prefix="memories/notes")))
     assert "failed" not in source_health(brain)["notes"]
 
 
 def test_status_says_an_interrupted_queue_write_recovers_with_bf_queue(brain: Store) -> None:
-    assisted(brain)
+    dispatched(brain)
+    index.refresh(brain)
     queue = Queue(brain)
     queue.set_progress("created", {})
     database = brain.root / QUEUE
-    # A writer killed once its journal was synced, as when it spills pages to the file mid-transaction, leaves a
-    # journal only the next writer can roll back.
+    # A writer killed after spilling pages to disk leaves a rollback journal that read-only inspection surfaces.
     killed = (
         "import os, signal, sqlite3, sys\n"
         "db = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
@@ -618,86 +611,91 @@ def test_status_says_an_interrupted_queue_write_recovers_with_bf_queue(brain: St
     process = subprocess.run([sys.executable, "-I", "-c", killed, str(database)], timeout=60, check=False)  # noqa: S603
     assert process.returncode == -signal.SIGKILL
     assert database.with_name(database.name + "-journal").exists()
-    interrupted = "assistant queue holds an interrupted write; run bf queue to recover it"
+    interrupted = "runtime database holds an interrupted write; run bf queue to recover it"
     entry = cast("dict", health.report(brain))
     assert {"error": interrupted} in entry["problems"]
-    assert entry["assistants"]["notes"]["error"] == interrupted
-    assert "failed" not in entry["sources"]["notes"]
-    # Any execution, such as bf queue, rolls the write back.
-    queue.report()
+    assert not entry["healthy"]
+    doc = doctor(brain)
+    assert doc["problems"] == [{"error": interrupted}]
+    assert not doc["healthy"]
+    # Any queue write rolls the interrupted journal back.
+    queue.compact()
     assert not database.with_name(database.name + "-journal").exists()
     assert queue.progress("spill:0") == {}
     entry = cast("dict", health.report(brain))
     assert entry["problems"] == []
-    assert "error" not in entry["assistants"]["notes"]
 
 
 def test_status_and_coverage_describe_one_bf_yaml_while_it_is_saved(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assisted(brain)
-    brain.write("bf.yaml", ASSISTED.replace(b"  notes:", b"  renamed:"))
+    dispatched(brain)
+    brain.write("bf.yaml", DISPATCH.replace(b"  notes:", b"  renamed:"))
     renamed = load(brain)
-    brain.write("bf.yaml", ASSISTED)
+    brain.write("bf.yaml", DISPATCH)
     original = load(brain)
-    # An editor's atomic save lands right after the first load: every later one reads the renamed assistant.
+    # An editor's atomic save lands right after the first load: every later one reads the renamed job.
     loads = iter([original])
     monkeypatch.setattr("bf.health.load", lambda _store: next(loads, renamed))
     entry = cast("dict", health.report(brain))
-    assert set(entry["assistants"]) == {"notes", "personal"}
+    assert set(entry["jobs"]) == {"chat-in", "chat-send", "notes", "personal"}
     loads = iter([original])
     assert attention(brain) == []
-    loads = iter([original])
-    assert set(source_health(brain)) == {"notes", "personal"}
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [echo]\n    emit: records\n")
+    src_a = load(brain)
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  renamed:\n    run: [echo]\n    emit: records\n")
+    src_b = load(brain)
+    loads = iter([src_a])
+    monkeypatch.setattr("bf.health.load", lambda _store: next(loads, src_b))
+    assert set(source_health(brain)) == {"mail"}
 
 
 def test_disabled_programs_report_no_failure_while_their_queued_work_stays_listed(brain: Store) -> None:
-    configured = ASSISTED.replace(
-        b"sensors: {}\n",
-        b"sensors:\n  mail:\n    command: [mail]\n    refresh: 3600\n"
-        b"routines:\n  review:\n    command: [review]\n    refresh: 3600\n",
+    configured = (
+        b"version: 10\nname: fixture\ndefaults:\n  harness: [harness]\njobs:\n"
+        b"  mail:\n    run: [mail]\n    emit: records\n    on: {every: 3600}\n"
+        b"  review:\n    run: [review]\n    emit: log\n    on: {every: 3600}\n"
+        b"  notes:\n    prompt: prompts/personal.md\n    emit: message\n"
     )
-    assisted(brain).write("bf.yaml", configured)
+    brain.write("bf.yaml", configured)
+    brain.write("prompts/personal.md", b"Answer {{context}}.\n")
 
     def failing(*_: object) -> bytes:
         raise Error("provider timed out")
+
+    def cancelled(*_: object) -> bytes:
+        raise jobs.CancelledError("interrupted")
 
     start, end = "2026-10-30T00:00:00Z", "2026-10-31T00:00:00Z"
     with pytest.raises(Error, match="provider timed out"):
         collect(brain, "mail", start=start, end=end, runner=failing)
     with pytest.raises(Error, match="provider timed out"):
-        routine(brain, "review", start=start, end=end, runner=failing)
-    assert not assistants.manual(brain, "notes", runner=failing)["ok"]
+        jobs.run_job(brain, "review", runner=failing)
+    with pytest.raises(jobs.CancelledError, match="interrupted"):
+        jobs.run_job(brain, "notes", runner=cancelled)
     status = cast("dict", health.report(brain))
-    entry = status
     assert not status["healthy"]
-    assert {"failed", "error", "log"} <= entry["sources"]["mail"].keys()
-    assert {"failed", "error", "log"} <= entry["routines"]["review"].keys()
-    assert {"failed", "error", "log"} <= entry["assistants"]["notes"].keys()
-    assert entry["sources"]["notes"]["failed"] is True
-    # Disabled, each program keeps its history and its queued job, but no longer reports a failure or fails the check.
-    disabled = configured.replace(b"    refresh: 3600\n", b"    refresh: 3600\n    enabled: false\n").replace(
-        b"  notes:\n    prompt: prompts/personal.md\n",
-        b"  notes:\n    enabled: false\n    prompt: prompts/personal.md\n",
+    assert {"failed", "error", "log"} <= status["sources"]["mail"].keys()
+    assert {"failed", "error", "log"} <= status["jobs"]["review"].keys()
+    assert {"failed", "error", "log"} <= status["jobs"]["notes"].keys()
+    # Disabled jobs hide their failure diagnostics and leave attention empty, while preserving queue state.
+    disabled = configured.replace(b"    on: {every: 3600}\n", b"    on: {every: 3600}\n    enabled: false\n").replace(
+        b"    emit: message\n",
+        b"    emit: message\n    enabled: false\n",
     )
     brain.write("bf.yaml", disabled)
     status = cast("dict", health.report(brain))
-    entry = status
     failure = {"failed", "error", "failures", "log"}
-    assert not failure & entry["sources"]["mail"].keys()
-    assert not failure & entry["routines"]["review"].keys()
-    assert not failure & entry["assistants"]["notes"].keys()
-    assert not failure & entry["sources"]["notes"].keys()
-    assert (entry["sources"]["mail"]["state"], entry["assistants"]["notes"]["state"]) == ("disabled", "disabled")
-    assert entry["attention"] == []
-    assert status["healthy"]
-    assert [job["state"] for job in entry["messaging"]["jobs"]] == ["uncertain"]
+    assert not failure & status["sources"]["mail"].keys()
+    assert not failure & status["jobs"]["mail"].keys()
+    assert not failure & status["jobs"]["review"].keys()
+    assert not failure & status["jobs"]["notes"].keys()
+    assert (status["sources"]["mail"]["state"], status["jobs"]["notes"]["state"]) == ("disabled", "disabled")
+    assert status["attention"] == []
+    assert status["queue"]["uncertain"] == 1
     coverage = {item["source"]: item for item in cast("list[dict]", search(brain, Query(text="anything"))["sources"])}
     assert not failure & coverage["mail"].keys()
-    assert not failure & coverage["notes"].keys()
-    result = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
-    assert result.exit_code == 0, result.output
-    # Enabled again, the unresolved failures are reported again.
+    # Enabled again, unresolved failures surface immediately.
     brain.write("bf.yaml", configured)
     assert not cast("dict", health.report(brain))["healthy"]
 
@@ -705,70 +703,118 @@ def test_disabled_programs_report_no_failure_while_their_queued_work_stays_liste
 def test_a_source_that_keeps_missing_parts_needs_attention_after_three_runs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nsensors:\n"
-        b"  feeds:\n    command: [echo]\n    refresh: 3600\n"
-        b"  manual:\n    command: [echo]\n",
+        b"version: 10\nname: fixture\njobs:\n"
+        b"  feeds:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n"
+        b"  manual:\n    run: [echo]\n    emit: records\n",
     )
-    # The home page and the CLI read the current time: collect in the last hour.
     now = datetime.now(UTC)
     partial = b'{"records":[{"id":"one","title":"One"}],"incomplete":{"missed":1,"of":3}}'
 
-    def run(sensor: str, output: bytes) -> None:
+    def run(source: str, output: bytes) -> None:
         start, end = timestamp((now - timedelta(hours=1)).isoformat()), timestamp(now.isoformat())
-        collect(brain, sensor, start=start, end=end, runner=lambda *_: output, clock=lambda: now)
-
-    def status() -> dict:
-        return cast("dict", health.report(brain, now=now))
+        collect(brain, source, start=start, end=end, runner=lambda *_: output, clock=lambda: now)
 
     for runs in (1, 2):
         run("feeds", partial)
-        entry = status()
-        # Shown from the first incomplete run, beside a freshness the run still earned.
+        entry = cast("dict", health.report(brain, now=now))
+        # Shown from the first incomplete run beside freshness the run still earned.
         assert entry["sources"]["feeds"]["degraded"] == {"runs": runs, "missed": 1, "of": 3}
         assert entry["sources"]["feeds"]["freshness"] == "fresh"
         assert entry["attention"] == []
-    assert status()["healthy"] is True
+    assert cast("dict", health.report(brain, now=now))["healthy"] is True
     run("feeds", partial)
     run("manual", partial)
-    full = status()
-    entry = full
+    full = cast("dict", health.report(brain, now=now))
     # A manual source shows its gap but, like its failures, needs no attention.
-    assert entry["sources"]["manual"]["degraded"] == {"runs": 1, "missed": 1, "of": 3}
-    assert entry["attention"] == [{"kind": "sensor", "name": "feeds", "freshness": "fresh", "degraded": True}]
+    assert full["sources"]["manual"]["degraded"] == {"runs": 1, "missed": 1, "of": 3}
+    assert full["attention"] == [{"kind": "job", "name": "feeds", "freshness": "fresh", "degraded": True}]
     assert full["healthy"] is False
-    check = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
-    assert check.exit_code == 1
-    # The home page, search coverage and memories pages share the attention and the source state.
-    home = cast("dict", read(brain))
-    assert {"kind": "sensor", "name": "feeds", "freshness": "fresh", "degraded": True} in home["attention"]
+    assert CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)]).exit_code == 1
+    # Home page, search coverage and memories pages share attention and source state.
+    assert {"kind": "job", "name": "feeds", "freshness": "fresh", "degraded": True} in cast("dict", read(brain))[
+        "attention"
+    ]
     found = cast("dict", search(brain, Query(text="one")))
     assert {source["source"]: source.get("degraded") for source in found["sources"]}["feeds"]["runs"] == 3
     memories = cast("dict", read(brain, "memories"))
     assert {source["source"]: source.get("degraded") for source in memories["sources"]}["manual"]["runs"] == 1
-    # A record read's collection names the gap too.
-    record = cast("dict", read(brain, "feeds:one"))
-    assert record["collection"]["degraded"]["missed"] == 1
+    assert cast("dict", read(brain, "feeds:one"))["collection"]["degraded"]["missed"] == 1
     # The next complete run clears it.
     run("feeds", b'[{"id":"one","title":"One"}]')
-    entry = status()
+    entry = cast("dict", health.report(brain, now=now))
     assert "degraded" not in entry["sources"]["feeds"]
     assert entry["attention"] == []
 
 
 def test_hand_edited_incomplete_counts_never_report_a_gap(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 9\nname: fixture\nsensors:\n  feeds:\n    command: [echo]\n    refresh: 3600\n")
-    for counts in ({"incomplete_runs": 3}, {"incomplete_runs": 3, "missed": 2, "of": 1}, {"missed": 1, "of": 2}):
-        private_dir(brain, ".bf", "state").write("sensors.json", encode({"feeds": counts}))
+    brain.write(
+        "bf.yaml",
+        b"version: 10\nname: fixture\njobs:\n  feeds:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n",
+    )
+    queue = Queue(brain)
+    for counts in (
+        {"incomplete_runs": 3},
+        {"incomplete_runs": 3, "missed": 2, "of": 1},
+        {"incomplete_runs": 0, "missed": 1, "of": 2},
+    ):
+        queue.remember("feeds", **counts)
         assert "degraded" not in source_health(brain)["feeds"]
-        assert attention(brain) == [{"kind": "sensor", "name": "feeds", "freshness": "never"}]
+        assert attention(brain) == [{"kind": "job", "name": "feeds", "freshness": "never"}]
 
 
-def test_home_and_review_attention_include_failed_assistants_and_channels(brain: Store) -> None:
-    assisted(brain)
-    assert not assistants.manual(brain, "notes", runner=lambda *_: (_ for _ in ()).throw(Error("boom")))["ok"]
-    Queue(brain).set_progress("health:channel:chat", {"error": "transport down", "at": "2026-10-17T00:00:00.000000Z"})
+def test_home_and_review_attention_include_failed_jobs(brain: Store) -> None:
+    dispatched(brain)
+    with pytest.raises(Error, match="boom"):
+        jobs.run_job(brain, "notes", runner=lambda *_: (_ for _ in ()).throw(Error("boom")))
+    Queue(brain).set_progress("health:daemon:chat-in", {"error": "transport down", "at": "2026-10-17T00:00:00.000000Z"})
     expected = cast("dict", health.report(brain))["attention"]
-    assert {"kind": "assistant", "name": "notes", "freshness": "manual", "failed": True} in expected
-    assert {"kind": "channel", "name": "chat", "freshness": "unknown", "failed": True} in expected
+    assert {"kind": "job", "name": "notes", "freshness": "manual", "failed": True} in expected
+    assert {"kind": "job", "name": "chat-in", "freshness": "manual", "failed": True} in expected
     assert read(brain)["attention"] == expected
     assert read(brain, "review")["attention"] == expected
+
+
+def test_doctor_checks_bins_env_scripts_prompts_and_runtime_without_leaking_secrets(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_marker = "synthetic-doc-env-marker-12345"
+    monkeypatch.setenv("BF_DOC_PRESENT", env_marker)
+    monkeypatch.delenv("BF_DOC_MISSING", raising=False)
+    brain.write("sensors/nonexec.sh", b"#!/bin/sh\necho ok\n")
+    brain.write("sensors/good.sh", b"#!/bin/sh\necho ok\n")
+    (brain.root / "sensors/good.sh").chmod(0o700)
+    brain.write("prompts/ok.md", b"Hi.\n")
+    brain.write("not-a-dir", b"file\n")
+    brain.write(
+        "bf.yaml",
+        b"version: 10\nname: fixture\njobs:\n"
+        b"  healthy-job:\n    run: [sensors/good.sh]\n    emit: log\n    requires: {env: [BF_DOC_PRESENT]}\n"
+        b"  disabled-broken:\n    enabled: false\n    run: [bf-nonexistent-binary]\n    emit: log\n"
+        b"    requires: {bins: [bf-missing-bin], env: [BF_DOC_MISSING]}\n"
+        b"  broken-env-bin:\n    run: [bf-nonexistent-cmd]\n    emit: log\n"
+        b"    requires: {bins: [bf-missing-bin], env: [BF_DOC_MISSING]}\n"
+        b"  broken-script:\n    run: [sensors/nonexec.sh]\n    emit: log\n"
+        b"  broken-prompt:\n    prompt: prompts/missing.md\n    cwd: not-a-dir\n    emit: log\n",
+    )
+    report = cast("dict", doctor(brain))
+    assert not report["healthy"]
+    # Present secret values must never appear anywhere in bf doctor output.
+    assert env_marker not in json.dumps(report)
+    assert report["jobs"]["healthy-job"] == {"enabled": True, "ok": True}
+    assert report["jobs"]["disabled-broken"] == {"enabled": False, "ok": True}
+    assert report["jobs"]["broken-env-bin"]["missing_bins"] == ["bf-missing-bin", "bf-nonexistent-cmd"]
+    assert report["jobs"]["broken-env-bin"]["missing_env"] == ["BF_DOC_MISSING"]
+    assert "not an executable regular file" in str(report["jobs"]["broken-script"]["error"])
+    assert "missing.md" in str(report["jobs"]["broken-prompt"]["error"])
+    assert "missing harness" in str(report["jobs"]["broken-prompt"]["error"])
+    assert "not-a-dir" in str(report["jobs"]["broken-prompt"]["error"])
+
+    # Corrupt runtime SQLite surfaces in doctor problems while offline doctor CLI exits non-zero.
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  healthy-job:\n    run: [sensors/good.sh]\n")
+    brain.write(QUEUE, b"corrupt")
+    cli = CliRunner().invoke(app, ["doctor", "--brain", str(brain.root)])
+    assert cli.exit_code == 1
+    parsed = json.loads(cli.stdout)
+    assert not parsed["healthy"]
+    assert parsed["problems"]
+    assert env_marker not in cli.stdout

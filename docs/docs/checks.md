@@ -7,11 +7,11 @@ description: Validate saved files and test that recurring questions still retrie
 
 Run three offline checks inside your brain to verify structure, retrieval quality and local runtime health:
 
-| Command             | Verifies                                                                              |
-| ------------------- | ------------------------------------------------------------------------------------- |
-| `bf validate`       | OKF notes, links, relations, identities, record files and configured program paths.   |
-| `bf eval`           | Saved `evals/*.yaml` questions still retrieve expected refs and text.                 |
-| `bf status --check` | Cache, scheduled sensors/routines, assistants and channels need no local `attention`. |
+| Command             | Verifies                                                                            |
+| ------------------- | ----------------------------------------------------------------------------------- |
+| `bf validate`       | OKF notes, links, relations, identities, record files and configured program paths. |
+| `bf eval`           | Saved `evals/*.yaml` questions still retrieve expected refs and text.               |
+| `bf status --check` | Cache and scheduled jobs need no local `attention`.                                 |
 
 ## Validate
 
@@ -21,7 +21,7 @@ Run three offline checks inside your brain to verify structure, retrieval qualit
 - **Links and relations**: local targets, `#section` anchors, case-sensitive `SOURCE:ID` refs, `?rel=` syntax, `relations:` identities and optional `targets:` prefix bounds.
 - **[Identities](link-reference.md#identity-rules)**: own-brain namespace, whole-subject rule (rejecting `#section`, `.md` paths, pages, `SOURCE:ID` and `bf://NAME/actions/SLUG` action folders), no duplicate owners (`ambiguous identity`) and no invisible format characters.
 - **Records and filesystem**: `<sha256-id>.json` filenames, record schemas, relation target bounds, and rejection of symlinks, special files or invalid UTF-8 names.
-- **Enabled programs**: executable scripts (or existing `sensors/`/`routines/`/`channels/` script arguments), `{{lines:...}}` files (<= 128 total args) and assistant `prompt` files (<= 120,000 bytes).
+- **Enabled jobs**: executable scripts (or existing `sensors/`/`routines/`/`channels/` script arguments), `{{lines:...}}` files (<= 128 total args) and prompt files (<= 120,000 bytes).
 - **Optional `validate:` policy in `bf.yaml`**: `max_stale_days`, `warn_stale_days`, `index_note` (e.g. `concepts/index.md`), `required_status` and `forbid_patterns` (up to 64 regexes).
 
 ## Warnings
@@ -41,7 +41,7 @@ Run three offline checks inside your brain to verify structure, retrieval qualit
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/checks/
-version: 9
+version: 10
 cases:
   - name: find-the-reason
     query: visitors clear explanation
@@ -78,7 +78,7 @@ bf eval --path evals/new-website.yaml --baseline ~/new-website-eval.json
 
 ## Suite reference
 
-Each `.yaml`/`.yml` suite (up to 100 suites of 200 cases; `bf schema --kind eval`) sets `version: 9` and `cases`:
+Each `.yaml`/`.yml` suite (up to 100 suites of 200 cases; `bf schema --kind eval`) sets `version: 10` and `cases`:
 
 | Field               | Rule                                                                                                  |
 | ------------------- | ----------------------------------------------------------------------------------------------------- |

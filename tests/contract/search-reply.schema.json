@@ -12,20 +12,17 @@
       "type": "object"
     },
     "Attention": {
-      "description": "A program or channel that needs action, identified by kind and name.",
+      "description": "A job that needs action, identified by kind and name.",
       "properties": {
         "degraded": {
           "const": true,
-          "description": "Three or more committed collections in a row reported missing parts; the source's `degraded` coverage gives the counts."
+          "description": "Three or more committed collections in a row reported missing parts; `degraded` gives counts."
         },
         "failed": { "const": true },
         "freshness": { "type": "string" },
-        "kind": { "enum": ["sensor", "routine", "assistant", "channel"] },
+        "kind": { "enum": ["job"] },
         "name": { "type": "string" },
-        "silent": {
-          "const": true,
-          "description": "The source gained no new or changed record within its `silent_after`, whatever its freshness."
-        }
+        "silent": { "const": true, "description": "Gained no new or changed record within `silent_after`." }
       },
       "required": ["kind", "name", "freshness"],
       "type": "object"
@@ -119,7 +116,7 @@
           "format": "date-time",
           "type": "string"
         },
-        "mode": { "enum": ["window", "snapshot"] },
+        "mode": { "enum": ["window", "cursor", "snapshot"] },
         "page": { "type": "string" },
         "records": { "minimum": 0, "type": "integer" },
         "silent": {
@@ -168,7 +165,7 @@
         "excerpt": { "description": "A one-line preview; read the ref for exact text.", "type": "string" },
         "generated": {
           "const": true,
-          "description": "Model output an assistant recorded; read what it cites before relying on it."
+          "description": "Model output a prompt job recorded; read what it cites before relying on it."
         },
         "kind": { "enum": ["note", "record"] },
         "modified": {
@@ -177,12 +174,12 @@
           "type": "string"
         },
         "new_links": {
-          "description": "Items linking to the note, and records it links to, that happened or changed upstream between its last edit and now.",
+          "description": "Linked items that happened or changed upstream since the note's last edit.",
           "minimum": 0,
           "type": "integer"
         },
         "newer": {
-          "description": "Up to five of those items, newest first, to read before relying on the note.",
+          "description": "Up to five of those items, newest first.",
           "items": { "type": "string" },
           "maxItems": 5,
           "type": "array"
@@ -195,16 +192,13 @@
         },
         "partial": {
           "const": true,
-          "description": "The record's text is deliberately incomplete, such as an excerpt the sensor kept; never quote it as the whole source."
+          "description": "The record's text is deliberately incomplete, such as an excerpt the job kept; never quote it as the whole source."
         },
         "ref": {
           "description": "Read this exact ref as written: a section ref ends in #fragment, and a record id may itself contain #.",
           "type": "string"
         },
-        "relation": {
-          "description": "On a relation page, the item's relation when it is a narrower relation.",
-          "type": "string"
-        },
+        "relation": { "description": "On a relation page, the narrower relation of this item.", "type": "string" },
         "relations": { "items": { "$ref": "#/$defs/Claim" }, "type": "array" },
         "relations_truncated": { "const": true },
         "review": { "const": true },
@@ -222,7 +216,7 @@
         },
         "source": { "description": "A record's source.", "type": "string" },
         "status": {
-          "description": "OKF notes use draft, stable or deprecated; other Markdown keeps its own word.",
+          "description": "OKF notes use draft, stable or deprecated; other Markdown keeps its own.",
           "type": "string"
         },
         "tasks": { "$ref": "#/$defs/Tasks" },

@@ -8,17 +8,38 @@ import json
 import os
 import re
 import stat
+import sys
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
-
-import _sensor
 
 FILE_BYTES = 8 << 20
 OUTPUT_BYTES = 16 << 20
 TEXT_BYTES = 64 << 10
 MAX_HIGHLIGHTS = 1000
-InvalidError = _sensor.InvalidError
+
+
+class InvalidError(ValueError):
+    """Export failed contract validation."""
+
+
+def emit(records: list[dict[str, object]], *, max_bytes: int = OUTPUT_BYTES) -> None:
+    payload = (json.dumps(records, ensure_ascii=False) + "\n").encode("utf-8")
+    if len(payload) > max_bytes:
+        raise InvalidError(f"output exceeds {max_bytes} bytes; narrow the export")
+    sys.stdout.buffer.write(payload)
+
+
+def cli(action: Callable[[], None], summary: str, hint: str) -> None:
+    try:
+        action()
+    except InvalidError as error:
+        sys.stderr.write(f"{summary}: {error}.\n")
+        sys.exit(1)
+    except (OSError, UnicodeError, ValueError, LookupError, ArithmeticError, RecursionError):
+        sys.stderr.write(f"{summary}; {hint}.\n")
+        sys.exit(1)
 
 
 def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
@@ -180,8 +201,8 @@ def main() -> None:
     parser.add_argument("label", help="stable personal/team export scope")
     parser.add_argument("export", type=Path, help="selected complete JSON export; use snapshot mode")
     args = parser.parse_args()
-    _sensor.cli(
-        lambda: _sensor.emit(collect(args.label, args.export), max_bytes=OUTPUT_BYTES),
+    cli(
+        lambda: emit(collect(args.label, args.export), max_bytes=OUTPUT_BYTES),
         "Highlight collection failed",
         "check the regular UTF-8 JSON file, syntax and symlinks",
     )

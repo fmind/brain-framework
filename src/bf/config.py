@@ -22,16 +22,13 @@ from bf.storage import Store, expand, writer, xdg
 _HEADER = "# https://fmind.github.io/brain-framework/docs/configuration/\n"
 
 
-# libyaml is about nine times faster than PyYAML's pure-Python parser, which also rejects some YAML that libyaml
-# accepts: BF reads YAML only through libyaml, so one file loads alike on every installation.
+# libyaml parses (~9x faster than pure Python); BF requires CSafeLoader so YAML loads identically everywhere.
 LIBYAML = (
     "reading YAML needs PyYAML built with libyaml, which this installation lacks; reinstall bf with a PyYAML wheel "
     "that bundles it: uv tool install --reinstall --python 3.14 brain-framework, or 'brain-framework[mcp]' with MCP"
 )
-# One command reads bf.yaml many times: reuse validated configurations by content digest.
 _LOADED: dict[str, Config] = {}
-# The YAML 1.2 core schema, as in editor tooling: `on`, `no` and `off` stay strings, `017` is decimal and `1:30` is
-# text. libyaml parses; this Python table resolves the plain scalars it reports.
+# YAML 1.2 core schema: `on`/`no`/`off` stay strings, `017` is decimal, `1:30` is text.
 _CORE = (
     ("null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]),
     ("bool", r"^(?:true|True|TRUE|false|False|FALSE)$", list("tTfF")),
@@ -45,23 +42,19 @@ _CORE = (
 
 
 def _integer(loader: yaml.constructor.SafeConstructor, node: yaml.ScalarNode) -> int:
-    """YAML 1.2 integers: a leading zero is decimal, never YAML 1.1 octal.
-
-    Every base keeps Python's digit limit for decimal text: replies, the cache and records print integers in decimal.
-    """
+    """YAML 1.2 decimal/octal/hex integer preserving Python's decimal digit limit."""
     value = str(loader.construct_scalar(node))
     base = {"0o": 8, "0x": 16}.get(value[:2])
     try:
         number = int(value[2:], base) if base else int(value, 10)
         str(number)
     except ValueError:
-        # Located like a syntax error; the reason is never shown, so neither is the value.
         raise yaml.constructor.ConstructorError(None, None, "invalid integer", node.start_mark) from None
     return number
 
 
 class _KeyError(yaml.constructor.ConstructorError):
-    """A duplicate or non-string mapping key: its position and fixed reason name it without quoting it."""
+    """A duplicate or non-string mapping key, reported without quoting its text."""
 
 
 def _mapping(loader: yaml.constructor.SafeConstructor, node: yaml.MappingNode) -> dict[str, object]:
@@ -76,24 +69,18 @@ def _mapping(loader: yaml.constructor.SafeConstructor, node: yaml.MappingNode) -
 
 @cache
 def _strict(base: type[yaml.CSafeLoader]) -> type[yaml.CSafeLoader]:
-    """libyaml's safe loader with the core schema; it rejects duplicate mappings rather than accept a hidden override."""
-    # A subclass, so the resolvers and constructors below leave PyYAML's own loader unchanged.
+    """libyaml's safe loader restricted to YAML 1.2 scalars and unique string mapping keys."""
     loader = cast("type[yaml.CSafeLoader]", type("StrictLoader", (base,), {}))
     loader.yaml_implicit_resolvers = {}
     for tag, pattern, first in _CORE:
         loader.add_implicit_resolver(f"tag:yaml.org,2002:{tag}", re.compile(pattern), first)
     loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
     loader.add_constructor("tag:yaml.org,2002:int", _integer)
-    # Dates are validated by their owning models; even an explicit tag must not turn them into other types.
     loader.add_constructor("tag:yaml.org,2002:timestamp", lambda constructor, node: constructor.construct_scalar(node))
     return loader
 
 
 def _loaders() -> tuple[type[yaml.CSafeLoader], type[yaml.CSafeLoader]]:
-    """libyaml's safe loader, to scan events, and its strict subclass, to build values; never the pure-Python ones.
-
-    PyYAML built from source without libyaml, as on a Python it publishes no wheel for, lacks `CSafeLoader`.
-    """
     base = getattr(yaml, "CSafeLoader", None)
     if base is None:
         raise Error(LIBYAML)
@@ -101,15 +88,9 @@ def _loaders() -> tuple[type[yaml.CSafeLoader], type[yaml.CSafeLoader]]:
 
 
 def yaml_object(data: bytes, name: str = "", *, line: int = 1) -> dict[str, object]:
-    """No aliases, anchors, duplicate keys, deep documents or large node graphs.
-
-    Errors name the file and, for syntax errors, the position: `line` is the file line of the first
-    YAML line, such as 2 for Markdown frontmatter. They never quote the document's content. A PyYAML without
-    libyaml fails every document alike, without naming one.
-    """
-    loaders = _loaders()
+    """Parse one UTF-8 YAML mapping without anchors, aliases, duplicate keys or deep nesting."""
     try:
-        return _yaml_object(data, line, *loaders)
+        return _yaml_object(data, line, *_loaders())
     except Error as error:
         if not name:
             raise
@@ -122,7 +103,6 @@ def _yaml_object(
     if len(data) > 1 << 20:
         raise Error("YAML exceeds 1 MiB")
     try:
-        # PyYAML also reads UTF-16 and UTF-32 with a byte-order mark; brain files are UTF-8 only.
         data.decode("utf-8")
     except UnicodeDecodeError:
         raise Error("YAML is not UTF-8") from None
@@ -131,21 +111,17 @@ def _yaml_object(
         for count, event in enumerate(yaml.parse(data, Loader=scanner), 1):
             if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
                 raise Error("YAML anchors and aliases are not supported")
-            if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
-                depth += 1
-            if isinstance(event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
-                depth -= 1
+            depth += isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)) - isinstance(
+                event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)
+            )
             if depth > 32 or count > 20_000:
                 raise Error("YAML structure exceeds its limit")
         value = yaml.load(data, Loader=loader)  # noqa: S506 - restricted CSafeLoader subclass
     except (yaml.YAMLError, ValueError, OverflowError, LookupError, TypeError) as error:
-        # The safe constructor's explicit tags can raise conversion, indexing or node-shape errors.
-        # Keep their possibly sensitive values behind the same private diagnostic boundary.
         mark = getattr(error, "problem_mark", None)
         reason = "YAML mapping keys must be unique strings" if isinstance(error, _KeyError) else "invalid YAML"
-        if mark is None:
-            raise Error(reason) from error
-        raise Error(f"{reason} at line {mark.line + line}, column {mark.column + 1}") from error
+        loc = f" at line {mark.line + line}, column {mark.column + 1}" if mark else ""
+        raise Error(f"{reason}{loc}") from error
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -154,10 +130,7 @@ def _yaml_object(
 
 
 def load(store: Store) -> Config:
-    """The brain configuration; each call rereads the file and shares one frozen result per content.
-
-    Callers must not change the returned dictionaries, such as `sensors`: other loads share them.
-    """
+    """Validate and cache `bf.yaml` per content digest; callers must treat nested dicts as read-only."""
     try:
         data = store.read("bf.yaml", 1 << 20)
     except FileNotFoundError:
@@ -186,8 +159,6 @@ def _registry() -> tuple[UserConfig, str]:
     try:
         if not path.parent.exists():
             return UserConfig(), ""
-        # The optional registry needs the same bounded, regular-file reads as brain files:
-        # opening a FIFO with Path.open() would wait indefinitely for another process.
         data = Store(path.parent).read(path.name, 1 << 20)
     except FileNotFoundError:
         return UserConfig(), ""
@@ -195,7 +166,6 @@ def _registry() -> tuple[UserConfig, str]:
         registry = UserConfig.model_validate(yaml_object(data, str(path)))
     except ValidationError as error:
         raise Error(f"invalid {path}: " + explain(error)) from error
-    # yaml_object has already rejected invalid UTF-8. Blank lines may separate the comments' paragraphs.
     lines = data.decode().splitlines(keepends=True)
     block = list(takewhile(lambda line: line.startswith("#") or not line.strip(), lines))
     while block and not block[-1].startswith("#"):
@@ -209,7 +179,6 @@ def user_config() -> UserConfig:
 
 
 def _identity(entry: Registration) -> str | None:
-    """The physical directory a registry entry names; None when it cannot be reached on this machine."""
     try:
         return Store(Path(entry.path).expanduser()).identity
     except Error:
@@ -217,8 +186,7 @@ def _identity(entry: Registration) -> str | None:
 
 
 def _location(entry: Registration) -> Path:
-    """The directory an entry names, resolving only its leading `~`: a home reached through a link, such as /home ->
-    /var/home, is a spelling, while a link the entry names itself is another path to the brain."""
+    """Resolve only a leading `~` so symlinked paths remain distinct unless pointing to the same directory."""
     path = Path(entry.path)
     if not entry.path.startswith("~"):
         return path
@@ -231,72 +199,73 @@ def _location(entry: Registration) -> Path:
 
 
 def _write_registry(registry_store: Store, path: Path, header: str, registry: UserConfig) -> None:
-    document: dict[str, object] = {}
-    if registry.default is not None:
-        document["default"] = registry.default
+    document = {**({"default": registry.default} if registry.default is not None else {})}
     document["brains"] = {key: value.model_dump() for key, value in sorted(registry.brains.items())}
-    registry_store.write(
-        path.name,
-        # Keep the owner's leading comments; inline comments do not survive the rewrite.
-        ((header or _HEADER) + yaml.safe_dump(document, sort_keys=False)).encode(),
-    )
+    registry_store.write(path.name, ((header or _HEADER) + yaml.safe_dump(document, sort_keys=False)).encode())
+
+
+def _is_path(value: str) -> bool:
+    return "/" in value or value in {".", "..", "~"}
+
+
+def _match_registered(brains: dict[str, Registration], target: str | Store, path: Path) -> str:
+    if isinstance(target, Store):
+        identity: str | None = target.identity
+        root, missing = target.root, f"this brain is not registered in {path}"
+    elif _is_path(target):
+        expanded = expand(Path(target))
+        identity, root, missing = None, expanded, f"{target} is not registered in {path}"
+        with suppress(Error):
+            identity = Store(expanded).identity
+    else:
+        if target not in brains:
+            raise Error(f"brain {target} is not registered{suggest(target, brains)}")
+        return target
+    for name, entry in sorted(brains.items()):
+        if (identity is not None and _identity(entry) == identity) or _location(entry) == root:
+            return name
+    raise Error(missing)
+
+
+def _existing_brain(entry: Registration, alias: str, path: Path) -> Store | None:
+    unreachable = f"cannot reach the brain registered as {alias} at {entry.path}; restore access to it, or remove that entry from {path}"
+    try:
+        if (registered := _registered(entry)) is None:
+            return None
+        registered.mode("bf.yaml")
+        return registered
+    except FileNotFoundError:
+        return None
+    except (Error, OSError) as error:
+        raise Error(unreachable) from error
 
 
 def register(store: Store, *, name: str = "", default: bool = False) -> dict[str, object]:
-    """Add or update this brain in the user registry, optionally under an alias and/or as default.
-
-    The entry of that name moves here when its directory no longer exists or holds no bf.yaml, as after moving the
-    brain, or is this physical brain through another path; the reply names the path it replaced. An entry that names
-    this brain's directory, even spelled with `~`, stays as written. A path that exists but cannot be reached, such as
-    a locked folder or a disconnected network mount, keeps its entry; a share that is not mounted at all looks moved.
-    """
-    configured = load(store)
-    alias = name or configured.name
+    """Add or update this brain in the user registry, optionally under an alias and/or as default."""
+    alias = name or load(store).name
     if name and not re.fullmatch(NAME, alias):
         raise InputError(
-            "brain name must start with a lowercase letter and use only lowercase letters, digits and hyphens",
-            "name",
+            "brain name must start with a lowercase letter and use only lowercase letters, digits and hyphens", "name"
         )
     path = user_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     registry_store = Store(path.parent)
-    # Registration is one shared read/modify/write transaction, independent of each brain's lock.
     with writer(registry_store, wait=30, busy="another bf register is updating the registry; retry after it finishes"):
         registry, header = _registry()
         for other, entry in registry.brains.items():
             if other != alias and _identity(entry) == store.identity:
                 raise Error(
-                    f"this brain is already registered as {other}; unregister {other} from {path}, then run "
-                    "bf register again"
+                    f"this brain is already registered as {other}; unregister {other} from {path}, then run bf register again"
                 )
         replaced = ""
-        # Locations, not spellings: a `~` path, which a dotfiles-managed registry may need, stays as written.
         if (existing := registry.brains.get(alias)) and _location(existing) != store.root:
-            unreachable = (
-                f"cannot reach the brain registered as {alias} at {existing.path}; restore access to it, or remove "
-                f"that entry from {path}"
-            )
-            try:
-                registered = _registered(existing)
-            except Error as error:
-                raise Error(unreachable) from error
-            if registered is not None:
-                try:
-                    registered.mode("bf.yaml")
-                except FileNotFoundError:
-                    # A folder without bf.yaml holds no brain, such as one a move left or an empty mount point.
-                    registered = None
-                except OSError as error:
-                    raise Error(unreachable) from error
+            registered = _existing_brain(existing, alias, path)
             if registered is not None and registered.identity != store.identity:
                 raise Error(
-                    f"another brain is already registered as {alias} at {existing.path}; remove that entry from "
-                    f"{path}, or pass a different --name"
+                    f"another brain is already registered as {alias} at {existing.path}; remove that entry from {path}, or pass a different --name"
                 )
             replaced = existing.path
-        default_changed = default and registry.default != alias
-        # An unchanged registration leaves the file, and the owner's inline comments, as they are.
-        if existing is None or replaced or default_changed:
+        if existing is None or replaced or (default and registry.default != alias):
             if existing is None or replaced:
                 registry.brains[alias] = Registration(path=str(store.root))
             if default:
@@ -326,29 +295,7 @@ def unregister(target: str | Store) -> dict[str, object]:
         registry_store, wait=30, busy="another bf unregister is updating the registry; retry after it finishes"
     ):
         registry, header = _registry()
-        matched = ""
-        if isinstance(target, Store):
-            for name, entry in sorted(registry.brains.items()):
-                if _identity(entry) == target.identity or _location(entry) == target.root:
-                    matched = name
-                    break
-            if not matched:
-                raise Error(f"this brain is not registered in {path}")
-        elif "/" in target or target in {".", "..", "~"}:
-            expanded = expand(Path(target))
-            identity: str | None = None
-            with suppress(Error):
-                identity = Store(expanded).identity
-            for name, entry in sorted(registry.brains.items()):
-                if (identity is not None and _identity(entry) == identity) or _location(entry) == expanded:
-                    matched = name
-                    break
-            if not matched:
-                raise Error(f"{target} is not registered in {path}")
-        else:
-            if target not in registry.brains:
-                raise Error(f"brain {target} is not registered{suggest(target, registry.brains)}")
-            matched = target
+        matched = _match_registered(registry.brains, target, path)
         removed = registry.brains.pop(matched)
         cleared_default = registry.default == matched
         if cleared_default:
@@ -383,17 +330,11 @@ ABSENT = (
     "registered brain directory is absent on this machine; restore it, run bf register at its new place, or remove "
     "its registry entry"
 )
-
-
 UNREACHABLE = "registered brain directory exists but cannot be reached; restore access to it"
 
 
 def _registered(entry: Registration) -> Store | None:
-    """A registered brain, or None when its directory is absent: missing, or no longer a directory.
-
-    One that exists but cannot be reached, such as a locked folder or a disconnected mount, may still hold that
-    brain and return: it fails with UNREACHABLE, so neither selection nor bf register treats it as moved.
-    """
+    """A registered brain, or None when its directory is absent; raises UNREACHABLE on locked/disconnected paths."""
     try:
         return Store(Path(entry.path).expanduser())
     except Error as error:
@@ -412,42 +353,40 @@ def _enclosing_named(value: str, *, registered: bool) -> Store | None:
     except Error, OSError, UnicodeError:
         if not registered:
             raise
-        # An invalid enclosing brain cannot be selected by name, so it claims none: the registry decides.
         return None
     return nearest if config.name == value else None
 
 
-def _located(value: str, *, execute: bool = False) -> Store:
-    """A path, or a name from the owner's registry, else the enclosing brain.
+def _open_registered(entry: Registration, unreachable_label: str, label: str) -> Store:
+    try:
+        store = _registered(entry)
+    except Error:
+        raise Error(f"cannot reach {unreachable_label}; restore access to its directory") from None
+    if store is None:
+        raise Error(f"{label}: {ABSENT}")
+    return _configured(store, label)
 
-    A working directory can be an untrusted checkout: its brain may not replace a registered name, and a brain
-    you do not own claims no name at all. To `execute` programs, a name must be registered or be the enclosing
-    brain's own: a directory below the working directory needs a deliberate path.
-    """
-    if "/" in value or value in {".", "..", "~"}:
+
+def _located(value: str, *, execute: bool = False) -> Store:
+    """Resolve explicit paths, registered names, enclosing brain name, or (for retrieval only) relative dirs."""
+    if _is_path(value):
         return _configured(Store(expand(Path(value))), value)
     entry = user_config().brains.get(value)
     local = _enclosing_named(value, registered=entry is not None)
     if entry is not None:
-        try:
-            store = _registered(entry)
-        except Error:
-            raise Error(f"cannot reach the brain registered as {value}; restore access to its directory") from None
-        if store is None:
-            raise Error(f"{value}: {ABSENT}")
+        store = _open_registered(entry, f"the brain registered as {value}", f"registered brain {value}")
         if local is not None and local.identity != store.identity:
             raise Error(
                 f"ambiguous brain name {value}: the registry and the enclosing brain name different directories; "
                 "pass --brain PATH"
             )
-        return _configured(store, f"registered brain {value}")
+        return store
     if local is not None:
         return local
     if execute:
         raise Error(
             f"brain {value} is neither registered nor the enclosing brain; pass --brain PATH{suggest(value, _names())}"
         )
-    # An unregistered name can still be a directory below the working directory.
     path = expand(Path(value))
     if not path.exists():
         raise Error(f"brain directory does not exist; pass an existing --brain or BF_BRAIN{suggest(value, _names())}")
@@ -455,7 +394,6 @@ def _located(value: str, *, execute: bool = False) -> Store:
 
 
 def _names() -> set[str]:
-    """Brain names a mistyped selection may have meant: registered ones and the enclosing brain's."""
     names = set(user_config().brains)
     with suppress(Error, OSError, UnicodeError):
         if (nearest := _nearest(required=False)) is not None:
@@ -464,10 +402,7 @@ def _names() -> set[str]:
 
 
 def _configured(store: Store, given: str) -> Store:
-    """A selected brain holds bf.yaml: a subfolder or parent fails here, before a command reads or caches it.
-
-    The failure names the selection as given, never the directory it resolved to: MCP errors must not reveal it.
-    """
+    """Require `bf.yaml` at the selected brain root without revealing resolved filesystem paths."""
     try:
         store.mode("bf.yaml")
     except FileNotFoundError:
@@ -478,10 +413,7 @@ def _configured(store: Store, given: str) -> Store:
 
 
 def _nearest(*, required: bool = True) -> Store | None:
-    """The enclosing brain, trusted only when you own its directory and bf.yaml, as Git trusts repositories.
-
-    An untrusted one fails discovery; when a name is given instead, it is ignored.
-    """
+    """The enclosing brain, trusted only when you own its directory and bf.yaml."""
     here = Path.cwd()
     for up, candidate in enumerate((here, *here.parents)):
         try:
@@ -492,56 +424,36 @@ def _nearest(*, required: bool = True) -> Store | None:
         if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or candidate.stat().st_uid != owner:
             if not required:
                 return None
-            # Named from the working directory, never as an absolute path: MCP errors must not reveal it.
             location = "../" * up or "./"
             raise Error(f"{location}bf.yaml is not a regular file owned by you; pass --brain PATH to select a brain")
         return Store(candidate)
     return None
 
 
-def select(value: str = "") -> Store:
+def select(value: str = "", *, execute: bool = False) -> Store:
     """Single-brain selection: --brain NAME|PATH, then BF_BRAIN, then the enclosing brain, then default."""
-    chosen = value or os.environ.get("BF_BRAIN", "")
-    if chosen:
-        return _located(chosen)
+    if chosen := value or os.environ.get("BF_BRAIN", ""):
+        return _located(chosen, execute=execute)
     if nearest := _nearest():
         return nearest
     registry = user_config()
     if registry.default is None:
-        if registry.brains:
-            raise Error(
-                "no default brain configured; pass --brain NAME, run inside a brain, or register one with --default"
-            )
-        raise Error("no brain selected; pass --brain, run inside a brain, or register one with --default")
-    entry = registry.brains[registry.default]
-    try:
-        store = _registered(entry)
-    except Error:
-        raise Error(f"cannot reach default brain {registry.default}; restore access to its directory") from None
-    if store is None:
-        raise Error(f"default brain {registry.default}: {ABSENT}")
-    return _configured(store, f"default brain {registry.default}")
+        hint = (
+            "no default brain configured; pass --brain NAME" if registry.brains else "no brain selected; pass --brain"
+        )
+        raise Error(f"{hint}, run inside a brain, or register one with --default")
+    label = f"default brain {registry.default}"
+    return _open_registered(registry.brains[registry.default], label, label)
 
 
 def brain_name(store: Store) -> str:
     """How to name a brain whose bf.yaml cannot load: its registered name, else its directory name."""
-    if match := registration(store):
-        return match[0]
-    return store.root.name
+    return match[0] if (match := registration(store)) else store.root.name
 
 
 def execution(value: str = "") -> Store:
-    """The one brain whose programs a command runs: --brain, BF_BRAIN or the enclosing brain.
-
-    Registration selects brains for retrieval only: a registered brain never runs its programs implicitly.
-    A name selects a registered brain or the owned enclosing brain, never an unchecked directory.
-    """
-    chosen = value or os.environ.get("BF_BRAIN", "")
-    if chosen:
-        return _located(chosen, execute=True)
-    if nearest := _nearest():
-        return nearest
-    raise Error("pass --brain PATH or run inside the brain; registered brains are selected for retrieval only")
+    """Select one brain for commands or execution: --brain, BF_BRAIN, enclosing, then default."""
+    return select(value, execute=True)
 
 
 def one(value: str = "") -> Store:

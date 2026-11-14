@@ -1,6 +1,6 @@
-# A complete assistant messaging loop
+# A complete messaging loop
 
-This fictional brain connects a passive local channel to an assistant. `printf` stands in for the agent CLI and answers `Acknowledged.`; the channel records outgoing messages under `logs/deliveries.jsonl`. The walkthrough ends with a read-only scout that proposes steps and an actor that carries out the one the owner approves. No model, account or network is needed. Replace the commands with your own provider adapter and harness after testing the contracts.
+This fictional brain connects a local message job to prompt jobs. `printf` and `cat` stand in for the agent CLI, while `channels/local.py` acts as a local provider adapter writing outbound messages to `logs/deliveries.jsonl`. The walkthrough ends with a read-only `scout` proposing steps and an `actor` receiving the owner's reply in `owner-chat`. No model, account, or network is needed.
 
 From the framework checkout, run this isolated walkthrough:
 
@@ -18,60 +18,59 @@ From the framework checkout, run this isolated walkthrough:
       uv run --project "$bf_checkout" bf "$@"
   }
   bf validate
-  bf channel read local --since 2026-10-16T08:00:00Z --until 2026-10-16T10:00:00Z
+  bf run local-poll --since 2026-10-16T08:00:00Z --until 2026-10-16T10:00:00Z
   bf queue
+  bf update --job personal
   printf '%s\n' 'Please check.' | bf run personal --stdin
-  bf update
   cat logs/deliveries.jsonl
-  bf read memories/personal
-  printf '%s\n' '{"id":"demo-send","text":"The review is ready."}' | bf channel send local --stdin
-  printf '%s\n' '{"id":"demo-retry","text":"Sent after the outage."}' |
-    CHANNEL_DEMO_OFFLINE=1 bf channel send local --stdin || echo "The send failed; its delivery waits in the queue."
+  printf '%s\n' 'The review is ready.' | bf post --to local --stdin
+  mkdir -p logs && : >logs/offline
+  printf '%s\n' 'Sent after the outage.' |
+    bf post --to local --key demo-retry --stdin || echo "The send failed; its delivery waits in the queue."
+  rm -f logs/offline
   bf queue demo-retry
   bf queue demo-retry --retry
   wc -l <logs/deliveries.jsonl
   cat >>bf.yaml <<'YAML'
   scout:
     prompt: prompts/scout.md
-    command: [printf, '{"say":"The review is ready. Proposed: 1. Rerun the checks. 2. Publish the notes.","wake":null}']
-    reply: { path: "" }
+    harness: [printf, "The review is ready. Proposed: 1. Rerun the checks. 2. Publish the notes."]
+    emit: message
     idempotent: true
     post: owner-chat
-    schedules:
-      proposals: { every: 86400 }
+    on: { every: 86400 }
   actor:
     prompt: prompts/actor.md
-    command: [cat]
-    inputs:
-      - channel: { name: owner-chat, mode: read, every: 1 }
+    harness: [cat]
+    emit: message
+    post: owner-chat
+    on:
+      event:
+        kind: [message.received, channel.received]
+        source: owner-chat
 YAML
-  bf update --assistant scout
-  bf update --assistant actor
-  sleep 1
-  bf update --assistant actor
+  bf update --job scout
+  bf update --job owner-chat
+  bf update --job actor
   tail -n 2 logs/deliveries.jsonl
 )
 ```
 
 Expected observations:
 
-1. Validation succeeds. The history read returns `hello-1` in `thread-1`; the queue still has no jobs.
-1. The manual run returns `Acknowledged.` and sends one message to the configured endpoint's default conversation.
-1. The first update runs the named review schedule and sends another message. The two lines in `logs/deliveries.jsonl` have distinct stable delivery IDs and an empty `reply_to`.
-1. `bf read memories/personal` lists both saved answers, with `"total":2`.
-1. `bf channel send` uses the endpoint directly, without an assistant: it saves the delivery, sends it and prints `"state":"delivered"` with the fixture's receipt, `"id":"sent-demo-send"`.
-1. With `CHANNEL_DEMO_OFFLINE` set, the fixture refuses to send, standing in for a provider outage: `bf channel send` exits 1, its reply shows `"state":"uncertain"`, since the fixture's `send` does not declare `idempotent: true`, with the `error`, and the fixture's message goes to `logs/channel.local.send.log`. `bf queue demo-retry` opens the saved delivery, text included, and `--retry` sends that same delivery once the outage is over: `{"id":"demo-retry","status":"delivered"}`. Watch and `bf update` never retry such a standalone send on their own.
-1. `logs/deliveries.jsonl` ends with four lines: the failed attempt recorded nothing.
-1. The walkthrough then adds two assistants that [propose, then act](../../docs/docs/prompts.md#propose-then-act). The `scout` stands in for a read-only harness: its structured reply ends with numbered steps after `Proposed:`. It has no inputs and posts to `owner-chat`, whose `send` is the same fixture. `bf update --assistant scout` runs its schedule and posts the proposal, which the fixture puts in `proactive-thread`.
-1. The `actor` reads `owner-chat`, where `printf` stands in for the owner's chat: every read returns the owner's reply, `do 2`, in `proactive-thread`, dated at the start of the read window. Its first update only marks where reading starts, so it runs nothing. One second later, the next update reads the reply and runs `cat`, which prints the expanded prompt it receives. History holds the messages dated up to the reply, so the scout posts before the actor's first read.
-1. The last two lines of `logs/deliveries.jsonl` are the proposal, with an empty `reply_to`, and the actor's answer, with `"reply_to": "reply-1"` in `proactive-thread`. That answer is the actor's prompt. Its invocation context, escaped inside `text`, holds the proposal under `history` with the role `assistant`: history follows the channel and conversation, whichever assistant posted.
+1. `bf validate` succeeds. `bf run local-poll` admits `"hello-1"` (`"messages":1`) into the durable queue.
+1. `bf update --job personal` runs the due scheduled run and delivers `"Acknowledged."` via `local` (`logs/deliveries.jsonl`), and `bf run personal --stdin` sends a second delivery.
+1. `bf post --to local --stdin` delivers directly through `local` (`"state":"delivered"`, receipt `"id":"sent-..."`).
+1. While `logs/offline` exists, `local.py send` fails before writing to `logs/deliveries.jsonl`: `bf post` exits `1` and leaves `"state":"uncertain"` in the queue (`bf queue demo-retry`). Once `logs/offline` is removed, `bf queue demo-retry --retry` sends `"Sent after the outage."` and returns `{"id":"demo-retry","status":"delivered"}`.
+1. `logs/deliveries.jsonl` has four lines (the failed attempt wrote nothing).
+1. `scout` posts its proposal (`Proposed: 1. ...`) to `owner-chat`. Next, `bf update --job owner-chat` polls `owner-chat`, admitting the fictional owner reply `"do 2"` in `"proactive-thread"`; then `bf update --job actor` dispatches that `channel.received` event to `actor`, whose `cat` harness posts `Invocation:` carrying `events` with `"do 2"` in `"proactive-thread"` back through `owner-chat`.
 
-To try incoming messages, copy this brain to a directory you keep, select it explicitly and run:
+To try daemon streaming (`on: { daemon: true }`), copy this brain to a directory you keep and run:
 
 ```bash
 bf watch --brain /path/to/channel-demo --json
 ```
 
-The fixture emits `hello-1` immediately. Watch durably accepts it, acknowledges the stream, runs the assistant and sends `Acknowledged.` with `conversation: thread-1` and `reply_to: hello-1`. A scheduled review can run beside it. Stop with Ctrl-C. Restarting watch redelivers the fixture message, but its stable ID creates no second reply while its 35-day identity tombstone lasts. The automated example test checks these observable results and stops the subprocess.
+`channels/local.py stream` emits `hello-1` immediately as NDJSON. Watch durably admits the message (`"channel.received"`), invokes `personal`, and records `"Acknowledged."` in `logs/deliveries.jsonl`. Stop with Ctrl-C.
 
-[Channel contracts](../../docs/docs/channels.md) define send receipts, bounded reads and stream ACKs. [Assistant configuration](../../docs/docs/prompts.md) explains schedules, structured replies, gates, wakes, the `post` channel and recovery. The fixture is deliberately a local demonstration, not a production provider adapter.
+[Channel contracts](../../docs/docs/channels.md) define send receipts, bounded polls, and NDJSON daemon streams. [Prompts and jobs](../../docs/docs/prompts.md) explains schedules, `extract:`, wakes, `post:`, and recovery.

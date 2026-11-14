@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from typing import cast
 
 import pytest
@@ -11,11 +12,12 @@ from mcp.types import CallToolResult
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from bf import index, records
+from bf import index, ontology, records
 from bf.cli import app
 from bf.collect import collect
 from bf.config import load
 from bf.evaluate import evaluate
+from bf.markdown import note
 from bf.mcp import server
 from bf.models import Config, Error, Knowledge, Query, Record, SchemaField, encode
 from bf.retrieve import read, search
@@ -23,16 +25,17 @@ from bf.storage import Store, writer
 from bf.validate import validate
 from test_interfaces import invoke
 
-CONFIG = b"""version: 9
+CONFIG = b"""version: 10
 name: fixture
 fields:
   sender:
     description: Account that sent the message.
   recipient:
     description: Explicit recipients of this message.
-sensors:
+jobs:
   mail:
-    command: [fake-provider]
+    run: [fake-provider]
+    emit: records
 """
 
 
@@ -49,7 +52,7 @@ def ingest(brain: Store, values: list[dict], sensor: str = "mail") -> dict:
 
 
 def test_undeclared_camel_and_kebab_relations_work_and_rebuild_cleanly(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 9\nname: fixture\nsensors:\n  mail:\n    command: [fake-provider]\n")
+    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [fake-provider]\n    emit: records\n")
     brain.write("projects/alice.md", b"---\ntype: person\naliases: [person:alice, account:alice]\n---\n# Alice\n")
     brain.write(
         "projects/note.md",
@@ -190,11 +193,11 @@ def test_optional_field_rules_validate_targets_and_broader_without_legacy_keys()
         ({"owner": {"targets": []}}, "targets"),
     ]:
         with pytest.raises(ValidationError, match=message):
-            Config.model_validate({"version": 9, "name": "test", "fields": schema})
+            Config.model_validate({"version": 10, "name": "test", "fields": schema})
     with pytest.raises(ValidationError):
-        Config.model_validate({"version": 9, "name": "test", "sensors": {"x": {"command": ["fake"], "fields": {}}}})
+        Config.model_validate({"version": 10, "name": "test", "jobs": {"x": {"run": ["fake"], "fields": {}}}})
     with pytest.raises(ValidationError):
-        Config.model_validate({"version": 8, "name": "old"})
+        Config.model_validate({"version": 9, "name": "old"})
 
 
 TARGETED = CONFIG.replace(
@@ -265,11 +268,11 @@ def test_cli_mcp_and_evaluation_share_relation_pages(brain: Store) -> None:
     )
     brain.write(
         "evals/relations.yaml",
-        b"version: 9\ncases:\n- name: sender\n  read: person:alice\n  expect: [mail:one]\n  text: [sender]\n",
+        b"version: 10\ncases:\n- name: sender\n  read: person:alice\n  expect: [mail:one]\n  text: [sender]\n",
     )
     brain.write(
         "evals/nested/empty.yml",
-        b"version: 9\ncases:\n- name: absent\n  read: person:unknown\n  empty: true\n",
+        b"version: 10\ncases:\n- name: absent\n  read: person:unknown\n  empty: true\n",
     )
     assert evaluate(brain)["score"] == "2/2"
     assert evaluate(brain, "evals/relations.yaml")["score"] == "1/1"
@@ -277,7 +280,7 @@ def test_cli_mcp_and_evaluation_share_relation_pages(brain: Store) -> None:
         with pytest.raises(ValidationError):
             Query.model_validate(params)
     brain.write(
-        "evals/duplicate.yaml", b"version: 9\ncases:\n- name: twice\n  empty: true\n- name: twice\n  empty: true\n"
+        "evals/duplicate.yaml", b"version: 10\ncases:\n- name: twice\n  empty: true\n- name: twice\n  empty: true\n"
     )
     with pytest.raises(Error, match="duplicate"):
         evaluate(brain)
@@ -301,7 +304,15 @@ def test_reproject_revalidates_records_and_keeps_target_failures_unchanged(
         )
     before = {name: brain.read(name) for name in records.files(brain, "mail")}
     preview = invoke("build", "--brain", str(brain.root), "--reproject", "mail", "--dry-run")
-    assert preview == {"sensor": "mail", "dry_run": True, "records": 3, "changed": 0, "unchanged": 3, "failed": 0}
+    assert preview == {
+        "job": "mail",
+        "source": "mail",
+        "dry_run": True,
+        "records": 3,
+        "changed": 0,
+        "unchanged": 3,
+        "failed": 0,
+    }
     assert {name: brain.read(name) for name in records.files(brain, "mail")} == before
     recovered: list[Store] = []
     monkeypatch.setattr(records, "recover", lambda store: recovered.append(store))
@@ -348,4 +359,31 @@ def test_identity_search_deduplicates_links_and_config_follows_edits(brain: Stor
         )
     ]
     brain.write("bf.yaml", CONFIG.replace(b"  mail:\n", b"  post:\n"))
-    assert set(load(brain).sensors) == {"post"}
+    assert set(load(brain).jobs) == {"post"}
+
+
+def test_ontology_direct_checks_reject_reserved_and_invalid_relations(brain: Store) -> None:
+    config = load(brain)
+    bad_record = Record.model_construct(id="r1", title="T", relations={"tagged-with": "person:a", "owner": "bad-id"})
+    record_errors: list[str] = []
+    ontology.validate(bad_record, config, errors=record_errors)
+    assert record_errors[0] == "relation tagged-with is reserved"
+    assert record_errors[1].startswith("relation owner:")
+
+    clean_record = Record.model_construct(
+        id="r2", title="T2", relations={"tagged-with": "person:a", "owner": "person:a"}, aliases=[]
+    )
+    assert ontology.relations(clean_record, config) == [("owner", "person:a")]
+
+    parsed = replace(
+        note("concepts/n.md", b"---\ntype: concept\n---\n# N\n"),
+        knowledge=Knowledge.model_construct(
+            type="concept",
+            relations={"tagged-with": "person:a", "owner": "bad-id"},
+        ),
+    )
+    assert ontology.note_claims(parsed, config, strict=False) == []
+    note_errors: list[str] = []
+    assert ontology.note_claims(parsed, config, strict=True, errors=note_errors) == []
+    assert note_errors[0] == "concepts/n.md: relations.tagged-with: relation tagged-with is reserved"
+    assert note_errors[1].startswith("concepts/n.md: relations.owner:")

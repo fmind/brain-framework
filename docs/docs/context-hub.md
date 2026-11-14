@@ -70,9 +70,10 @@ fields:
   project:
     description: Project explicitly identified by the source.
     targets: ["project:"]
-sensors:
+jobs:
   jira:
-    command: [sensors/demo.py, jira, "{{end}}"]
+    run: [sensors/demo.py, jira, "{{end}}"]
+    emit: records
     mode: snapshot
 ```
 
@@ -111,27 +112,26 @@ Home lists the project with its `next` task and no `review` flag (`changed` is e
 
 ## Hear of each change once
 
-An [assistant](prompts.md) schedule can filter changes with built-in declarative `when: { sources: [jira] }` or a custom [`gate`](prompts.md#gates) script ([records-gate.py](https://github.com/fmind/brain-framework/blob/main/examples/routines/records-gate.py), built on `_bf.py`, when you also filter fields with `--where`):
+A [scheduled job](prompts.md) can also react to record updates with `on: { event: { kind: [record.created, record.updated], source: jira } }` or a custom [`gate`](prompts.md#gates) script ([records-gate.py](https://github.com/fmind/brain-framework/blob/main/examples/routines/records-gate.py) when you also filter fields with `--where`):
 
 ```bash
 mkdir -p routines
-cp "$context_demo/source/examples/routines/"*.py routines/
+cp "$context_demo/source/examples/routines/records-gate.py" routines/
 cat >> bf.yaml <<'EOF'
-assistants:
   watcher:
     prompt: prompts/watcher.md
-    command: [printf, '{"say":"Jira changed: check whether the launch decision still holds.","wake":null}']
-    reply: { path: "" }
-    schedules:
-      changes: { every: 1, gate: { command: [python3, routines/records-gate.py, jira] } }
+    harness: [printf, "%s\n", "---\ntype: action\nstatus: draft\n---\n\n# Jira review\n\nJira changed: check whether the launch decision still holds.\n"]
+    emit: action
+    on: { every: 1 }
+    gate: [python3, routines/records-gate.py, jira, --end, "{{end}}", --state, "{{state}}"]
 EOF
 bf validate
-bf update --assistant watcher
+bf update --job watcher
 sleep 1
-bf update --assistant watcher
+bf update --job watcher
 ```
 
-`printf` stands in for an LLM harness and returns a [structured reply](prompts.md#structured-replies). Validation stays `"valid":true`; the first update finds `jira:review` and writes a `record` under `memories/watcher`, while the second finds nothing new and starts no harness (`"status":"ran"` with no `record`).
+`printf` stands in for an LLM harness and prints a draft action note; `emit: action` writes `actions/YYYY-MM-DD_watcher.../ACTION.md`. Validation stays `"valid":true`; the first update finds `jira:review` and writes `"action"`, while the second finds nothing new and returns `"status":"gated"` without starting the harness.
 
 ## Follow a change
 
@@ -143,11 +143,11 @@ bf collect jira
 bf read
 bf read jira:review
 sleep 1
-bf update --assistant watcher
-bf read memories/watcher/7d
+bf update --job watcher
+bf read actions
 ```
 
-Collection reports `"updated":1`, Home flags the project with `newer_evidence`, and the watcher runs once for the transition (`"total":2` in `memories/watcher/7d`):
+Collection reports `"updated":1`, Home flags the project with `newer_evidence`, and the watcher emits a second draft action (`"total":2` in `bf read actions`):
 
 ```json
 {
@@ -169,4 +169,4 @@ rm -rf -- "$context_demo"
 
 ## Use it on your work
 
-Pick one cross-tool question, author its project note and connect only the sources it needs: [GitHub history](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) (`gh`), [Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py) / [Gmail](https://github.com/fmind/brain-framework/blob/main/examples/sensors/gmail-headers.py) / [Drive](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py) (`gws`), Jira (`acli`) or Gcloud (`gcloud`), then add an assistant schedule with `when:` or [`records-gate.py`](https://github.com/fmind/brain-framework/blob/main/examples/routines/README.md#react-to-new-records). See [sensors](sensors.md).
+Pick one cross-tool question, author its project note and connect only the sources it needs: [GitHub history](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) (`gh`), [Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py) / [Gmail](https://github.com/fmind/brain-framework/blob/main/examples/sensors/gmail-headers.py) / [Drive](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py) (`gws`), Jira (`acli`) or Gcloud (`gcloud`), then add a reactive job with `on: { event: ... }` or [`records-gate.py`](https://github.com/fmind/brain-framework/blob/main/examples/routines/README.md#react-to-new-records). See [sensors](sensors.md).

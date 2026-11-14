@@ -33,31 +33,31 @@ Diagnostics write one `bf:` line to stderr naming the file, field or program wit
 
 Use the reinstall commands in [Install and update](upgrades.md#install) (`--reinstall --managed-python --python 3.14`, keeping `'brain-framework[mcp]'` if you serve MCP), then restart agent hosts.
 
-## A program fails
+## A job fails
 
-Failed collection leaves existing records untouched and marks the program `"failed": true` in `bf status` with `logs/NAME.log` (inspect locally; never paste raw logs publicly).
+Failed collection leaves existing records untouched and marks the job `"failed": true` in `bf status` with `logs/NAME.log` (inspect locally; never paste raw logs publicly).
 
-- **`not an executable regular file`**: run `chmod +x` on the script or invoke its interpreter explicitly in `command`.
-- **`set max_text_bytes on this sensor to cut longer text`**: a record's `text` exceeded 4 MiB; filter bloated bodies in the sensor or set `max_text_bytes` on the sensor.
-- **`snapshot would remove N of M records`**: verify credentials and scope with `bf collect SENSOR --dry-run` (executes the sensor); if the shrinkage is intentional, pass `--allow-removal` once (`bf update --dry-run` plans without executing).
+- **`not an executable regular file`**: run `chmod +x` on the script or invoke its interpreter explicitly in `run`/`harness`/`send`/`gate` (run `bf doctor` to check all job binaries, scripts and `requires.env` variables).
+- **`set max_text_bytes on this job to cut longer text`**: a record's `text` exceeded 4 MiB; filter bloated bodies in the job or set `max_text_bytes` on that job.
+- **`snapshot would remove N of M records`**: verify credentials and scope with `bf collect JOB --dry-run` (executes the job); if the shrinkage is intentional, pass `--allow-removal` once (`bf update --dry-run` plans without executing).
 - **`program was killed by SIGKILL` / `SIGTERM`**: terminated externally (such as OOM killer) rather than by BF's own timeout.
 
-## An assistant fails {#a-prompt-fails}
+## A prompt or queue job fails {#a-prompt-fails}
 
-Preview an expanded prompt safely without running your harness by temporarily declaring `prompt-check: {prompt: prompts/personal.md, command: [cat]}`, running `bf run prompt-check --dry-run` (with `--stdin` if testing input), and removing `prompt-check`. Never edit `command` or `reply` on an assistant with unresolved `bf queue` items ([configuration changes](channels.md#configuration-changes)).
+Preview an expanded prompt safely without running your harness by temporarily declaring `prompt-check: {prompt: prompts/personal.md, harness: [cat]}`, running `bf run prompt-check --dry-run` (with `--stdin` if testing input), and removing `prompt-check`. Never edit or disable a `send:` job while deliveries await `bf queue` ([configuration changes](channels.md#configuration-changes)).
 
-Common assistant and queue errors:
+Common trigger and queue errors:
 
-- **`schedule requires either every or at, not both`**: set `every` (seconds) or `at: "HH:MM"` on each schedule entry, never both.
-- **`assistant command must print one JSON object when reply is set`** / **`assistant reply at /… is missing or does not match bf schema --kind assistant-reply`**: pass `--output-format json --json-schema "{{schema}}"` and point `reply.path` at the structured output (such as `/structured_output`); when `propose: true`, proposed `actions` must validate as `status: draft` OKF notes.
-- **`expanded assistant prompt exceeds 120000 bytes; shorten …`** / **`the argument holding the prompt exceeds Linux's 128 KiB limit`**: shorten the template/input, pass prompts on stdin (omit `{{prompt}}`), and cancel oversized queued input jobs with `bf queue ID --cancel`.
+- **`trigger accepts either every or at, not both`**: set `every` (seconds) or `at: "HH:MM"` on each `on:` trigger, never both.
+- **`extract` pointer failure or invalid action Markdown**: inspect raw output with `bf run JOB --dry-run` (omitting `extract` returns stdout verbatim; `emit: action` requires `type: action` and `status: draft` OKF frontmatter).
+- **`expanded prompt exceeds 120000 bytes`** / **`expanded argument contains NUL or exceeds 128 KiB`**: shorten the prompt template, pass prompt stdin (omit `{{prompt}}`), and inspect `bf queue`.
 - **Harness could not run `bf read` / `bf search` or failed auth**: include `Bash` in `--tools`, allowlist `Bash(bf read *),Bash(bf search *)`, and sign in under the OS user running `bf watch`.
 - **Queue diagnostics** ([queue recovery](channels.md#queue-and-recovery)):
-  - `assistant queue is full; …` or `admitted N of M messages` — resolve `failed`/`uncertain` items in `bf queue`.
-  - `assistant queue lacks answer space for this job; …` — waits automatically until running jobs free space (`bf run` cancels its run; retry afterwards).
-  - `assistant queue holds unresolved work admitted under this brain's previous path or name; …` — restore the previous path/name, drain `bf queue`, then move/rename again.
-  - `assistant queue predates this release; …` or `unexpected assistant queue schema; …` — preserve `.bf/runtime.sqlite3` and follow the [changelog](../changelog.md) upgrade steps using the release that created it.
-  - `assistant queue holds an interrupted write; …` — keep `.bf/runtime.sqlite3` and `.bf/runtime.sqlite3-journal` together and run `bf queue` to roll back cleanly.
+  - `runtime queue has no unresolved-work slots; clear pending work first` or `runtime queue reached its size limit; resolve or clear pending work` — resolve `failed`/`uncertain` items in `bf queue`.
+  - `send job configuration changed or is disabled; inspect bf queue before retrying` — restore the `send:` configuration or cancel the pending delivery with `bf queue ID --cancel`.
+  - `runtime queue holds unresolved work under a previous path or name; resolve via bf queue first` — restore the previous path/name, drain `bf queue`, then move/rename again.
+  - `runtime database predates this release; preserve it and follow upgrade steps in the changelog` or `unexpected runtime database schema; preserve it and repair it` — preserve `.bf/runtime.sqlite3` and follow the [changelog](../changelog.md) upgrade steps using the release that created it.
+  - `runtime database holds an interrupted write; run bf queue to recover it` — keep `.bf/runtime.sqlite3` and `.bf/runtime.sqlite3-journal` together and run `bf queue` to roll back cleanly.
 
 ## Updates do not run
 
@@ -66,7 +66,7 @@ bf update --dry-run
 bf status
 ```
 
-Verify the program is `enabled: true`, sets a nonzero `refresh` or `at` (or `schedules`/`inputs` on an assistant), matches any CLI selectors, is not skipped as `gated` by a `when:` condition that currently has no matching events, and has an active `bf watch` service or timer on **this** machine ([timing and health](schedule.md#timing-and-health)).
+Verify the job is `enabled: true`, sets a nonzero `on.every` or `on.at` (or `on.event`), matches any `--job` selectors, is not skipped as `gated` by a `gate:` script exiting nonzero, and has an active `bf watch` service or timer on **this** machine ([timing and health](schedule.md#timing-and-health)).
 
 ## Recover the cache or an interrupted write
 

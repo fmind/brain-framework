@@ -1,27 +1,35 @@
 # https://fmind.github.io/brain-framework/docs/schedule/
-version: 9
+version: 10
 name: watch-demo
 watch:
   interval: 5
   poll_interval: 1
   notifications: off
   notification_cooldown: 30
-sensors:
+jobs:
   calendar:
-    command: [python3, sensors/demo.py, calendar]
+    run: [python3, sensors/demo.py, calendar]
+    emit: records
     mode: snapshot
-    refresh: 30
+    on:
+      every: 30
   git:
-    command: [python3, sensors/demo.py, git]
+    run: [python3, sensors/demo.py, git]
+    emit: records
     mode: snapshot
-    refresh: 60
+    on:
+      every: 60
   unavailable:
-    command: [python3, sensors/demo.py, unavailable]
-    refresh: 60
+    run: [python3, sensors/demo.py, unavailable]
+    emit: records
+    on:
+      every: 60
   manual:
-    command: [python3, sensors/demo.py, calendar]
-    refresh: 0
+    run: [python3, sensors/demo.py, calendar]
+    emit: records
   disabled:
-    command: [python3, sensors/demo.py, calendar]
+    run: [python3, sensors/demo.py, calendar]
+    emit: records
     enabled: false
-    refresh: 60
+    on:
+      every: 60

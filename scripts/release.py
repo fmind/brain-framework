@@ -258,6 +258,10 @@ def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major:
             raise ReleaseError(f"{skill.relative_to(clone)} must hold one `compatibility: Requires Brain Framework N`")
         skill.write_text(text)
     run("mise", "run", "generate:schema", cwd=clone, env=env)
+    expected = {schema.name for schema in clone.glob("docs/*.schema.json")}
+    for old in sorted((clone / "tests/contract").glob("*.schema.json")):
+        if old.name not in expected:
+            old.unlink()
     for schema in sorted(clone.glob("docs/*.schema.json")):
         shutil.copy2(schema, clone / "tests/contract" / schema.name)
     # Mentions of the previous major that may mean the current release; historical ones, such as upgrade notes, stay.

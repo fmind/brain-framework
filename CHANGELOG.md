@@ -4,6 +4,16 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v24.0.0](https://github.com/fmind/brain-framework/releases/tag/v24.0.0) - 2026-11-14
+
+A major release introducing brain format `version: 10`, unifying sensors, routines, channels, and assistants into one `jobs:` configuration with `defaults:` and declarative `map:` extractions, replacing separate `bf channel` and type-specific flags with `--job`, `bf doctor`, `bf forget`, and `bf build --reproject`, and exposing a uniform `"job"` attention kind and `jobs`/`queue` status surface; see the breaking changes below.
+
+### Breaking changes
+
+- **Brain format bumped to `version: 10` (`jobs:` unifies sensors, routines, channels, and assistants).** Update `bf.yaml` and `evals/*.yaml` to `version: 10` and move `sensors:`, `routines:`, `channels:`, and `assistants:` entries into `jobs:` manually. `bf.yaml` adds top-level `defaults:` (`harness`, `timezone`, `post`) and `jobs.<name>:` (`run`/`prompt`/`send`, `harness`, `requires` `{bins, env}`, `on` triggers `{every, at, days, timezone, hook, daemon, event}`, `gate`, `emit` `records|messages|message|action|log`, `source`, `mode`, declarative `map` with `{path, prefix, lower}` transforms, `extract`, `post`, `timeout`, `max_bytes`, `retries`, and `idempotent`). Removed `when:` declarative gates, `reply:`/`--structured_output`, `input_args`, `schedule_args`, `BF_START`/`BF_END`/`BF_STATE_DIR` env vars, and copy-in `_sensor.py`/`_bf.py` kits.
+- **Unified job CLI and `bf.yaml`-backed wake/post/doctor commands.** Removed `bf channel` and `--sensor`/`--routine`/`--assistant` filters in favor of `--job` across `bf update` and `bf watch`, `bf run JOB [--hook HOOK] [--since ...] [--until ...]`, `bf post TEXT [--to JOB] [--thread ...] [--run ...]`, and `bf wake AT [--job JOB] [--say ...] [--thread ...] [--run ...]`. Added `bf doctor` (`bf schema --kind doctor-reply`), `bf forget SOURCE`, and `bf build --reproject`.
+- **Uniform `"job"` attention kind and unified status surface.** `bf status`, Home, and `bf read review` report `attention` entries with `"kind": "job"`; `bf status` exposes `"jobs"` and `"queue"` instead of separate `sensors`/`routines`/`assistants`/`messaging` objects. Updated `examples/` configs, scripts, and walkthroughs to `version: 10`.
+
 ## [v23.0.0](https://github.com/fmind/brain-framework/releases/tag/v23.0.0) - 2026-11-14
 
 A major release introducing brain format `version: 9`, explicit single-brain selection with per-brain `.bf/` state, typed `@type`, `relations`, and `attributes` replacing `fields:`, interactive `bf guide`, and a consolidated `/bf` skill. Plain-file notes and SHA-256 JSON records remain authoritative, though manually updating notes and stored records from `fields:` to `relations:`/`attributes:`, updating `bf.yaml` and `evals/*.yaml` to `version: 9`, deleting legacy `.bf/index.sqlite` caches, registering brains via `bf register`, and reinstalling the `/bf` skill via `bf skill install` are required; see the breaking changes below.

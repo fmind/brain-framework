@@ -70,7 +70,7 @@ def test_routine_help_never_runs_a_routine(
     marker = tmp_path / "ran"
     store.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [routines/review.sh]\n    hooks: [pre-push]\n",
+        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [routines/review.sh]\n    on: { hook: pre-push }\n",
     )
     store.write("routines/review.sh", f"#!/bin/sh\ntouch '{marker}'\n".encode())
     (store.root / "routines/review.sh").chmod(0o700)
@@ -91,7 +91,7 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
     (tmp_path / "brain").mkdir()
     store = Store(tmp_path / "brain")
     received = tmp_path / "received"
-    store.write("bf.yaml", b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [routines/review.sh]\n")
+    store.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  review:\n    run: [routines/review.sh]\n")
     store.write("routines/review.sh", f"#!/bin/sh\nprintf %s \"$1\" > '{received}'\n".encode())
     (store.root / "routines/review.sh").chmod(0o700)
     # Python passes an undecodable argument byte, such as a Latin-1 é, as a lone surrogate.
@@ -143,24 +143,27 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
         # Before 18.1.4 these rebuilt the whole cache, collected the default window or named an unknown program "".
         (["build", "--reproject", ""], "--reproject"),
         (["collect", "calendar", "--since", ""], "--since"),
-        # Its reason used to say the empty value would collect the default window: a channel read has none.
-        (["channel", "read", "chat", "--since", ""], "--since: give a start time; an empty value names none"),
-        (["collect", ""], "SENSOR"),
-        # An empty --input, as an unset variable gives, used to run the sensor and save records instead of checking.
+        (["post", "hi", "--to", ""], "--to: give a send job name; an empty value names none"),
+        (["wake", "--job", ""], "--job: give a job name; an empty value names none"),
+        (["wake", "--in", ""], "--in: give a delay such as 10m or 600; an empty value names none"),
+        (["wake", "--at", ""], "--at: give a timestamp; an empty value names none"),
+        (["run", "--hook", ""], "--hook: give an event name; an empty value would run the first argument as a job"),
+        (["collect", ""], "JOB"),
+        # An empty --input, as an unset variable gives, used to run the collector and save records instead of checking.
         (["collect", "calendar", "--input", ""], "--input"),
-        (["channel", "listen", "chat"], "ACTION: 'listen' is not one of 'read', 'send'"),
-        (["run", ""], "PROGRAM"),
-        (["update", "--sensor", "calendar", "--sensor", ""], "--sensor"),
-        (["update", "--routine", " "], "--routine"),
+        (["action", "status", "rotate", "unknown"], "STATUS: 'unknown' is not one of 'draft', 'stable', 'deprecated'"),
+        (["run", ""], "JOB"),
+        (["update", "--job", "calendar", "--job", ""], "--job"),
+        (["update", "--job", " "], "--job"),
         # Checked before a brain is selected, and quoted like Click's choices: an empty kind used to read as a blank.
-        (["update", "--kind", ""], "--kind: '' is not one of 'sensor', 'routine', 'assistant'"),
+        (["export", "--kind", ""], "--kind: '' is not one of 'edges', 'identities', 'items'"),
         # A suite path is relative to the brain, never the working directory: it keeps its own reason.
         (["eval", "--path", ""], "--path: expected a normalized brain-relative path"),
         # Python passes undecodable argument bytes, such as a Latin-1 é, as lone surrogates. Before 18 the read
         # failed binding them into the cache and blamed a brain file; the same bytes as a QUERY were invalid input.
         (["read", "caf\udce9"], "REF: expected UTF-8 text"),
-        # Run's variadic arguments used to skip that check: the name failed later as an unknown routine, exit 1.
-        (["run", "caf\udce9"], "PROGRAM: expected UTF-8 text"),
+        # Run's variadic arguments used to skip that check: the name failed later as an unknown job, exit 1.
+        (["run", "caf\udce9"], "JOB: expected UTF-8 text"),
         (["forget", "caf\udce9"], "REF: expected UTF-8 text"),
     ],
 )
@@ -175,7 +178,12 @@ def test_invalid_options_name_the_option_without_a_selected_brain(
     assert (exited.value.code, out) == (2, ""), err
     # One plain line, like every other diagnostic: no usage text or wrapped box.
     assert err.startswith("bf: invalid input: ")
-    help_target = "skill install" if arguments[:2] == ["skill", "install"] else arguments[0]
+    if arguments[:2] == ["skill", "install"]:
+        help_target = "skill install"
+    elif arguments[:2] == ["action", "status"]:
+        help_target = "action status"
+    else:
+        help_target = arguments[0]
     assert err.endswith(f" (see bf {help_target} -h)\n")
     assert err.count("\n") == 1
     assert option in err
@@ -233,8 +241,8 @@ def test_repeated_flags_and_multiple_options_stay_valid(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     brain = str(tmp_path / "brain")
     assert CliRunner().invoke(app, ["update", "--brain", brain, "--dry-run", "--dry-run"]).exit_code == 0
-    # --sensor selects several programs by repetition; an unknown one is a failure, not a usage error.
-    result = CliRunner().invoke(app, ["update", "--brain", brain, "--sensor", "a", "--sensor", "b"])
+    # --job selects several jobs by repetition; an unknown one is a failure, not a usage error.
+    result = CliRunner().invoke(app, ["update", "--brain", brain, "--job", "a", "--job", "b"])
     assert result.exit_code == 1, result.output
 
 
@@ -245,7 +253,7 @@ def test_repeated_flags_and_multiple_options_stay_valid(tmp_path: Path) -> None:
         ["guide", "", "--help"],
         ["unregister", "", "--help"],
         ["skill", "install", "--help"],
-        ["update", "--sensor", "", "-h"],
+        ["update", "--job", "", "-h"],
         ["search", "x", "--brain", "", "-h"],
         ["search", "-h", "x", "--brain", ""],
         ["search", "x", "--scope", "a", "--scope", "b", "-h"],
@@ -278,8 +286,8 @@ def test_an_unknown_home_directory_fails_without_a_traceback(arguments: list[str
 def test_single_root_commands_describe_their_selection(command: str) -> None:
     # Single-brain commands select one brain explicitly, by cwd/env, or from the default registered brain.
     help_text = " ".join(plain(CliRunner().invoke(app, [command, "--help"]).stdout).replace("│", " ").split())
-    assert "default registered brain" in help_text
-    assert "every registered brain" not in help_text
+    assert "BF_BRAIN, cwd, or default" in help_text
+    assert "no default" not in help_text
 
 
 def test_root_help_explains_first_use_and_output() -> None:
@@ -288,8 +296,8 @@ def test_root_help_explains_first_use_and_output() -> None:
     help_text = plain(result.stdout)
     assert "bf init ~/brain" in help_text
     assert "JSON" in help_text
-    assert "bf COMMAND --help" in help_text
-    assert {"guide", "register", "run", "skill", "unregister"} <= set(COMMANDS)
+    assert "bf COMMAND -h" in help_text
+    assert {"guide", "post", "register", "run", "skill", "unregister", "wake"} <= set(COMMANDS)
 
 
 @pytest.mark.parametrize(
@@ -297,7 +305,7 @@ def test_root_help_explains_first_use_and_output() -> None:
     [
         ("search", "QUERY"),
         ("read", "REF"),
-        ("collect", "SENSOR"),
+        ("collect", "JOB"),
         ("init", "PATH"),
         ("register", "PATH"),
         ("unregister", "TARGET"),
@@ -458,7 +466,7 @@ def test_a_hook_that_no_routine_lists_never_waits_for_input(brain: Store) -> Non
         # Its input stays open until it exits: waiting for it would fail after 10 seconds.
         assert process.wait(timeout=60) == 0
         assert process.stdout is not None
-        assert json.loads(process.stdout.read()) == {"ok": True, "dry_run": False, "hook": "pre-push", "routines": []}
+        assert json.loads(process.stdout.read()) == {"ok": True, "dry_run": False, "hook": "pre-push", "jobs": []}
 
 
 @pytest.mark.parametrize(
@@ -603,8 +611,8 @@ def test_export_items_emits_relations_attributes_and_observed_since(brain: Store
 
     brain.write(
         "bf.yaml",
-        b'version: 9\nname: fixture\nfields:\n  topic:\n    description: Topics\n    targets: ["topic:"]\n'
-        b"sensors:\n  feed:\n    command: [echo]\n",
+        b'version: 10\nname: fixture\nfields:\n  topic:\n    description: Topics\n    targets: ["topic:"]\n'
+        b"jobs:\n  feed:\n    run: [echo]\n    emit: records\n",
     )
     brain.write(
         "projects/tagged.md",
@@ -655,7 +663,7 @@ def test_action_status_preserves_rich_frontmatter_and_resolves_unique_slugs(brai
 
     brain.write(
         "bf.yaml",
-        b"version: 9\nname: fixture\n",
+        b"version: 10\nname: fixture\n",
     )
     runner = CliRunner()
     created = runner.invoke(app, ["action", "new", "audit-logs", "--unique", "--brain", str(brain.root)])
@@ -682,3 +690,124 @@ def test_action_status_preserves_rich_frontmatter_and_resolves_unique_slugs(brai
         {"priority": "high"},
     )
     assert "# Audit logs\n\n## Outcome\n\nSettled.\n" in parts[2]
+
+
+def test_cli_run_wake_post_action_watch_and_input_validation(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 10\nname: fixture\njobs:\n  feed:\n    run: [routines/noop.sh]\n    emit: records\n"
+        b"  brief:\n    prompt: prompts/brief.md\n    harness: [routines/noop.sh]\n"
+        b"  noop:\n    run: [routines/noop.sh]\n",
+    )
+    brain.write("prompts/brief.md", b"Summarize.\n")
+    brain.write("routines/noop.sh", b"#!/bin/sh\nexit 0\n")
+    (brain.root / "routines/noop.sh").chmod(0o700)
+
+    runner = CliRunner()
+    assert runner.invoke(app, ["run", "--hook", "pre-push", "--since", "1d", "--brain", str(brain.root)]).exit_code == 2
+    assert runner.invoke(app, ["run", "feed", "extra", "--brain", str(brain.root)]).exit_code == 2
+    monkeypatch.setattr(sys, "stdin", None)
+    monkeypatch.setattr(sys, "argv", ["bf", "run", "noop", "--stdin", "--brain", str(brain.root)])
+    with pytest.raises(SystemExit) as exited:
+        main()
+    assert exited.value.code == 0
+    monkeypatch.undo()
+
+    # wake validation and integer/duration/--at paths
+    for bad_wake in (
+        ["wake", "--job", "brief", "--in", "5m", "--at", "2026-09-25T10:00:00Z"],
+        ["wake", "--job", "brief", "--in", "bad"],
+        ["wake", "--job", "brief", "--in", "0"],
+        ["wake", "--in", "5m"],
+    ):
+        assert runner.invoke(app, [*bad_wake, "--brain", str(brain.root)]).exit_code == 2
+
+    woke_secs = runner.invoke(
+        app, ["wake", "--job", "brief", "--in", "60", "--reason", "follow-up", "--brain", str(brain.root)]
+    )
+    assert woke_secs.exit_code == 0, woke_secs.output
+    assert json.loads(woke_secs.stdout)["job"] == "brief"
+
+    woke_at = runner.invoke(app, ["wake", "--job", "brief", "--at", "2026-09-25T10:00:00Z", "--brain", str(brain.root)])
+    assert woke_at.exit_code == 0, woke_at.output
+    assert json.loads(woke_at.stdout)["due"].startswith("2026-09-25T10:00:00")
+
+    # post argument/UTF-8 validation
+    assert runner.invoke(app, ["post", "--brain", str(brain.root)]).exit_code == 2
+    assert runner.invoke(app, ["post", "hi", "--stdin", "--brain", str(brain.root)]).exit_code == 2
+    bad_utf8 = runner.invoke(app, ["post", "--stdin", "--brain", str(brain.root)], input=b"\xff\xfe")
+    assert bad_utf8.exit_code == 1
+
+    # action title control char rejection and `actions/<folder>` resolution
+    bad_title = runner.invoke(app, ["action", "new", "ctrl", "--title", "bad\x1btitle", "--brain", str(brain.root)])
+    assert bad_title.exit_code == 2
+    created = json.loads(runner.invoke(app, ["action", "new", "by-folder", "--brain", str(brain.root)]).stdout)[
+        "action"
+    ]
+    folder_ref = created.removesuffix("/ACTION.md")
+    updated = runner.invoke(app, ["action", "status", folder_ref, "stable", "--brain", str(brain.root)])
+    assert updated.exit_code == 0, updated.output
+    assert json.loads(updated.stdout)["status"] == "stable"
+
+    # watch non-finite poll interval
+    assert runner.invoke(app, ["watch", "--poll-interval", "nan", "--brain", str(brain.root)]).exit_code == 2
+
+
+def test_cli_mcp_signal_main_errors_and_closed_stdin(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    import signal
+    from types import ModuleType
+
+    from pydantic import BaseModel, ValidationError
+
+    import bf.cli as cli_mod
+
+    brain.write("bf.yaml", b"version: 10\nname: fixture\n")
+    called = False
+
+    class _FakeTools:
+        def run(self) -> None:
+            nonlocal called
+            called = True
+
+    class _FakeMCP(ModuleType):
+        def server(self, getter: object) -> _FakeTools:
+            assert callable(getter)
+            assert cast(Store, getter()).root == brain.root
+            return _FakeTools()
+
+    monkeypatch.setitem(sys.modules, "bf.mcp", _FakeMCP("bf.mcp"))
+
+    saved = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    try:
+        res = CliRunner().invoke(app, ["mcp", "--brain", str(brain.root)])
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        assert CliRunner().invoke(app, ["mcp", "--brain", str(brain.root)]).exit_code == 0
+    finally:
+        for sig, handler in saved.items():
+            if handler is not None:
+                signal.signal(sig, handler)
+    assert res.exit_code == 0, res.output
+    assert called is True
+
+    # main() signal handling (SIGHUP ignored) + KeyboardInterrupt (130) + ValidationError (2)
+    class _Item(BaseModel):
+        count: int
+
+    try:
+        _Item.model_validate({"count": "not-an-int"})
+    except ValidationError as exc:
+        val_err = exc
+
+    prev_hup = signal.getsignal(signal.SIGHUP)
+    try:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        monkeypatch.setattr(cli_mod, "app", lambda: None)
+        main()
+        for raised, code in ((KeyboardInterrupt(), 130), (val_err, 2)):
+            monkeypatch.setattr(cli_mod, "app", lambda err=raised: (_ for _ in ()).throw(err))
+            with pytest.raises(SystemExit) as exited:
+                main()
+            assert exited.value.code == code
+    finally:
+        if prev_hup is not None:
+            signal.signal(signal.SIGHUP, prev_hup)

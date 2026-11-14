@@ -1,7 +1,7 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "23.0.0"
+version = "24.0.0"
 description = "Brain Framework is a local-first brain for you and your AI agents. It collects evidence from your tools into plain files you own, connects them through an ontology you declare, lets any agent harness search and read offline, and wakes your harness when declarative when: rules or reviewed gates spot new evidence."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -143,11 +143,6 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"examples/**/_bf.py" = [
-  "A002", # `emit_receipt(id=...)` matches BF's channel receipt field name.
-  "S603", # Helpers invoke `bf` with literal argv lists and no shell.
-  "S607", # `bf` is resolved on the PATH Brain Framework or the host provides.
-]
 "examples/channels/**" = [
   "S603", # Channel adapters invoke notifier CLIs with literal argv lists and no shell.
 ]
@@ -159,11 +154,6 @@ ignore = [
   "S603", # Adapters invoke provider CLIs with literal argv lists; no shell is involved.
   "S607", # Provider CLIs are resolved by bare name on the PATH Brain Framework sanitizes.
   "T201", # Adapters print exactly one JSON array to stdout.
-]
-"examples/sensors/_sensor.py" = [
-  "A002", # `record(id=...)` matches BF's record field name.
-  "BLE001", # `main()` and `cli()` catch unexpected exceptions so tracebacks never quote provider data.
-  "S310", # `fetch()` rejects non-HTTPS schemes, credentials and cross-host redirects before opening.
 ]
 "tests/**" = [
   "BLE001", # Worker-thread test helpers record any exception so the test thread can assert on it.

@@ -145,10 +145,12 @@ def test_prepare_ships_only_the_named_paths(primary: Path) -> None:
 
 def test_prepare_a_major_updates_compatibility_and_the_contract(primary: Path) -> None:
     write(primary / "docs/demo.schema.json", '{"major": true}\n')
+    write(primary / "tests/contract/retired.schema.json", "{}\n")
     clone, data = prepare(primary, "2.0.0", "--all")
     assert data["major"] is True
     assert "Requires Brain Framework 2 " in (clone / "src/bf/skills/demo/SKILL.md").read_text()
     assert (clone / "tests/contract/demo.schema.json").read_text() == '{"major": true}\n'
+    assert not (clone / "tests/contract/retired.schema.json").exists()
     assert (primary.parent / "mise.calls").read_text() == "run generate:schema\n"
     assert data["review"] == ["README.md:1:Needs Brain Framework 1."]
 

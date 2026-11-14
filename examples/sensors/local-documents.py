@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import fnmatch
 import io
@@ -13,33 +14,145 @@ import os
 import re
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 # UTF-8-only XML is rejected before parsing if it contains a DTD/entity; elements and nesting are bounded below.
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import quote
 
-import _sensor
-
 FILE_BYTES = 16 << 20
 TEXT_BYTES = 64 << 10
 TOTAL_BYTES = 64 << 20
 MAX_ENTRIES = 10000
 MAX_DEPTH = 20
+MAX_ID = 4096
+MAX_ENCODED_ID = 7988
+MAX_REF = 8192
 # Per Office XML part: parsing stops at these bounds and the record keeps the text read so far, marked partial.
 MAX_ELEMENTS, MAX_NESTING = 100_000, 64
 PDF_TIMEOUT = 60
 EXTENSIONS = {".txt", ".md", ".rst", ".org", ".csv", ".tsv", ".html", ".htm", ".docx", ".pptx", ".xlsx", ".pdf"}
 SKIP = {"node_modules", "__pycache__", "venv"}
-InvalidError = _sensor.InvalidError
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
+
+
+class InvalidError(ValueError):
+    """Input or document structure violated the expected contract."""
+
+
+class ProviderError(Exception):
+    """Converter subprocess failed, timed out, or could not start."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def run(argv: Sequence[str], *, timeout: float, max_bytes: int) -> bytes:
+    """Execute one converter CLI from / with bounded output and process-group reaping."""
+    try:
+        proc = subprocess.Popen(
+            list(argv),
+            cwd="/",
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise ProviderError(f"cannot start {argv[0]}") from error
+    stdout, stderr = proc.stdout, proc.stderr
+    if stdout is None or stderr is None:
+        if stdout is not None:
+            stdout.close()
+        if stderr is not None:
+            stderr.close()
+        raise RuntimeError("subprocess pipes missing")
+    out_fd, err_fd = stdout.fileno(), stderr.fileno()
+    chunks: list[bytes] = []
+    overflow = False
+
+    def drain_out() -> None:
+        nonlocal overflow
+        total = 0
+        while data := os.read(out_fd, 65536):
+            total += len(data)
+            if total > max_bytes:
+                overflow = True
+                with contextlib.suppress(OSError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                return
+            chunks.append(data)
+
+    def drain_err() -> None:
+        while os.read(err_fd, 65536):
+            pass
+
+    t_out = threading.Thread(target=drain_out, daemon=True)
+    t_err = threading.Thread(target=drain_err, daemon=True)
+    t_out.start()
+    t_err.start()
+    deadline = time.monotonic() + timeout
+    try:
+        while t_out.is_alive():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                with contextlib.suppress(OSError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                raise ProviderError(f"{argv[0]} exceeded its {int(timeout)}s timeout")
+            t_out.join(timeout=min(remaining, 0.05))
+        try:
+            remaining = max(0.0, deadline - time.monotonic())
+            code = proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            raise ProviderError(f"{argv[0]} exceeded its {int(timeout)}s timeout") from None
+    finally:
+        if proc.poll() is None:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        t_out.join(timeout=1.0)
+        t_err.join(timeout=1.0)
+        stdout.close()
+        stderr.close()
+    if overflow:
+        raise InvalidError(f"{argv[0]} output exceeds {max_bytes} bytes")
+    if code != 0:
+        raise ProviderError(f"{argv[0]} exited with status {code}", status=code)
+    return b"".join(chunks)
+
+
+def emit(records: list[dict[str, object]], *, max_bytes: int = TOTAL_BYTES) -> None:
+    payload = (json.dumps(records, ensure_ascii=False) + "\n").encode("utf-8")
+    if len(payload) > max_bytes:
+        raise InvalidError(f"output exceeds {max_bytes} bytes")
+    sys.stdout.buffer.write(payload)
+
+
+def cli(action: Callable[[], None], summary: str, hint: str) -> None:
+    try:
+        action()
+    except (InvalidError, ProviderError) as error:
+        sys.stderr.write(f"{summary}: {error}.\n")
+        sys.exit(1)
+    except (OSError, UnicodeError, ValueError, LookupError, ArithmeticError, RecursionError):
+        sys.stderr.write(f"{summary}; {hint}.\n")
+        sys.exit(1)
 
 
 class Page(HTMLParser):
@@ -175,14 +288,12 @@ def office(data: bytes, suffix: str) -> tuple[str, bool]:
 
 
 def pdf(path: Path) -> bytes:
-    """Bound converter output while it runs; inherit the collector group so Brain Framework can cancel the whole tree."""
+    """Bound converter output while it runs."""
     try:
-        return _sensor.run(
-            ["pdftotext", "-layout", "-enc", "UTF-8", str(path), "-"], timeout=PDF_TIMEOUT, max_bytes=FILE_BYTES
-        )
-    except _sensor.InvalidError:
+        return run(["pdftotext", "-layout", "-enc", "UTF-8", str(path), "-"], timeout=PDF_TIMEOUT, max_bytes=FILE_BYTES)
+    except InvalidError:
         raise InvalidError("PDF text exceeds its limit") from None
-    except _sensor.ProviderError as error:
+    except ProviderError as error:
         message = str(error)
         if message.startswith("cannot start"):
             raise InvalidError("pdftotext is not installed; install Poppler or exclude PDFs") from None
@@ -225,7 +336,7 @@ def nameable(relative: str) -> bool:
         relative.encode()
     except UnicodeEncodeError:
         return False
-    return not _sensor.CONTROL.search(relative)
+    return not CONTROL.search(relative)
 
 
 def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str, object]], int]:
@@ -283,9 +394,9 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
                 identifier = label + "/" + relative
                 alias = "file:" + quote(identifier, safe="/")
                 if (
-                    len(identifier) > _sensor.MAX_ID
-                    or len(quote(identifier, safe="/@:")) > _sensor.MAX_ENCODED_ID
-                    or len(alias) > _sensor.MAX_REF
+                    len(identifier) > MAX_ID
+                    or len(quote(identifier, safe="/@:")) > MAX_ENCODED_ID
+                    or len(alias) > MAX_REF
                 ):
                     skipped += 1
                     continue
@@ -335,7 +446,7 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
                     "title": " ".join(relative.split()),
                     "text": content[:TEXT_BYTES].decode(errors="ignore"),
                     "time": when,
-                    **({"url": url} if len(url) <= _sensor.MAX_REF else {}),
+                    **({"url": url} if len(url) <= MAX_REF else {}),
                     "aliases": [alias],
                     "attributes": {
                         "updated": when,
@@ -384,7 +495,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     result, skipped = collect(args.label, args.root, args.exclude)
-    _sensor.emit(result, max_bytes=TOTAL_BYTES)
+    emit(result, max_bytes=TOTAL_BYTES)
     if skipped:
         print(
             f"Local documents skipped {skipped} entries whose names are not UTF-8, contain control characters "
@@ -396,4 +507,4 @@ def main() -> None:
 if __name__ == "__main__":
     # BF sends SIGTERM before it kills a stopped run: exiting runs the cleanup that removes the private PDF copy.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
-    _sensor.cli(main, "Local document collection failed", "check the selected root and its permissions")
+    cli(main, "Local document collection failed", "check the selected root and its permissions")

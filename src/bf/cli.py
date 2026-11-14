@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import math
 import os
 import re
 import selectors
@@ -12,15 +11,14 @@ import stat
 import sys
 import time
 import unicodedata
-from collections.abc import Callable, Generator, Sequence
-from contextlib import ExitStack, contextmanager, suppress
+from collections.abc import Callable
+from contextlib import ExitStack, suppress
 from datetime import UTC, datetime, timedelta
 from importlib.resources import files
 from pathlib import Path
 from string import Template
 from types import FrameType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
-from uuid import uuid4
 
 import typer
 from pydantic import ValidationError
@@ -35,20 +33,18 @@ from bf.models import (
     MAX_NOTE,
     MAX_OFFSET,
     NAME,
-    PROGRAM_KINDS,
     SLUG,
     Bounds,
     Error,
     InputError,
     NotFoundError,
-    ProgramKind,
     SchemaKind,
-    Send,
     clean,
     decode,
     explain,
     failure,
     moment,
+    parse_duration,
     present,
     printable,
     suggest,
@@ -58,122 +54,81 @@ from bf.models import (
 if TYPE_CHECKING:
     from bf.storage import Store
 
+_Opt, _Arg = typer.Option, typer.Argument
+
 
 def _diagnose(message: str) -> None:
-    """Print one `bf:` line on stderr. Brain file names and keys are data: escaped, their controls never reach the
-    terminal, and a newline in one cannot forge another line."""
+    """Print one `bf:` line on stderr, escaping controls so brain data cannot forge another line."""
     typer.echo("bf: " + printable(message), err=True)
 
 
 def _usage(error: typer.TyperException) -> str:
-    """Invalid input as one diagnostic naming the argument, its reason and the help to read.
-
-    It replaces Typer's usage text and boxed panel, which wrapped at 80 columns and split the valid choices it named
-    across lines.
-    """
+    """Invalid input as one diagnostic naming the argument, reason and help path."""
     ctx: Any = getattr(error, "ctx", None)
     hint, message = "", error.format_message()
     if isinstance(error, typer.BadParameter) and error.message:
-        hint = _named(error.param_hint) if error.param_hint else _param_hint(error.param)
+        raw = error.param_hint or _param_hint(error.param)
+        hint = (raw if isinstance(raw, str) else " / ".join(raw)).replace("'", "")
         message = error.message.removeprefix("Value error, ")
     if not hint and message[1:2].islower():
-        # Click's own sentences, such as "Missing argument 'QUERY'.", in the lowercase of other diagnostics.
         message = message[:1].lower() + message[1:]
     reason = f"{hint}: {message}" if hint else message
-    see = f" (see {ctx.command_path} -h)" if ctx is not None else ""
-    return f"invalid input: {reason.rstrip('.')}{see}"
-
-
-def _named(hint: str | Sequence[str]) -> str:
-    """A parameter as help names it, such as --brain or PATH: Click quotes it in its own messages."""
-    return (hint if isinstance(hint, str) else " / ".join(hint)).replace("'", "")
+    return f"invalid input: {reason.rstrip('.')}" + (f" (see {ctx.command_path} -h)" if ctx is not None else "")
 
 
 def _param_hint(param: Any) -> str:
-    """Name an option from `opts` (without Typer 0.29's metavar suffix) or an argument from its metavar."""
     if param is None:
         return ""
     if getattr(param, "param_type_name", "") == "option":
-        return _named([*getattr(param, "opts", ()), *getattr(param, "secondary_opts", ())])
-    return _named(getattr(param, "metavar", None) or (getattr(param, "name", None) or "").upper())
-
-
-@contextmanager
-def _plain() -> Generator[None]:
-    """Usage errors as `_usage` lines, exit 2; help and its panels stay Typer's, as do Exit, interrupts and EPIPE."""
-    try:
-        yield
-    except typer.TyperException as error:
-        # Typer copies Click privately: its usage errors are the TyperExceptions that exit 2. Like Typer, recognize
-        # a bare `bf`, which has printed its help, by the class name.
-        if error.exit_code != 2 or type(error).__name__ == "NoArgsIsHelpError":
-            raise
-        _diagnose(_usage(error))
-        raise typer.Exit(2) from None
+        raw = [*getattr(param, "opts", ()), *getattr(param, "secondary_opts", ())]
+    else:
+        raw = getattr(param, "metavar", None) or (getattr(param, "name", None) or "").upper()
+    return (raw if isinstance(raw, str) else " / ".join(raw)).replace("'", "")
 
 
 class _Group(TyperGroup):
-    """The command group; it formats the usage errors of its own options and of every command."""
+    def _run(self, fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except typer.TyperException as error:
+            if error.exit_code != 2 or type(error).__name__ == "NoArgsIsHelpError":
+                raise
+            _diagnose(_usage(error))
+            raise typer.Exit(2) from None
 
-    # Typer keeps the base Click context it passes here private: Any matches it without importing that module.
     def make_context(self, info_name: str | None, args: list[str], parent: Any = None, **extra: Any) -> Any:
-        with _plain():
-            return super().make_context(info_name, args, parent, **extra)
+        return self._run(lambda: super(_Group, self).make_context(info_name, args, parent, **extra))
 
     def invoke(self, ctx: Any) -> Any:
-        with _plain():
-            return super().invoke(ctx)
+        return self._run(lambda: super(_Group, self).invoke(ctx))
 
 
-# Keep the shell protocol available without adding completion-management flags.
 completion_init()
+_TYPER: dict[str, Any] = {
+    "cls": _Group,
+    "no_args_is_help": True,
+    "add_completion": False,
+    "context_settings": {"help_option_names": ["-h", "--help"]},
+    "pretty_exceptions_show_locals": False,
+}
 app = typer.Typer(
-    cls=_Group,
-    no_args_is_help=True,
+    **_TYPER,
     invoke_without_command=True,
-    add_completion=False,
-    context_settings={"help_option_names": ["-h", "--help"]},
-    pretty_exceptions_show_locals=False,
     help="🧠 Brain Framework: from information to informed actions.",
-    epilog=(
-        "Start: bf init ~/brain, then cd ~/brain and bf read. "
-        'Find evidence: bf search "your topic", then bf read REF. '
-        "Results are JSON; diagnostics go to stderr. Use bf COMMAND --help for options."
-    ),
+    epilog="Start: bf init ~/brain, then bf read. Results are JSON; diagnostics go to stderr. See bf COMMAND -h.",
 )
-BrainOption = Annotated[
-    str,
-    typer.Option(
-        "--brain", help="Brain name or path; otherwise BF_BRAIN, the enclosing brain, or the default registered brain."
-    ),
-]
-OneBrainOption = BrainOption
-# Registration selects brains for retrieval only: programs run in one explicitly or enclosingly selected brain.
-RunOption = Annotated[
-    str,
-    typer.Option(
-        "--brain",
-        help="Registered or enclosing brain name, or a path; otherwise BF_BRAIN or the enclosing brain, "
-        "never the default registered brain.",
-    ),
-]
-SensorOption = Annotated[
-    list[str] | None,
-    typer.Option(
-        "--sensor", help="Select a sensor; repeat to select several. Only named programs run when selectors are used."
-    ),
-]
-RoutineOption = Annotated[
-    list[str] | None, typer.Option("--routine", help="Select a routine; repeat to select several.")
-]
-AssistantOption = Annotated[
-    list[str] | None, typer.Option("--assistant", help="Select an assistant; repeat to select several.")
-]
-# Every brain starts with knowledge and verification; the other folders are created as needed or with --full.
-FOLDERS = ("projects", "actions")
-OPTIONAL = ("memories", "assets", "sensors", "routines", "skills")
-# The files every new brain starts with, packaged as plain files: AGENTS.md, loaded by every agent session, stays
-# short, since procedures live in `bf guide` and the packaged `bf` skill. The ignore file is stored without its dot.
+BrainOpt = Annotated[str, _Opt("--brain", help="Brain name/path; else BF_BRAIN, cwd, or default.")]
+RunOpt = Annotated[str, _Opt("--brain", help="Registered or enclosing brain name or path (no default).")]
+JobOpt = Annotated[list[str] | None, _Opt("--job", help="Select a job; repeat for more.")]
+DryOpt = Annotated[bool, _Opt("--dry-run", help="Preview changes without writing.")]
+SinceOpt = Annotated[str, _Opt(help="Window start ({{start}}): 7d, yesterday, YYYY-MM-DD or ISO.")]
+UntilOpt = Annotated[str, _Opt(help="Window end ({{end}}).")]
+RemovalOpt = Annotated[bool, _Opt("--allow-removal", help="Allow empty or mostly-removed snapshot.")]
+ReconcileOpt = Annotated[bool, _Opt("--reconcile", help="Backfill over job's reconcile window.")]
+RunIdOpt = Annotated[str, _Opt("--run", help="Active run ID from {{run}}.")]
+KeyOpt = Annotated[str, _Opt("--key", help="Explicit idempotency key.")]
+OffsetOpt = Annotated[int, _Opt(min=0, max=MAX_OFFSET, help="Continue at next_offset.")]
+FOLDERS, OPTIONAL = ("projects", "actions"), ("memories", "assets", "sensors", "routines", "skills")
 STARTER = {
     "AGENTS.md": "AGENTS.md",
     ".gitignore": "gitignore",
@@ -181,49 +136,6 @@ STARTER = {
     "concepts/welcome.md": "concepts/welcome.md",
     "evals/retrieval.yaml": "evals/retrieval.yaml",
 }
-
-
-def emit(value: object, *, reply: bool = True) -> None:
-    # Write bytes: replies stay UTF-8 JSON whatever the terminal's locale encoding. Collected text is data:
-    # escape the controls and format characters a terminal could obey. Replies show dates and local datetimes;
-    # documents such as JSON Schemas are printed as they are.
-    _write(terminal(present(value) if reply else value))
-
-
-def _finish(value: object, *, failed: bool) -> None:
-    """Print a reply, then exit 1 when it reports a failed operation: the reply says what failed."""
-    emit(value)
-    if failed:
-        raise typer.Exit(1)
-
-
-def _write(data: bytes, *, flush: bool = True) -> None:
-    """Write reply bytes; standard output that cannot take them, such as a full disk, fails the command."""
-    try:
-        sys.stdout.buffer.write(data)
-        if flush:
-            sys.stdout.flush()
-    except BrokenPipeError:
-        # A reader that stopped early, as `bf export | head -1` does: Typer exits 1 without a message.
-        raise
-    except OSError as error:
-        raise Error(_unwritable(error)) from error
-
-
-def _unwritable(error: OSError) -> str:
-    # Not the brain's fault: `failure` would blame the brain and path.
-    return "cannot write the reply to standard output" + (f" ({error.strerror})" if error.strerror else "")
-
-
-def _option[T](name: str, parse: Callable[[str], T], value: str) -> T:
-    """An invalid option value is a usage error (exit 2), not a failed operation (exit 1)."""
-    try:
-        return parse(value)
-    except Error as error:
-        raise typer.BadParameter(str(error), param_hint=name) from None
-
-
-# Service argument names as the commands spell them, for invalid input a service rejects.
 _ARGUMENTS = {
     "query": "QUERY",
     "ref": "REF",
@@ -232,667 +144,62 @@ _ARGUMENTS = {
     "offset": "--offset",
     "topic": "TOPIC",
 }
+SCHEMAS = f"https://raw.githubusercontent.com/fmind/brain-framework/v{__version__}/docs/"
 
 
-def _finite(value: float | None) -> float | None:
-    # A NaN passes Click's range, since it compares false with both bounds.
-    if value is not None and not math.isfinite(value):
-        raise typer.BadParameter("expected a finite number of seconds")
-    return value
+def emit(value: object, *, reply: bool = True) -> None:
+    """Write UTF-8 JSON to stdout, sanitizing collected controls for replies."""
+    _write(terminal(present(value) if reply else value))
+
+
+def _finish(value: object, *, failed: bool) -> None:
+    emit(value)
+    if failed:
+        raise typer.Exit(1)
+
+
+def _finish_indexed(store: Store, result: dict[str, object], *, failed: bool = False) -> None:
+    from bf import index
+
+    refreshed = index.refresh(store, recover=True)
+    result["index"] = refreshed
+    _finish(result, failed=failed or bool(refreshed.get("skipped")))
+
+
+def _write(data: bytes, *, flush: bool = True) -> None:
+    try:
+        sys.stdout.buffer.write(data)
+        if flush:
+            sys.stdout.flush()
+    except BrokenPipeError:
+        raise
+    except OSError as error:
+        suffix = f" ({error.strerror})" if error.strerror else ""
+        raise Error(f"cannot write the reply to standard output{suffix}") from error
+
+
+def _option[T](name: str, parse: Callable[[str], T], value: str) -> T:
+    try:
+        return parse(value)
+    except Error as error:
+        raise typer.BadParameter(str(error), param_hint=name) from None
+
+
+def _has(store: Store, path: str, *, directory: bool = False) -> bool:
+    try:
+        mode = store.mode(path)
+    except Error, OSError:
+        return False
+    return stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)
 
 
 def _name(value: str) -> str:
     if not re.fullmatch(NAME, value):
         raise typer.BadParameter(
-            "choose a brain name of 1-64 characters: a lowercase letter, then lowercase letters, digits or hyphens",
+            "choose a brain name of 1-64 chars: lowercase letter, then lowercase letters, digits or hyphens",
             param_hint="--name",
         )
     return value
-
-
-def _slug(value: str) -> str:
-    if not re.fullmatch(SLUG, value) or len(value) > 64:
-        raise Error("hook names are lowercase words joined by single hyphens, such as pre-push")
-    return value
-
-
-@app.callback()
-def root(
-    version: Annotated[
-        bool, typer.Option("--version", is_eager=True, help="Show the installed version and exit.")
-    ] = False,
-) -> None:
-    if version:
-        _write(f"{__version__}\n".encode())
-        raise typer.Exit
-
-
-def _derived(directory: str) -> str:
-    """The default brain name: the directory name, lowercased with accents folded, each run of other characters
-    as one hyphen, and no edge hyphens. A letter that has no plain form, such as ø, is never silently dropped."""
-    folded = "".join(c for c in unicodedata.normalize("NFKD", directory.lower()) if not unicodedata.combining(c))
-    name = re.sub(r"[^a-z0-9]+", "-", folded).strip("-")
-    if any(c.isalnum() and not c.isascii() for c in folded) or not re.fullmatch(NAME, name):
-        raise typer.BadParameter("the directory name cannot form a brain name; pass --name NAME", param_hint="PATH")
-    return name
-
-
-def _vacant(directory: Path, *, locked: bool = False) -> None:
-    """Refuse a directory holding anything besides Git metadata (and `.bf` created by `writer(store)` when locked)."""
-    allowed = {".git", ".bf"} if locked else {".git"}
-    if any(entry.name not in allowed for entry in directory.iterdir()):
-        raise Error("initialization requires a new, empty or freshly cloned directory")
-
-
-# This release's published schemas, for editor modelines: the strict schema on main may already belong to the next
-# major, which can reject keys this release accepts. Editors fetch them; BF itself stays offline.
-SCHEMAS = f"https://raw.githubusercontent.com/fmind/brain-framework/v{__version__}/docs/"
-
-
-@app.command("init", rich_help_panel="Set up")
-def initialize(
-    path: Annotated[
-        Path,
-        typer.Argument(file_okay=False, metavar="PATH", help="New, empty or freshly cloned brain directory."),
-    ],
-    name: Annotated[
-        str | None,
-        typer.Option(
-            help="Stable BF link namespace; default: the directory name, lowercased with accents folded, each run of "
-            "other characters as one hyphen."
-        ),
-    ] = None,
-    full: Annotated[
-        bool, typer.Option("--full", help="Also create the optional folders, such as sensors/, routines/ and assets/.")
-    ] = False,
-) -> None:
-    """Create a brain at PATH (recommended: ~/brain); no global registration is needed."""
-    import yaml
-
-    from bf.models import starter_config
-    from bf.storage import Store, expand, writer
-
-    path = expand(path)
-    # Only an omitted --name derives one: an empty or blank value is invalid, never the directory's name.
-    name = _derived(path.resolve().name) if name is None else _name(name)
-    config = starter_config(name)
-    if path.exists():
-        _vacant(path)
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    store = Store(path)
-    with writer(store):
-        # Again under the lock: of two runs on one empty directory, the second never replaces the first's files;
-        # `writer(store)` creates `.bf/locks` on first entry, while the pre-lock check already rejected pre-existing `.bf`.
-        _vacant(store.root, locked=True)
-        store.write(
-            "bf.yaml",
-            (
-                f"# https://fmind.github.io/brain-framework/\n# yaml-language-server: $schema={SCHEMAS}bf.schema.json\n"
-                + yaml.safe_dump(config.model_dump(by_alias=True, exclude_defaults=True), sort_keys=False, width=1000)
-            ).encode(),
-        )
-        for target, source in STARTER.items():
-            text = (files("bf") / "starter" / source).read_text(encoding="utf-8")
-            if target.endswith(".yaml"):
-                # The checks read the welcome note by the brain's own address, in the current format.
-                text = Template(text).substitute(name=name, version=FORMAT, schemas=SCHEMAS)
-            store.write(target, text.encode())
-        for directory in FOLDERS + (OPTIONAL if full else ()):
-            store.write(directory + "/.gitkeep", b"")
-    emit({"created": str(store.root), "brain": name})
-
-
-@app.command("register", rich_help_panel="Set up")
-def enroll(
-    path: Annotated[
-        Path,
-        typer.Argument(
-            metavar="PATH", show_default=False, help="Existing brain directory; defaults to the current directory."
-        ),
-    ] = Path(),
-    name: Annotated[
-        str | None,
-        typer.Option("--name", help="Registry alias; defaults to bf.yaml's brain name."),
-    ] = None,
-    default: Annotated[
-        bool,
-        typer.Option("--default", help="Select this brain by default outside any brain directory."),
-    ] = False,
-) -> None:
-    """Register an existing brain to select it by name outside its folder; never runs its programs."""
-    from bf.config import register
-    from bf.storage import Store, expand
-
-    alias = "" if name is None else _name(name)
-    path = expand(path)
-    if not path.is_dir():
-        raise Error("PATH is not an existing directory; pass the brain's directory")
-    if not (path / "bf.yaml").is_file():
-        raise Error("PATH has no bf.yaml; run bf init PATH first, or pass the brain's root directory")
-    emit(register(Store(path), name=alias, default=default))
-
-
-@app.command("unregister", rich_help_panel="Set up")
-def unenroll(
-    target: Annotated[
-        str,
-        typer.Argument(metavar="TARGET", help="Registered brain name or path to remove from ~/.config/bf/config.yaml."),
-    ],
-) -> None:
-    """Remove a brain registration from the user registry; changes no files inside the brain."""
-    from bf.config import unregister
-
-    emit(unregister(target))
-
-
-@app.command("mcp", rich_help_panel="Set up")
-def serve(brain: BrainOption = "") -> None:
-    """Serve search and read over MCP stdio for agents that prefer tools to the CLI; needs the mcp extra."""
-    from bf.config import select
-
-    try:
-        from bf.mcp import server
-    except ModuleNotFoundError as error:
-        # The MCP SDK, or a package it needs, is missing: installing the `mcp` extra brings both, and uv replaces an
-        # installation without it.
-        raise Error(
-            "bf mcp needs the mcp extra; install it with uv tool install --python 3.14 'brain-framework[mcp]'"
-        ) from error
-    if sys.stdin is None:
-        # Descriptor 0 was closed at startup, as main() refuses for descriptor 1: no request could arrive.
-        raise Error("standard input is closed; an MCP host sends its requests through it")
-
-    # Resolved again for each call, so registry changes and newly available brains need no restart.
-    tools = server(lambda: select(brain))
-
-    def stop(_signum: int, _frame: FrameType | None) -> None:
-        # The SDK waits for a stdin line in a thread no signal interrupts. The tools only read: an interrupted
-        # cache refresh rolls back, and the kernel releases its locks.
-        os._exit(130)
-
-    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        # Like main(), keep SIGHUP ignored when it already is, as under nohup.
-        if signum != signal.SIGHUP or signal.getsignal(signum) is not signal.SIG_IGN:
-            signal.signal(signum, stop)
-    tools.run()
-
-
-skill_app = typer.Typer(
-    cls=_Group,
-    no_args_is_help=True,
-    add_completion=False,
-    context_settings={"help_option_names": ["-h", "--help"]},
-    pretty_exceptions_show_locals=False,
-    help="Install and verify the packaged bf skill.",
-)
-app.add_typer(skill_app, name="skill", rich_help_panel="Set up")
-
-
-@skill_app.command("install")
-def skill_install(
-    brain: BrainOption = "",
-    global_: Annotated[
-        bool,
-        typer.Option("--global", help="Install into ~/.agents/skills/bf (and link ~/.claude/skills/bf when present)."),
-    ] = False,
-    check: Annotated[
-        bool,
-        typer.Option(
-            "--check",
-            help="Report current, installed, outdated, modified, unmanaged, stale or missing; write nothing.",
-        ),
-    ] = False,
-    force: Annotated[
-        bool,
-        typer.Option("--force", help="Replace edited, foreign or newer bf skill files with the packaged copy."),
-    ] = False,
-) -> None:
-    """Install the packaged bf skill into one brain (and link .agents/.claude) or globally with --global."""
-    from bf.config import one
-    from bf.install import install as install_skill
-
-    if global_ and brain:
-        raise typer.BadParameter("cannot be combined with --global", param_hint="--brain")
-    store = None if global_ else one(brain)
-    result = install_skill(store, global_=global_, check=check, force=force)
-    _finish(result, failed=not result["ok"])
-
-
-@app.command("guide", rich_help_panel="Set up")
-def guide_command(
-    topic: Annotated[
-        str | None,
-        typer.Argument(metavar="[TOPIC]", show_default=False, help="Guide topic to read; omit to list all topics."),
-    ] = None,
-) -> None:
-    """Print a Brain Framework guide or the guide topic directory as Markdown."""
-    from bf.guide import read_guide, render_index
-
-    text = render_index() if topic is None else read_guide(topic)
-    _write(text.encode("utf-8"))
-
-
-@app.command("schema", rich_help_panel="Set up")
-def schema(
-    kind: Annotated[SchemaKind, typer.Option(help="Configuration format or command reply to describe.")] = "brain",
-) -> None:
-    """Print a configuration or reply JSON Schema; defaults to bf.yaml. No brain selection or network access."""
-    from bf.schemas import document
-
-    emit(document(kind), reply=False)
-
-
-@app.command("search", rich_help_panel="Find and read")
-def find(
-    query: Annotated[
-        str,
-        typer.Argument(metavar="QUERY", help="Words or an exact identity, such as repo:github.com/owner/name."),
-    ],
-    brain: BrainOption = "",
-    scope: Annotated[
-        str,
-        typer.Option(
-            help="Search within a folder or a whole note (projects, memories/gmail), a period (today, 7d, 2026-09, "
-            "2026-09-21..2026-09-25), an identity or a tag (bf://NAME/tags/LABEL); a period, a space, then another "
-            "scope narrows it, as in '7d repo:github.com/owner/name'."
-        ),
-    ] = "",
-    limit: Annotated[int, typer.Option(min=1, max=50, help="Maximum number of results.")] = 10,
-    offset: Annotated[int, typer.Option(min=0, max=MAX_OFFSET, help="Continue at the reply's next_offset.")] = 0,
-) -> None:
-    """Search notes and records; results carry refs for bf read."""
-    from bf import pages
-    from bf.config import select
-    from bf.retrieve import search
-
-    # Invalid input fails before any brain is read.
-    request = pages.query(query, scope, limit=limit, offset=offset)
-    emit(search(select(brain), request))
-
-
-@app.command("read", rich_help_panel="Find and read")
-def exact(
-    ref: Annotated[
-        str,
-        typer.Argument(
-            metavar="REF",
-            help="A page (projects, tasks, today, 7d, memories/gmail), note, path#section, source:id or identity.",
-        ),
-    ] = "",
-    brain: BrainOption = "",
-    rel: Annotated[
-        str,
-        typer.Option(
-            "--rel",
-            help="List every item linking to REF through this declared relation, cites for OKF sources, or links for untyped links.",
-        ),
-    ] = "",
-    offset: Annotated[
-        int,
-        typer.Option(min=0, max=MAX_OFFSET, help="Continue a listing, relation page or exact text at next_offset."),
-    ] = 0,
-) -> None:
-    """Read the home page, another page, a note, a note section, a record or an identity with its backlinks."""
-    from bf import pages
-    from bf.config import select
-    from bf.retrieve import read
-
-    # A malformed ref, or a relation page of a page or a section, fails before any brain is read.
-    pages.readable(ref, rel)
-    emit(read(select(brain), ref, rel=rel, offset=offset))
-
-
-@app.command("export", rich_help_panel="Find and read")
-def export(
-    kind: Annotated[
-        Literal["edges", "identities", "items"],
-        typer.Option(
-            help="edges: one claim per line; identities: each note or record that answers to more than its own "
-            "address, with every name; items: each note and record with its metadata, relations, attributes and text."
-        ),
-    ] = "edges",
-    brain: BrainOption = "",
-    scope: Annotated[
-        str,
-        typer.Option(
-            help="Export only the items bf search --scope would search, such as memories/gmail, memories/gmail/7d, "
-            "projects or 2026-09; edges keep the claims those items assert."
-        ),
-    ] = "",
-    observed_since: Annotated[
-        str,
-        typer.Option(
-            "--observed-since",
-            help="With --kind items, keep only collected records observed at or after this instant or relative period "
-            "(such as 7d).",
-        ),
-    ] = "",
-) -> None:
-    """Print the graph of the selected brain as JSON Lines from its cache; exit 1 when evidence was skipped."""
-    from bf import pages
-    from bf.config import select
-    from bf.retrieve import edges, identities, items
-
-    # Invalid input fails before any brain is read, as for search.
-    if observed_since and kind != "items":
-        raise typer.BadParameter("applies only to --kind items", param_hint="--observed-since")
-    cutoff = (
-        _option("--observed-since", lambda value: moment(value, datetime.now(UTC)), observed_since)
-        if observed_since
-        else ""
-    )
-    parsed = pages.bounds(scope)
-    bounds = Bounds(
-        since=parsed.since,
-        until=parsed.until,
-        observed_since=cutoff,
-        undated=parsed.undated,
-        prefix=parsed.prefix,
-        target=parsed.target,
-    )
-    with ExitStack() as stack:
-        stream, extra = {"edges": edges, "identities": identities, "items": items}[kind](select(brain), stack, bounds)
-        for row in stream:
-            _write(terminal(present(row)), flush=False)
-        _write(b"")
-    # The lines hold only claims: completeness goes to stderr, like other diagnostics, and to the exit code.
-    for name in cast("list[str]", extra.get("stale", [])):
-        _diagnose(f"{name}: a writer kept the cache from refreshing; retry for newer claims")
-    # Like stale, an omitted text leaves the export incomplete, yet every line it printed stays true.
-    for item in cast("list[dict[str, object]]", extra.get("omitted", [])):
-        _diagnose(
-            f"{item['brain']}: {item['file']}: text omitted: the file changed or became unreadable since the cache "
-            "refreshed; run bf build"
-        )
-    problems = cast("list[dict[str, object]]", extra.get("problems", []))
-    for problem in problems:
-        # A referenced brain's directory and file names are its own: _diagnose escapes them.
-        _diagnose(": ".join(str(problem[k]) for k in ("brain", "file", "error") if k in problem))
-    if problems:
-        raise typer.Exit(1)
-
-
-@app.command("collect", rich_help_panel="Collect and automate")
-def capture(
-    sensor: Annotated[
-        str,
-        typer.Argument(
-            metavar="SENSOR",
-            help="A sensor name from bf.yaml; it must be enabled unless --input is given; runs even with refresh: 0.",
-        ),
-    ],
-    brain: RunOption = "",
-    since: Annotated[str, typer.Option(help="Window start: 7d, yesterday, YYYY-MM-DD or ISO 8601.")] = "",
-    until: Annotated[str, typer.Option(help="Window end.")] = "now",
-    dry_run: Annotated[
-        bool,
-        typer.Option(
-            "--dry-run", help="Run the sensor (can contact providers); preview samples without saving records."
-        ),
-    ] = False,
-    allow_removal: Annotated[
-        bool,
-        typer.Option(
-            "--allow-removal",
-            help="Accept, for this run, a snapshot that empties its catalog, or removes more than half of it and more "
-            "than 10 records.",
-        ),
-    ] = False,
-    input_file: Annotated[
-        str,
-        typer.Option(
-            "--input",
-            metavar="FILE",
-            help="Check saved sensor output (FILE, or - for stdin) with this sensor's mappings instead of running it; "
-            "previews like --dry-run and saves no record.",
-        ),
-    ] = "",
-) -> None:
-    """Run one sensor now, for a backfill or to debug a collector."""
-    from bf.collect import collect
-    from bf.config import execution, load
-
-    now = datetime.now(UTC)
-    start = _option("--since", lambda value: moment(value, now), since) if since else ""
-    end = _option("--until", lambda value: moment(value, now), until)
-    if start and start >= end:
-        raise typer.BadParameter("must be earlier than --until", param_hint="--since")
-    store = execution(brain)
-    settings = load(store).sensors.get(sensor)
-    if not start:
-        start = moment((now - timedelta(seconds=settings.lookback if settings else 86_400)).isoformat())
-    if start >= end:
-        raise typer.BadParameter(
-            "must be later than the start; set --since for a historical window", param_hint="--until"
-        )
-    fixture = None
-    if input_file:
-        limit = (settings.max_bytes if settings else 64 << 20) + 1
-        try:
-            if input_file == "-":
-                fixture = sys.stdin.buffer.read(limit)
-            else:
-                with Path(input_file).expanduser().open("rb") as stream:
-                    fixture = stream.read(limit)
-        except OSError as error:
-            raise typer.BadParameter(f"cannot read the file ({error.strerror})", param_hint="--input") from None
-        if len(fixture) >= limit:
-            raise typer.BadParameter("exceeds the sensor's max_bytes", param_hint="--input")
-    emit(
-        collect(
-            store,
-            sensor,
-            start=start,
-            end=end,
-            dry_run=dry_run,
-            allow_removal=allow_removal,
-            clock=lambda: now,
-            fixture=fixture,
-            live=True,
-        )
-    )
-
-
-def _stored_source(store: Store, source: str) -> bool:
-    """Whether memories/ holds a folder for a source that bf.yaml no longer declares."""
-    try:
-        return stat.S_ISDIR(store.mode(f"memories/{source}"))
-    except Error, OSError:
-        return False
-
-
-@app.command("forget", rich_help_panel="Check and repair")
-def forget_records(
-    refs: Annotated[
-        list[str],
-        typer.Argument(
-            metavar="REF...", help="Records to remove: SOURCE:ID refs or memories/SOURCE/SHA256.json paths."
-        ),
-    ],
-    brain: OneBrainOption = "",
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="List what would be removed; change nothing.")] = False,
-) -> None:
-    """Remove collected records and keep their sensors from storing them again; Git history keeps old copies."""
-    from bf import index, records
-    from bf.config import load, one
-    from bf.storage import writer
-
-    targets: dict[str, dict[str, str]] = {}
-    for ref in refs:
-        # The UTF-8 check of single values skips arguments that take several, as `run` passes Git's arguments as given.
-        if _surrogates(ref):
-            raise typer.BadParameter("expected UTF-8 text", param_hint="REF")
-        try:
-            source, entry = records.target(ref)
-        except Error as error:
-            raise typer.BadParameter(str(error), param_hint="REF") from None
-        targets.setdefault(source, {})[ref] = entry
-    store = one(brain)
-    config = load(store)
-    for source in targets:
-        # A mistyped source would list a digest nothing reads and report success.
-        if source not in config.sensors and source not in config.assistants and not _stored_source(store, source):
-            known = [*config.sensors, *config.assistants]
-            raise Error(f"unknown source {source}; check names in bf.yaml{suggest(source, known)}")
-    removed: list[dict[str, object]] = []
-    with writer(store, wait=120):
-        for source, named in targets.items():
-            removed.extend(records.forget(store, source, named, dry_run=dry_run))
-    result: dict[str, object] = {"ok": True, "dry_run": dry_run, "records": removed}
-    if not dry_run:
-        result["index"] = index.refresh(store, recover=True)
-    # Like build and update: a skipped file hides evidence, and bf validate names it.
-    _finish(result, failed=bool(cast("dict[str, int]", result.get("index", {})).get("skipped")))
-
-
-@app.command("run", rich_help_panel="Collect and automate")
-def perform(
-    arguments: Annotated[
-        list[str] | None,
-        # A mistyped option, such as --dryrun, is invalid input instead of an argument to a routine that then runs
-        # for real: routine arguments that start with a dash follow `--`.
-        typer.Argument(
-            metavar="[PROGRAM] [ARGS]...",
-            help="A routine from bf.yaml, then arguments appended to its command, or an assistant; with --hook, only "
-            "arguments. Put -- before arguments that start with a dash.",
-        ),
-    ] = None,
-    hook: Annotated[
-        str,
-        typer.Option(help="Run every enabled routine whose hooks list this event, such as pre-push, in name order."),
-    ] = "",
-    brain: RunOption = "",
-    dry_run: Annotated[
-        bool,
-        typer.Option(
-            "--dry-run",
-            help="Run the routines or the assistant, but write no action or record and record no run; logs still grow.",
-        ),
-    ] = False,
-    forward: Annotated[
-        bool,
-        typer.Option(
-            "--stdin",
-            help="Pass piped input to the routine, or as an assistant's {{input}}. A hook passes what Git pipes to the "
-            "routines it runs; otherwise none.",
-        ),
-    ] = False,
-) -> None:
-    """Run one routine or assistant, or every routine of a hook, now; a hook's piped input reaches each routine."""
-    from bf.collect import hooked
-    from bf.config import execution, load
-    from bf.update import run_assistant, run_routines, runnable
-
-    values = tuple(arguments or ())
-    if hook:
-        _option("--hook", _slug, hook)
-        names, args = (), values
-    elif values and not values[0].strip():
-        raise typer.BadParameter("give a routine or assistant name; an empty value names none", param_hint="PROGRAM")
-    elif values and _surrogates(values[0]):
-        # A program name is text; ARGS, like a pre-push hook's Git arguments, reach the routine as given.
-        raise typer.BadParameter("expected UTF-8 text", param_hint="PROGRAM")
-    elif values:
-        names, args = values[:1], values[1:]
-    else:
-        raise typer.BadParameter("name a routine or assistant, or pass --hook EVENT", param_hint="PROGRAM")
-    store = execution(brain)
-    config = load(store)
-    if names and names[0] in config.assistants:
-        if args:
-            raise typer.BadParameter("an assistant takes no arguments; pipe its input with --stdin", param_hint="ARGS")
-        stdin = _input() if forward else b""
-        try:
-            text = stdin.decode("utf-8")
-        except UnicodeError as error:
-            raise Error("assistant input must be UTF-8 text") from error
-        result = run_assistant(store, names[0], text=text, dry_run=dry_run)
-        _finish(result, failed=not result["ok"])
-        return
-    # Git closes a hook's input; an agent's shell can hold its own open, so a direct run reads it only on request,
-    # and a hook only for the routines it runs: a hook that no routine lists succeeds at once. A mistyped or disabled
-    # name fails first, instead of after waiting for input.
-    runnable(config, names)
-    stdin = _input() if forward or (hook and hooked(config, hook)) else b""
-    result = run_routines(store, names=names, hook=hook, args=args, stdin=stdin, dry_run=dry_run)
-    _finish(result, failed=not result["ok"])
-
-
-@app.command("channel", rich_help_panel="Collect and automate")
-def channel_command(
-    action: Annotated[
-        Literal["read", "send"], typer.Argument(metavar="ACTION", help="Read a bounded batch or send one message.")
-    ],
-    name: Annotated[str, typer.Argument(metavar="CHANNEL", help="A configured channel name.")],
-    brain: RunOption = "",
-    since: Annotated[str, typer.Option(help="Required start of a read window.")] = "",
-    until: Annotated[str, typer.Option(help="End of a read window; defaults to now.")] = "now",
-    forward: Annotated[bool, typer.Option("--stdin", help="Read a JSON outgoing message from stdin for send.")] = False,
-) -> None:
-    """Use a passive channel explicitly; reading never advances subscriptions or starts an assistant."""
-    from bf import assistants, channels
-    from bf.config import execution
-    from bf.messages import Outgoing
-    from bf.runtime import Queue
-
-    # Invalid input fails before any brain is selected, as for every other command.
-    if action == "send" and (not forward or since or until != "now"):
-        raise typer.BadParameter("send requires --stdin and takes no time window", param_hint="--stdin")
-    if action == "read":
-        if not since or forward:
-            raise typer.BadParameter("read requires --since and does not accept --stdin", param_hint="--since")
-        at = datetime.now(UTC)
-        start = _option("--since", lambda value: moment(value, at), since)
-        end = _option("--until", lambda value: moment(value, at), until)
-        if start >= end:
-            raise typer.BadParameter("start must be earlier than end", param_hint="--since")
-    store = execution(brain)
-    if action == "read":
-        emit(
-            {
-                "channel": name,
-                "start": start,
-                "end": end,
-                "messages": [item.model_dump(exclude_defaults=True) for item in channels.read(store, name, start, end)],
-            }
-        )
-        return
-    command = channels.operation(store, name, "send")
-    if not isinstance(command, Send):
-        raise Error("channel requires a send operation")
-    # Oversized or unending input keeps its own diagnostic, as for bf run, instead of reading as invalid JSON.
-    data = _input()
-    try:
-        value = decode(data)
-        if not isinstance(value, dict):
-            raise Error("send input must be a JSON object containing text")
-        message = Outgoing.model_validate({"id": uuid4().hex, **value})
-    except (Error, ValidationError) as error:
-        raise typer.BadParameter(
-            "expected a valid outgoing JSON message with text and optional id, conversation, reply_to",
-            param_hint="--stdin",
-        ) from error
-    queue = Queue(store)
-    queue.send(name, command, message)
-    assistants.deliver(store, key=message.id)
-    with queue.connect() as db:
-        saved = dict(
-            db.execute("SELECT id,channel,state,receipt,error FROM deliveries WHERE id=?", (message.id,)).fetchone()
-        )
-    if saved["receipt"]:
-        saved["receipt"] = decode(saved["receipt"])
-    _finish(saved, failed=saved["state"] != "delivered")
-
-
-action_app = typer.Typer(
-    cls=_Group,
-    no_args_is_help=True,
-    add_completion=False,
-    context_settings={"help_option_names": ["-h", "--help"]},
-    pretty_exceptions_show_locals=False,
-    help="Create and update authored action notes.",
-)
-app.add_typer(action_app, name="action", rich_help_panel="Collect and automate")
 
 
 def _single_line(name: str, value: str) -> str:
@@ -905,481 +212,681 @@ def _single_line(name: str, value: str) -> str:
         raise typer.BadParameter("control and format characters are forbidden", param_hint=name) from None
 
 
+def _window(since: str, until: str) -> tuple[datetime, str, str]:
+    now = datetime.now(UTC)
+    start = _option("--since", lambda v: moment(v, now), since) if since else ""
+    end = _option("--until", lambda v: moment(v, now), until) if until else ""
+    if start and end and start >= end:
+        raise typer.BadParameter("must be earlier than --until", param_hint="--since")
+    return now, start, end
+
+
+@app.callback()
+def root(version: Annotated[bool, _Opt("--version", is_eager=True, help="Show version and exit.")] = False) -> None:
+    if version:
+        _write(f"{__version__}\n".encode())
+        raise typer.Exit
+
+
+def _vacant(directory: Path, *, locked: bool = False) -> None:
+    allowed = {".git", ".bf"} if locked else {".git"}
+    if any(entry.name not in allowed for entry in directory.iterdir()):
+        raise Error("initialization requires a new, empty or freshly cloned directory")
+
+
+@app.command("init", rich_help_panel="Set up")
+def initialize(
+    path: Annotated[Path, _Arg(file_okay=False, metavar="PATH", help="New, empty or freshly cloned brain directory.")],
+    name: Annotated[str | None, _Opt(help="Stable BF link namespace; defaults to folder name.")] = None,
+    full: Annotated[bool, _Opt("--full", help="Create optional memories/, sensors/, routines/ folders.")] = False,
+) -> None:
+    """Create a brain at PATH (recommended: ~/brain); no global registration is needed."""
+    import yaml
+
+    from bf.models import starter_config
+    from bf.storage import Store, expand, writer
+
+    path = expand(path)
+    if name is None:
+        raw_name = path.resolve().name.lower()
+        folded = "".join(c for c in unicodedata.normalize("NFKD", raw_name) if not unicodedata.combining(c))
+        name = re.sub(r"[^a-z0-9]+", "-", folded).strip("-")
+        if any(c.isalnum() and not c.isascii() for c in folded) or not re.fullmatch(NAME, name):
+            raise typer.BadParameter("the directory name cannot form a brain name; pass --name NAME", param_hint="PATH")
+    else:
+        name = _name(name)
+    cfg_obj = starter_config(name)
+    if path.exists():
+        _vacant(path)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    store = Store(path)
+    with writer(store):
+        _vacant(store.root, locked=True)
+        hdr = f"# https://fmind.github.io/brain-framework/\n# yaml-language-server: $schema={SCHEMAS}bf.schema.json\n"
+        body = yaml.safe_dump(cfg_obj.model_dump(by_alias=True, exclude_defaults=True), sort_keys=False, width=1000)
+        store.write("bf.yaml", (hdr + body).encode())
+        for target, source in STARTER.items():
+            text = (files("bf") / "starter" / source).read_text(encoding="utf-8")
+            if target.endswith(".yaml"):
+                text = Template(text).substitute(name=name, version=FORMAT, schemas=SCHEMAS)
+            store.write(target, text.encode())
+        for directory in FOLDERS + (OPTIONAL if full else ()):
+            store.write(directory + "/.gitkeep", b"")
+    emit({"created": str(store.root), "brain": name})
+
+
+@app.command("register", rich_help_panel="Set up")
+def enroll(
+    path: Annotated[Path, _Arg(metavar="PATH", show_default=False, help="Brain directory; defaults to cwd.")] = Path(),
+    name: Annotated[str | None, _Opt("--name", help="Registry alias; defaults to bf.yaml's brain name.")] = None,
+    default: Annotated[bool, _Opt("--default", help="Select this brain by default outside any brain.")] = False,
+) -> None:
+    """Register an existing brain to select it by name outside its folder; never runs its jobs."""
+    from bf.config import register
+    from bf.storage import Store, expand
+
+    alias, path = "" if name is None else _name(name), expand(path)
+    if not path.is_dir():
+        raise Error("PATH is not an existing directory; pass the brain's directory")
+    if not (path / "bf.yaml").is_file():
+        raise Error("PATH has no bf.yaml; run bf init PATH first, or pass the brain's root directory")
+    emit(register(Store(path), name=alias, default=default))
+
+
+@app.command("unregister", rich_help_panel="Set up")
+def unenroll(target: Annotated[str, _Arg(metavar="TARGET", help="Registered brain name or path to remove.")]) -> None:
+    """Remove a brain registration from the user registry; changes no files inside the brain."""
+    from bf.config import unregister
+
+    emit(unregister(target))
+
+
+@app.command("mcp", rich_help_panel="Set up")
+def serve(brain: BrainOpt = "") -> None:
+    """Serve search and read over MCP stdio for agents that prefer tools to the CLI; needs the mcp extra."""
+    from bf.config import select
+
+    try:
+        from bf.mcp import server
+    except ModuleNotFoundError as error:
+        msg = "bf mcp needs the mcp extra; install it with uv tool install --python 3.14 'brain-framework[mcp]'"
+        raise Error(msg) from error
+    if sys.stdin is None:
+        raise Error("standard input is closed; an MCP host sends its requests through it")
+    tools = server(lambda: select(brain))
+    stop = lambda _signum, _frame: os._exit(130)  # noqa: E731
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        if signum != signal.SIGHUP or signal.getsignal(signum) is not signal.SIG_IGN:
+            signal.signal(signum, stop)
+    tools.run()
+
+
+skill_app = typer.Typer(**_TYPER, help="Install and verify the packaged bf skill.")
+app.add_typer(skill_app, name="skill", rich_help_panel="Set up")
+
+
+@skill_app.command("install")
+def skill_install(
+    brain: BrainOpt = "",
+    global_: Annotated[bool, _Opt("--global", help="Install into ~/.agents/skills/bf and ~/.claude.")] = False,
+    check: Annotated[bool, _Opt("--check", help="Report status without writing files.")] = False,
+    force: Annotated[bool, _Opt("--force", help="Replace edited, foreign or newer bf skill files.")] = False,
+) -> None:
+    """Install the packaged bf skill into one brain (and link .agents/.claude) or globally with --global."""
+    from bf.config import one
+    from bf.install import install as install_skill
+
+    if global_ and brain:
+        raise typer.BadParameter("cannot be combined with --global", param_hint="--brain")
+    result = install_skill(None if global_ else one(brain), global_=global_, check=check, force=force)
+    _finish(result, failed=not result["ok"])
+
+
+@app.command("guide", rich_help_panel="Set up")
+def guide_command(
+    topic: Annotated[str | None, _Arg(metavar="[TOPIC]", show_default=False, help="Topic; omit for index.")] = None,
+) -> None:
+    """Print a Brain Framework guide or the guide topic directory as Markdown."""
+    from bf.guide import read_guide, render_index
+
+    _write((render_index() if topic is None else read_guide(topic)).encode("utf-8"))
+
+
+@app.command("schema", rich_help_panel="Set up")
+def schema(kind: Annotated[SchemaKind, _Opt(help="Config or reply JSON Schema kind.")] = "brain") -> None:
+    """Print a configuration or reply JSON Schema; defaults to bf.yaml. No brain selection or network access."""
+    from bf.schemas import document
+
+    emit(document(kind), reply=False)
+
+
+@app.command("search", rich_help_panel="Find and read")
+def find(
+    query: Annotated[str, _Arg(metavar="QUERY", help="Words or exact identity (repo:owner/name).")],
+    brain: BrainOpt = "",
+    scope: Annotated[str, _Opt(help="Prefix, period (today, 7d, 2026-09), identity, or tag.")] = "",
+    limit: Annotated[int, _Opt(min=1, max=50, help="Maximum number of results.")] = 10,
+    offset: OffsetOpt = 0,
+) -> None:
+    """Search notes and records; results carry refs for bf read."""
+    from bf import config, pages, retrieve
+
+    spec = pages.query(query, scope, limit=limit, offset=offset)
+    emit(retrieve.search(config.select(brain), spec))
+
+
+@app.command("read", rich_help_panel="Find and read")
+def exact(
+    ref: Annotated[str, _Arg(metavar="REF", help="Page, note, path#section, source:id or identity.")] = "",
+    brain: BrainOpt = "",
+    rel: Annotated[str, _Opt("--rel", help="List items linking to REF via this relation.")] = "",
+    offset: OffsetOpt = 0,
+) -> None:
+    """Read the home page, another page, a note, a note section, a record or an identity with its backlinks."""
+    from bf import config, pages, retrieve
+
+    pages.readable(ref, rel)
+    emit(retrieve.read(config.select(brain), ref, rel=rel, offset=offset))
+
+
+@app.command("export", rich_help_panel="Find and read")
+def export(
+    kind: Annotated[Literal["edges", "identities", "items"], _Opt(help="edges, identities, or items JSONL.")] = "edges",
+    brain: BrainOpt = "",
+    scope: Annotated[str, _Opt(help="Export only items matching a search scope.")] = "",
+    observed_since: Annotated[str, _Opt("--observed-since", help="With items, cutoff time or period.")] = "",
+) -> None:
+    """Print the graph of the selected brain as JSON Lines from its cache; exit 1 when evidence was skipped."""
+    from bf import config, pages, retrieve
+
+    if observed_since and kind != "items":
+        raise typer.BadParameter("applies only to --kind items", param_hint="--observed-since")
+    cutoff = (
+        ""
+        if not observed_since
+        else _option("--observed-since", lambda v: moment(v, datetime.now(UTC)), observed_since)
+    )
+    p = pages.bounds(scope)
+    bounds = Bounds(
+        since=p.since, until=p.until, observed_since=cutoff, undated=p.undated, prefix=p.prefix, target=p.target
+    )
+    with ExitStack() as stack:
+        stream, extra = getattr(retrieve, kind)(config.select(brain), stack, bounds)
+        for row in stream:
+            _write(terminal(present(row)), flush=False)
+        _write(b"")
+    for name in cast("list[str]", extra.get("stale", [])):
+        _diagnose(f"{name}: a writer kept the cache from refreshing; retry for newer claims")
+    for item in cast("list[dict[str, object]]", extra.get("omitted", [])):
+        msg = "text omitted: the file changed or became unreadable since the cache refreshed; run bf build"
+        _diagnose(f"{item['brain']}: {item['file']}: {msg}")
+    problems = cast("list[dict[str, object]]", extra.get("problems", []))
+    for problem in problems:
+        _diagnose(": ".join(str(problem[k]) for k in ("brain", "file", "error") if k in problem))
+    if problems:
+        raise typer.Exit(1)
+
+
+@app.command("collect", rich_help_panel="Collect and automate")
+def capture(
+    job: Annotated[str, _Arg(metavar="JOB", help="Record-emitting job (emit: records) from bf.yaml.")],
+    brain: RunOpt = "",
+    since: SinceOpt = "",
+    until: UntilOpt = "now",
+    dry_run: DryOpt = False,
+    allow_removal: RemovalOpt = False,
+    reconcile: ReconcileOpt = False,
+    input_file: Annotated[str, _Opt("--input", metavar="FILE", help="Validate FILE (or - for stdin) offline.")] = "",
+) -> None:
+    """Run one record-emitting job now, for a backfill or to debug a collector."""
+    from bf import collect, config
+
+    now, start, end = _window(since, until)
+    store = config.execution(brain)
+    settings = config.load(store).jobs.get(job)
+    start = start or moment((now - timedelta(seconds=settings.lookback if settings else 86_400)).isoformat())
+    if start >= end:
+        raise typer.BadParameter("must be later than start; set --since for a historical window", param_hint="--until")
+    fixture = None
+    if input_file:
+        limit = (settings.max_bytes if settings else 64 << 20) + 1
+        try:
+            if input_file == "-":
+                fixture = sys.stdin.buffer.read(limit)
+            else:
+                with Path(input_file).expanduser().open("rb") as handle:
+                    fixture = handle.read(limit)
+        except OSError as error:
+            raise typer.BadParameter(f"cannot read the file ({error.strerror})", param_hint="--input") from None
+        if len(fixture) >= limit:
+            raise typer.BadParameter("exceeds the job's max_bytes", param_hint="--input")
+    kw: dict[str, Any] = {"start": start, "end": end, "dry_run": dry_run, "allow_removal": allow_removal}
+    emit(collect.collect(store, job, **kw, reconcile=reconcile, clock=lambda: now, fixture=fixture, live=True))
+
+
+@app.command("forget", rich_help_panel="Check and repair")
+def forget_records(
+    refs: Annotated[list[str], _Arg(metavar="REF...", help="SOURCE:ID refs or memories/SOURCE/SHA256.json.")],
+    brain: BrainOpt = "",
+    dry_run: DryOpt = False,
+) -> None:
+    """Remove collected records and keep tombstones so re-collection does not restore them."""
+    from bf import config, records, storage
+
+    targets: dict[str, dict[str, str]] = {}
+    for ref in refs:
+        if _surrogates(ref):
+            raise typer.BadParameter("expected UTF-8 text", param_hint="REF")
+        try:
+            source, entry = records.target(ref)
+        except Error as error:
+            raise typer.BadParameter(str(error), param_hint="REF") from None
+        targets.setdefault(source, {})[ref] = entry
+    store = config.one(brain)
+    sources = config.load(store).record_sources()
+    for source in targets:
+        if source not in sources and not _has(store, f"memories/{source}", directory=True):
+            raise Error(f"unknown source {source}; check jobs in bf.yaml{suggest(source, sorted(sources))}")
+    removed: list[dict[str, object]] = []
+    with storage.writer(store, wait=120):
+        for source, named in targets.items():
+            removed.extend(records.forget(store, source, named, dry_run=dry_run))
+    result: dict[str, object] = {"ok": True, "dry_run": dry_run, "records": removed}
+    emit(result) if dry_run else _finish_indexed(store, result)
+
+
+@app.command("run", rich_help_panel="Collect and automate")
+def perform(
+    arguments: Annotated[list[str] | None, _Arg(metavar="[JOB] [ARGS]...", help="Job name plus optional args.")] = None,
+    hook: Annotated[str, _Opt(help="Run all enabled jobs triggered by hook EVENT.")] = "",
+    brain: RunOpt = "",
+    dry_run: DryOpt = False,
+    forward: Annotated[bool, _Opt("--stdin", help="Pass stdin to job or prompt {{input}}.")] = False,
+    allow_removal: RemovalOpt = False,
+    reconcile: ReconcileOpt = False,
+    since: SinceOpt = "",
+    until: UntilOpt = "",
+) -> None:
+    """Run one configured job (records, prompt, script, or send) or every job matching --hook EVENT."""
+    from bf import config, jobs
+
+    values = tuple(arguments or ())
+    if hook:
+        if not re.fullmatch(SLUG, hook) or len(hook) > 64:
+            raise typer.BadParameter("use lowercase words joined by hyphens, e.g. pre-push", param_hint="--hook")
+        if since or until or allow_removal or reconcile:
+            raise typer.BadParameter("cannot mix with --since/--until/--allow-removal/--reconcile", param_hint="--hook")
+        names, args, start, end = (), values, "", ""
+    elif not values:
+        raise typer.BadParameter("name a job, or pass --hook EVENT", param_hint="JOB")
+    elif not values[0].strip():
+        raise typer.BadParameter("give a job name; an empty value names none", param_hint="JOB")
+    elif _surrogates(values[0]):
+        raise typer.BadParameter("expected UTF-8 text", param_hint="JOB")
+    else:
+        names, args = values[:1], values[1:]
+        _, start, end = _window(since, until)
+    store = config.execution(brain)
+    cfg_obj = config.load(store)
+    if hook:
+        has_hook = any(j.enabled and any(t.hook == hook for t in j.triggers) for j in cfg_obj.jobs.values())
+        result = jobs.run_hook(store, hook, args=args, stdin=_input() if forward or has_hook else b"", dry_run=dry_run)
+        _finish(result, failed=not result["ok"])
+        return
+    job_cfg = jobs.enabled(cfg_obj.jobs, names[0])
+    if args and (job_cfg.prompt or job_cfg.emit == "records" or (job_cfg.send and not job_cfg.run)):
+        raise typer.BadParameter("only script run: jobs accept extra positional arguments", param_hint="ARGS")
+    kw: dict[str, Any] = {"args": args, "dry_run": dry_run, "allow_removal": allow_removal, "reconcile": reconcile}
+    result = jobs.run_job(store, names[0], stdin=_input() if forward else b"", **kw, since=start, until=end)
+    delivery = result.get("delivery")
+    failed = (
+        result.get("ok") is False
+        or result.get("status") == "failed"
+        or (isinstance(delivery, dict) and not delivery.get("ok"))
+    )
+    _finish(result, failed=failed)
+
+
+@app.command("wake", rich_help_panel="Collect and automate")
+def schedule_wake(
+    job: Annotated[str, _Opt("--job", help="Enabled job to wake; optional with --run.")] = "",
+    in_delay: Annotated[str, _Opt("--in", metavar="DURATION", help="Delay before wake, e.g. 10m or 600.")] = "",
+    at: Annotated[str, _Opt("--at", metavar="ISO", help="Explicit UTC/offset wake instant.")] = "",
+    reason: Annotated[str, _Opt("--reason", help="Why this wake was requested.")] = "",
+    run_id: RunIdOpt = "",
+    key: KeyOpt = "",
+    brain: RunOpt = "",
+) -> None:
+    """Queue a bounded follow-up wake for an enabled job."""
+    from bf import config, jobs
+
+    if in_delay and at:
+        raise typer.BadParameter("pass either --in or --at, not both", param_hint="--in")
+    secs = 0
+    if in_delay:
+        try:
+            secs = int(in_delay) if in_delay.isdigit() else parse_duration(in_delay)
+        except ValueError as error:
+            raise typer.BadParameter(str(error), param_hint="--in") from None
+        if secs <= 0:
+            raise typer.BadParameter("delay must be positive", param_hint="--in")
+    due_at = _option("--at", lambda v: moment(v, datetime.now(UTC)), at) if at else ""
+    if not job and not run_id:
+        raise typer.BadParameter("name a --job or pass --run RUN_ID", param_hint="--job")
+    kw: dict[str, Any] = {"job": job, "in_seconds": secs, "at": due_at, "reason_text": reason, "run_id": run_id}
+    emit(jobs.wake_command(config.execution(brain), **kw, idempotency_key=key))
+
+
+@app.command("post", rich_help_panel="Collect and automate")
+def post_message(
+    text: Annotated[str, _Arg(metavar="[TEXT]", help="Message text; omit and pass --stdin for stdin.")] = "",
+    to: Annotated[str, _Opt("--to", metavar="JOB", help="send: job; defaults to active/defaults post.")] = "",
+    thread: Annotated[str, _Opt("--thread", help="Conversation or thread ID.")] = "",
+    target: Annotated[str, _Opt("--target", help="Target/conversation fallback when --thread omitted.")] = "",
+    reply_to: Annotated[str, _Opt("--reply-to", help="Provider message ID being replied to.")] = "",
+    run_id: RunIdOpt = "",
+    key: KeyOpt = "",
+    forward: Annotated[bool, _Opt("--stdin", help="Read UTF-8 message text from stdin.")] = False,
+    brain: RunOpt = "",
+) -> None:
+    """Queue and deliver one outbound message through a `send:` job."""
+    from bf import config, jobs
+
+    if bool(text) == forward:
+        raise typer.BadParameter("pass either TEXT or --stdin", param_hint="--stdin")
+    try:
+        body = _input().decode("utf-8") if forward else text
+    except UnicodeError as error:
+        raise Error("post input must be UTF-8 text") from error
+    kw: dict[str, Any] = {"to": to, "target": target, "thread": thread, "reply_to": reply_to, "run_id": run_id}
+    result = jobs.post_command(config.execution(brain), body, **kw, idempotency_key=key)
+    _finish(result, failed=not result["ok"])
+
+
+action_app = typer.Typer(**_TYPER, help="Create and update authored action notes.")
+app.add_typer(action_app, name="action", rich_help_panel="Collect and automate")
+
+
 def _resolve_action(store: Store, target: str) -> str:
-    """Resolve an action slug, folder name or `actions/.../ACTION.md` path to one existing `ACTION.md`."""
     from bf.storage import relative
 
-    found = [file for file in store.files("actions") if file.endswith("/ACTION.md")]
-    if target.startswith("actions/"):
-        norm = target if target.endswith("/ACTION.md") else f"{target.rstrip('/')}/ACTION.md"
-        try:
-            relative(norm)
-        except Error as error:
-            raise typer.BadParameter(str(error), param_hint="SLUG") from None
-        if norm.count("/") != 2:
-            raise typer.BadParameter(
-                "expected an action slug, folder name or actions/FOLDER/ACTION.md", param_hint="SLUG"
-            )
-        if norm in found:
-            return norm
-        if not target.endswith("/ACTION.md"):
-            folder = target.removeprefix("actions/").rstrip("/")
-            if re.fullmatch(r"\d{4}-\d{2}-\d{2}_[a-z0-9]+(?:-[a-z0-9]+)*", folder):
-                prefixed = [
-                    file
-                    for file in found
-                    if re.fullmatch(rf"actions/{re.escape(folder)}-[0-9a-f]{{8,12}}/ACTION\.md", file)
-                ]
-                if len(prefixed) == 1:
-                    return prefixed[0]
-                if len(prefixed) > 1:
-                    folders = ", ".join(file.removesuffix("/ACTION.md") for file in prefixed)
-                    raise Error(f"multiple actions match {target}; pass the exact folder: {folders}")
-        raise NotFoundError(f"action {target} does not exist")
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}_[a-z0-9]+(?:-[a-z0-9]+)*", target):
-        exact_path = f"actions/{target}/ACTION.md"
-        if exact_path in found:
-            return exact_path
-        prefixed = [
-            file for file in found if re.fullmatch(rf"actions/{re.escape(target)}-[0-9a-f]{{8,12}}/ACTION\.md", file)
-        ]
-        if len(prefixed) == 1:
-            return prefixed[0]
-        if len(prefixed) > 1:
-            folders = ", ".join(file.removesuffix("/ACTION.md") for file in prefixed)
-            raise Error(f"multiple actions match {target}; pass the exact folder: {folders}")
-        raise NotFoundError(f"action {target} does not exist")
-    if re.fullmatch(ACTION_SLUG, target) and len(target) <= 64:
-        pattern = re.compile(rf"actions/\d{{4}}-\d{{2}}-\d{{2}}_{re.escape(target)}(?:-[0-9a-f]{{8,12}})?/ACTION\.md")
-        matches = [file for file in found if pattern.fullmatch(file)]
+    slug_body = ACTION_SLUG.lstrip("^")
+    dated = rf"\d{{4}}-\d{{2}}-\d{{2}}_{slug_body}"
+    if target.endswith("/ACTION.md") and re.fullmatch(r"actions/[^/]+/ACTION\.md", target):
+        relative(target)
+        candidate = target
+    elif target.startswith("actions/") and "/" not in target.removeprefix("actions/"):
+        candidate = f"{target}/ACTION.md"
+        relative(candidate)
+    elif re.fullmatch(dated, target):
+        candidate = f"actions/{target}/ACTION.md"
+    elif re.fullmatch(ACTION_SLUG, target) and len(target) <= 64 and _has(store, "actions", directory=True):
+        slug_pat = re.compile(rf"\d{{4}}-\d{{2}}-\d{{2}}_{re.escape(target)}(?:-[0-9a-f]{{8,12}})?")
+        matches = sorted(
+            f"actions/{entry}/ACTION.md"
+            for entry in store.entries("actions")
+            if slug_pat.fullmatch(entry) and _has(store, f"actions/{entry}/ACTION.md")
+        )
         if not matches:
-            raise NotFoundError(f"action {target} does not exist")
+            raise NotFoundError(f"no action matches {target}")
         if len(matches) > 1:
-            folders = ", ".join(file.removesuffix("/ACTION.md") for file in matches)
-            raise Error(f"multiple actions match {target}; pass the folder name: {folders}")
+            raise Error(f"multiple actions match {target}; pass the dated folder name: {', '.join(matches[:5])}")
         return matches[0]
-    raise typer.BadParameter("expected an action slug, folder name or actions/FOLDER/ACTION.md", param_hint="SLUG")
+    else:
+        raise typer.BadParameter("expected an action slug, folder name or actions/FOLDER/ACTION.md", param_hint="SLUG")
+    if not _has(store, candidate):
+        raise NotFoundError(f"{candidate} does not exist")
+    return candidate
 
 
 @action_app.command("new")
-def action_new(
-    slug: Annotated[
-        str,
-        typer.Argument(metavar="SLUG", help="Lowercase words or digits joined by single hyphens, such as rotate-keys."),
-    ],
-    title: Annotated[
-        str,
-        typer.Option("--title", help="Single-line heading; defaults to the humanized slug."),
-    ] = "",
-    summary: Annotated[
-        str,
-        typer.Option("--summary", help="Optional one-line OKF summary in frontmatter."),
-    ] = "",
-    unique: Annotated[
-        bool,
-        typer.Option("--unique", help="Append a random 12-hex folder suffix so concurrent writers never collide."),
-    ] = False,
-    brain: OneBrainOption = "",
+def action_new_cmd(
+    slug: Annotated[str, _Arg(metavar="SLUG", help="Lowercase slug (e.g. rotate-keys).")],
+    title: Annotated[str, _Opt("--title", help="Single-line heading; defaults to slug.")] = "",
+    summary: Annotated[str, _Opt("--summary", help="Optional one-line OKF summary.")] = "",
+    unique: Annotated[bool, _Opt("--unique", help="Append random 12-hex suffix to avoid collisions.")] = False,
+    run_id: RunIdOpt = "",
+    brain: BrainOpt = "",
 ) -> None:
-    """Create a validated draft action note at actions/YYYY-MM-DD_SLUG/ACTION.md and refresh the search cache."""
-    import yaml
-
-    from bf import index
-    from bf.collect import allocate_action_path, validate_action_markdown
-    from bf.config import load, one
-    from bf.storage import writer
+    """Create a validated draft action note at actions/YYYY-MM-DD_SLUG/ACTION.md and refresh the cache."""
+    from bf import config, jobs
 
     if not re.fullmatch(ACTION_SLUG, slug) or len(slug) > 64:
         raise typer.BadParameter(
-            "expected lowercase letters or digits joined by single hyphens, up to 64 characters", param_hint="SLUG"
+            "use lowercase letters or digits joined by single hyphens (<=64 chars)", param_hint="SLUG"
         )
-    heading = _single_line("--title", title) if title else slug.replace("-", " ").capitalize()
-    front_summary = _single_line("--summary", summary) if summary else ""
-    store = one(brain)
-    config = load(store)
-    today = datetime.now(UTC).astimezone().date().isoformat()
-    with writer(store, wait=120):
-        path = allocate_action_path(store, slug, today, unique=unique)
-        attributes: dict[str, object] = {"type": "action", "status": "draft", "updated": today}
-        if front_summary:
-            attributes["summary"] = front_summary
-        body = (
-            f"# {heading}\n\n"
-            "## Context {#context}\n\n"
-            "## TODO\n\n"
-            "## Decision {#decision}\n\n"
-            "## Resume {#resume}\n\n"
-            "## Outcome\n"
-        )
-        raw = (
-            "---\n" + yaml.safe_dump(attributes, sort_keys=False, allow_unicode=True, width=1000) + "---\n" + body
-        ).encode("utf-8")
-        validate_action_markdown(store, config, path, raw, require_draft=True)
-        store.write(path, raw)
-    refreshed = index.refresh(store, recover=True)
-    _finish({"ok": True, "action": path, "status": "draft", "index": refreshed}, failed=bool(refreshed.get("skipped")))
+    store = config.one(brain)
+    t_line, s_line = (
+        _single_line("--title", title) if title else "",
+        _single_line("--summary", summary) if summary else "",
+    )
+    result = jobs.action_new(store, slug, title=t_line, summary=s_line, unique=unique, run_id=run_id)
+    emit(result) if result.get("reused") else _finish_indexed(store, result)
 
 
 @action_app.command("status")
 def action_status(
-    slug: Annotated[
-        str,
-        typer.Argument(
-            metavar="SLUG", help="Action slug, folder name (YYYY-MM-DD_SLUG) or actions/.../ACTION.md path."
-        ),
-    ],
+    slug: Annotated[str, _Arg(metavar="SLUG", help="Slug, folder name, or actions/.../ACTION.md.")],
     status: Annotated[
-        Literal["draft", "stable", "deprecated"],
-        typer.Argument(metavar="STATUS", help="Target OKF status: draft, stable or deprecated."),
+        Literal["draft", "stable", "deprecated"], _Arg(metavar="STATUS", help="draft|stable|deprecated.")
     ],
-    brain: OneBrainOption = "",
+    brain: BrainOpt = "",
 ) -> None:
     """Update an existing action note's OKF status and updated date atomically, then refresh the search cache."""
     import yaml
 
-    from bf import index
-    from bf.collect import validate_action_markdown
-    from bf.config import load, one
-    from bf.markdown import lines as markdown_lines
-    from bf.markdown import parse as parse_markdown
-    from bf.storage import writer
+    from bf import config, markdown, storage, validate
 
-    store = one(brain)
-    config = load(store)
-    today = datetime.now(UTC).astimezone().date().isoformat()
-    with writer(store, wait=120):
+    store = config.one(brain)
+    cfg_obj, today = config.load(store), datetime.now(UTC).astimezone().date().isoformat()
+    with storage.writer(store, wait=120):
         path = _resolve_action(store, slug)
-        parsed = parse_markdown(path, store.read(path, MAX_NOTE))
-        attributes = dict(parsed.attributes)
-        attributes.setdefault("type", "action")
-        attributes["status"] = status
-        attributes["updated"] = today
-        body = "".join(markdown_lines(parsed.text)[parsed.offset :])
-        raw = (
-            "---\n" + yaml.safe_dump(attributes, sort_keys=False, allow_unicode=True, width=1000) + "---\n" + body
-        ).encode("utf-8")
-        validate_action_markdown(store, config, path, raw)
+        parsed = markdown.parse(path, store.read(path, MAX_NOTE))
+        attributes = {"type": "action", **parsed.attributes, "status": status, "updated": today}
+        body = "".join(markdown.lines(parsed.text)[parsed.offset :])
+        front = yaml.safe_dump(attributes, sort_keys=False, allow_unicode=True, width=1000)
+        raw = f"---\n{front}---\n{body}".encode()
+        validate.validate_action_markdown(store, cfg_obj, path, raw)
         store.write(path, raw)
-    refreshed = index.refresh(store, recover=True)
-    _finish({"ok": True, "action": path, "status": status, "index": refreshed}, failed=bool(refreshed.get("skipped")))
+    _finish_indexed(store, {"ok": True, "action": path, "status": status})
 
 
 @app.command("queue", rich_help_panel="Collect and automate")
 def queue_command(
-    key: Annotated[
-        str, typer.Argument(metavar="[ID]", help="Inspect one job, or identify work to retry or cancel.")
-    ] = "",
-    brain: RunOption = "",
-    retry: Annotated[
-        bool,
-        typer.Option("--retry", help="Retry unresolved work; a harness without a saved answer may repeat effects."),
-    ] = False,
-    cancel: Annotated[
-        bool, typer.Option("--cancel", help="Cancel pending or unresolved work, preserving its identity.")
-    ] = False,
-    limit: Annotated[int, typer.Option(min=1, max=10000, help="Maximum listed jobs and deliveries.")] = 50,
+    key: Annotated[str, _Arg(metavar="[ID]", help="Inspect, retry, or cancel one entry.")] = "",
+    brain: RunOpt = "",
+    retry: Annotated[bool, _Opt("--retry", help="Retry unresolved work; may repeat effects.")] = False,
+    cancel: Annotated[bool, _Opt("--cancel", help="Cancel pending or unresolved work.")] = False,
+    limit: Annotated[int, _Opt(min=1, max=10000, help="Maximum listed wakes, runs and deliveries.")] = 50,
 ) -> None:
     """Inspect durable work or explicitly resolve an uncertain attempt; listing contains no message bodies."""
-    from bf import assistants
-    from bf.config import execution
-    from bf.runtime import Queue
+    from bf import config, jobs, runtime
 
     if (retry and cancel) or ((retry or cancel) and not key):
         raise typer.BadParameter("give an ID and exactly one of --retry or --cancel", param_hint="ID")
-    queue = Queue(execution(brain))
+    queue = runtime.Queue(config.execution(brain))
     if retry or cancel:
         queue.retry(key, cancel=cancel)
         saved = queue.inspect(key)
-        if retry and "channel" in saved:
-            assistants.deliver(queue.brain, key=key)
+        is_delivery = "send_job" in saved
+        if retry and is_delivery:
+            jobs.deliver_due(queue.brain, key=key)
             saved = queue.inspect(key)
-        _finish(
-            {"id": key, "status": saved["state"]}, failed=retry and "channel" in saved and saved["state"] != "delivered"
-        )
+        _finish({"id": key, "status": saved["state"]}, failed=retry and is_delivery and saved["state"] != "delivered")
     elif key:
         row = queue.inspect(key)
-        for name in ("payload", "prepared", "command", "receipt"):
+        for name in ("payload", "command", "receipt"):
             if row.get(name):
                 row[name] = decode(str(row[name]))
-        if row.get("raw") is not None:
-            row["raw"] = cast(bytes, row["raw"]).decode("utf-8", errors="replace")
         emit(row)
     else:
         emit(queue.report(limit=limit))
 
 
 @app.command("update", rich_help_panel="Collect and automate")
-def refresh(
-    brain: RunOption = "",
-    sensor: SensorOption = None,
-    routine: RoutineOption = None,
-    assistant: AssistantOption = None,
-    kind: Annotated[
-        list[str] | None,
-        typer.Option(help="Run only this kind of program: sensor, routine or assistant; repeat for several."),
-    ] = None,
-    dry_run: Annotated[
-        bool,
-        typer.Option("--dry-run", help="List due sensors, routines and assistants with their windows; run nothing."),
-    ] = False,
-) -> None:
-    """Run due sensors, then due routines, then due assistants, of one brain, then refresh its search cache."""
-    from bf.config import execution
-    from bf.update import update
+def refresh(brain: RunOpt = "", job: JobOpt = None, dry_run: DryOpt = False) -> None:
+    """Run due record jobs, scheduled/event jobs, wakes and deliveries of one brain, then refresh its cache."""
+    from bf import config, update
 
-    kinds = _kinds(kind or [])
-    result = update(
-        execution(brain),
-        dry_run=dry_run,
-        sensors=tuple(sensor or ()),
-        routines=tuple(routine or ()),
-        assistants=tuple(assistant or ()),
-        kinds=kinds,
-    )
+    result = update.update(config.execution(brain), dry_run=dry_run, jobs=tuple(job or ()))
     _finish(result, failed=not result["ok"])
-
-
-def _kinds(values: list[str]) -> frozenset[ProgramKind]:
-    """The program kinds an update runs; none given runs every kind."""
-    if unknown := sorted(set(values) - PROGRAM_KINDS):
-        # Worded like Click's choices, which quote the value: an empty one, as an unset variable gives, stays visible.
-        raise typer.BadParameter(f"{unknown[0]!r} is not one of 'sensor', 'routine', 'assistant'", param_hint="--kind")
-    return cast("frozenset[ProgramKind]", frozenset(values)) if values else PROGRAM_KINDS
 
 
 @app.command("watch", rich_help_panel="Collect and automate")
 def monitor(
-    brain: RunOption = "",
-    sensor: SensorOption = None,
-    routine: RoutineOption = None,
-    assistant: AssistantOption = None,
-    interval: Annotated[
-        int | None,
-        typer.Option(min=5, max=86400, help="Seconds between cycles; overrides bf.yaml watch.interval (default 60)."),
-    ] = None,
-    poll_interval: Annotated[
-        float | None,
-        typer.Option(
-            min=0.2,
-            max=60,
-            callback=_finite,
-            help="Seconds between local history reads; overrides bf.yaml watch.poll_interval (default 2).",
-        ),
-    ] = None,
-    notify: Annotated[
-        Literal["off", "failure", "success", "all"] | None,
-        typer.Option(
-            help="Desktop notifications: off, failure (default), success or all; every mode except off also alerts on "
-            "recovery; overrides bf.yaml watch.notifications."
-        ),
-    ] = None,
-    json_output: Annotated[
-        bool, typer.Option("--json", help="Stream JSON snapshots instead of the interactive dashboard.")
-    ] = False,
+    brain: RunOpt = "",
+    job: JobOpt = None,
+    interval: Annotated[int | None, _Opt(min=5, max=86400, help="Seconds between cycles (default 60).")] = None,
+    poll_interval: Annotated[float | None, _Opt(min=0.2, max=60, help="Seconds between reads (default 2).")] = None,
+    notify: Annotated[Literal["off", "failure", "success", "all"] | None, _Opt(help="Desktop notifications.")] = None,
+    json_output: Annotated[bool, _Opt("--json", help="Stream JSON snapshots instead of dashboard.")] = False,
 ) -> None:
-    """Watch one brain and run its due programs until you quit; this can contact providers."""
-    from bf.config import execution
-    from bf.watch import watch
+    """Watch one brain, run daemon streams and due jobs until you quit; this can contact providers."""
+    from bf import config, watch
 
-    watch(
-        execution(brain),
-        sensors=tuple(sensor or ()),
-        routines=tuple(routine or ()),
-        assistants=tuple(assistant or ()),
-        interval=interval,
-        poll_interval=poll_interval,
-        notifications=notify,
-        json_output=json_output,
-    )
+    kw: dict[str, Any] = {"jobs": tuple(job or ()), "interval": interval, "poll_interval": poll_interval}
+    watch.watch(config.execution(brain), **kw, notifications=notify, json_output=json_output)
 
 
 @app.command("status", rich_help_panel="Check and repair")
 def report(
-    brain: BrainOption = "",
-    check: Annotated[
-        bool,
-        typer.Option(
-            "--check",
-            help="Exit 1 on problems, an unavailable cache, brain or reference, scheduled programs that failed, are "
-            "overdue, due but never succeeded or fell silent, sources degraded three runs in a row, unresolved "
-            "assistant work, or a failing channel.",
-        ),
-    ] = False,
-    watch: Annotated[
-        bool,
-        typer.Option(
-            "--watch",
-            help="Observe local program history in a dashboard; never execute programs. Needs one brain, as build does.",
-        ),
-    ] = False,
+    brain: BrainOpt = "",
+    check: Annotated[bool, _Opt("--check", help="Exit 1 on problems or unhealthy jobs/queue.")] = False,
+    watch: Annotated[bool, _Opt("--watch", help="Observe local history in a dashboard offline.")] = False,
 ) -> None:
-    """Show each brain's cache, notes, records, sensor, routine and assistant freshness, errors, logs and usage."""
-    from bf.config import one, select
+    """Show the brain's cache, notes, jobs, record sources, queue summary, errors and usage."""
+    from bf import config, health
 
     if watch:
         if check:
             raise typer.BadParameter("cannot be combined with --check", param_hint="--watch")
         from bf.watch import watch as observe
 
-        observe(one(brain), observe=True)
+        observe(config.one(brain), observe=True)
         return
-    from bf import health
-
-    result = health.report(select(brain))
+    result = health.report(config.select(brain))
     _finish(result, failed=check and not result["healthy"])
 
 
-@app.command("validate", rich_help_panel="Check and repair")
-def check(brain: OneBrainOption = "") -> None:
-    """Check OKF projects, concepts and ACTION.md notes, links, record files and program files; exit 1 on problems."""
-    from bf.config import one
-    from bf.validate import validate
+@app.command("doctor", rich_help_panel="Check and repair")
+def doctor_command(brain: BrainOpt = "") -> None:
+    """Verify configured job executables, required binaries, env vars (presence only), scripts and prompts."""
+    from bf import config, health
 
-    result = validate(one(brain))
+    result = health.doctor(config.one(brain))
+    _finish(result, failed=not result["healthy"])
+
+
+@app.command("validate", rich_help_panel="Check and repair")
+def check(brain: BrainOpt = "") -> None:
+    """Check OKF projects, concepts and ACTION.md notes, links, record files and job configs; exit 1 on problems."""
+    from bf import config, validate
+
+    result = validate.validate(config.one(brain))
     _finish(result, failed=not result["valid"])
 
 
 @app.command("eval", rich_help_panel="Check and repair")
 def acceptance(
-    brain: OneBrainOption = "",
-    path: Annotated[str, typer.Option(help="A suite file or a directory of suites, relative to the brain.")] = "evals",
-    baseline: Annotated[
-        Path | None,
-        typer.Option(dir_okay=False, help="A saved bf eval reply: list regressions and improvements since it."),
-    ] = None,
+    brain: BrainOpt = "",
+    path: Annotated[str, _Opt(help="Suite file or directory relative to brain.")] = "evals",
+    baseline: Annotated[Path | None, _Opt(dir_okay=False, help="Saved bf eval reply for comparison.")] = None,
 ) -> None:
     """Run the brain's retrieval cases; exit 1 when one fails."""
-    from bf.config import one
-    from bf.evaluate import evaluate, load_baseline
-    from bf.storage import relative
+    from bf import config, evaluate, storage
 
-    # Like --scope, a folder may end with the slash that shell completion adds.
     path = path.rstrip("/") or path
-    _option("--path", relative, path)
-    previous = _option("--baseline", load_baseline, str(baseline)) if baseline else None
-    result = evaluate(one(brain), path, previous)
+    _option("--path", storage.relative, path)
+    previous = _option("--baseline", evaluate.load_baseline, str(baseline)) if baseline else None
+    result = evaluate.evaluate(config.one(brain), path, previous)
     _finish(result, failed=not result["passed"])
 
 
 @app.command("build", rich_help_panel="Check and repair")
 def rebuild(
-    brain: OneBrainOption = "",
-    reproject: Annotated[
-        str,
-        typer.Option(
-            metavar="SENSOR",
-            help="Re-apply this sensor's current field mappings to its stored records, then refresh the cache. "
-            "Runs no sensor and removes no record.",
-        ),
-    ] = "",
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="With --reproject, count the records that would change; write nothing.")
-    ] = False,
+    brain: BrainOpt = "",
+    reproject: Annotated[str, _Opt(metavar="JOB", help="Re-validate stored records for job or source.")] = "",
+    dry_run: DryOpt = False,
 ) -> None:
     """Recover interrupted record writes and rebuild the disposable search cache; exit 1 when files were skipped."""
-    from bf import index
-    from bf.collect import reproject as remap
-    from bf.config import one
+    from bf import collect, config, index
 
     if reproject and not re.fullmatch(NAME, reproject):
-        raise typer.BadParameter("expected a sensor name from bf.yaml", param_hint="--reproject")
+        raise typer.BadParameter("expected a job or source name from bf.yaml", param_hint="--reproject")
     if dry_run and not reproject:
-        raise typer.BadParameter("previews a reprojection; add --reproject SENSOR", param_hint="--dry-run")
-    store = one(brain)
-    if reproject:
-        result = remap(store, reproject, dry_run=dry_run)
-        if not dry_run:
-            result["index"] = index.refresh(store, recover=True)
-        _finish(result, failed=bool(result["failed"] or cast("dict[str, int]", result.get("index", {})).get("skipped")))
+        raise typer.BadParameter("previews a reprojection; add --reproject JOB", param_hint="--dry-run")
+    store = config.one(brain)
+    if not reproject:
+        result = index.refresh(store, full=True)
+        _finish(result, failed=bool(result["skipped"]))
         return
-    result = index.refresh(store, full=True)
-    emit(result)
-    # Like update and status --check: a skipped file hides evidence, and bf validate names it.
-    if result["skipped"]:
-        raise typer.Exit(1)
+    result = collect.reproject(store, reproject, dry_run=dry_run)
+    failed = bool(result["failed"])
+    _finish(result, failed=failed) if dry_run else _finish_indexed(store, result, failed=failed)
 
 
-# Piped input reaches routines, such as a Git pre-push hook's ref lines, within these bounds.
-_INPUT = 1 << 20
-_INPUT_WAIT = 10.0
+_INPUT, _INPUT_WAIT = 1 << 20, 10.0
 
 
 def _input() -> bytes:
-    """Standard input when piped or redirected; a terminal gives none.
-
-    A pipe or socket must end within _INPUT_WAIT seconds. A file or device, such as the /dev/null a Git hook
-    receives, is read directly: epoll cannot wait on it, and it ends by itself.
-    """
+    """Standard input when piped or redirected; a terminal gives none."""
     stream = sys.stdin
     if stream is None or stream.isatty():
         return b""
     try:
         descriptor = stream.fileno()
     except AttributeError, OSError, io.UnsupportedOperation:
-        # An in-memory stream, as in tests, has no descriptor to wait on.
         data = stream.buffer.read(_INPUT + 1)
     else:
         mode = os.fstat(descriptor).st_mode
         if not (stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)):
             data = os.read(descriptor, _INPUT + 1) if stat.S_ISREG(mode) or stat.S_ISCHR(mode) else b""
         else:
-            buffer = bytearray()
-            deadline = time.monotonic() + _INPUT_WAIT
+            buffer, deadline = bytearray(), time.monotonic() + _INPUT_WAIT
             with selectors.DefaultSelector() as selector:
                 selector.register(descriptor, selectors.EVENT_READ)
                 while len(buffer) <= _INPUT:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise Error(
-                            "piped input did not end within 10 seconds; close it, or run the command from a terminal"
-                        )
-                    if not selector.select(remaining):
-                        continue
-                    if not (chunk := os.read(descriptor, 65536)):
-                        break
-                    buffer.extend(chunk)
+                    if (remaining := deadline - time.monotonic()) <= 0:
+                        msg = "piped input did not end within 10 seconds; close it, or run the command from a terminal"
+                        raise Error(msg)
+                    if selector.select(remaining):
+                        if not (chunk := os.read(descriptor, 65536)):
+                            break
+                        buffer.extend(chunk)
             data = bytes(buffer)
     if len(data) > _INPUT:
         raise Error("piped input exceeds 1 MiB")
     return data
 
 
-# Values that choose where or on what a command acts, as help names them. Given empty, as an unset variable gives
-# them, they would silently choose another brain, directory, window or operation, so they are invalid input; an
-# omitted one keeps its default.
 _GIVEN = {
+    "--at": "give a timestamp; an empty value names none",
     "--brain": "give a brain name or path; an empty value would select another brain",
-    "--hook": "give an event name; an empty value would run the first argument as a routine",
-    "--input": "give a file, or - for stdin; an empty value would run the sensor",
-    "--assistant": "give an assistant name; an empty value names none",
+    "--hook": "give an event name; an empty value would run the first argument as a job",
+    "--in": "give a delay such as 10m or 600; an empty value names none",
+    "--input": "give a file, or - for stdin; an empty value would run the job",
+    "--job": "give a job name; an empty value names none",
+    "--key": "give an idempotency key; an empty value names none",
     "--observed-since": "give a cutoff time or period; an empty value names none",
-    "--reproject": "give a sensor name; an empty value would rebuild the cache instead",
-    "--routine": "give a routine name; an empty value names none",
-    "--sensor": "give a sensor name; an empty value names none",
+    "--reproject": "give a job or source name; an empty value would rebuild the cache instead",
+    "--run": "give an active run ID; an empty value names none",
     "--since": "give a start time; an empty value names none",
     "--summary": "give a summary; an empty value names none",
     "--title": "give a title; an empty value names none",
+    "--to": "give a send job name; an empty value names none",
+    "JOB": "give a job name from bf.yaml",
     "PATH": "give a directory; an empty value would name the working directory",
-    "TARGET": "give a registered brain name or path",
-    "SENSOR": "give a sensor name from bf.yaml",
     "SLUG": "give an action slug or path",
-    "CHANNEL": "give a channel name from bf.yaml",
+    "TARGET": "give a registered brain name or path",
 }
 
 
 class _Command(TyperCommand):
-    """A command whose single-valued options appear at most once and whose `_GIVEN` values are never empty.
+    """Single-valued options appear at most once and `_GIVEN` values are never empty."""
 
-    Click keeps the last of repeated values: a second --scope or --brain would silently narrow or redirect the
-    answer instead of combining, so repetition is invalid input.
-    """
-
-    # Typer keeps the base Click context it passes here private: Any matches it without importing that module.
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         try:
             violation = None if ctx.resilient_parsing else self._violation(ctx, args)
-            # Help is eager and answers here, as it does despite a value Click rejects itself; only then does the
-            # violation fail.
             remaining = super().parse_args(ctx, args)
             if violation:
                 raise violation
@@ -1387,13 +894,9 @@ class _Command(TyperCommand):
         except typer.TyperException as error:
             if getattr(error, "ctx", ctx) is not None:
                 raise
-            # The parser leaves some errors, such as an option without its value, without the command to name.
             raise typer.BadParameter(error.format_message(), ctx) from None
 
     def _violation(self, ctx: Any, args: list[str]) -> typer.BadParameter | None:
-        """The first repeated single-valued option, else the first value that is not UTF-8 or a `_GIVEN` one empty."""
-        # The parser consumes its list; parsing a copy lists each option occurrence in command-line order, with the
-        # raw values a Path type would already have turned into the working directory.
         given, _, order = self.make_parser(ctx).parse_args(args=list(args))
         seen: set[str | None] = set()
         for param in order:
@@ -1402,11 +905,8 @@ class _Command(TyperCommand):
                     return typer.BadParameter("give it once; repeated values do not combine", ctx, param)
                 seen.add(param.name)
         for param in self.params:
-            value = given.get(param.name)
-            reason = _GIVEN.get(_param_hint(param))
-            # Run's variadic arguments arrive as one tuple, left to perform(): only their PROGRAM must be text.
+            value, reason = given.get(param.name), _GIVEN.get(_param_hint(param))
             values = value if isinstance(value, list) else [value]
-            # Python decodes other bytes as surrogates: refuse them before a command writes, such as init's files.
             if any(isinstance(item, str) and not item.isascii() and _surrogates(item) for item in values):
                 return typer.BadParameter("expected UTF-8 text", ctx, param_hint=_param_hint(param))
             if reason and any(isinstance(item, str) and not item.strip() for item in values):
@@ -1417,7 +917,6 @@ class _Command(TyperCommand):
         try:
             return super().invoke(ctx)
         except InputError as error:
-            # Invalid input a service found, such as an undeclared relation, names the argument like Click does.
             raise typer.BadParameter(str(error), ctx, param_hint=_ARGUMENTS.get(error.argument)) from None
 
 
@@ -1437,37 +936,28 @@ def _fail(message: str, code: int, error: Exception | None = None) -> NoReturn:
     try:
         sys.stdout.flush()
     except (OSError, ValueError) as refused:
-        # Standard output cannot take the rest of a reply: discard it, so the interpreter's exit flush cannot fail
-        # again, print its own warning and turn the exit status into 120.
         with suppress(OSError, ValueError):
             devnull = os.open(os.devnull, os.O_WRONLY)
             os.dup2(devnull, sys.stdout.fileno())
             os.close(devnull)
         if isinstance(error, OSError) and isinstance(refused, OSError) and refused.errno == error.errno:
-            # Flushing failed the same way: the error was standard output's, as help and the watch JSON stream
-            # write outside `_write`.
-            message = _unwritable(error)
+            suffix = f" ({error.strerror})" if error.strerror else ""
+            message = f"cannot write the reply to standard output{suffix}"
     _diagnose(message)
     sys.exit(code)
 
 
 def main() -> None:
     if sys.stdout is None:
-        # Descriptor 1 was closed at startup: no reply could be delivered, so nothing runs.
         _diagnose("standard output is closed; redirect it to a file or /dev/null")
         sys.exit(1)
-    # A stop request or a closed terminal cancels like Ctrl-C, so running providers are killed with bf.
-    # Keep SIGHUP ignored when it already is, as under nohup.
     previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGHUP)}
     for signum, handler in previous.items():
         if signum == signal.SIGTERM or handler is not signal.SIG_IGN:
             signal.signal(signum, _cancel)
-    # Typer owns interrupts inside a command (exit 130) and a closed pipe (exit 1), both silently; _Group prints
-    # usage errors (exit 2).
     try:
         app()
     except KeyboardInterrupt:
-        # An interrupt before Typer's context starts, such as during shell completion.
         sys.exit(130)
     except ValidationError as error:
         _fail("invalid input: " + explain(error), 2)
@@ -1479,7 +969,5 @@ def main() -> None:
                 signal.signal(signum, handler)
 
 
-# Last in the module, so every command declared here gets _Command's checks: repeated or empty values, and invalid
-# input a service finds.
 for _command in (*app.registered_commands, *action_app.registered_commands, *skill_app.registered_commands):
     _command.cls = _Command

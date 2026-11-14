@@ -29,7 +29,7 @@ from bf.validate import validate
 def make(root: Path, name: str) -> Store:
     root.mkdir(parents=True, exist_ok=True)
     store = Store(root)
-    store.write("bf.yaml", yaml.safe_dump({"version": 9, "name": name}).encode())
+    store.write("bf.yaml", yaml.safe_dump({"version": 10, "name": name}).encode())
     store.write(
         "projects/example.md",
         f"# Shared evidence\n\n{name} decision.\n\n## Decision {{#decision}}\n\n{name} durable answer.\n".encode(),
@@ -125,13 +125,13 @@ def test_register_and_unregister_contracts(tmp_path: Path, monkeypatch: pytest.M
 
 def test_brains_key_is_rejected_and_foreign_addresses_fail(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
-        Config.model_validate({"version": 9, "name": "test", "brains": {"other": {"path": "../other"}}})
+        Config.model_validate({"version": 10, "name": "test", "brains": {"other": {"path": "../other"}}})
     first = make(tmp_path / "first", "first")
     second = make(tmp_path / "second", "second")
-    first.write("bf.yaml", b"version: 9\nname: first\nbrains:\n  second:\n    path: ../second\n")
+    first.write("bf.yaml", b"version: 10\nname: first\nbrains:\n  second:\n    path: ../second\n")
     with pytest.raises(Error, match=r"invalid bf\.yaml"):
         load(first)
-    first.write("bf.yaml", b"version: 9\nname: first\n")
+    first.write("bf.yaml", b"version: 10\nname: first\n")
     assert "first durable answer" in str(read(first, "bf://first/projects/example.md#decision")["text"])
     with pytest.raises(NotFoundError):
         read(first, "bf://second/projects/example.md")
@@ -151,7 +151,7 @@ def test_mcp_and_evaluations_use_single_selected_brain(tmp_path: Path) -> None:
     first = make(tmp_path / "first", "first")
     first.write(
         "evals/retrieval.yaml",
-        b"version: 9\ncases:\n- name: own\n  query: durable\n  expect: [projects/example.md]\n",
+        b"version: 10\ncases:\n- name: own\n  query: durable\n  expect: [projects/example.md]\n",
     )
     assert evaluate(first)["passed"]
     mcp = server(first)
@@ -258,10 +258,14 @@ def test_enclosing_discovery_requires_your_ownership(tmp_path: Path, monkeypatch
     assert one().root == execution().root == mine.root
 
 
-def test_default_brain_is_searched_but_never_run_implicitly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_brain_is_selected_for_retrieval_and_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     team = make(tmp_path / "team", "team")
+    team.write("sensors/pulled.sh", b"#!/bin/sh\necho '[]'\n")
+    (team.root / "sensors/pulled.sh").chmod(0o700)
     team.write(
-        "bf.yaml", b"version: 9\nname: team\nsensors:\n  pulled:\n    command: [sensors/pulled.sh]\n    refresh: 900\n"
+        "bf.yaml",
+        b"version: 10\nname: team\njobs:\n  pulled:\n    run: [sensors/pulled.sh]\n    emit: records\n"
+        b"    on:\n      every: 900\n",
     )
     register(team, default=True)
     outside = tmp_path / "outside"
@@ -269,10 +273,12 @@ def test_default_brain_is_searched_but_never_run_implicitly(tmp_path: Path, monk
     monkeypatch.chdir(outside)
     found = cast(dict, search(select(), Query(text="durable")))
     assert [item["ref"] for item in found["items"]] == ["projects/example.md#decision"]
-    for command in (["update", "--dry-run"], ["collect", "pulled", "--dry-run"], ["watch", "--json"]):
-        result = CliRunner().invoke(app, command)
-        assert result.exit_code == 1, command
-        assert "registered brains are selected for retrieval only" in str(result.exception)
+    update_reply = CliRunner().invoke(app, ["update", "--dry-run"])
+    assert update_reply.exit_code == 0, update_reply.output
+    assert json.loads(update_reply.stdout)["brain"] == "team"
+    collect_reply = CliRunner().invoke(app, ["collect", "pulled", "--dry-run"])
+    assert collect_reply.exit_code == 0, collect_reply.output
+    assert json.loads(collect_reply.stdout)["job"] == "pulled"
     result = CliRunner().invoke(app, ["update", "--dry-run", "--brain", "team"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["brain"] == "team"
@@ -283,7 +289,10 @@ def test_execution_names_only_registered_or_enclosing_brains(tmp_path: Path, mon
     marker = tmp_path / "ran"
     team.write("sensors/s.sh", f"#!/bin/sh\ntouch '{marker}'\n".encode())
     (team.root / "sensors/s.sh").chmod(0o700)
-    team.write("bf.yaml", b"version: 9\nname: team\nsensors:\n  s:\n    command: [sensors/s.sh]\n    refresh: 60\n")
+    team.write(
+        "bf.yaml",
+        b"version: 10\nname: team\njobs:\n  s:\n    run: [sensors/s.sh]\n    emit: records\n    on:\n      every: 60\n",
+    )
     # A subdirectory below the working directory is not checked for ownership, so execution requires a deliberate path.
     monkeypatch.chdir(tmp_path)
     for command in (["update", "--dry-run", "--brain", "team"], ["collect", "s", "--brain", "team"]):
@@ -387,7 +396,7 @@ def test_an_unreachable_registered_brain_is_not_called_absent(tmp_path: Path) ->
     finally:
         locked.chmod(0o700)
     store.root.rename(tmp_path / "gone")
-    with pytest.raises(Error, match=f"^kept: {re.escape(ABSENT)}"):
+    with pytest.raises(Error, match=f"^registered brain kept: {re.escape(ABSENT)}"):
         select("kept")
 
 

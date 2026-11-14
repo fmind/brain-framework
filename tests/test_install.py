@@ -27,7 +27,7 @@ def run(*args: str, code: int = 0) -> dict:
 def make_brain(root: Path, name: str = "fixture") -> Store:
     root.mkdir(parents=True, exist_ok=True)
     store = Store(root)
-    store.write("bf.yaml", f"version: 9\nname: {name}\n".encode())
+    store.write("bf.yaml", f"version: 10\nname: {name}\n".encode())
     return store
 
 
@@ -367,3 +367,99 @@ def test_skill_install_global_scope_and_validation(tmp_path: Path, monkeypatch: 
     assert missing_brain.exit_code == 1
     conflict = CliRunner().invoke(app, ["skill", "install", "--brain", str(tmp_path), "--global"])
     assert conflict.exit_code == 2
+
+
+def test_skill_install_handles_nested_packaged_files_and_missing_retired_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import bf.install as install_mod
+
+    pkg = tmp_path / "pkg"
+    skill_src = pkg / "skills/bf"
+    (skill_src / "scripts").mkdir(parents=True)
+    (skill_src / "references").mkdir(parents=True)
+    (skill_src / "__pycache__").mkdir(parents=True)
+    (skill_src / "SKILL.md").write_text("---\nname: bf\n---\n# v1\n")
+    (skill_src / ".DS_Store").write_bytes(b"ignored")
+    (skill_src / "__pycache__/cache.pyc").write_bytes(b"ignored")
+    (skill_src / "scripts/run.sh").write_text("#!/bin/sh\nexit 0\n")
+    (skill_src / "references/guide.md").write_text("# Guide\n")
+    monkeypatch.setattr(install_mod, "files", lambda _pkg: pkg)
+
+    brain = tmp_path / "brain"
+    store = make_brain(brain)
+    first = install(store)
+    assert first["ok"] is True
+    assert first["skills"] == [{"name": SKILL, "status": "installed"}]
+    assert ((brain / "skills/bf/scripts/run.sh").stat().st_mode & 0o777) == 0o700
+    assert ((brain / "skills/bf/SKILL.md").stat().st_mode & 0o777) == 0o600
+    assert not (brain / "skills/bf/.DS_Store").exists()
+    assert not (brain / "skills/bf/__pycache__").exists()
+
+    # Delete a tracked nested file, drop both subdirs from packaged copy, and update:
+    # retired missing file hits `_unedited` FileNotFoundError, and retired nested file syncs its parent dir.
+    (brain / "skills/bf/references/guide.md").unlink()
+    (skill_src / "scripts/run.sh").unlink()
+    (skill_src / "scripts").rmdir()
+    (skill_src / "references/guide.md").unlink()
+    (skill_src / "references").rmdir()
+    (skill_src / "SKILL.md").write_text("---\nname: bf\n---\n# v2\n")
+
+    second = install(store)
+    assert second["ok"] is True
+    assert second["skills"] == [{"name": SKILL, "status": "updated"}]
+    assert not (brain / "skills/bf/scripts/run.sh").exists()
+    assert (brain / "skills/bf/SKILL.md").read_text().endswith("# v2\n")
+
+
+def test_skill_install_rejects_malformed_manifests_non_dir_targets_and_ignores_skill_files(tmp_path: Path) -> None:
+    from bf.models import Error
+
+    with pytest.raises(Error, match="no brain selected"):
+        install(None)
+
+    brain = tmp_path / "brain"
+    store = make_brain(brain)
+    (brain / "skills/bf").mkdir(parents=True)
+    for bad_manifest in (b"[]", b'{"version": "22.0.0"}'):
+        (brain / "skills/bf" / MANIFEST).write_bytes(bad_manifest)
+        assert install(store)["skills"] == [{"name": SKILL, "status": "unmanaged"}]
+    (brain / "skills/bf" / MANIFEST).unlink()
+    (brain / "skills/bf").rmdir()
+
+    # Non-directory entries and hidden folders inside <brain>/skills are ignored cleanly.
+    (brain / "skills/.hidden").mkdir(parents=True)
+    (brain / "skills/__pycache__").mkdir(parents=True)
+    (brain / "skills/README.md").write_text("notes\n")
+    installed = install(store)
+    assert installed["ok"] is True
+    links = installed["links"]
+    assert isinstance(links, list)
+    assert [entry["path"] for entry in links] == [".agents/skills/bf", ".claude/skills/bf"]
+
+    # Symlinked or regular-file host directories fail closed.
+    agents_parent = brain / ".agents"
+    (agents_parent / "skills/bf").unlink()
+    (agents_parent / "skills").rmdir()
+    agents_parent.rmdir()
+    agents_parent.symlink_to(tmp_path)
+    with pytest.raises(Error, match="is not a folder"):
+        install(store)
+    agents_parent.unlink()
+    agents_parent.write_text("not a dir\n")
+    with pytest.raises(Error, match="is not a folder"):
+        install(store)
+    agents_parent.unlink()
+
+    # Non-directory <brain>/skills fails cleanly.
+    bad_brain = make_brain(tmp_path / "bad-brain")
+    (bad_brain.root / "skills").write_text("not a dir\n")
+    with pytest.raises(Error, match="is not a folder"):
+        install(bad_brain)
+
+    # Global --global fails closed when ~/.agents/skills is a regular file or symlink.
+    bad_home = tmp_path / "bad-home"
+    (bad_home / ".agents").mkdir(parents=True)
+    (bad_home / ".agents/skills").write_text("not a dir\n")
+    with pytest.raises(Error, match="is not a folder"):
+        install(global_=True, home=bad_home)

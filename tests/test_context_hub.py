@@ -36,9 +36,7 @@ def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path:
     # The walkthrough copies the records gate from the cloned release: the checkout's copy stands in for it.
     demo = tmp_path / "demo"
     (demo / "source/examples/routines").mkdir(parents=True)
-    for script in ("_bf.py", "records-gate.py"):
-        if (ROOT / "examples/routines" / script).is_file():
-            shutil.copy2(ROOT / "examples/routines" / script, demo / "source/examples/routines")
+    shutil.copy2(ROOT / "examples/routines/records-gate.py", demo / "source/examples/routines/records-gate.py")
     result = subprocess.run(  # noqa: S603 - the reviewed walkthrough on its disposable fixture copy
         ["bash", "--noprofile", "--norc", "-euc", "\n".join(blocks[1:-1])],  # noqa: S607
         cwd=brain,
@@ -62,9 +60,9 @@ def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path:
         if language == "json":
             assert any(anywhere(reply, json.loads(body)) for reply in replies), body
     # The checks below pin which reply holds each value.
-    collections = [reply for reply in replies if "sensor" in reply]
-    assert [(reply["sensor"], reply["records"]) for reply in collections[:4]] == [(s, 1) for s, *_ in SOURCES]
-    assert (collections[4]["sensor"], collections[4]["updated"]) == ("jira", 1)
+    collections = [reply for reply in replies if "source" in reply]
+    assert [(reply["source"], reply["records"]) for reply in collections[:4]] == [(s, 1) for s, *_ in SOURCES]
+    assert (collections[4]["source"], collections[4]["updated"]) == ("jira", 1)
 
     # The four tools' records become one relation, with their normalized types side by side.
     project = next(reply for reply in replies if "backlinks" in reply)
@@ -100,18 +98,19 @@ def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path:
         "Done",
     )
     # The gated watcher answers once per change: three scheduled runs, of which the second found nothing new.
-    runs = [reply["assistants"] for reply in replies if "assistants" in reply]
-    assert [[(row["assistant"], row["status"], "record" in row) for row in rows] for rows in runs] == [
+    runs = [reply["jobs"] for reply in replies if "jobs" in reply]
+    assert [[(row["job"], row["status"], "action" in row) for row in rows] for rows in runs] == [
         [("watcher", "ran", True)],
-        [("watcher", "ran", False)],
+        [("watcher", "gated", False)],
         [("watcher", "ran", True)],
     ]
-    assert len({rows[0]["job"] for rows in runs}) == 3
-    # The quiet run did run its gate, which printed no event, and started no harness: not a schedule left undue.
-    assert (brain / "logs/assistant.watcher.gate.changes.log").read_text().count("exited with status 0") == 3
-    assert (brain / "logs/watcher.log").read_text().count("exited with status 0") == 2
-    answers = next(reply for reply in replies if reply.get("page") == "memories/watcher/7d")
-    assert [item["ref"] for item in answers["items"]] == [runs[2][0]["record"], runs[0][0]["record"]]
+    assert len({rows[0]["run"] for rows in runs}) == 3
+    # The quiet run ran its gate (exit 1) and started no harness.
+    log_text = (brain / "logs/watcher.log").read_text()
+    assert log_text.count("exited with status 0") == 4
+    assert log_text.count("program exited with status 1") == 1
+    actions = next(reply for reply in replies if reply.get("page") == "actions")
+    assert {item["ref"] for item in actions["items"]} == {runs[0][0]["action"], runs[2][0]["action"]}
     assert all(reply["valid"] for reply in replies if "valid" in reply)
     # The walkthrough copies the release's gate: no copy beside the example can drift from it.
     assert not (EXAMPLE / "routines").exists()
@@ -157,7 +156,7 @@ def test_context_hub_stays_readable_without_sensors(tmp_path: Path) -> None:
     checked = runner.invoke(app, ["validate", "--brain", str(brain)])
     assert checked.exit_code == 1
     assert json.loads(checked.stdout)["problems"] == [
-        {"file": "bf.yaml", "error": f"sensors.{source}.command: sensors/demo.py is not an executable regular file"}
+        {"file": "bf.yaml", "error": f"jobs.{source}.run: sensors/demo.py is not an executable regular file"}
         for source in sorted(source for source, *_ in SOURCES)
     ]
 

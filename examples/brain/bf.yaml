@@ -1,10 +1,13 @@
 # https://fmind.github.io/brain-framework/
-version: 9
+version: 10
 name: example
-sensors:
+jobs:
   demo:
-    command: [sensors/demo.py, "{{start}}", "{{end}}"]
-    refresh: 3600
+    run: [sensors/demo.py, "{{start}}", "{{end}}"]
+    emit: records
+    mode: window
+    on:
+      every: 3600
 fields:
   depends-on:
     description: This conclusion needs review when the target evidence changes.

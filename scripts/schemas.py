@@ -20,6 +20,13 @@ def main() -> None:
         ROOT / "docs" / f"{'bf' if kind == 'brain' else kind}.schema.json": document(kind) for kind in get_args(Kind)
     }
     store = Store(ROOT)
+    for path in sorted((ROOT / "docs").glob("*.schema.json")):
+        if path in documents:
+            continue
+        if args.write:
+            path.unlink()
+        else:
+            parser.exit(1, f"{path.name}: obsolete schema; run mise run generate:schema\n")
     for path, schema in documents.items():
         if args.write:
             store.write(path.relative_to(ROOT).as_posix(), encode(schema))
