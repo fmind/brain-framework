@@ -539,7 +539,11 @@ def _stream_job(
             err_reader.start()
             try:
                 _pump_stdout(store, name, proc, stopped, started)
-                if not stopped.is_set() and (code := proc.poll()) not in {None, 0}:
+                code = proc.poll()
+                if code is None and not stopped.is_set():
+                    with suppress(subprocess.TimeoutExpired):
+                        code = proc.wait(timeout=0.5)
+                if not stopped.is_set() and code not in {None, 0}:
                     failed_msg = f"daemon {name}: exited with status {code}; see {runtime.log_path(name)}"
             finally:
                 with lock:
