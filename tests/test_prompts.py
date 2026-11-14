@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from bf import health, jobs, watch
+from bf import collect, health, jobs, watch
 from bf.cli import app
 from bf.map import extract_pointer
 from bf.models import Config, Error, Job, OnSpec
@@ -420,3 +420,31 @@ def test_cli_runs_piped_prompt_and_update_dispatches_channel_events(configured: 
     assert len(seen_contexts) == 1
     assert '"kind":"message.received"' in seen_contexts[0]
     assert "Please triage" in seen_contexts[0]
+
+
+def test_reactive_runs_preserve_schedule_anchor_and_due_eligibility(configured: Store) -> None:
+    configured.write(
+        "bf.yaml",
+        CONFIG
+        + b"  hybrid:\n    prompt: prompts/assistant.md\n    harness: [agent]\n"
+        + b"    emit: message\n    post: inbox\n"
+        + b"    on:\n      - every: 1800\n      - event: { kind: message.received, source: inbox }\n",
+    )
+
+    def ok(*_args: object) -> bytes:
+        return b"NO_REPLY"
+
+    jobs.run_job(configured, "hybrid", kind="event", until="2026-09-01T12:00:05Z", runner=ok)
+    assert any(j[0] == "hybrid" for j in collect.due_jobs(configured, datetime(2026, 9, 1, 12, 0, 10, tzinfo=UTC)))
+
+    jobs.run_job(configured, "hybrid", kind="schedule", until="2026-09-01T12:00:10Z", runner=ok)
+    assert not any(j[0] == "hybrid" for j in collect.due_jobs(configured, datetime(2026, 9, 1, 12, 0, 15, tzinfo=UTC)))
+    state = Queue(configured).state_of("hybrid")
+    assert state["runs"] == 2
+    assert "scheduled_success" not in state
+
+    jobs.run_job(configured, "hybrid", kind="event", until="2026-09-01T12:05:00Z", runner=ok)
+    after_event = Queue(configured).state_of("hybrid")
+    assert after_event["scheduled_success"] == "2026-09-01T12:00:10.000000Z"
+    assert not any(j[0] == "hybrid" for j in collect.due_jobs(configured, datetime(2026, 9, 1, 12, 30, 9, tzinfo=UTC)))
+    assert any(j[0] == "hybrid" for j in collect.due_jobs(configured, datetime(2026, 9, 1, 12, 30, 10, tzinfo=UTC)))

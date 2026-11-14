@@ -133,6 +133,7 @@ cat >> bf.yaml <<'EOF'
     harness:
       [
         printf,
+        "%s",
         "---\ntype: action\nstatus: draft\nupdated: 2026-09-27\nsummary: Re-check website launch review after Jira change.\n---\n\n# Launch review check\n\n## Decision\n\nReview [Jira issue](jira:review) against the launch decision.\n",
       ]
     emit: action

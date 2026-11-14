@@ -14,7 +14,7 @@ from typing import cast
 from bf import __version__, collect, index, usage
 from bf.config import is_registered, load
 from bf.models import CACHE_ERROR, MAX_PROMPT, Config, Error, Job, decode, timestamp
-from bf.runtime import _ZERO_STATUS, Queue, environment, log_path
+from bf.runtime import _ZERO_STATUS, Queue, environment, log_path, scheduled_anchor
 from bf.storage import Store
 
 _C1 = ("records", "added", "updated", "unchanged", "removed", "forgotten")
@@ -65,9 +65,9 @@ def is_late(job: Job, health: Mapping[str, object], now: datetime, *, default_tz
 
 
 def _health_entry(job: Job | None, entry: _Map, changed: str, now: datetime, tz: str | None) -> _Entry:
-    success = str(entry.get("last_success", ""))
+    success, sched_ok = str(entry.get("last_success", "")), scheduled_anchor(entry)
     state = "historical" if job is None else "active" if job.enabled else "disabled"
-    item: _Entry = {"state": state, "freshness": _freshness(job, success, now, default_tz=tz)}
+    item: _Entry = {"state": state, "freshness": _freshness(job, sched_ok, now, default_tz=tz)}
     if success and (job is None or job.emit == "records"):
         item["last_collected"] = success
     mode = (job.mode or "window") if job is not None else "window"

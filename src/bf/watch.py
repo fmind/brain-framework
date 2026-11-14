@@ -116,11 +116,12 @@ def snapshot(store: Store, jobs: tuple[str, ...] = (), *, now: datetime | None =
         q_err = "unresolved work in runtime queue; inspect bf queue" if name in failing else ""
         inc_err = (inc or {}).get("last_error") or ""
         error = str(entry.get("last_error") or daemon_errors.get(name, "") or inc_err or q_err) if job.enabled else ""
-        success, due_at = str(entry.get("last_success", "")), collect.next_due(job, entry, now, default_tz=tz)
+        success, sched_ok = str(entry.get("last_success", "")), runtime.scheduled_anchor(entry)
+        due_at = collect.next_due(job, entry, now, default_tz=tz)
         status = State.DISABLED if not job.enabled else State.FAILED if error else State.MANUAL
         if status is State.MANUAL and (timed or daemon):
             status = (
-                State.NEVER if not success and not daemon else State.DUE if due_at and due_at <= now else State.FRESH
+                State.NEVER if not sched_ok and not daemon else State.DUE if due_at and due_at <= now else State.FRESH
             )
         keys = ("added", "updated", "removed", "output_bytes", "records", "runs")
         added, updated, removed, out_b, recs, runs = (cast("int | None", entry.get(k)) for k in keys)

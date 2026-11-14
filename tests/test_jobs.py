@@ -183,6 +183,16 @@ def test_job_env_isolation_and_executable_confinement(jobs_brain: Store, monkeyp
     jobs_brain.write("routines/helper.py", b"print('ok')\n")
     assert jobs.executable(jobs_brain, "routines/helper.py", env) == str(jobs_brain.root / "routines/helper.py")
 
+    idx = str(jobs_brain.root / "git-index")
+    monkeypatch.setenv("GIT_INDEX_FILE", idx)
+    assert "GIT_INDEX_FILE" not in jobs.job_env(jobs_brain, job)
+    add_job(
+        jobs_brain,
+        "hooked",
+        {"run": ["python3", "-c", "print('ok')"], "emit": "log", "on": {"hook": "pre-commit"}},
+    )
+    assert jobs.job_env(jobs_brain, load(jobs_brain).jobs["hooked"])["GIT_INDEX_FILE"] == idx
+
 
 def test_gate_skips_execution_or_allows_run_to_proceed(jobs_brain: Store) -> None:
     add_job(

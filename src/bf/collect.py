@@ -15,7 +15,7 @@ from bf import jobs, models, ontology, records, runtime
 from bf import map as mapper
 from bf.config import load
 from bf.models import Config, Error, InputError, Job, Record
-from bf.runtime import Queue, append_log
+from bf.runtime import Queue, append_log, scheduled_anchor
 from bf.storage import Store, collecting, ping_wakeup, writer
 
 CATCH_UP, SCHEDULE_BACKOFF, SHRINK_FLOOR, MAX_COUNT, REPROJECT, LIMIT = timedelta(days=30), 60, 10, 2**53 - 1, 1000, 200
@@ -373,7 +373,7 @@ def next_due(job: Job, last: Mapping[str, object], now: datetime, *, default_tz:
         if not (anchor := str(last.get("last_run") or last.get("run") or "")):
             return now
         return now if (since := datetime.fromisoformat(anchor)) > now else since + delay
-    last_success = str(last.get("last_success") or last.get("success") or "")
+    last_success = scheduled_anchor(last)
     return min(t.schedule_due(now, last_success, timezone=default_tz) for t in timed)
 
 

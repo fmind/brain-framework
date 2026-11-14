@@ -6,7 +6,7 @@ import os
 import sqlite3
 import stat
 import uuid
-from collections.abc import Collection, Generator
+from collections.abc import Collection, Generator, Mapping
 from contextlib import contextmanager, nullcontext, suppress
 from datetime import UTC, datetime, timedelta
 from functools import cache
@@ -159,8 +159,14 @@ class JobState(Model):
     output_bytes: _NN = 0
     action: str = ""
     record: str = ""
-    when_cursor: _TS = ""
+    scheduled_success: _TS | None = None
     reports: dict[str, str] = Field(default_factory=dict)
+
+
+def scheduled_anchor(entry: Mapping[str, object]) -> str:
+    """Last schedule/manual success timestamp, unaffected by reactive event/wake/hook/message runs."""
+    v = entry.get("scheduled_success")
+    return v if isinstance(v, str) else str(entry.get("last_success") or entry.get("success") or "")
 
 
 _SCHEMA = """
@@ -411,13 +417,24 @@ class Queue:
     def state_of(self, job: str) -> dict[str, object]:
         return self.all_states(job).get(job, {})
 
-    def remember(self, job: str, /, **values: object) -> dict[str, object]:
-        """Validate and upsert one job's execution state inside `job_state`."""
+    def _remember(
+        self, job: str, values: Mapping[str, object], *, unscheduled: bool = False, bump_runs: bool = False
+    ) -> dict[str, object]:
+        patch = dict(values)
         with self.connect() as db:
             row = db.execute("SELECT data FROM job_state WHERE job=?", (job,)).fetchone()
             cur = decode(row["data"]) if row is not None else {}
+            d = cur if isinstance(cur, dict) else {}
+            if bump_runs:
+                patch["runs"] = int(cast("int", d.get("runs", 0))) + 1
+            if unscheduled:
+                patch["scheduled_success"] = scheduled_anchor(d)
+                if (prev_ok := str(d.get("last_success") or "")) and "last_success" in patch:
+                    patch["last_success"] = max(prev_ok, str(patch["last_success"]))
+            elif "last_success" in patch and "scheduled_success" not in patch:
+                patch["scheduled_success"] = None
             try:
-                e = JobState.model_validate({**(cur if isinstance(cur, dict) else {}), **values})
+                e = JobState.model_validate({**d, **patch})
             except ValidationError as error:
                 raise Error(f"{job}: invalid job state: {explain(error)}") from error
             dumped = e.model_dump(exclude_defaults=True)
@@ -425,6 +442,16 @@ class Queue:
             sql = "INSERT OR REPLACE INTO job_state VALUES (?,?,?,?,?,?,?,?,?)"
             db.execute(sql, (*vals, e.runs, encode(dumped).decode()))
         return dumped
+
+    def remember(self, job: str, /, **values: object) -> dict[str, object]:
+        """Validate and upsert one job's execution state inside `job_state`."""
+        return self._remember(job, values)
+
+    def remember_run(
+        self, job: str, values: Mapping[str, object], /, *, unscheduled: bool = False, bump_runs: bool = False
+    ) -> dict[str, object]:
+        """Record one job run, incrementing `runs` and keeping the scheduled anchor across reactive runs."""
+        return self._remember(job, values, unscheduled=unscheduled, bump_runs=bump_runs)
 
     def start_run(
         self,

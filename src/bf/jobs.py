@@ -34,8 +34,10 @@ _RE_PL = re.compile(r"\{\{(brain|home|state|run|start|end|cursor|prompt|context|
 _RE_PROMPT_PL = re.compile(r"\{\{(brain|home|state|run|start|end|cursor|context|input|target|thread)\}\}")
 _E1 = "PATH HOME USER LOGNAME SHELL TERM TZ LANG LC_ALL LC_CTYPE LC_MESSAGES"
 _E2 = "TMPDIR TEMP TMP XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME"
-_E3 = "XDG_RUNTIME_DIR SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE"
+_E3 = "XDG_RUNTIME_DIR SSH_AUTH_SOCK SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE"
 _ENV_ALLOW = frozenset(f"{_E1} {_E2} {_E3}".split())
+_G1 = "GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY"
+_GIT_HOOK_ENV = frozenset(f"{_G1} GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_QUARANTINE_PATH".split())
 _INDEXED_EVENTS = frozenset({"record.added", "record.changed", "note.changed"})
 
 
@@ -98,8 +100,9 @@ def home_folder() -> str:
 
 
 def job_env(store: Store, job: Job) -> dict[str, str]:
-    """Isolated environment: sanitized host allowlist + `job.requires.env` + `BF_BRAIN`."""
-    allowed = _ENV_ALLOW | frozenset(job.requires.env)
+    """Isolated environment: sanitized host allowlist + hook Git data vars + `job.requires.env` + `BF_BRAIN`."""
+    extra = _GIT_HOOK_ENV if any(t.hook for t in job.triggers) else frozenset()
+    allowed = _ENV_ALLOW | extra | frozenset(job.requires.env)
     return {**{k: v for k, v in runtime.environment().items() if k in allowed}, "BF_BRAIN": str(store.root)}
 
 
@@ -740,9 +743,15 @@ def run_job(
     win = {"window_start": since, "window_end": end_ts} if since else {}
     status: Literal["completed", "failed", "uncertain"] = "failed"
 
-    def _done(**extra: object) -> None:
+    def _done(*, bump_runs: bool = False) -> None:
         if not dry_run:
-            queue.remember(name, last_run=end_ts, last_success=end_ts, last_error="", error_count=0, **extra, **win)
+            unsched = kind in {"event", "wake", "hook", "message"}
+            queue.remember_run(
+                name,
+                {"last_run": end_ts, "last_success": end_ts, "last_error": "", "error_count": 0, **win},
+                unscheduled=unsched,
+                bump_runs=bump_runs,
+            )
             queue.resolve_incident(name)
 
     try:
@@ -763,7 +772,7 @@ def run_job(
         raw = _invoke((store, name, job, runner), tmpl, ctx, cmd_stdin, ("", args if job.run else (), ikw))
         result = _route_output((store, config, name, job, runner), raw, (dry_run, run_id, target, thread))
         status = "completed"
-        _done(runs=int(cast("int", prev.get("runs", 0))) + 1)
+        _done(bump_runs=True)
         return {**result, "run": run_id}
     except (Error, OSError, UnicodeError) as error:
         if isinstance(error, CancelledError):
