@@ -32,7 +32,7 @@ Run from the Brain Framework checkout after `uv sync --locked`. This subshell co
   cat >> bf.yaml <<'YAML'
   draft-action:
     prompt: prompts/assistant.md
-    harness: [printf, "---\ntype: action\nstatus: draft\n---\n\n# Launch brief\n\nFollow up on launch date.\n"]
+    harness: [printf, "%s", "---\ntype: action\nstatus: draft\n---\n\n# Launch brief\n\nFollow up on launch date.\n"]
     emit: action
   quiet:
     prompt: prompts/assistant.md
