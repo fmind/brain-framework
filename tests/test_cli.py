@@ -70,7 +70,7 @@ def test_routine_help_never_runs_a_routine(
     marker = tmp_path / "ran"
     store.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [routines/review.sh]\n    hooks: [pre-push]\n",
+        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [routines/review.sh]\n    hooks: [pre-push]\n",
     )
     store.write("routines/review.sh", f"#!/bin/sh\ntouch '{marker}'\n".encode())
     (store.root / "routines/review.sh").chmod(0o700)
@@ -91,7 +91,7 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
     (tmp_path / "brain").mkdir()
     store = Store(tmp_path / "brain")
     received = tmp_path / "received"
-    store.write("bf.yaml", b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [routines/review.sh]\n")
+    store.write("bf.yaml", b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [routines/review.sh]\n")
     store.write("routines/review.sh", f"#!/bin/sh\nprintf %s \"$1\" > '{received}'\n".encode())
     (store.root / "routines/review.sh").chmod(0o700)
     # Python passes an undecodable argument byte, such as a Latin-1 é, as a lone surrogate.
@@ -137,7 +137,9 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
         (["mcp", "--brain="], "--brain"),
         (["init", ""], "PATH"),
         (["register", ""], "PATH"),
-        (["skills", ""], "DIR"),
+        (["unregister", ""], "TARGET"),
+        (["guide", ""], "TOPIC"),
+        (["skill", "install", "--brain", ""], "--brain"),
         # Before 18.1.4 these rebuilt the whole cache, collected the default window or named an unknown program "".
         (["build", "--reproject", ""], "--reproject"),
         (["collect", "calendar", "--since", ""], "--since"),
@@ -173,7 +175,8 @@ def test_invalid_options_name_the_option_without_a_selected_brain(
     assert (exited.value.code, out) == (2, ""), err
     # One plain line, like every other diagnostic: no usage text or wrapped box.
     assert err.startswith("bf: invalid input: ")
-    assert err.endswith(f" (see bf {arguments[0]} -h)\n")
+    help_target = "skill install" if arguments[:2] == ["skill", "install"] else arguments[0]
+    assert err.endswith(f" (see bf {help_target} -h)\n")
     assert err.count("\n") == 1
     assert option in err
 
@@ -239,7 +242,9 @@ def test_repeated_flags_and_multiple_options_stay_valid(tmp_path: Path) -> None:
     "arguments",
     [
         ["init", "", "-h"],
-        ["skills", "", "--help"],
+        ["guide", "", "--help"],
+        ["unregister", "", "--help"],
+        ["skill", "install", "--help"],
         ["update", "--sensor", "", "-h"],
         ["search", "x", "--brain", "", "-h"],
         ["search", "-h", "x", "--brain", ""],
@@ -259,7 +264,7 @@ def test_help_answers_despite_empty_or_repeated_values(arguments: list[str]) -> 
         ["search", "word", "--brain", "~bf-no-such-user/brain"],
         ["init", "~bf-no-such-user/brain"],
         ["register", "~bf-no-such-user/brain"],
-        ["skills", "~bf-no-such-user/skills"],
+        ["skill", "install", "--brain", "~bf-no-such-user/brain"],
     ],
 )
 def test_an_unknown_home_directory_fails_without_a_traceback(arguments: list[str]) -> None:
@@ -271,9 +276,9 @@ def test_an_unknown_home_directory_fails_without_a_traceback(arguments: list[str
 
 @pytest.mark.parametrize("command", ["build", "eval", "validate"])
 def test_single_root_commands_describe_their_selection(command: str) -> None:
-    # These commands check one root: their help never promises every registered brain.
+    # Single-brain commands select one brain explicitly, by cwd/env, or from the default registered brain.
     help_text = " ".join(plain(CliRunner().invoke(app, [command, "--help"]).stdout).replace("│", " ").split())
-    assert "the only registered brain present" in help_text
+    assert "default registered brain" in help_text
     assert "every registered brain" not in help_text
 
 
@@ -284,12 +289,20 @@ def test_root_help_explains_first_use_and_output() -> None:
     assert "bf init ~/brain" in help_text
     assert "JSON" in help_text
     assert "bf COMMAND --help" in help_text
-    assert {"run", "skills"} <= set(COMMANDS)
+    assert {"guide", "register", "run", "skill", "unregister"} <= set(COMMANDS)
 
 
 @pytest.mark.parametrize(
     ("command", "argument"),
-    [("search", "QUERY"), ("read", "REF"), ("collect", "SENSOR"), ("init", "PATH"), ("skills", "DIR")],
+    [
+        ("search", "QUERY"),
+        ("read", "REF"),
+        ("collect", "SENSOR"),
+        ("init", "PATH"),
+        ("register", "PATH"),
+        ("unregister", "TARGET"),
+        ("guide", "TOPIC"),
+    ],
 )
 def test_help_names_arguments_as_the_reference_does(command: str, argument: str) -> None:
     # The usage line, its errors and the command reference name each argument alike.
@@ -327,7 +340,7 @@ def test_a_closed_standard_output_fails_before_anything_runs(
     with pytest.raises(SystemExit) as exited:
         main()
     assert (exited.value.code, capsys.readouterr().err) == (1, message)
-    assert not (tmp_path / "brain/.bf").exists()
+    assert not (tmp_path / "brain/.bf/cache.sqlite3").exists()
 
 
 @pytest.mark.parametrize(
@@ -474,15 +487,20 @@ def test_a_directory_name_without_a_plain_form_asks_for_a_name(tmp_path: Path, d
 
 
 def test_arguments_that_are_not_utf8_are_invalid_before_anything_is_written(tmp_path: Path) -> None:
-    # init and skills used to write everything, then fail to print the path; register showed pydantic's error.
+    # Bad UTF-8 arguments fail validation before init/register/unregister/guide touch disk.
     parent = tmp_path / "parent"
     parent.mkdir()
     target = os.fsencode(parent) + b"/bad\xff"
-    for arguments in ([b"init", target, b"--name", b"bad"], [b"skills", target], [b"register", target]):
+    cases = [
+        ([b"init", target, b"--name", b"bad"], b"PATH"),
+        ([b"register", target], b"PATH"),
+        ([b"unregister", target], b"TARGET"),
+        ([b"guide", b"bad\xff"], b"[TOPIC]"),
+    ]
+    for arguments, hint in cases:
         result = subprocess.run(  # noqa: S603 - fixed interpreter and synthetic CLI arguments
             [sys.executable, "-m", "bf", *arguments], capture_output=True, timeout=120, check=False
         )
-        hint = b"DIR" if arguments[0] == b"skills" else b"PATH"
         assert (result.returncode, result.stdout) == (2, b"")
         assert result.stderr == b"bf: invalid input: %s: expected UTF-8 text (see python -m bf %s -h)\n" % (
             hint,
@@ -577,7 +595,7 @@ def test_action_commands_create_and_settle_actions(brain: Store) -> None:
     )
 
 
-def test_export_items_emits_values_attributes_and_observed_since(brain: Store) -> None:
+def test_export_items_emits_relations_attributes_and_observed_since(brain: Store) -> None:
     from pydantic import JsonValue
 
     from bf.models import Record, encode
@@ -585,12 +603,13 @@ def test_export_items_emits_values_attributes_and_observed_since(brain: Store) -
 
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nfields:\n  topic:\n    description: Topics\n    type: string\n    cardinality: many\n"
-        b"sensors:\n  feed:\n    command: [echo]\n    fields:\n      topic:\n        path: /attributes/topics\n",
+        b'version: 9\nname: fixture\nfields:\n  topic:\n    description: Topics\n    targets: ["topic:"]\n'
+        b"sensors:\n  feed:\n    command: [echo]\n",
     )
     brain.write(
         "projects/tagged.md",
-        b"---\ntype: project\nstatus: stable\nupdated: 2026-09-25\nfields:\n  topic: [alpha, beta]\n---\n\n# Tagged\n",
+        b"---\ntype: project\nstatus: stable\nupdated: 2026-09-25\n"
+        b"relations:\n  topic: [topic:alpha, topic:beta]\nattributes:\n  priority: high\n---\n\n# Tagged\n",
     )
     cases: tuple[tuple[str, str, list[JsonValue]], ...] = (
         ("old", "2026-09-01T00:00:00Z", ["legacy"]),
@@ -599,12 +618,13 @@ def test_export_items_emits_values_attributes_and_observed_since(brain: Store) -
     for rec_id, obs, topics in cases:
         rec = Record(
             id=rec_id,
+            type="Note",
             title=f"Item {rec_id}",
             time=obs,
-            fields={"topic": topics},
+            relations={"topic": [f"topic:{t}" for t in topics]},
             attributes={"observed": obs, "topics": topics, "priority": "high"},
         )
-        brain.write(record_path("feed", rec.id), encode(rec.model_dump(exclude_defaults=True)))
+        brain.write(record_path("feed", rec.id), encode(rec.model_dump(by_alias=True, exclude_defaults=True)))
 
     runner = CliRunner()
     wrong_kind = runner.invoke(app, ["export", "--kind", "edges", "--observed-since", "7d", "--brain", str(brain.root)])
@@ -613,7 +633,8 @@ def test_export_items_emits_values_attributes_and_observed_since(brain: Store) -
     all_exported = runner.invoke(app, ["export", "--kind", "items", "--brain", str(brain.root)])
     assert all_exported.exit_code == 0, all_exported.output
     all_rows = {row["ref"]: row for row in (json.loads(line) for line in all_exported.stdout.splitlines())}
-    assert all_rows["projects/tagged.md"]["values"] == {"topic": ["alpha", "beta"]}
+    assert all_rows["projects/tagged.md"]["relations"] == {"topic": ["topic:alpha", "topic:beta"]}
+    assert all_rows["projects/tagged.md"]["attributes"] == {"priority": "high"}
     assert "feed:old" in all_rows
 
     exported = runner.invoke(
@@ -624,7 +645,8 @@ def test_export_items_emits_values_attributes_and_observed_since(brain: Store) -
     rows = {row["ref"]: row for row in (json.loads(line) for line in exported.stdout.splitlines())}
     assert "feed:old" not in rows
     recent_row = rows["feed:recent"]
-    assert recent_row["values"] == {"topic": ["gamma", "delta"]}
+    assert recent_row["@type"] == "Note"
+    assert recent_row["relations"] == {"topic": ["topic:gamma", "topic:delta"]}
     assert recent_row["attributes"]["priority"] == "high"
 
 
@@ -633,7 +655,7 @@ def test_action_status_preserves_rich_frontmatter_and_resolves_unique_slugs(brai
 
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nfields:\n  priority:\n    description: Priority.\n    type: string\n",
+        b"version: 9\nname: fixture\n",
     )
     runner = CliRunner()
     created = runner.invoke(app, ["action", "new", "audit-logs", "--unique", "--brain", str(brain.root)])
@@ -644,7 +666,7 @@ def test_action_status_preserves_rich_frontmatter_and_resolves_unique_slugs(brai
     brain.write(
         action_path,
         b"---\ntype: action\nstatus: draft\nupdated: 2026-09-20\nsummary: Keep keys\ntags: [ops, audit]\n"
-        b"fields:\n  priority: high\n---\n# Audit logs\n\n## Outcome\n\nSettled.\n",
+        b"attributes:\n  priority: high\n---\n# Audit logs\n\n## Outcome\n\nSettled.\n",
     )
     updated = runner.invoke(app, ["action", "status", "audit-logs", "stable", "--brain", str(brain.root)])
     assert updated.exit_code == 0, updated.output
@@ -652,7 +674,7 @@ def test_action_status_preserves_rich_frontmatter_and_resolves_unique_slugs(brai
     parts = raw_text.split("---\n")
     assert len(parts) == 3
     meta = yaml.safe_load(parts[1])
-    assert (meta["type"], meta["status"], meta["summary"], meta["tags"], meta["fields"]) == (
+    assert (meta["type"], meta["status"], meta["summary"], meta["tags"], meta["attributes"]) == (
         "action",
         "stable",
         "Keep keys",

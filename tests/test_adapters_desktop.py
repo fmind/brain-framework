@@ -113,7 +113,7 @@ def test_bf_channel_send_accepts_the_receipt(provider: Provider, brain: Store, m
     brain.write("channels/_bf.py", (ROOT / "examples" / FOLDER / "_bf.py").read_bytes())
     brain.write("channels/desktop.py", (ROOT / "examples" / FOLDER / ADAPTER).read_bytes())
     channel = {"desktop": {"send": {"command": ["python3", "channels/desktop.py", "send"]}}}
-    brain.write("bf.yaml", yaml.safe_dump({"version": 8, "name": "fixture", "channels": channel}).encode())
+    brain.write("bf.yaml", yaml.safe_dump({"version": 9, "name": "fixture", "channels": channel}).encode())
     # Either platform's notifier: the adapter picks one by sys.platform.
     for notifier in ("notify-send", "osascript"):
         provider.install(notifier, [{"match": [], "stdout": ""}])

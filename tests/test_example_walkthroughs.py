@@ -29,7 +29,7 @@ def export() -> str:
             [
                 '"score":"16/16"',
                 export(),
-                '"ref":"demo:retention","source":"demo","text":"Keep original evidence because upstream content can disappear."',
+                '"ref":"demo:retention","relations":{"repository":["repo:example/project"]},"source":"demo","text":"Keep original evidence because upstream content can disappear."',
                 '"state":"unchanged"',
                 '"state":"changed"',
                 '"brain":"example-team"',
@@ -91,16 +91,6 @@ def export() -> str:
                 "The hook refused the second commit.",
                 '"status":"failed"',
                 '{"error":"broken link: plan.md","file":"projects/launch.md"}',
-            ],
-        ),
-        (
-            "team",
-            0,
-            [
-                '{"notes":4,"problems":[],"records":3,"valid":true}',
-                "CONFLICT (content): Merge conflict in memories/issues/",
-                '{"error":"invalid JSON document","file":"memories/issues/',
-                "Validation rejected the unresolved record.",
             ],
         ),
     ],

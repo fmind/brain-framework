@@ -19,7 +19,7 @@ from mcp.types import CallToolResult, TextContent
 from typer.testing import CliRunner
 
 from bf.cli import app
-from bf.config import select, user_path
+from bf.config import register, select, user_path
 from bf.mcp import INSTRUCTIONS, server
 from bf.models import Error
 from bf.schemas import document
@@ -42,7 +42,7 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
     brain.write(
         "actions/2026-09-27_work/ACTION.md", b"# Work\n\n## Next\n\n- [ ] Resume the task.\n- [x] Gather evidence.\n"
     )
-    mcp = server([brain])
+    mcp = server(brain)
 
     async def check() -> None:
         tools = await mcp.list_tools()
@@ -98,7 +98,7 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
             assert json.loads(text(result)) == invoke("read", ref, "--brain", "fixture")
         tasks = invoke("read", "tasks", "--brain", "fixture")
         assert tasks["summary"] == {"open": 1, "done": 1, "notes": 1}
-        assert "Resume the task." in invoke("read", tasks["items"][0]["ref"])["text"]
+        assert "Resume the task." in invoke("read", tasks["items"][0]["ref"], "--brain", "fixture")["text"]
         result = await mcp.call_tool("search", {"query": "evidence", "scope": tag})
         assert json.loads(text(result)) == invoke("search", "evidence", "--scope", tag, "--brain", "fixture")
         # One contract with the CLI: a bf:// address, not a separate argument, chooses the brain.
@@ -106,6 +106,10 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
         linked = await mcp.call_tool("read", {"ref": "projects/offline.md", "rel": "links"})
         assert json.loads(text(linked)) == invoke("read", "projects/offline.md", "--rel", "links", "--brain", "fixture")
         assert json.loads(text(linked))["items"][0]["ref"] == "meetings:decision-1"
+        undeclared = await mcp.call_tool("read", {"ref": "projects/offline.md", "rel": "owner"})
+        assert isinstance(undeclared, CallToolResult)
+        assert not undeclared.is_error
+        assert json.loads(text(undeclared))["items"] == []
         # Unknown arguments fail like unknown CLI options: 13's `brain`, or a misspelled scope, never widens a read.
         assert all(tool.input_schema["additionalProperties"] is False for tool in tools)
         for name, arguments in [
@@ -158,7 +162,7 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
             ("read", {"ref": "tags/a\\b"}, "invalid input: ref: invalid tag label; read the tags page and use one"),
             ("read", {"offset": 1}, "invalid input: offset: offset applies to listing pages"),
             ("read", {"ref": "projects/", "rel": "links"}, "invalid input: rel: rel lists the links to a note"),
-            ("read", {"ref": "projects/offline.md", "rel": "owner"}, "invalid input: rel: undeclared relation; use"),
+            ("read", {"ref": "projects/offline.md", "rel": "tagged-with"}, "invalid input: rel: invalid relation; use"),
         ]:
             failed = await mcp.call_tool(name, arguments)
             assert isinstance(failed, CallToolResult)
@@ -179,25 +183,28 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
     asyncio.run(check())
 
 
-def test_qualified_mcp_reads_keep_backlinks_from_referenced_brains(brain: Store, tmp_path: Path) -> None:
-    (tmp_path / "team").mkdir()
-    team = Store(tmp_path / "team")
-    team.write("bf.yaml", b"version: 8\nname: team\n")
-    team.write("projects/linker.md", b"# Linker\n\nSee [offline](bf://fixture/projects/offline.md).\n")
-    brain.write("bf.yaml", f"version: 8\nname: fixture\nbrains:\n  team:\n    path: {team.root}\n".encode())
+def test_qualified_mcp_reads_keep_backlinks_and_reject_other_brains(brain: Store) -> None:
+    brain.write("projects/linker.md", b"# Linker\n\nSee [offline](bf://fixture/projects/offline.md).\n")
     expected = invoke("read", "bf://fixture/projects/offline.md", "--brain", str(brain.root))
 
     async def check() -> None:
-        result = await server([brain]).call_tool("read", {"ref": "bf://fixture/projects/offline.md"})
+        mcp = server(brain)
+        result = await mcp.call_tool("read", {"ref": "bf://fixture/projects/offline.md"})
         assert json.loads(text(result)) == expected
+        foreign = await mcp.call_tool("read", {"ref": "bf://other/projects/offline.md"})
+        assert isinstance(foreign, CallToolResult)
+        assert foreign.is_error
+        assert "unknown brain other; this brain is fixture" in text(foreign)
 
     asyncio.run(check())
-    linked = {(item["brain"], item["ref"]) for group in expected["backlinks"] for item in group["items"]}
-    assert ("team", "projects/linker.md") in linked
+    assert expected["uri"] == "bf://fixture/projects/offline.md"
+    assert expected["brain"] == "fixture"
+    linked = {item["ref"] for group in expected["backlinks"] for item in group["items"]}
+    assert "projects/linker.md" in linked
 
 
-@pytest.mark.usefixtures("brain")
-def test_mcp_stdio_handshake(tmp_path: Path) -> None:
+def test_mcp_stdio_handshake(brain: Store, tmp_path: Path) -> None:
+    register(brain, default=True)
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
@@ -293,12 +300,12 @@ def test_an_unexpected_mcp_failure_reveals_nothing(brain: Store, monkeypatch: py
     monkeypatch.setattr("bf.mcp.read", failing)
     # A bug, as in the CLI: the SDK reports a generic failure without the exception's text.
     with pytest.raises(UnexpectedToolError) as raised:
-        asyncio.run(server([brain]).call_tool("read", {"ref": "projects/offline.md"}))
+        asyncio.run(server(brain).call_tool("read", {"ref": "projects/offline.md"}))
     assert str(brain.root) not in str(raised.value)
 
 
-@pytest.mark.usefixtures("brain")
-def test_mcp_resolves_the_selection_for_each_call(tmp_path: Path) -> None:
+def test_mcp_resolves_the_selection_for_each_call(brain: Store, tmp_path: Path) -> None:
+    register(brain, default=True)
     # Validated at startup: a server that could not answer fails to start, like a CLI command.
     with pytest.raises(Error, match="brain directory does not exist"):
         server(lambda: select(str(tmp_path / "absent")))
@@ -313,7 +320,7 @@ def test_mcp_resolves_the_selection_for_each_call(tmp_path: Path) -> None:
     later = tmp_path / "later"
     invoke("init", str(later), "--name", "later")
     (later / "concepts/zephyr.md").write_text("# Zephyr\n\nA later brain.\n")
-    invoke("register", str(later))
+    invoke("register", str(later), "--default")
     # Before 18 a registered brain reached the server only after a restart.
     assert asyncio.run(found("zephyr")) == ["concepts/zephyr.md"]
 
@@ -321,6 +328,7 @@ def test_mcp_resolves_the_selection_for_each_call(tmp_path: Path) -> None:
 def test_a_selection_that_fails_mid_session_reveals_no_path(
     brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    register(brain, default=True)
     # Each call resolves the selection again, so its errors reach the agent: they name the selection as given, never
     # the directory it resolved to, the registry file or the home directory.
     folder = Path.home() / "private-folder"
@@ -362,5 +370,5 @@ def test_a_selection_that_fails_mid_session_reveals_no_path(
 def test_mcp_errors_hide_a_short_home_only_where_a_path_starts(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     # Containers often set a short home, such as /root or /app: a note path that contains it keeps its name.
     monkeypatch.setenv("HOME", "/offline")
-    result = asyncio.run(server([brain]).call_tool("read", {"ref": "projects/offline.md#missing"}))
+    result = asyncio.run(server(brain).call_tool("read", {"ref": "projects/offline.md#missing"}))
     assert text(result).startswith("projects/offline.md: heading #missing does not exist; its sections: ")

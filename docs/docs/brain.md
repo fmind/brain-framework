@@ -35,17 +35,17 @@ Start with a single product page because visitors need a clear explanation befor
 - [ ] Draft the product page.
 ```
 
-| Field                           | Effect                                                                                                      |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `type`                          | Required kind, such as `project`, `concept` or `action`.                                                    |
-| `status`                        | `draft`, `stable` (default) or `deprecated` (closes tasks and removes the note from Home/review).           |
-| `title`                         | Listing title (falls back to first H1, then filename).                                                      |
-| `updated`                       | `YYYY-MM-DD` when meaning last changed; places the note on period pages.                                    |
-| `summary`, `description`        | Preview lead in listings and search.                                                                        |
-| `tags`                          | Case-sensitive labels (`bf read tags`; [tag rules](link-reference.md#tag-rules)).                           |
-| `stale_after`                   | ISO 8601 timestamp with timezone (`2026-10-13T00:00:00+02:00`) scheduling review.                           |
-| `entity`, `aliases`, `resource` | Exact subject identities ([identities](links.md#give-a-subject-a-stable-identity)).                         |
-| `links`, `sources`, `fields`    | Frontmatter links, OKF `cites` provenance and declared `bf.yaml` [typed fields](links.md#set-typed-fields). |
+| Field                                         | Effect                                                                                                                       |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `type`                                        | Required kind, such as `project`, `concept` or `action`.                                                                     |
+| `status`                                      | `draft`, `stable` (default) or `deprecated` (closes tasks and removes the note from Home/review).                            |
+| `title`                                       | Listing title (falls back to first H1, then filename).                                                                       |
+| `updated`                                     | `YYYY-MM-DD` when meaning last changed; places the note on period pages.                                                     |
+| `summary`, `description`                      | Preview lead in listings and search.                                                                                         |
+| `tags`                                        | Case-sensitive labels (`bf read tags`; [tag rules](link-reference.md#tag-rules)).                                            |
+| `stale_after`                                 | ISO 8601 timestamp with timezone (`2026-10-13T00:00:00+02:00`) scheduling review.                                            |
+| `entity`, `aliases`, `resource`               | Exact subject identities ([identities](links.md#give-a-subject-a-stable-identity)).                                          |
+| `links`, `sources`, `relations`, `attributes` | Frontmatter links, OKF `cites` provenance and [typed relations and attributes](links.md#set-typed-relations-and-attributes). |
 
 H2+ headings become addressable `#section` targets (`bf read projects/new-website.md#decision`), and unchecked `- [ ]` items populate `bf read tasks` (`next` previews the first open box; [task rules](retrieval.md#tasks)).
 
@@ -85,7 +85,7 @@ bf validate
 
 ## Actions
 
-Each tracked session lives in `actions/YYYY-MM-DD_topic/ACTION.md` (add a 12-hex suffix in shared Git brains; routines use 8-hex suffixes). Manage the lifecycle from the CLI or `bf-action` ([template](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/templates/action.md)):
+Each tracked session lives in `actions/YYYY-MM-DD_topic/ACTION.md` (add a 12-hex suffix in shared Git brains; routines use 8-hex suffixes). Manage the lifecycle with `bf action new` and `bf action status`:
 
 ```bash
 bf action new website-review --title "Website review" \
@@ -100,14 +100,14 @@ bf read actions/2026-09-27_website-review/ACTION.md#resume
 
 ## Records
 
-Sensors store one JSON file per item at `memories/SOURCE/<sha256-id>.json`, addressed as `SOURCE:ID` (`id`, `title`, optional `text`, `time`, `url`, `links`, `aliases`, `attributes` and BF-mapped `fields`; [record revisions](schema.md#record-revisions-and-provenance)).
+Sensors store one JSON file per item at `memories/SOURCE/<sha256-id>.json`, addressed as `SOURCE:ID` (`id`, `title`, optional `@type`, `text`, `time`, `url`, `links`, `aliases`, `relations`, `attributes`; [record format](schema.md#record-schema)).
 
 ## Directory reference
 
 `bf init PATH` creates the core layout (`--full` adds `memories/`, `assets/`, `sensors/`, `routines/` and `skills/`):
 
 ```text
-bf.yaml                                  # name, fields, sensors, routines, assistants, channels, watch
+bf.yaml                                  # name, ontology, sensors, routines, assistants, channels, watch
 AGENTS.md                                # instructions for agents in this brain
 projects/<project>.md                    # project state, decisions and open tasks
 concepts/index.md, concepts/<concept>.md # reusable OKF concepts
@@ -116,7 +116,7 @@ memories/<source>/<sha256-id>.json       # collected records and assistant run r
 evals/*.yaml                             # retrieval suites for bf eval
 sensors/, routines/, prompts/, channels/ # programs and prompts declared in bf.yaml
 hooks/, skills/, assets/                 # host hooks, brain workflow skills and linked media
-logs/, inputs/, originals/, .bf/         # Git-ignored logs, staging/captures and disposable SQLite cache
+logs/, inputs/, originals/, .bf/         # Git-ignored logs, captures, cache, locks, runtime queue and usage
 ```
 
-Back up `memories/`, `inputs/`, `originals/` and `$XDG_STATE_HOME/bf/runtime/` ([queue recovery](channels.md#queue-and-recovery)); only `.bf/` and `logs/` are disposable while idle. Separate private and shared brains with `brains:` ([team setup](team.md), [configuration](configuration.md#related-brains), [agent workflows](agents.md#decision-workflows)).
+Back up `memories/`, `inputs/`, `originals/` and `.bf/runtime.sqlite3` ([queue recovery](channels.md#queue-and-recovery)); `.bf/cache.sqlite3` and `logs/` are disposable while idle. See [configuration](configuration.md) and [agent workflows](agents.md#decision-workflows).

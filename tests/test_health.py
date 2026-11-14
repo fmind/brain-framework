@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -16,7 +17,7 @@ from typing import cast
 import pytest
 from typer.testing import CliRunner
 
-from bf import assistants, health, index, records
+from bf import assistants, health, index, records, usage
 from bf.cli import app
 from bf.collect import collect, routine
 from bf.config import ABSENT, load, register
@@ -26,14 +27,14 @@ from bf.messages import Message
 from bf.models import WEEKDAYS, Error, Query, encode, timestamp
 from bf.retrieve import read, search
 from bf.runtime import Queue
-from bf.storage import QUEUE, Store, runtime_store, state_store
+from bf.storage import QUEUE, Store, private_dir
 from bf.update import update
 
 
 def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n"
+        b"version: 9\nname: fixture\nsensors:\n"
         b"  mail:\n    command: [echo]\n    refresh: 3600\n    reconcile: {refresh: 86400, lookback: 604800}\n"
         b"  folders:\n    command: [echo]\n    mode: snapshot\n    refresh: 86400\n"
         b"routines:\n  review:\n    command: [review]\n    refresh: 86400\n",
@@ -46,7 +47,7 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
     with pytest.raises(Error, match="invalid JSON"):
         collect(brain, "folders", start=week, end=at, runner=lambda *_: b"broken", clock=lambda: now)
     routine(brain, "review", start=week, end=at, runner=lambda *_: b"", clock=lambda: now)
-    status = cast("dict", health.report([brain], now=now))["brains"][0]
+    status = cast("dict", health.report(brain, now=now))
     mail = status["sources"]["mail"]
     # The coverage shape shared with search and read, plus indexed totals and local run details.
     assert set(mail) == {
@@ -79,7 +80,7 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
     # Before 17 an unhealthy brain listed no reason: attention names the programs, as the home page does.
     assert status["attention"] == [{"kind": "sensor", "name": "folders", "freshness": "never", "failed": True}]
     assert status["problems"] == []
-    assert not cast("dict", health.report([brain], now=now))["healthy"]
+    assert not cast("dict", health.report(brain, now=now))["healthy"]
     # Every reply instant uses one canonical UTC form, so clients can compare them as strings.
     instants = re.findall(r'"(\d{4}-\d\d-\d\dT[^"]*)"', json.dumps(status))
     assert instants
@@ -89,52 +90,62 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
 def test_history_offsets_read_back_as_canonical_utc_in_status_and_home(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n"
+        b"version: 9\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n"
         b"routines:\n  review:\n    command: [review]\n    refresh: 60\n",
     )
     local = "2026-09-23T15:00:00+02:00"
-    state_store(brain.root).write(
+    private_dir(brain, ".bf", "state").write(
         "sensors.json", encode({"mail": {"success": local, "start": local, "end": local, "run": local}})
     )
-    state_store(brain.root).write(
+    private_dir(brain, ".bf", "state").write(
         "routines.json", encode({"review": {"success": local, "run": local, "error": "failed"}})
     )
     now = datetime(2026, 9, 23, 14, tzinfo=UTC)
     # Status and the home page's attention list read the same private history.
-    replies = [health.report([brain], now=now), read([brain])]
+    replies = [health.report(brain, now=now), read(brain)]
     instants = re.findall(r'"(\d{4}-\d\d-\d\dT[^"]*)"', json.dumps(replies))
     assert "2026-09-23T13:00:00.000000Z" in instants
     assert all(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z", instant) for instant in instants)
 
 
-@pytest.mark.parametrize("results", ["1e999", "-1", "true", '"0"', "0.5"])
-def test_invalid_usage_counts_do_not_break_health_or_hide_valid_events(brain: Store, results: str) -> None:
-    now = datetime.now(UTC).isoformat()
-    state_store(brain.root).write(
-        "usage.jsonl",
-        (
-            f'{{"at":"{now}","op":"search","results":{results}}}\n'
-            '{"at":"9999-12-31T23:59:59Z","op":"search","results":0}\n'
-            f'{{"at":"{now}","op":"search","results":0}}\n'
-            f'{{"at":"{now}","op":"read","results":1}}\n'
-        ).encode(),
-    )
+def test_invalid_usage_counts_do_not_break_health_or_hide_valid_events(brain: Store) -> None:
+    usage.note(brain, "search", 0, kind="none")
+    usage.note(brain, "read", 1, kind="note")
+    with closing(sqlite3.connect(brain.root / usage.USAGE)) as connection, connection:
+        connection.execute("INSERT INTO usage_days(day,search,empty,read) VALUES(?,?,?,?)", ("bad-date", 9, 9, 9))
+        connection.execute("INSERT INTO usage_days(day,search,empty,read) VALUES(?,?,?,?)", ("9999-12-31", 9, 9, 9))
+        connection.execute(
+            "INSERT INTO usage_days(day,search,empty,read) VALUES(?,?,?,?)",
+            ((datetime.now(UTC).date() - timedelta(days=1)).isoformat(), -5, 10, -2),
+        )
     result = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
     assert result.exit_code == 0, result.exception
-    usage = json.loads(result.stdout)["brains"][0]["usage"]
-    assert usage == {period: {"search": 1, "empty": 1, "read": 1} for period in ("7d", "30d")}
+    expected = {
+        "search": 1,
+        "empty": 1,
+        "read": 1,
+        "kinds": {"read": {"note": 1}, "search": {"none": 1}},
+        "empty_kinds": {"none": 1},
+    }
+    assert json.loads(result.stdout)["usage"] == dict.fromkeys(("7d", "30d"), expected)
+    brain.write(usage.USAGE, b"not sqlite")
+    corrupt = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
+    assert corrupt.exit_code == 0, corrupt.exception
+    assert json.loads(corrupt.stdout)["usage"] == {
+        period: {"search": 0, "empty": 0, "read": 0} for period in ("7d", "30d")
+    }
 
 
 def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n"
+        b"version: 9\nname: fixture\nsensors:\n"
         b"  current:\n    command: [echo]\n    refresh: 3600\n"
         b"  missing:\n    command: [echo]\n    refresh: 3600\n"
         b"  paused:\n    command: [echo]\n    enabled: false\n"
         b"  manual:\n    command: [echo]\n",
     )
-    state_store(brain.root).write(
+    private_dir(brain, ".bf", "state").write(
         "sensors.json",
         encode(
             {
@@ -160,7 +171,7 @@ def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> 
 
 
 def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 8\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
+    brain.write("bf.yaml", b"version: 9\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
     brain.write(
         "memories/current/ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb.json",
         b'{"id":"a","title":"First"}\n',
@@ -169,10 +180,10 @@ def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store)
         "memories/current/3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d.json",
         b'{"id":"b","title":"Second"}\n',
     )
-    state_store(brain.root).write("sensors.json", encode({"current": {"records": 1, "unchanged": 1}}))
+    private_dir(brain, ".bf", "state").write("sensors.json", encode({"current": {"records": 1, "unchanged": 1}}))
     result = CliRunner().invoke(app, ["status", "--brain", str(brain.root)])
     assert result.exit_code == 0, result.output
-    report = json.loads(result.stdout)["brains"][0]
+    report = json.loads(result.stdout)
     assert report["sources"]["current"]["records"] == 2
     assert report["sources"]["current"]["last_run"] == {"records": 1, "unchanged": 1}
     assert report["coverage"]["active"] == {"sources": 1, "records": 2}
@@ -181,9 +192,9 @@ def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store)
 def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failures_are_inactive(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n  agenda:\n    command: [echo]\n    mode: snapshot\n    enabled: false\n",
+        b"version: 9\nname: fixture\nsensors:\n  agenda:\n    command: [echo]\n    mode: snapshot\n    enabled: false\n",
     )
-    state_store(brain.root).write(
+    private_dir(brain, ".bf", "state").write(
         "sensors.json",
         encode({"agenda": {"start": "2026-09-22T00:00:00Z", "end": "2026-09-23T00:00:00Z", "error": "old failure"}}),
     )
@@ -196,71 +207,51 @@ def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failure
 
 def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) -> None:
     brain.write(
-        "bf.yaml", b"version: 8\nname: fixture\nsensors:\n  meetings:\n    command: [echo]\n    refresh: 3600\n"
+        "bf.yaml", b"version: 9\nname: fixture\nsensors:\n  meetings:\n    command: [echo]\n    refresh: 3600\n"
     )
-    record = cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])
-    found = cast("list[dict[str, object]]", search([brain], Query(text="offline retrieval"))["sources"])
+    record = cast("dict[str, object]", read(brain, "meetings:decision-1")["collection"])
+    found = cast("list[dict[str, object]]", search(brain, Query(text="offline retrieval"))["sources"])
     status = source_health(brain)["meetings"]
     # The scheduled sensor never succeeded on this machine: every reply says so.
     assert record["freshness"] == found[0]["freshness"] == status["freshness"] == "never"
     register(brain)
-    record = cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])
+    record = cast("dict[str, object]", read(brain, "meetings:decision-1")["collection"])
     assert record["freshness"] == "never"
 
 
-@pytest.mark.usefixtures("brain")
-def test_status_reports_a_broken_brain_and_still_reports_the_others(tmp_path: Path) -> None:
-    # The broken brain keeps its registered name, not its directory's.
+def test_status_fails_on_a_broken_brain(tmp_path: Path) -> None:
     (tmp_path / "other-dir").mkdir()
     other = Store(tmp_path / "other-dir")
-    other.write("bf.yaml", b"version: 8\nname: other\n")
-    register(other)
-    other.write("bf.yaml", b"version: 8\nname: [broken\n")
-    result = CliRunner().invoke(app, ["status"])
-    assert result.exit_code == 0, result.output
-    brains = json.loads(result.stdout)["brains"]
-    assert [entry["brain"] for entry in brains] == ["fixture", "other"]
-    assert brains[1]["error"] == "bf.yaml: invalid YAML at line 3, column 1"
-    assert CliRunner().invoke(app, ["status", "--check"]).exit_code == 1
-    # Word, known-identity and unknown-identity searches report it once, by the same name.
-    for query in ("offline", "repo:example/project", "repo:example/absent"):
-        found = CliRunner().invoke(app, ["search", query])
-        assert found.exit_code == 0, found.output
-        assert json.loads(found.stdout)["problems"] == [{"brain": "other", "error": brains[1]["error"]}]
-    # A brain chosen alone still fails with the named file.
-    alone = CliRunner().invoke(app, ["status", "--brain", str(other.root)])
-    assert alone.exit_code == 1
-    assert "bf.yaml: invalid YAML at line 3" in str(alone.exception)
+    other.write("bf.yaml", b"version: 9\nname: other\n")
+    register(other, default=True)
+    other.write("bf.yaml", b"version: 9\nname: [broken\n")
+    for command in (["status"], ["status", "--check"], ["status", "--brain", str(other.root)]):
+        result = CliRunner().invoke(app, command)
+        assert result.exit_code == 1
+        assert "bf.yaml: invalid YAML at line 3" in str(result.exception)
 
 
-def test_status_reports_a_broken_brain_beside_an_unavailable_one(tmp_path: Path) -> None:
-    # Of two registered brains, one moved away and the other's bf.yaml broke: neither hides the other.
-    for name in ("moved", "broken"):
-        (tmp_path / name).mkdir()
-        Store(tmp_path / name).write("bf.yaml", f"version: 8\nname: {name}\n".encode())
-        register(Store(tmp_path / name))
-    broken = Store(tmp_path / "broken")
-    broken.write("bf.yaml", b"version: 8\nname: [broken\n")
+def test_status_fails_when_the_default_brain_is_absent(tmp_path: Path) -> None:
+    (tmp_path / "moved").mkdir()
+    moved = Store(tmp_path / "moved")
+    moved.write("bf.yaml", b"version: 9\nname: moved\n")
+    register(moved, default=True)
     (tmp_path / "moved").rename(tmp_path / "elsewhere")
-    result = CliRunner().invoke(app, ["status"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["brains"] == [
-        {"brain": "moved", "error": ABSENT},
-        {"brain": "broken", "path": str(broken.root), "error": "bf.yaml: invalid YAML at line 3, column 1"},
-    ]
-    assert CliRunner().invoke(app, ["status", "--check"]).exit_code == 1
+    result = CliRunner().invoke(app, ["status", "--check"])
+    assert result.exit_code == 1
+    assert ABSENT in str(result.exception)
 
 
 def test_status_warns_without_failing_when_a_scanned_tree_nears_the_scan_limit(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     command = ["status", "--check", "--brain", str(brain.root)]
-    assert "warnings" not in json.loads(CliRunner().invoke(app, command).stdout)["brains"][0]
+    assert "warnings" not in json.loads(CliRunner().invoke(app, command).stdout)
     # Pretend the two meeting records fill over 80% of what one source may hold.
     monkeypatch.setattr(index, "CROWDED", 1)
     result = CliRunner().invoke(app, command)
     assert result.exit_code == 0, result.output
-    entry = json.loads(result.stdout)["brains"][0]
+    entry = json.loads(result.stdout)
     assert entry["warnings"] == [
         {"warning": "directory nears the scan limit", "directory": "memories/meetings", "entries": 2, "limit": 100_000}
     ]
@@ -280,28 +271,28 @@ def test_status_reports_an_interrupted_transaction_instead_of_failing(brain: Sto
     command = ["status", "--check", "--brain", str(brain.root)]
     result = CliRunner().invoke(app, command)
     assert result.exit_code == 1
-    entry = json.loads(result.stdout)["brains"][0]
+    entry = json.loads(result.stdout)
     # Status never applies the journal: it describes the last generation and names the recovery.
     assert entry["pending_transaction"] is True
     assert entry["problems"][0]["error"].endswith("run bf update or bf build to recover it")
     assert (entry["cache"], entry["notes"]) == (("stale", 2) if cached else ("missing", 0))
     assert brain.read("memories/.pending/manifest.json")
     assert update(brain)["ok"]
-    recovered = json.loads(CliRunner().invoke(app, command).stdout)["brains"][0]
+    recovered = json.loads(CliRunner().invoke(app, command).stdout)
     assert "pending_transaction" not in recovered
     assert (recovered["cache"], recovered["problems"]) == ("ready", [])
 
 
 def test_status_reports_the_bytes_each_source_holds(brain: Store) -> None:
     sizes = [(brain.root / records.path("meetings", key)).stat().st_size for key in ("decision-1", "lunch")]
-    entry = cast("dict", health.report([brain]))["brains"][0]
+    entry = cast("dict", health.report(brain))
     assert entry["sources"]["meetings"]["bytes"] == sum(sizes)
 
 
 def test_a_source_that_succeeds_without_new_evidence_falls_silent(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n"
+        b"version: 9\nname: fixture\nsensors:\n"
         b"  papers:\n    command: [echo]\n    refresh: 86400\n    silent_after: 345600\n"
         b"  quiet:\n    command: [echo]\n    refresh: 86400\n",
     )
@@ -328,8 +319,8 @@ def test_a_source_that_succeeds_without_new_evidence_falls_silent(brain: Store) 
             clock=lambda: later,
         )
     index.refresh(brain)
-    full = cast("dict", health.report([brain], now=later))
-    status = full["brains"][0]
+    full = cast("dict", health.report(brain, now=later))
+    status = full
     papers = status["sources"]["papers"]
     # The event time is old, the change is when this brain first saw the record.
     assert (papers["freshness"], papers["silent"], papers["changed"]) == ("fresh", True, "2026-09-20T13:00:00.000000Z")
@@ -347,26 +338,26 @@ def test_a_source_that_succeeds_without_new_evidence_falls_silent(brain: Store) 
         clock=lambda: later,
     )
     index.refresh(brain)
-    assert cast("dict", health.report([brain], now=later))["brains"][0]["attention"] == []
+    assert cast("dict", health.report(brain, now=later))["attention"] == []
 
 
 def test_status_names_the_installed_and_pinned_runtime(brain: Store) -> None:
-    status = cast("dict", health.report([brain]))["brains"][0]
+    status = cast("dict", health.report(brain))
     assert set(status["runtime"]) == {"installed"}
     brain.write(
         "uv.lock",
         b'version = 1\n\n[[package]]\nname = "brain-framework"\nversion = "17.2.0"\n\n'
         b'[[package]]\nname = "other"\nversion = "1.0"\n',
     )
-    assert cast("dict", health.report([brain]))["brains"][0]["runtime"]["pinned"] == "17.2.0"
+    assert cast("dict", health.report(brain))["runtime"]["pinned"] == "17.2.0"
     # A lock that does not parse pins nothing: status never fails on it, even nested past the recursion limit or
     # holding an integer past Python's digit limit.
     for lock in (b"[[package\n", b"a = " + b"[" * 100_000 + b"]" * 100_000, b"a = " + b"1" * 5000):
         brain.write("uv.lock", lock)
-        assert "pinned" not in cast("dict", health.report([brain]))["brains"][0]["runtime"]
+        assert "pinned" not in cast("dict", health.report(brain))["runtime"]
 
 
-ASSISTED = b"""version: 8
+ASSISTED = b"""version: 9
 name: fixture
 sensors: {}
 channels:
@@ -399,11 +390,11 @@ def incoming(key: str = "message-1") -> Message:
 
 def test_retrieval_and_status_never_create_or_write_lock_the_queue(brain: Store) -> None:
     assisted(brain)
-    database = runtime_store(brain).root / QUEUE
-    search([brain], Query(text="offline retrieval"))
-    read([brain], "meetings:decision-1")
-    read([brain])
-    assert health.report([brain])["healthy"]
+    database = brain.root / QUEUE
+    search(brain, Query(text="offline retrieval"))
+    read(brain, "meetings:decision-1")
+    read(brain)
+    assert health.report(brain)["healthy"]
     # Reading reports nothing yet: only execution creates and binds the queue.
     assert not database.exists()
     assistants.accept(brain, "chat", [incoming()], {"personal"})
@@ -412,8 +403,8 @@ def test_retrieval_and_status_never_create_or_write_lock_the_queue(brain: Store)
     try:
         writer.execute("BEGIN IMMEDIATE")
         started = time.monotonic()
-        status = cast("dict", health.report([brain]))["brains"][0]
-        assert read([brain], "meetings:decision-1")["ref"] == "meetings:decision-1"
+        status = cast("dict", health.report(brain))
+        assert read(brain, "meetings:decision-1")["ref"] == "meetings:decision-1"
         assert time.monotonic() - started < 5
     finally:
         writer.close()
@@ -425,9 +416,9 @@ def test_a_queue_execution_refuses_still_leaves_reads_and_status_working(brain: 
     assistants.accept(brain, "chat", [incoming()], {"personal"})
     # Renaming the brain leaves its queue bound to the former name.
     brain.write("bf.yaml", ASSISTED.replace(b"name: fixture", b"name: renamed"))
-    assert read([brain], "meetings:decision-1")["ref"] == "meetings:decision-1"
-    status = cast("dict", health.report([brain]))
-    entry = status["brains"][0]
+    assert read(brain, "meetings:decision-1")["ref"] == "meetings:decision-1"
+    status = cast("dict", health.report(brain))
+    entry = status
     assert not status["healthy"]
     # Status names the reason instead of failing, and claims no freshness it cannot read.
     refused = (
@@ -442,7 +433,7 @@ def test_a_queue_execution_refuses_still_leaves_reads_and_status_working(brain: 
     for job in cast("list[dict]", Queue(brain).report()["jobs"]):
         Queue(brain).retry(str(job["id"]), cancel=True)
     brain.write("bf.yaml", ASSISTED.replace(b"name: fixture", b"name: renamed"))
-    entry = cast("dict", health.report([brain]))["brains"][0]
+    entry = cast("dict", health.report(brain))
     assert entry["problems"] == []
     assert "messaging" in entry
 
@@ -469,8 +460,8 @@ def test_status_names_unresolved_work_and_recovers_once_it_is_resolved(brain: St
     assistants.deliver(brain, runner=sent)
     # A dispatcher's lane checkpoint repeats what the durable job already says.
     queue.set_progress("health:reactive", {"error": "harness timed out", "at": "2026-10-17T00:00:00.000000Z"})
-    status = cast("dict", health.report([brain]))
-    attention = status["brains"][0]["attention"]
+    status = cast("dict", health.report(brain))
+    attention = status["attention"]
     assert not status["healthy"]
     assert attention == [
         {"kind": "assistant", "name": "notes", "freshness": "manual", "failed": True},
@@ -482,15 +473,13 @@ def test_status_names_unresolved_work_and_recovers_once_it_is_resolved(brain: St
     for delivery in cast("list[dict]", queue.report()["deliveries"]):
         queue.retry(str(delivery["id"]), cancel=True)
     # Resolved work no longer fails the check, whatever a stopped dispatcher's lane checkpoints still hold.
-    status = cast("dict", health.report([brain]))
-    assert status["brains"][0]["attention"] == []
+    status = cast("dict", health.report(brain))
+    assert status["attention"] == []
     assert status["healthy"]
     # A running stream's error names its channel until watch clears it.
     queue.set_progress("health:channel:chat", {"error": "stream exited", "at": "2026-10-17T00:00:00.000000Z"})
-    status = cast("dict", health.report([brain]))
-    assert status["brains"][0]["attention"] == [
-        {"kind": "channel", "name": "chat", "freshness": "unknown", "failed": True}
-    ]
+    status = cast("dict", health.report(brain))
+    assert status["attention"] == [{"kind": "channel", "name": "chat", "freshness": "unknown", "failed": True}]
     assert not status["healthy"]
 
 
@@ -501,15 +490,13 @@ def test_status_names_an_assistant_whose_work_cannot_start(brain: Store) -> None
     queue.set_progress(
         "health:assistant:notes", {"error": "assistant queue is full", "at": "2026-10-17T00:00:00.000000Z"}
     )
-    status = cast("dict", health.report([brain]))
+    status = cast("dict", health.report(brain))
     assert not status["healthy"]
-    assert {"kind": "assistant", "name": "notes", "freshness": "manual", "failed": True} in status["brains"][0][
-        "attention"
-    ]
+    assert {"kind": "assistant", "name": "notes", "freshness": "manual", "failed": True} in status["attention"]
     # Once admission succeeds, the dispatcher records an empty error and status recovers.
     queue.set_progress("health:assistant:notes", {"error": "", "at": "2026-10-17T00:01:00.000000Z"})
-    status = cast("dict", health.report([brain]))
-    assert status["brains"][0]["attention"] == []
+    status = cast("dict", health.report(brain))
+    assert status["attention"] == []
     assert status["healthy"]
 
 
@@ -545,16 +532,16 @@ def test_a_schedule_without_a_success_needs_attention_only_once_due(brain: Store
     brain.write("bf.yaml", ASSISTED.replace(b"  notes:\n", b"  notes:\n    schedules:\n" + weekdays))
     sunday, monday = datetime(2026, 9, 27, 19, 5, tzinfo=UTC), datetime(2026, 9, 28, 7, 31, tzinfo=UTC)
     # Declared on Sunday evening: it has not run, which its freshness says, but its first slot is Monday morning.
-    status = cast("dict", health.report([brain], now=sunday))
-    notes = status["brains"][0]["assistants"]["notes"]
+    status = cast("dict", health.report(brain, now=sunday))
+    notes = status["assistants"]["notes"]
     assert (notes["freshness"], notes["schedules"]["morning"]["freshness"]) == ("never", "never")
     assert notes["schedules"]["morning"]["next_due"] == timestamp(monday.replace(minute=30).isoformat())
-    assert (status["brains"][0]["attention"], status["healthy"]) == ([], True)
+    assert (status["attention"], status["healthy"]) == ([], True)
     assert attention(brain, now=sunday) == []
     # Monday's slot passed without a run: the dispatcher would start it now, so it is late.
     late = [{"kind": "assistant", "name": "notes", "freshness": "never"}]
-    status = cast("dict", health.report([brain], now=monday))
-    assert (status["brains"][0]["attention"], status["healthy"]) == (late, False)
+    status = cast("dict", health.report(brain, now=monday))
+    assert (status["attention"], status["healthy"]) == (late, False)
     assert attention(brain, now=monday) == late
     # An interval schedule without a success is due at once, even beside one that waits.
     brain.write(
@@ -577,16 +564,14 @@ def test_status_check_passes_before_a_new_schedule_first_falls_due(brain: Store)
     brain.write("bf.yaml", ASSISTED.replace(b"  notes:\n", b"  notes:\n    schedules:\n" + waiting))
     result = CliRunner().invoke(app, command)
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["brains"][0]["assistants"]["notes"]["freshness"] == "never"
+    assert json.loads(result.stdout)["assistants"]["notes"]["freshness"] == "never"
     brain.write(
         "bf.yaml",
         ASSISTED.replace(b"  notes:\n", b"  notes:\n    schedules:\n" + waiting + b"      hourly: {every: 3600}\n"),
     )
     result = CliRunner().invoke(app, command)
     assert result.exit_code == 1
-    assert json.loads(result.stdout)["brains"][0]["attention"] == [
-        {"kind": "assistant", "name": "notes", "freshness": "never"}
-    ]
+    assert json.loads(result.stdout)["attention"] == [{"kind": "assistant", "name": "notes", "freshness": "never"}]
 
 
 def test_coverage_marks_an_assistant_with_unresolved_failed_work_as_failed(brain: Store) -> None:
@@ -603,14 +588,14 @@ def test_coverage_marks_an_assistant_with_unresolved_failed_work_as_failed(brain
         return next(entry for entry in cast("list[dict]", reply["sources"]) if entry["source"] == "notes")
 
     # Search and read coverage say what status says: the latest run failed, however fresh its last record.
-    assert coverage(search([brain], Query(text="Checked", prefix="memories/notes")))["failed"] is True
+    assert coverage(search(brain, Query(text="Checked", prefix="memories/notes")))["failed"] is True
     # An unscoped search that returns none of its records still lists it.
-    assert coverage(search([brain], Query(text="Durable evidence")))["failed"] is True
-    assert cast("dict", health.report([brain]))["brains"][0]["sources"]["notes"]["failed"] is True
+    assert coverage(search(brain, Query(text="Durable evidence")))["failed"] is True
+    assert cast("dict", health.report(brain))["sources"]["notes"]["failed"] is True
     for job in cast("list[dict]", queue.report()["jobs"]):
         if job["state"] in {"failed", "uncertain"}:
             queue.retry(str(job["id"]), cancel=True)
-    assert "failed" not in coverage(search([brain], Query(text="Checked", prefix="memories/notes")))
+    assert "failed" not in coverage(search(brain, Query(text="Checked", prefix="memories/notes")))
     assert "failed" not in source_health(brain)["notes"]
 
 
@@ -618,7 +603,7 @@ def test_status_says_an_interrupted_queue_write_recovers_with_bf_queue(brain: St
     assisted(brain)
     queue = Queue(brain)
     queue.set_progress("created", {})
-    database = runtime_store(brain).root / QUEUE
+    database = brain.root / QUEUE
     # A writer killed once its journal was synced, as when it spills pages to the file mid-transaction, leaves a
     # journal only the next writer can roll back.
     killed = (
@@ -634,7 +619,7 @@ def test_status_says_an_interrupted_queue_write_recovers_with_bf_queue(brain: St
     assert process.returncode == -signal.SIGKILL
     assert database.with_name(database.name + "-journal").exists()
     interrupted = "assistant queue holds an interrupted write; run bf queue to recover it"
-    entry = cast("dict", health.report([brain]))["brains"][0]
+    entry = cast("dict", health.report(brain))
     assert {"error": interrupted} in entry["problems"]
     assert entry["assistants"]["notes"]["error"] == interrupted
     assert "failed" not in entry["sources"]["notes"]
@@ -642,7 +627,7 @@ def test_status_says_an_interrupted_queue_write_recovers_with_bf_queue(brain: St
     queue.report()
     assert not database.with_name(database.name + "-journal").exists()
     assert queue.progress("spill:0") == {}
-    entry = cast("dict", health.report([brain]))["brains"][0]
+    entry = cast("dict", health.report(brain))
     assert entry["problems"] == []
     assert "error" not in entry["assistants"]["notes"]
 
@@ -658,7 +643,7 @@ def test_status_and_coverage_describe_one_bf_yaml_while_it_is_saved(
     # An editor's atomic save lands right after the first load: every later one reads the renamed assistant.
     loads = iter([original])
     monkeypatch.setattr("bf.health.load", lambda _store: next(loads, renamed))
-    entry = cast("dict", health.report([brain]))["brains"][0]
+    entry = cast("dict", health.report(brain))
     assert set(entry["assistants"]) == {"notes", "personal"}
     loads = iter([original])
     assert attention(brain) == []
@@ -683,8 +668,8 @@ def test_disabled_programs_report_no_failure_while_their_queued_work_stays_liste
     with pytest.raises(Error, match="provider timed out"):
         routine(brain, "review", start=start, end=end, runner=failing)
     assert not assistants.manual(brain, "notes", runner=failing)["ok"]
-    status = cast("dict", health.report([brain]))
-    entry = status["brains"][0]
+    status = cast("dict", health.report(brain))
+    entry = status
     assert not status["healthy"]
     assert {"failed", "error", "log"} <= entry["sources"]["mail"].keys()
     assert {"failed", "error", "log"} <= entry["routines"]["review"].keys()
@@ -696,8 +681,8 @@ def test_disabled_programs_report_no_failure_while_their_queued_work_stays_liste
         b"  notes:\n    enabled: false\n    prompt: prompts/personal.md\n",
     )
     brain.write("bf.yaml", disabled)
-    status = cast("dict", health.report([brain]))
-    entry = status["brains"][0]
+    status = cast("dict", health.report(brain))
+    entry = status
     failure = {"failed", "error", "failures", "log"}
     assert not failure & entry["sources"]["mail"].keys()
     assert not failure & entry["routines"]["review"].keys()
@@ -707,20 +692,20 @@ def test_disabled_programs_report_no_failure_while_their_queued_work_stays_liste
     assert entry["attention"] == []
     assert status["healthy"]
     assert [job["state"] for job in entry["messaging"]["jobs"]] == ["uncertain"]
-    coverage = {item["source"]: item for item in cast("list[dict]", search([brain], Query(text="anything"))["sources"])}
+    coverage = {item["source"]: item for item in cast("list[dict]", search(brain, Query(text="anything"))["sources"])}
     assert not failure & coverage["mail"].keys()
     assert not failure & coverage["notes"].keys()
     result = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
     assert result.exit_code == 0, result.output
     # Enabled again, the unresolved failures are reported again.
     brain.write("bf.yaml", configured)
-    assert not cast("dict", health.report([brain]))["healthy"]
+    assert not cast("dict", health.report(brain))["healthy"]
 
 
 def test_a_source_that_keeps_missing_parts_needs_attention_after_three_runs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n"
+        b"version: 9\nname: fixture\nsensors:\n"
         b"  feeds:\n    command: [echo]\n    refresh: 3600\n"
         b"  manual:\n    command: [echo]\n",
     )
@@ -733,11 +718,11 @@ def test_a_source_that_keeps_missing_parts_needs_attention_after_three_runs(brai
         collect(brain, sensor, start=start, end=end, runner=lambda *_: output, clock=lambda: now)
 
     def status() -> dict:
-        return cast("dict", health.report([brain], now=now))
+        return cast("dict", health.report(brain, now=now))
 
     for runs in (1, 2):
         run("feeds", partial)
-        entry = status()["brains"][0]
+        entry = status()
         # Shown from the first incomplete run, beside a freshness the run still earned.
         assert entry["sources"]["feeds"]["degraded"] == {"runs": runs, "missed": 1, "of": 3}
         assert entry["sources"]["feeds"]["freshness"] == "fresh"
@@ -746,7 +731,7 @@ def test_a_source_that_keeps_missing_parts_needs_attention_after_three_runs(brai
     run("feeds", partial)
     run("manual", partial)
     full = status()
-    entry = full["brains"][0]
+    entry = full
     # A manual source shows its gap but, like its failures, needs no attention.
     assert entry["sources"]["manual"]["degraded"] == {"runs": 1, "missed": 1, "of": 3}
     assert entry["attention"] == [{"kind": "sensor", "name": "feeds", "freshness": "fresh", "degraded": True}]
@@ -754,26 +739,26 @@ def test_a_source_that_keeps_missing_parts_needs_attention_after_three_runs(brai
     check = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
     assert check.exit_code == 1
     # The home page, search coverage and memories pages share the attention and the source state.
-    home = cast("dict", read([brain]))
+    home = cast("dict", read(brain))
     assert {"kind": "sensor", "name": "feeds", "freshness": "fresh", "degraded": True} in home["attention"]
-    found = cast("dict", search([brain], Query(text="one")))
+    found = cast("dict", search(brain, Query(text="one")))
     assert {source["source"]: source.get("degraded") for source in found["sources"]}["feeds"]["runs"] == 3
-    memories = cast("dict", read([brain], "memories"))
+    memories = cast("dict", read(brain, "memories"))
     assert {source["source"]: source.get("degraded") for source in memories["sources"]}["manual"]["runs"] == 1
     # A record read's collection names the gap too.
-    record = cast("dict", read([brain], "feeds:one"))
+    record = cast("dict", read(brain, "feeds:one"))
     assert record["collection"]["degraded"]["missed"] == 1
     # The next complete run clears it.
     run("feeds", b'[{"id":"one","title":"One"}]')
-    entry = status()["brains"][0]
+    entry = status()
     assert "degraded" not in entry["sources"]["feeds"]
     assert entry["attention"] == []
 
 
 def test_hand_edited_incomplete_counts_never_report_a_gap(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 8\nname: fixture\nsensors:\n  feeds:\n    command: [echo]\n    refresh: 3600\n")
+    brain.write("bf.yaml", b"version: 9\nname: fixture\nsensors:\n  feeds:\n    command: [echo]\n    refresh: 3600\n")
     for counts in ({"incomplete_runs": 3}, {"incomplete_runs": 3, "missed": 2, "of": 1}, {"missed": 1, "of": 2}):
-        state_store(brain.root).write("sensors.json", encode({"feeds": counts}))
+        private_dir(brain, ".bf", "state").write("sensors.json", encode({"feeds": counts}))
         assert "degraded" not in source_health(brain)["feeds"]
         assert attention(brain) == [{"kind": "sensor", "name": "feeds", "freshness": "never"}]
 
@@ -782,8 +767,8 @@ def test_home_and_review_attention_include_failed_assistants_and_channels(brain:
     assisted(brain)
     assert not assistants.manual(brain, "notes", runner=lambda *_: (_ for _ in ()).throw(Error("boom")))["ok"]
     Queue(brain).set_progress("health:channel:chat", {"error": "transport down", "at": "2026-10-17T00:00:00.000000Z"})
-    expected = cast("dict", health.report([brain]))["brains"][0]["attention"]
+    expected = cast("dict", health.report(brain))["attention"]
     assert {"kind": "assistant", "name": "notes", "freshness": "manual", "failed": True} in expected
     assert {"kind": "channel", "name": "chat", "freshness": "unknown", "failed": True} in expected
-    assert read([brain])["attention"] == expected
-    assert read([brain], "review")["attention"] == expected
+    assert read(brain)["attention"] == expected
+    assert read(brain, "review")["attention"] == expected

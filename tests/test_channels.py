@@ -22,7 +22,7 @@ from bf.runtime import Queue, QueueFullError
 from bf.storage import Store
 
 START, END, INSIDE = "2026-10-15T00:00:00.000000Z", "2026-10-16T00:00:00.000000Z", "2026-10-15T12:00:00.000000Z"
-ASSISTED = b"""version: 8
+ASSISTED = b"""version: 9
 name: fixture
 channels:
   chat:
@@ -471,7 +471,7 @@ def test_an_undeclared_channel_is_named_apart_from_a_missing_capability(assistan
     with pytest.raises(ValidationError) as failure:
         Config.model_validate(
             {
-                "version": 8,
+                "version": 9,
                 "name": "fixture",
                 "channels": {"chat": {"send": {"command": ["send"]}}, "listen": {"stream": {"command": ["listen"]}}},
                 "assistants": {"a": {"prompt": "prompts/a.md", "command": ["harness"], **assistant}},

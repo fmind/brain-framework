@@ -27,7 +27,7 @@ def write(brain: Store, path: str, metadata: str, modified: str) -> None:
 def entry(brain: Store, path: str, now: datetime = NOW) -> dict[str, object]:
     return next(
         item
-        for item in cast("list[dict[str, object]]", pages.folder([brain], path.split("/")[0], now)["items"])
+        for item in cast("list[dict[str, object]]", pages.folder(brain, path.split("/")[0], now)["items"])
         if item["ref"] == path
     )
 
@@ -234,8 +234,8 @@ def test_a_note_never_cites_through_a_name_several_records_claim(brain: Store) -
         ["newer_evidence"],
     )
     with pytest.raises(Error, match="ambiguous identity"):
-        read([brain], "deck:launch")
-    assert read([brain], "mail:m")["ref"] == "mail:m"
+        read(brain, "deck:launch")
+    assert read(brain, "mail:m")["ref"] == "mail:m"
 
 
 def test_links_through_a_name_another_item_claims_are_not_newer(brain: Store) -> None:
@@ -254,7 +254,7 @@ def test_links_through_a_name_another_item_claims_are_not_newer(brain: Store) ->
             Record(id="n", title="Owned", time=day, links=["bf://fixture/projects/p.md"]),
         ],
     )
-    whole = read([brain], path)
+    whole = read(brain, path)
     # Backlinks leave out both shared names, and so do the review signals beside them.
     groups = cast("list[dict[str, list[dict[str, object]]]]", whole["backlinks"])
     assert [item["ref"] for group in groups for item in group["items"]] == ["mail:n"]

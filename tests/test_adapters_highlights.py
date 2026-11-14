@@ -39,7 +39,9 @@ def test_highlights_preserve_passage_annotation_locator_and_dates(provider: Prov
     assert len(records) == 1
     record = records[0]
     assert record.id == "reading/brief-clarity"
+    assert record.type == "Highlight"
     assert record.url == SOURCE
+    assert record.relations == {"source-document": [SOURCE]}
     assert record.text == "Visitors need a clear product explanation before signing up."
     assert record.attributes["annotation"] == "Review whether our first page explains who the product helps."
     assert record.attributes["locator"] == {"page": 2, "section": "Audience"}
@@ -173,7 +175,7 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
         "bf.yaml",
         json.dumps(
             {
-                "version": 8,
+                "version": 9,
                 "name": "fixture",
                 "sensors": {
                     "highlights": {
@@ -184,15 +186,6 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
                             "{{brain}}/inputs/highlights.json",
                         ],
                         "mode": "snapshot",
-                        "fields": {"source-document": {"path": "/url"}},
-                    }
-                },
-                "fields": {
-                    "source-document": {
-                        "description": "The document containing this selected passage.",
-                        "type": "identity",
-                        "cardinality": "one",
-                        "relation": True,
                     }
                 },
             }
@@ -201,23 +194,26 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
     save(path, [selected, {**selected, "id": "second"}])
     assert collect(brain, "highlights", start=START, end=END)["added"] == 2
     assert collect(brain, "highlights", start=START, end=END)["unchanged"] == 2
-    found = search([brain], Query(text="product explanation", prefix="memories/highlights"))
+    found = search(brain, Query(text="product explanation", prefix="memories/highlights"))
     assert {item["ref"] for item in cast("list[dict]", found["items"])} == {REF, "highlights:reading/second"}
-    reply = cast("dict", read([brain], REF)["record"])
-    assert reply["fields"] == {"source-document": SOURCE}
+    reply = cast("dict", read(brain, REF)["record"])
+    assert reply["@type"] == "Highlight"
+    assert reply["relations"] == {"source-document": [SOURCE]}
     assert reply["attributes"]["locator"] == selected["locator"]
-    assert not search([brain], Query(text="whether", prefix="memories/highlights"))["items"]
+    assert reply["attributes"]["annotation"] == selected["annotation"]
+    assert "Review whether" not in reply["text"]
+    assert not search(brain, Query(text="missingword", prefix="memories/highlights"))["items"]
     brain.write(
         "projects/website.md",
         f"---\ntype: project\nstatus: draft\n---\n# New website\n\n## Decision\n"
         f"Explain the product first because visitors need clarity before signup. Evidence: [brief]({REF}).\n".encode(),
     )
-    decision = search([brain], Query(text="clarity before signup", prefix="projects/website.md"))
+    decision = search(brain, Query(text="clarity before signup", prefix="projects/website.md"))
     decision_ref = cast("list[dict]", decision["items"])[0]["ref"]
-    assert "because visitors need clarity" in str(read([brain], decision_ref)["text"])
+    assert "because visitors need clarity" in str(read(brain, decision_ref)["text"])
     brain.write(
         "evals/highlights.yaml",
-        b"version: 8\ncases:\n  - name: recover-decision-reason\n    query: clarity before signup\n"
+        b"version: 9\ncases:\n  - name: recover-decision-reason\n    query: clarity before signup\n"
         b"    scope: projects/website.md\n    expect: [projects/website.md#decision]\n"
         b"  - name: locate-source-passage\n    read: highlights:reading/brief-clarity\n"
         b"    text: [https://example.com/website-brief, Audience, Visitors need a clear product explanation]\n",
@@ -227,7 +223,7 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
     save(path, [{**selected, "annotation": "Our interpretation changed; the passage did not."}])
     changed = collect(brain, "highlights", start=START, end=END)
     assert (changed["updated"], changed["removed"]) == (1, 1)
-    assert cast("dict", read([brain], REF)["record"])["text"] == selected["selection"]
+    assert cast("dict", read(brain, REF)["record"])["text"] == selected["selection"]
     stored = {name: brain.read(name) for name in brain.files("memories/highlights")}
     save(path, [selected, {**selected, "id": "second", "locator": {}}])
     with pytest.raises(Error):

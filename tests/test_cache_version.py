@@ -13,14 +13,13 @@ from bf.models import digest, encode
 from bf.storage import Store
 
 # The digest of the layout and rows a full build of BRAIN stores, recorded with the index.SCHEMA that stores them.
-PROJECTION = (41, "97f6360e5fd04092b36848ab855ff28eb1bd41a29901a3f6e6d9abc0625c7b73")
+PROJECTION = (42, "e8a86551037824399c0aede14a304080879cff44ec397e045aee7b04278c4253")
 # Fixed input covering what indexing projects: notes, sections, tasks, links, claims, facts, records and problems.
 BRAIN = {
-    "bf.yaml": """version: 8
+    "bf.yaml": """version: 9
 name: golden
 fields:
-  depends-on: {description: Needs review when the target changes., type: identity, cardinality: many, relation: true}
-  kind: {description: Kind of item., type: string, cardinality: one}
+  depends-on: {description: Needs review when the target changes.}
 """,
     "projects/atlas.md": """---
 type: project
@@ -29,7 +28,8 @@ updated: 2026-09-01
 stale_after: 2026-12-01T00:00:00Z
 tags: [launch]
 aliases: ["repo:example/atlas"]
-fields: {kind: plan, depends-on: ["mail:m1"]}
+relations: {depends-on: ["mail:m1"]}
+attributes: {kind: plan}
 summary: Ship `MAX_FILE_SIZE` limits in config_loader.py.
 ---
 
@@ -92,14 +92,20 @@ Open [the console](http://[your-host]:8080/admin) or [the docs](https://example.
 RECORDS = {
     ("mail", "m1"): {
         "id": "m1",
+        "@type": "EmailMessage",
         "title": "Kickoff",
         "text": "Budget approved:  1300 m² of office space…",
         "time": "2026-08-31T12:00:00Z",
         "url": "https://mail.example.test/m1",
         "links": ["repo:example/atlas"],
         "aliases": ["meeting:kickoff"],
-        "fields": {"kind": "meeting", "depends-on": ["repo:example/atlas"]},
-        "attributes": {"updated": "2026-09-01T08:00:00Z", "observed": "2026-09-01T08:15:00Z", "partial": True},
+        "relations": {"depends-on": ["repo:example/atlas"]},
+        "attributes": {
+            "kind": "meeting",
+            "updated": "2026-09-01T08:00:00Z",
+            "observed": "2026-09-01T08:15:00Z",
+            "partial": True,
+        },
     },
     ("mail", "m2"): {"id": "m2", "title": "Follow-up", "text": "Short.", "time": "2026-09-02T09:30:00+02:00"},
     ("chat", "c1"): {"id": "c1", "title": "Untimed", "text": "The ﬁnance team."},

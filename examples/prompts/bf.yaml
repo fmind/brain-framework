@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/docs/prompts/
-version: 8
+version: 9
 name: prompt-demo
 channels:
   inbox:

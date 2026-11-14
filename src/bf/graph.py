@@ -1,4 +1,4 @@
-"""Bounded identity federation and claim explanations over selected SQLite projections."""
+"""Bounded identity expansion and claim explanations over a brain's SQLite projection."""
 
 from __future__ import annotations
 
@@ -6,10 +6,9 @@ import json
 import re
 import sqlite3
 from contextlib import suppress
-from pathlib import Path
 
 from bf import index, links
-from bf.config import brain_name, load
+from bf.config import load
 from bf.markdown import preview
 from bf.models import Error, reason
 from bf.storage import Store
@@ -42,20 +41,18 @@ def local_refs(connection: sqlite3.Connection, identities: set[str], brain: str)
 UNAVAILABLE = "inaccessible brain or cache; run bf status"
 
 
-def problem(store: Store, brain: str, error: BaseException, fallback: str = UNAVAILABLE) -> dict[str, object]:
-    """A selected brain's failure as a reply problem, without the brain's path: an Error's own reason, otherwise
-    `fallback`. `brain` names the brain, or its folder does when its bf.yaml did not load."""
+def problem(store: Store, error: BaseException, fallback: str = UNAVAILABLE) -> dict[str, object]:
+    """A brain failure as a reply problem, without leaking the brain's path."""
     message = reason(error, fallback)
-    return {"brain": brain or brain_name(store), "error": message.replace(str(store.root), "<brain>")}
+    return {"error": message.replace(str(store.root), "<brain>")}
 
 
-def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, object]]]:
+def expand(store: Store, value: str) -> tuple[set[str], list[dict[str, object]]]:
     """One explicit owner expands aliases; conflicting owners never merge their identities.
 
-    An alias that another item in any selected brain also claims is not expanded: it identifies
-    neither owner, even when the value itself is a unique, brain-qualified address. A record also expands to its
-    bare `source:id`, by which other brains link it, unless another item holds that ref too, such as the same record
-    collected by another brain: each brain's links then name its own copy, which is no problem.
+    An alias that another item in the brain also claims is not expanded: it identifies neither owner, even when the
+    value itself is a unique, brain-qualified address. A record also expands to its bare `source:id`, unless another
+    item holds that ref as an alias.
     """
     if not value:
         return set(), []
@@ -68,82 +65,49 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
         if parsed and re.fullmatch(r"actions/[^/#]+", parsed.path)
         else value
     )
-    matches: list[tuple[Store, str, set[str], str]] = []
     problems: list[dict[str, object]] = []
-    labels: dict[Path, str] = {}
-    failed: set[Path] = set()
-    for store in stores:
-        name = ""
-        try:
-            name = labels[store.root] = load(store).name
-            if parsed and parsed.brain != name:
-                continue
-            with index.database(store) as (connection, state):
-                if state != "ready":
-                    problems.append({"brain": name, "error": "identity resolution used a stale cache"})
-                rows = connection.execute(
-                    "SELECT id,ref,kind FROM items WHERE id IN "
-                    "(SELECT id FROM items WHERE ref=?1 UNION SELECT item FROM names WHERE name=?1) LIMIT 3",
-                    (lookup,),
-                ).fetchall()
-                for item, ref, kind in rows:
-                    names = {
-                        r[0]
-                        for r in connection.execute("SELECT name FROM names WHERE item=? LIMIT ?", (item, NAMES + 1))
-                    }
-                    if len(names) > NAMES:
-                        raise Error(f"identity expansion exceeds {NAMES} aliases")
-                    matches.append((store, ref, names, ref if kind == "record" else ""))
-        except (Error, OSError, sqlite3.DatabaseError) as error:
-            # Named and worded as the page reports the same brain, so a reply lists an unloadable brain once.
-            problems.append(problem(store, name, error))
-            failed.add(store.root)
-    if len(matches) > 1:
-        # The owners may be notes or records, such as one record two brains collect.
-        problems.append({"error": "ambiguous identity across selected evidence; read an owner's bf://NAME/... address"})
+    try:
+        name = load(store).name
+        if parsed and parsed.brain != name:
+            return {value}, []
+        with index.database(store) as (connection, state):
+            if state != "ready":
+                problems.append({"error": "identity resolution used a stale cache"})
+            rows = connection.execute(
+                "SELECT id,ref,kind FROM items WHERE id IN "
+                "(SELECT id FROM items WHERE ref=?1 UNION SELECT item FROM names WHERE name=?1) LIMIT 3",
+                (lookup,),
+            ).fetchall()
+            if len(rows) > 1:
+                problems.append({"error": "ambiguous identity; read an owner's bf://NAME/... address"})
+                return {value}, problems
+            if not rows:
+                return {value}, problems
+            item, ref, kind = rows[0]
+            names = {r[0] for r in connection.execute("SELECT name FROM names WHERE item=? LIMIT ?", (item, NAMES + 1))}
+            if len(names) > NAMES:
+                raise Error(f"identity expansion exceeds {NAMES} aliases")
+            bare = ref if kind == "record" else ""
+            if re.fullmatch(r"actions/[^/#]+/ACTION\.md", ref):
+                names = names | {links.address(name, ref.removesuffix("/ACTION.md"))}
+            candidates = sorted(candidate for candidate in (names | {bare}) - {value, ""} if candidate)
+            found = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM names WHERE name IN (SELECT value FROM json_each(?1)) AND item!=?2 "
+                    "UNION SELECT ref FROM items WHERE ref IN (SELECT value FROM json_each(?1)) AND ref!=?3",
+                    (json.dumps(candidates), item, ref),
+                )
+            }
+    except (Error, OSError, sqlite3.DatabaseError) as error:
+        problems.append(problem(store, error))
         return {value}, problems
-    if not matches:
-        return {value}, problems
-    # Each pass reads its own snapshot, and a concurrent re-index renumbers an edited note: its ref names the owner.
-    owner, ref, names, bare = matches[0]
-    if re.fullmatch(r"actions/[^/#]+/ACTION\.md", ref):
-        names = names | {links.address(labels[owner.root], ref.removesuffix("/ACTION.md"))}
-    # Another brain never holds a name in the owner's namespace: like local_refs, ignore a cache built before a rule
-    # rejected one. The owner's claim to another brain's address still counts as shared.
-    namespace = links.address(labels[owner.root], "")
-    shared: set[str] = set()
-    for store in stores:
-        if store.root not in labels or store.root in failed:
-            # Its bf.yaml or cache did not load: already reported once. It cannot share an alias, but it may hold the
-            # record's ref.
-            bare = ""
-            continue
-        own = store.root == owner.root
-        candidates = sorted(name for name in (names | {bare}) - {value, ""} if own or not name.startswith(namespace))
-        try:
-            with index.database(store) as (connection, _state):
-                # A record's ref already names it: a note alias repeating one is shared, never expanded.
-                found = {
-                    row[0]
-                    for row in connection.execute(
-                        "SELECT name FROM names WHERE name IN (SELECT value FROM json_each(?1)) "
-                        "AND NOT (?2 AND item IN (SELECT id FROM items WHERE ref=?3)) "
-                        "UNION SELECT ref FROM items WHERE ref IN (SELECT value FROM json_each(?1)) "
-                        "AND NOT (?2 AND ref=?3)",
-                        (json.dumps(candidates), own, ref),
-                    )
-                }
-        except (Error, OSError, sqlite3.DatabaseError) as error:
-            problems.append(problem(store, labels[store.root], error))
-            bare = ""
-            continue
-        if bare in found:
-            found.remove(bare)
-            bare = ""
-        shared |= found
-    if shared:
-        problems.append({"error": f"aliases also claimed elsewhere were not expanded: {len(shared)}"})
-    return {value} | (names - shared) | ({bare} if bare else set()), problems
+    if bare in found:
+        found.remove(bare)
+        bare = ""
+    if found:
+        problems.append({"error": f"aliases also claimed elsewhere were not expanded: {len(found)}"})
+    return {value} | (names - found) | ({bare} if bare else set()), problems
 
 
 def explanations(connection: sqlite3.Connection, ref: str, targets: set[str]) -> tuple[list[dict[str, object]], bool]:

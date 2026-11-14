@@ -264,7 +264,17 @@ def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major:
     # Python's regex, not `git grep -E`: macOS's POSIX regex has no `\b`, so the search found nothing there.
     pattern = re.compile(rf"(Brain Framework|bf`?) {old_major}\b|\b{old_major}\.[0-9]+\.[0-9]+")
     listed = run(
-        "git", "ls-files", "-z", "--", "src/bf/skills", "examples", "docs/docs", "README.md", cwd=clone, strip=False
+        "git",
+        "ls-files",
+        "-z",
+        "--",
+        "src/bf/guides",
+        "src/bf/skills",
+        "examples",
+        "docs/docs",
+        "README.md",
+        cwd=clone,
+        strip=False,
     )
     found = []
     for name in sorted(filter(None, listed.split("\0"))):

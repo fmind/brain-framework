@@ -1,22 +1,8 @@
 #!/usr/bin/env python3
 """Collect Gmail message headers (sender, recipients, subject and date) through the owner's gws CLI; never bodies.
 
-Each message lists its thread in `attributes.parent_refs` and its label ids in `attributes.label_refs`, which the
-standard `part-of` and `label` relations of a new brain map. A brain whose bf.yaml lacks those fields declares them
-under `fields:` first:
-
-  part-of:
-    description: Containing thread, folder, list, epic, project or other parent item.
-    type: identity
-    cardinality: many
-    relation: true
-    path: /attributes/parent_refs
-  label:
-    description: Label the provider attaches to the item.
-    type: identity
-    cardinality: many
-    relation: true
-    path: /attributes/label_refs
+Each message sets `@type` to `"EmailMessage"` and asserts its thread (`part-of`), labels (`label`), `sender`,
+`recipient` and `cc` directly under `relations`.
 """
 
 from __future__ import annotations
@@ -135,7 +121,6 @@ def record(message_id: str, start: datetime, end: datetime) -> dict[str, object]
         key: sorted({address.strip().lower() for _, address in getaddresses([values.get(key, "")]) if "@" in address})
         for key in ("from", "to", "cc")
     }
-    everyone = sorted({address for addresses in people.values() for address in addresses})
     subject = _sensor.line(values.get("subject", ""), "")
     lines = [f"Subject: {subject or '(no subject)'}"]
     lines += [f"{key.capitalize()}: {', '.join(people[key])}" for key in ("from", "to", "cc") if people[key]]
@@ -152,19 +137,21 @@ def record(message_id: str, start: datetime, end: datetime) -> dict[str, object]
     return _sensor.record(
         message_id,
         subject or "(no subject)",
+        item_type="EmailMessage",
         time=when,
         text="\n".join(lines),
         url=f"https://mail.google.com/mail/#all/{thread}",
-        links=[thread_ref, *map(_sensor.person, everyone)],
         aliases=[alias] if alias else (),
+        relations={
+            "part-of": [thread_ref],
+            "label": label_refs,
+            "sender": list(map(_sensor.person, people["from"])),
+            "recipient": list(map(_sensor.person, people["to"])),
+            "cc": list(map(_sensor.person, people["cc"])),
+        },
         attributes={
             "thread": thread,
             "labels": sorted(labels),
-            "parent_refs": [thread_ref],
-            "label_refs": label_refs,
-            "sender_refs": list(map(_sensor.person, people["from"])),
-            "recipient_refs": list(map(_sensor.person, people["to"])),
-            "cc_refs": list(map(_sensor.person, people["cc"])),
         },
     )
 

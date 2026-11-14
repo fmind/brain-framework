@@ -29,7 +29,7 @@ from bf.storage import BusyError, Store, collecting, program_state
 def messaging(brain: Store) -> Store:
     brain.write(
         "bf.yaml",
-        b"""version: 8
+        b"""version: 9
 name: fixture
 sensors:
   calendar:
@@ -544,10 +544,12 @@ def test_incomplete_channel_batches_fail_closed(messaging: Store, raw: bytes) ->
 
 def test_queue_corruption_is_preserved_and_never_rebuilt(messaging: Store) -> None:
     queue = Queue(messaging)
-    queue.store.write("queue.sqlite3", b"corrupt evidence")
+    queue.report()
+    queue.store.write(runtime.QUEUE, b"corrupt evidence")
+    (messaging.root / runtime.QUEUE).chmod(0o600)
     with pytest.raises(Error, match="assistant queue is unavailable; preserve its files"):
         queue.report()
-    assert queue.store.read("queue.sqlite3") == b"corrupt evidence"
+    assert queue.store.read(runtime.QUEUE) == b"corrupt evidence"
 
 
 def test_queue_connection_preflight_preserves_another_threads_sqlite_lock(
@@ -615,7 +617,7 @@ def test_cli_channel_and_queue_roundtrip_without_an_assistant(brain: Store) -> N
 
     brain.write(
         "bf.yaml",
-        b"""version: 8
+        b"""version: 9
 name: fixture
 channels:
   local:
@@ -808,10 +810,10 @@ def test_removed_assistant_still_exposes_unresolved_work(messaging: Store) -> No
     key = queue.next(True, {"personal"})
     assert key
     queue.fail(key, "needs review")
-    messaging.write("bf.yaml", b"version: 8\nname: fixture\n")
-    status = cast("dict", report([messaging]))
+    messaging.write("bf.yaml", b"version: 9\nname: fixture\n")
+    status = cast("dict", report(messaging))
     assert not status["healthy"]
-    assert status["brains"][0]["messaging"]["counts"] == {"failed": 1}
+    assert status["messaging"]["counts"] == {"failed": 1}
 
 
 def test_real_watch_replies_once_and_recovers_stream_redelivery(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -824,7 +826,6 @@ def test_real_watch_replies_once_and_recovers_stream_redelivery(tmp_path, monkey
     root = tmp_path / "demo"
     shutil.copytree(Path(__file__).parents[1] / "examples/channels", root)
     store = Store(root)
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     # Cold interpreter starts get the suite's 120-second budget, shared so both runs stay under the per-test limit.
     deadline = time.monotonic() + 120
@@ -1149,56 +1150,35 @@ def renumbered(store: Store, device: str) -> Store:
 def test_a_new_device_number_keeps_the_queue_and_program_state(messaging: Store) -> None:
     assistants.accept(messaging, "chat", [message()], {"personal"})
     program_state(messaging, "calendar").write("cursor", b"42")
-    old = Queue(messaging).store.root
     store = renumbered(messaging, "999")
     assert program_state(store, "calendar").read("cursor") == b"42"
     assert Queue(store).report()["counts"] == {"pending": 1}
-    assert Queue(store).store.root == old.parent / store.identity
-    assert not old.exists()
+    assert Queue(store).store.root == messaging.root
 
 
 def test_another_brain_with_the_same_inode_number_keeps_its_queue(messaging: Store, tmp_path: Path) -> None:
     assistants.accept(messaging, "chat", [message()], {"personal"})
-    old = Queue(messaging).store.root
     (tmp_path / "other").mkdir()
     other = Store(tmp_path / "other")
     other.write("bf.yaml", messaging.read("bf.yaml"))
-    # Another filesystem can reuse the inode number: the old queue is bound to another path, so it stays.
-    other.identity = f"999-{old.name.rsplit('-', 1)[1]}"
+    # Another filesystem can reuse the inode number: each brain keeps its own .bf/ queue.
+    other.identity = f"999-{messaging.identity.rsplit('-', 1)[1]}"
     assert Queue(other).report()["counts"] == {}
-    assert Queue(other).store.root != old
+    assert Queue(other).store.root != Queue(messaging).store.root
     assert Queue(messaging).report()["counts"] == {"pending": 1}
 
 
-def test_several_queues_bound_to_one_renumbered_brain_fail_without_blocking_collection(messaging: Store) -> None:
+def test_unreadable_queue_fails_without_blocking_collection(messaging: Store) -> None:
     assistants.accept(messaging, "chat", [message()], {"personal"})
-    old = Queue(messaging).store.root
-    twin = old.parent / f"777-{old.name.rsplit('-', 1)[1]}"
-    twin.mkdir(mode=0o700)
-    (twin / "queue.sqlite3").write_bytes((old / "queue.sqlite3").read_bytes())
-    store = renumbered(messaging, "999")
-    with pytest.raises(Error, match=r"several assistant queues .* are bound to this brain"):
-        Queue(store).report()
-    program_state(store, "calendar").write("cursor", b"1")
+    queue_file = messaging.root / runtime.QUEUE
+    queue_file.write_bytes(b"not a database")
+    with pytest.raises(Error, match="assistant queue is unavailable"):
+        Queue(messaging).report()
+    program_state(messaging, "calendar").write("cursor", b"1")
     # Watch still starts, so its collection runs, while assistant commands refuse.
     with ExitStack() as stack:
-        watch.Assistants(store, ((), (), ()), stack)
-    assert old.exists()
-    assert twin.exists()
-
-
-def test_an_unreadable_queue_with_the_same_inode_refuses_instead_of_starting_empty(messaging: Store) -> None:
-    # SQLite cannot open read-only a queue holding an interrupted write's journal: that queue may be this brain's.
-    assistants.accept(messaging, "chat", [message()], {"personal"})
-    old = Queue(messaging).store.root
-    (old / "queue.sqlite3").write_bytes(b"not a database, as a hot journal makes it look read-only")
-    store = renumbered(messaging, "999")
-    with pytest.raises(Error, match=r"may belong to this brain but cannot be read.*rename it 999-"):
-        Queue(store).report()
-    assert not (old.parent / store.identity).exists()
-    program_state(store, "calendar").write("cursor", b"1")
-    with pytest.raises(Error, match="cannot be read"):
-        Queue(store).report()
+        watch.Assistants(messaging, ((), (), ()), stack)
+    assert queue_file.read_bytes() == b"not a database"
 
 
 def test_renamed_brain_with_unresolved_work_refuses_execution_but_never_record_writes(messaging: Store) -> None:
@@ -1438,7 +1418,7 @@ def test_queue_resolves_an_abandoned_standalone_send_without_a_dispatcher(brain:
     from bf.cli import app
     from bf.models import digest
 
-    brain.write("bf.yaml", b"version: 8\nname: fixture\nchannels:\n  local:\n    send: {command: [send-local]}\n")
+    brain.write("bf.yaml", b"version: 9\nname: fixture\nchannels:\n  local:\n    send: {command: [send-local]}\n")
     queue = Queue(brain)
     queue.send("local", Send(command=["send-local"]), Outgoing(id="stable", text="Hello"))
     # A bf channel send was killed after marking its attempt.
@@ -1665,7 +1645,7 @@ def test_another_queue_format_is_refused_and_preserved(messaging: Store, script:
         from bf.health import report
 
         # bf status reads the queue read-only, yet names the same refusal and leaves it as it is.
-        entry = cast("dict", report([messaging]))["brains"][0]
+        entry = cast("dict", report(messaging))
         problems = [problem["error"] for problem in entry["problems"]]
         assert refusal in problems
         assert path.read_bytes() == before
@@ -1727,7 +1707,7 @@ def test_a_drained_v19_queue_upgrades_with_the_documented_statements(messaging: 
     finally:
         db.close()
     # Status and execution accept the upgraded queue, and the obligations v19 left keep their meaning.
-    entry = cast("dict", report([messaging]))["brains"][0]
+    entry = cast("dict", report(messaging))
     assert entry["problems"] == []
     assert entry["messaging"]["counts"] == {"complete": 2}
     assert entry["messaging"]["delivery_counts"] == {"pending": 1}

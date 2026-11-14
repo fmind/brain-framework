@@ -41,7 +41,7 @@ bf read projects/new-website.md#decision
 | Identity | `bf read repo:github.com/example/new-website` | Owning note or record, else a backlink page ([identities](links.md#give-a-subject-a-stable-identity)). |
 | Relation | `bf read projects/new-website.md --rel cites` | Paginated [relation page](retrieval.md#relation-pages) of incoming links.                              |
 
-Notes above 32 KiB page their text and include a section `outline` ([large exact reads](retrieval.md#large-exact-reads)). With multiple selected brains, pass the returned `uri` (`bf://brain/...`).
+Notes above 32 KiB page their text and include a section `outline` ([large exact reads](retrieval.md#large-exact-reads)). Pass the returned `ref` or `uri` (`bf://brain/...`).
 
 ## Pages
 

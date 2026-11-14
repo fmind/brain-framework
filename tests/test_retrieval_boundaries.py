@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 from bf import graph, health, index, pages, retrieve
 from bf.cli import app
 from bf.collect import collect
-from bf.config import ABSENT, register, select, user_path
+from bf.config import user_path
 from bf.evaluate import evaluate
 from bf.mcp import server
 from bf.models import MAX_OFFSET, Error, InputError, NotFoundError, Query, Record, digest, encode
@@ -29,72 +29,67 @@ from bf.validate import validate
 from conftest import records_file
 
 
-def corpus(brain: Store, tmp_path: Path) -> list[Store]:
-    root = tmp_path / "team"
-    root.mkdir()
-    team = Store(root)
-    team.write("bf.yaml", b"version: 8\nname: team\n")
-    for n, store in enumerate([brain, team]):
-        records_file(
-            store,
-            "mail",
-            [
-                Record(
-                    id=f"{i:03}",
-                    title="Shared incident",
-                    text="Common evidence",
-                    time="2026-09-26T09:00:00Z",
-                    links=["topic:incident"],
-                )
-                for i in range(n, 123, 2)
-            ],
-        )
-    return [brain, team]
+def corpus(brain: Store) -> Store:
+    records_file(
+        brain,
+        "mail",
+        [
+            Record(
+                id=f"{i:03}",
+                title="Shared incident",
+                text="Common evidence",
+                time="2026-09-26T09:00:00Z",
+                links=["topic:incident"],
+            )
+            for i in range(123)
+        ],
+    )
+    return brain
 
 
 @pytest.mark.parametrize("ref", ["2026-09-26", "memories/mail", "memories/mail/2026-09"])
-def test_pages_visit_every_record_across_brains(brain: Store, tmp_path: Path, ref: str) -> None:
-    stores = corpus(brain, tmp_path)
+def test_pages_visit_every_record(brain: Store, ref: str) -> None:
+    store = corpus(brain)
     offset = 0
     refs: list[str] = []
     while True:
-        reply = retrieve.read(stores, ref, offset=offset)
+        reply = retrieve.read(store, ref, offset=offset)
         assert reply["total"] == 123
         items = cast("list[dict]", reply["items"])
         assert len(items) <= 50
-        refs.extend(item["uri"] for item in items)
+        refs.extend(item["ref"] for item in items)
         if "next_offset" not in reply:
             break
         offset = cast("int", reply["next_offset"])
     assert len(refs) == len(set(refs)) == 123
     assert [ref.rsplit(":", 1)[1] for ref in refs] == [f"{i:03}" for i in reversed(range(123))]
-    assert retrieve.read(stores, ref, offset=MAX_OFFSET)["items"] == []
+    assert retrieve.read(store, ref, offset=MAX_OFFSET)["items"] == []
 
 
 @pytest.mark.parametrize("query", ["incident", "topic:incident"])
-def test_search_continues_lexical_and_identity_results(brain: Store, tmp_path: Path, query: str) -> None:
-    stores = corpus(brain, tmp_path)
+def test_search_continues_lexical_and_identity_results(brain: Store, query: str) -> None:
+    store = corpus(brain)
     offset = 0
     refs: list[str] = []
     while True:
-        reply = retrieve.search(stores, Query(text=query, limit=7, offset=offset))
+        reply = retrieve.search(store, Query(text=query, limit=7, offset=offset))
         items = cast("list[dict]", reply["items"])
         assert len(items) <= 7
         assert all("_rank" not in item for item in items)
-        refs.extend(item["uri"] for item in items)
+        refs.extend(item["ref"] for item in items)
         assert "more" not in reply
         if "next_offset" not in reply:
             break
         offset = cast("int", reply["next_offset"])
     assert len(refs) == len(set(refs)) == 123
-    assert retrieve.search(stores, Query(text=query, offset=MAX_OFFSET))["items"] == []
+    assert retrieve.search(store, Query(text=query, offset=MAX_OFFSET))["items"] == []
 
 
 def test_authored_folder_continuation(brain: Store) -> None:
     for n in range(215):
         brain.write(f"concepts/page-{n:03}.md", f"# Page {n:03}\n".encode(), durable=False)
-    first = retrieve.read([brain], "concepts")
-    second = retrieve.read([brain], "concepts", offset=cast("int", first["next_offset"]))
+    first = retrieve.read(brain, "concepts")
+    second = retrieve.read(brain, "concepts", offset=cast("int", first["next_offset"]))
     items = cast("list[dict]", first["items"]) + cast("list[dict]", second["items"])
     assert len(items) == first["total"] == 216
     assert len({item["ref"] for item in items}) == 216
@@ -102,20 +97,20 @@ def test_authored_folder_continuation(brain: Store) -> None:
 
 
 def test_empty_search_describes_failed_and_never_collected_sources(brain: Store) -> None:
-    brain.write("bf.yaml", b'version: 8\nname: fixture\nsensors:\n  mail:\n    command: ["fake"]\n    refresh: 3600\n')
+    brain.write("bf.yaml", b'version: 9\nname: fixture\nsensors:\n  mail:\n    command: ["fake"]\n    refresh: 3600\n')
 
     def failed(*_args: object) -> bytes:
         raise Error("synthetic failure")
 
     with pytest.raises(Error):
         collect(brain, "mail", start="2026-09-25T00:00:00Z", end="2026-09-26T00:00:00Z", runner=failed)
-    reply = retrieve.search([brain], Query(text="absentunique"))
+    reply = retrieve.search(brain, Query(text="absentunique"))
     assert reply["items"] == []
     coverage = {source["source"]: source for source in cast("list[dict]", reply["sources"])}
     assert coverage["mail"]["failed"] is True
     assert coverage["mail"]["freshness"] == "never"
     # Authored-only searches do not imply that a provider's records were searched.
-    assert "sources" not in retrieve.search([brain], Query(text="absentunique", prefix="projects"))
+    assert "sources" not in retrieve.search(brain, Query(text="absentunique", prefix="projects"))
 
 
 @pytest.mark.parametrize("name", ["shared", "shared.bin"])
@@ -124,19 +119,19 @@ def test_skipped_directories_are_visible_without_following_them(brain: Store, tm
     outside.mkdir()
     (outside / "secret.md").write_text("# Private\nNeverfollowthis\n")
     (brain.root / "projects" / name).symlink_to(outside, target_is_directory=True)
-    reply = retrieve.search([brain], Query(text="Neverfollowthis"))
+    reply = retrieve.search(brain, Query(text="Neverfollowthis"))
     assert reply["items"] == []
     assert f"projects/{name}" in str(reply["problems"])
     assert str(outside) not in str(reply)
     assert not validate(brain)["valid"]
     # Its page names the skipped link: not found would claim the folder absent.
     with pytest.raises(Error, match=f"^projects/{name}: expected a directory; symlinks") as raised:
-        retrieve.read([brain], f"projects/{name}")
+        retrieve.read(brain, f"projects/{name}")
     assert not isinstance(raised.value, NotFoundError)
     # So does the page of a folder below it, which once read as `reference not found`.
     (outside / "sub").mkdir()
     with pytest.raises(Error, match=f"^projects/{name}: expected a directory; symlinks") as raised:
-        retrieve.read([brain], f"projects/{name}/sub")
+        retrieve.read(brain, f"projects/{name}/sub")
     assert not isinstance(raised.value, NotFoundError)
 
 
@@ -147,7 +142,7 @@ def test_oversized_record_text_reads_in_pages(brain: Store) -> None:
     pieces: list[str] = []
     offset = 0
     while True:
-        reply = retrieve.read([brain], "bf://fixture/docs:large", offset=offset)
+        reply = retrieve.read(brain, "bf://fixture/docs:large", offset=offset)
         # Every page fits the budget, names the record file's digest and continues where the last one ended.
         assert len(encode(reply)) <= pages.BUDGET
         assert (reply["ref"], reply["offset"], reply["sha256"]) == ("docs:large", offset, digest(stored))
@@ -166,19 +161,19 @@ def test_oversized_record_text_reads_in_pages(brain: Store) -> None:
     assert len(pieces) > 2
     assert "".join(pieces) == record.text
     with pytest.raises(Error, match="beyond"):
-        retrieve.read([brain], "docs:large", offset=len(record.text))
+        retrieve.read(brain, "docs:large", offset=len(record.text))
 
 
 def test_invalid_optional_registry_does_not_affect_explicit_reads(brain: Store) -> None:
     user_path().write_text("brains: [broken]\n")
-    reply = retrieve.read([brain])
+    reply = retrieve.read(brain)
     assert cast("list[dict]", reply["projects"])[0]["ref"] == "projects/offline.md"
     assert reply["attention"] == []
     assert "problems" not in reply
 
 
-def test_cli_and_mcp_accept_continuations(brain: Store, tmp_path: Path) -> None:
-    corpus(brain, tmp_path)
+def test_cli_and_mcp_accept_continuations(brain: Store) -> None:
+    corpus(brain)
     arguments = ["search", "incident", "--brain", str(brain.root), "--limit", "2"]
     first = CliRunner().invoke(app, arguments)
     assert first.exit_code == 0, first.output
@@ -189,7 +184,7 @@ def test_cli_and_mcp_accept_continuations(brain: Store, tmp_path: Path) -> None:
     page = CliRunner().invoke(app, ["read", "memories/mail", "--brain", str(brain.root), "--offset", "20"])
     assert page.exit_code == 0, page.output
     assert json.loads(page.stdout)["next_offset"] == 40
-    mcp = server([brain])
+    mcp = server(brain)
 
     async def check() -> None:
         result = await mcp.call_tool("search", {"query": "incident", "limit": 2, "offset": reply["next_offset"]})
@@ -209,7 +204,7 @@ def test_cli_and_mcp_accept_continuations(brain: Store, tmp_path: Path) -> None:
 def test_summary_pages_do_not_silently_ignore_offsets(brain: Store, ref: str, *, invalid: bool) -> None:
     # The home page and the sources overview are never paged: their ref alone makes an offset invalid input.
     with pytest.raises(Error, match="offset") as raised:
-        retrieve.read([brain], ref, offset=1)
+        retrieve.read(brain, ref, offset=1)
     assert isinstance(raised.value, InputError) is invalid
     assert getattr(raised.value, "argument", "offset") == "offset"
 
@@ -217,21 +212,21 @@ def test_summary_pages_do_not_silently_ignore_offsets(brain: Store, ref: str, *,
 @pytest.mark.parametrize("ref", ["topic:missing", "projects/absent.md", "gmail:absent"])
 def test_missing_refs_are_not_found_whatever_the_offset(brain: Store, ref: str) -> None:
     with pytest.raises(NotFoundError):
-        retrieve.read([brain], ref, offset=5)
+        retrieve.read(brain, ref, offset=5)
 
 
 def test_read_rejects_invalid_service_offsets(brain: Store) -> None:
     with pytest.raises(Error, match="offset"):
-        retrieve.read([brain], "projects", offset=-1)
+        retrieve.read(brain, "projects", offset=-1)
 
 
 def test_evaluation_assembles_paged_exact_reads_before_checking_them(brain: Store) -> None:
     records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000 + "closing clause")])
     brain.write(
         "evals/large.yaml",
-        b"version: 8\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n  text: [closing clause]\n",
+        b"version: 9\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n  text: [closing clause]\n",
     )
-    assert "closing clause" not in str(retrieve.read([brain], "docs:large"))
+    assert "closing clause" not in str(retrieve.read(brain, "docs:large"))
     reply = evaluate(brain)
     assert reply["passed"] is True, reply["cases"]
 
@@ -240,11 +235,11 @@ def test_evaluation_rejects_a_paged_read_that_changes_between_pages(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000)])
-    brain.write("evals/large.yaml", b"version: 8\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n")
+    brain.write("evals/large.yaml", b"version: 9\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n")
     original = retrieve.read
 
-    def changing(stores: list[Store], ref: str = "", *, offset: int = 0, counted: bool = True) -> dict[str, object]:
-        reply = original(stores, ref, offset=offset, counted=counted)
+    def changing(store: Store, ref: str = "", *, offset: int = 0, counted: bool = True) -> dict[str, object]:
+        reply = original(store, ref, offset=offset, counted=counted)
         return {**reply, "sha256": "0" * 64} if offset else reply
 
     monkeypatch.setattr("bf.evaluate.read", changing)
@@ -262,7 +257,7 @@ def test_linked_evidence_roots_preserve_other_retrieval(brain: Store, tmp_path: 
         (brain.root / path).symlink_to(outside, target_is_directory=True)
     else:
         os.mkfifo(brain.root / path)
-    reply = retrieve.search([brain], Query(text="retention"))
+    reply = retrieve.search(brain, Query(text="retention"))
     assert any(item["ref"].startswith("projects/offline.md") for item in cast("list[dict]", reply["items"]))
     assert path in str(reply["problems"])
     assert str(outside) not in str(reply)
@@ -270,7 +265,7 @@ def test_linked_evidence_roots_preserve_other_retrieval(brain: Store, tmp_path: 
     if path.startswith("memories"):
         # A linked memories root is named: it cannot prove the record absent.
         with pytest.raises(Error, match=r"^memories: expected a directory|unreadable|incomplete"):
-            retrieve.read([brain], "meetings:missing")
+            retrieve.read(brain, "meetings:missing")
 
 
 def test_linked_transaction_directory_still_blocks_reads(brain: Store, tmp_path: Path) -> None:
@@ -278,24 +273,16 @@ def test_linked_transaction_directory_still_blocks_reads(brain: Store, tmp_path:
     outside.mkdir()
     (brain.root / "memories/.pending").symlink_to(outside, target_is_directory=True)
     with pytest.raises(Error, match=r"^memories/\.pending: expected a directory; symlinks"):
-        retrieve.search([brain], Query(text="retention"))
+        retrieve.search(brain, Query(text="retention"))
 
 
 def test_claim_preview_keeps_every_relation_and_reports_truncation(brain: Store) -> None:
-    brain.write(
-        "bf.yaml",
-        b"version: 8\nname: fixture\nfields:\n"
-        + b"".join(
-            f"  {name}:\n    description: A relation.\n    type: identity\n    cardinality: many\n    relation: true\n".encode()
-            for name in ("attendee", "depends-on", "organizer")
-        ),
-    )
     links = "\n".join(f"[Person {n}](bf://fixture/concepts/person-{n}?rel=attendee)" for n in range(62))
     brain.write(
         "projects/meeting.md",
         f"# Meeting\n\n{links}\n[Host](bf://fixture/concepts/host?rel=organizer)\n".encode(),
     )
-    reply = retrieve.read([brain], "projects/meeting.md")
+    reply = retrieve.read(brain, "projects/meeting.md")
     claims = cast("list[dict[str, str]]", reply["claims"])
     # A crowded relation keeps its first RELATION claims and never hides another relation.
     assert [claim["relation"] for claim in claims].count("attendee") == graph.RELATION
@@ -307,21 +294,16 @@ def test_claim_preview_keeps_every_relation_and_reports_truncation(brain: Store)
         for n in range(graph.RELATION)
     )
     brain.write("projects/many.md", f"# Many claims\n\n{many}\n".encode())
-    reply = retrieve.read([brain], "projects/many.md")
+    reply = retrieve.read(brain, "projects/many.md")
     assert len(cast("list", reply["claims"])) == graph.CLAIMS
     assert reply["claims_truncated"] is True
 
 
 def test_claims_preview_the_title_of_their_target(brain: Store) -> None:
-    brain.write(
-        "bf.yaml",
-        b"version: 8\nname: fixture\nfields:\n  depends-on:\n    description: A dependency.\n    type: identity\n"
-        b"    cardinality: many\n    relation: true\n",
-    )
     # A title can hold a whole message: a claim names its target as listings preview it.
     brain.write("concepts/long.md", f"# {'word ' * 800}\n".encode())
     brain.write("projects/plan.md", b"# Plan\n\n[Long](bf://fixture/concepts/long.md?rel=depends-on)\n")
-    [claim] = cast("list[dict[str, str]]", retrieve.read([brain], "projects/plan.md")["claims"])
+    [claim] = cast("list[dict[str, str]]", retrieve.read(brain, "projects/plan.md")["claims"])
     assert claim["target_ref"] == "concepts/long.md"
     assert len(claim["target_title"]) <= index.TITLE
     assert claim["target_title"].endswith("…")
@@ -336,15 +318,15 @@ def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(
     contexts: list[int] = []
     building = pages.context
 
-    def counted(stores: list[Store], owner: Store, name: str, reply: dict[str, object]) -> dict[str, object]:
+    def counted(store: Store, reply: dict[str, object]) -> dict[str, object]:
         contexts.append(1)
-        return building(stores, owner, name, reply)
+        return building(store, reply)
 
     monkeypatch.setattr(pages, "context", counted)
-    first = retrieve.read([brain], "projects/mid.md", counted=False)
+    first = retrieve.read(brain, "projects/mid.md", counted=False)
     assert [item["ref"] for item in cast("list[dict]", first["backlinks"])[0]["items"]] == ["concepts/linking.md"]
     # Later pages carry only their text: they no longer build the graph context the first page returns.
-    later = retrieve.read([brain], "projects/mid.md", offset=cast("int", first["next_offset"]), counted=False)
+    later = retrieve.read(brain, "projects/mid.md", offset=cast("int", first["next_offset"]), counted=False)
     assert set(later) <= {*retrieve._TEXT, "text", "offset", "next_offset", "total_characters"}  # noqa: SLF001
     assert len(contexts) == 1
     assert (first["offset"], first["total_characters"], first["sha256"]) == (0, len(data), digest(data))
@@ -354,7 +336,7 @@ def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(
         {"ref": "projects/mid.md#detail", "title": "Detail", "characters": 18},
         {"ref": "projects/mid.md#part-two", "title": "Part two", "characters": 17},
     ]
-    section = retrieve.read([brain], "projects/mid.md#part-one", counted=False)
+    section = retrieve.read(brain, "projects/mid.md#part-one", counted=False)
     assert section["sha256"] == first["sha256"]
     assert [entry["ref"] for entry in cast("list[dict]", section["outline"])] == ["projects/mid.md#detail"]
 
@@ -375,7 +357,7 @@ def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(
         assert result.exit_code == 0, result.output
         return json.loads(result.stdout)
 
-    mcp = server([brain])
+    mcp = server(brain)
 
     def tool(offset: int) -> dict:
         result = asyncio.run(mcp.call_tool("read", {"ref": "projects/mid.md", "offset": offset}))
@@ -386,75 +368,50 @@ def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(
         # A whole note's pages rebuild its file, which the common digest verifies.
         assert digest(text.encode()) == first["sha256"]
     with pytest.raises(Error, match="not paged"):
-        retrieve.read([brain], "projects/offline.md", offset=1)
+        retrieve.read(brain, "projects/offline.md", offset=1)
     # A note search skips, such as one with a merge conflict marker, still pages its text without an outline.
     brain.write("projects/mid.md", data + b"<<<<<<< ours\n")
-    conflicted = retrieve.read([brain], "projects/mid.md", counted=False)
+    conflicted = retrieve.read(brain, "projects/mid.md", counted=False)
     assert (conflicted["total_characters"], "outline" in conflicted) == (len(data) + 13, False)
 
 
 @pytest.mark.parametrize("paged", ["context", "text"])
-def test_later_text_pages_leave_the_context_problems_to_the_first(brain: Store, tmp_path: Path, paged: str) -> None:
+def test_later_text_pages_leave_the_context_problems_to_the_first(brain: Store, paged: str) -> None:
     # Another note claims the same alias: the read's graph context reports it.
     brain.write("concepts/twin.md", b'---\naliases: ["topic:twin"]\n---\n# Twin\n')
-    # A registered brain moved away leaves every answer incomplete: the read's own problem, which each page keeps.
-    (tmp_path / "moved").mkdir()
-    moved = Store(tmp_path / "moved")
-    moved.write("bf.yaml", b"version: 8\nname: moved\n")
-    register(moved)
-    moved.root.rename(tmp_path / "elsewhere")
-    absent = {"brain": "moved", "error": ABSENT}
     head = '---\naliases: ["topic:twin"]\n---\n# Long\n\n'
     brain.write("concepts/long.md", head.encode())
-    whole = retrieve.read(select(), "concepts/long.md")
+    whole = retrieve.read(brain, "concepts/long.md")
     assert "aliases also claimed elsewhere were not expanded" in str(whole["problems"])
     # One byte past the page budget with those problems: the text alone fits, so the context decides the paging. Or
     # a text past the budget on its own, whose later pages never build the context.
     text = head + "x" * (pages.BUDGET + 1 - (len(encode(whole)) if paged == "context" else 0))
     brain.write("concepts/long.md", text.encode())
-    first = retrieve.read(select(), "concepts/long.md")
-    assert absent in cast("list[dict]", first["problems"])
+    first = retrieve.read(brain, "concepts/long.md")
     assert "aliases also claimed elsewhere were not expanded" in str(first["problems"])
-    later = retrieve.read(select(), "concepts/long.md", offset=cast("int", first["next_offset"]))
-    assert later["problems"] == [absent]
+    later = retrieve.read(brain, "concepts/long.md", offset=cast("int", first["next_offset"]))
+    assert "problems" not in later
     assert (cast("str", first["text"]) + cast("str", later["text"]), "next_offset" in later) == (text, False)
 
 
 def test_typed_links_read_their_unowned_target_identity(brain: Store) -> None:
-    brain.write(
-        "bf.yaml",
-        b"version: 8\nname: fixture\nfields:\n  owner:\n    description: Owner.\n    type: identity\n    relation: true\n",
-    )
     brain.write("projects/a.md", b"---\ntype: project\n---\n# A\n\n[Alice](bf://fixture/people/alice?rel=owner)\n")
-    plain = retrieve.read([brain], "bf://fixture/people/alice")
+    plain = retrieve.read(brain, "bf://fixture/people/alice")
     assert cast("list[dict]", plain["backlinks"])[0]["relation"] == "owner"
-    assert retrieve.read([brain], "bf://fixture/people/alice?rel=owner") == plain
+    assert retrieve.read(brain, "bf://fixture/people/alice?rel=owner") == plain
     with pytest.raises(Error, match="offset applies"):
-        retrieve.read([brain], "bf://fixture/people/alice", offset=1)
+        retrieve.read(brain, "bf://fixture/people/alice", offset=1)
     with pytest.raises(NotFoundError):
-        retrieve.read([brain], "bf://fixture/people/bob?rel=owner")
+        retrieve.read(brain, "bf://fixture/people/bob?rel=owner")
 
 
-def test_identity_problems_name_the_configured_brain(
-    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "team-folder"
-    root.mkdir()
-    team = Store(root)
-    team.write("bf.yaml", b"version: 8\nname: team\n")
-    original = index.database
-    opened: list[Path] = []
+def test_identity_problems_preserve_their_cause(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(_store: Store) -> contextlib.AbstractContextManager[tuple[sqlite3.Connection, str]]:
+        raise Error("simulated unavailable cache")
 
-    def unavailable_later(store: Store) -> contextlib.AbstractContextManager[tuple[sqlite3.Connection, str]]:
-        opened.append(store.root)
-        # The second visit to the team brain checks shared aliases, after the owner was resolved.
-        if opened.count(root) > 1:
-            raise Error("simulated unavailable cache")
-        return original(store)
-
-    monkeypatch.setattr(index, "database", unavailable_later)
-    _targets, problems = graph.expand([brain, team], "repo:example/project")
-    assert {"brain": "team", "error": "simulated unavailable cache"} in problems
+    monkeypatch.setattr(index, "database", unavailable)
+    _targets, problems = graph.expand(brain, "repo:example/project")
+    assert {"error": "simulated unavailable cache"} in problems
 
 
 # Process and network events that retrieval must never cause. Audit hooks cannot be removed, so a flag gates them.
@@ -481,7 +438,7 @@ sys.addaudithook(_audit)
 def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n  mail:\n    command: [sensors/marker.sh]\n    refresh: 60\n"
+        b"version: 9\nname: fixture\nsensors:\n  mail:\n    command: [sensors/marker.sh]\n    refresh: 60\n"
         b"routines:\n  digest:\n    command: [routines/marker.sh]\n    refresh: 60\n",
     )
     marker = brain.root / "ran"
@@ -492,18 +449,18 @@ def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> N
         script.chmod(0o700)
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 8\ncases:\n- name: decision\n  query: retention\n  expect: [projects/offline.md]\n",
+        b"version: 9\ncases:\n- name: decision\n  query: retention\n  expect: [projects/offline.md]\n",
     )
-    mcp = server([brain])
+    mcp = server(brain)
     events: set[str] = set()
     _WATCHING.append(events)
     try:
-        retrieve.search([brain], Query(text="offline"))
+        retrieve.search(brain, Query(text="offline"))
         for ref in ("", "today", "tasks", "memories", "memories/mail", "projects", "meetings:decision-1"):
-            retrieve.read([brain], ref)
-        retrieve.read([brain], "projects/offline.md")
+            retrieve.read(brain, ref)
+        retrieve.read(brain, "projects/offline.md")
         health.source_health(brain)
-        health.report([brain])
+        health.report(brain)
         assert validate(brain)["valid"]
         assert evaluate(brain)["score"] == "1/1"
         # Due, never-collected programs fail the status check without running.
@@ -528,7 +485,7 @@ def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> N
             Error("the search cache needs write access to the brain's .bf directory; grant it or use a writable copy"),
             "the search cache needs write access to the brain's .bf directory; grant it or use a writable copy",
         ),
-        (sqlite3.DatabaseError("database disk image is malformed"), "run bf build to resolve identities"),
+        (sqlite3.DatabaseError("database disk image is malformed"), "the search cache is unavailable; run bf build"),
     ],
 )
 def test_an_identity_read_without_a_cache_keeps_its_cause(
@@ -540,39 +497,45 @@ def test_an_identity_read_without_a_cache_keeps_its_cause(
     monkeypatch.setattr(index, "database", unavailable)
     # Before 18 every cause read "the search cache is unavailable; run bf build".
     with pytest.raises(Error, match=message):
-        retrieve.read([brain], "repo:example/project")
+        retrieve.read(brain, "repo:example/project")
 
 
-def test_a_brain_whose_bf_yaml_fails_is_named_with_its_cause(brain: Store, tmp_path: Path) -> None:
+def test_a_brain_whose_bf_yaml_fails_names_its_cause(brain: Store, tmp_path: Path) -> None:
     (tmp_path / "other").mkdir()
     other = Store(tmp_path / "other")
-    other.write("bf.yaml", b"version: 8\nname: other\nbogus: true\n")
-    problem = {"brain": "other", "error": "invalid bf.yaml: bogus: unknown key"}
-    # Like search and status, a read names the key to fix, where it said only "bf.yaml is invalid" before 18.
-    assert problem in cast("list[dict]", retrieve.read([brain, other], "projects/offline.md")["problems"])
-    assert problem in cast("list[dict]", retrieve.search([brain, other], Query(text="offline"))["problems"])
+    other.write("bf.yaml", b"version: 9\nname: other\nbogus: true\n")
+    for call in (
+        lambda: retrieve.read(other, "projects/offline.md"),
+        lambda: retrieve.search(other, Query(text="offline")),
+    ):
+        with pytest.raises(Error, match=r"invalid bf\.yaml: bogus: unknown key"):
+            call()
+    with pytest.raises(NotFoundError, match="unknown brain other; this brain is fixture"):
+        retrieve.read(brain, "bf://other/projects/offline.md")
 
 
 def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
     brain.write("projects/archive/old.md", b"# Old\n")
+    assert retrieve.read(brain, "projects/offline.md", rel="owner")["items"] == []
     for call, argument, message in (
-        (lambda: retrieve.read([brain], "2026-13"), "ref", "invalid period: 2026-13"),
-        (lambda: retrieve.read([brain], "memories/meetings/2026-13"), "ref", "invalid period: 2026-13"),
-        (lambda: retrieve.read([brain], "0d"), "ref", "invalid period: 0d"),
-        (lambda: retrieve.read([brain], "projects", offset=-1), "offset", "offset must be an integer"),
-        (lambda: retrieve.read([brain], "projects/", rel="links"), "rel", "not a page"),
+        (lambda: retrieve.read(brain, "2026-13"), "ref", "invalid period: 2026-13"),
+        (lambda: retrieve.read(brain, "memories/meetings/2026-13"), "ref", "invalid period: 2026-13"),
+        (lambda: retrieve.read(brain, "0d"), "ref", "invalid period: 0d"),
+        (lambda: retrieve.read(brain, "projects", offset=-1), "offset", "offset must be an integer"),
+        (lambda: retrieve.read(brain, "projects/", rel="links"), "rel", "not a page"),
         # An existing folder is a page only in its brain: the read finds it, then rejects the relation page.
-        (lambda: retrieve.read([brain], "projects/archive", rel="links"), "rel", "not a page"),
-        (lambda: retrieve.read([brain], "projects/offline.md#decision", rel="links"), "rel", "without its #section"),
+        (lambda: retrieve.read(brain, "projects/archive", rel="links"), "rel", "not a page"),
+        (lambda: retrieve.read(brain, "projects/offline.md#decision", rel="links"), "rel", "without its #section"),
         # A trailing # names no section: it used to read the whole note under a ref no backlink or reminder matched.
-        (lambda: retrieve.read([brain], "projects/offline.md#"), "ref", "a ref ending in # names no section"),
-        (lambda: retrieve.read([brain], "projects/offline.md#", rel="links"), "ref", "ending in # names no"),
+        (lambda: retrieve.read(brain, "projects/offline.md#"), "ref", "a ref ending in # names no section"),
+        (lambda: retrieve.read(brain, "projects/offline.md#", rel="links"), "ref", "ending in # names no"),
         # Nor does a BF address's empty fragment, which read the whole note under another spelling before 20.
-        (lambda: retrieve.read([brain], "bf://fixture/projects/offline.md#"), "ref", "remove the trailing #"),
-        (lambda: retrieve.read([brain], "bf://fixture/#"), "ref", "remove the trailing #"),
+        (lambda: retrieve.read(brain, "bf://fixture/projects/offline.md#"), "ref", "remove the trailing #"),
+        (lambda: retrieve.read(brain, "bf://fixture/#"), "ref", "remove the trailing #"),
         (lambda: pages.query("bf://fixture/projects/offline.md#"), "query", "remove the trailing #"),
         (lambda: pages.query("x", "bf://fixture/projects/offline.md#"), "scope", "remove the trailing #"),
-        (lambda: retrieve.read([brain], "projects/offline.md", rel="owner"), "rel", "undeclared relation"),
+        (lambda: retrieve.read(brain, "projects/offline.md", rel="tagged-with"), "rel", "invalid relation"),
+        (lambda: retrieve.read(brain, "projects/offline.md", rel="Bad!"), "rel", "invalid relation"),
         (lambda: pages.query("!!!"), "query", "give words or an identity"),
         (lambda: pages.query("bf://Me/x"), "query", "invalid BF link"),
         (lambda: pages.query("x", "0d"), "scope", "invalid period: 0d"),

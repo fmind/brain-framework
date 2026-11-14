@@ -5,7 +5,6 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Generator
 from contextlib import closing, contextmanager
-from pathlib import Path
 from typing import cast
 
 import pytest
@@ -29,7 +28,7 @@ def test_tasks_include_source_sections_lines_and_counts_for_canonical_notes(brai
     brain.write("actions/2026-09-27_work/outputs/result.md", b"# Output\n\n- [ ] Copied task.\n")
     brain.write("actions/guide.md", b"# Guide\n\n- [ ] Example.\n")
     brain.write("projects/retired.md", b"---\nstatus: deprecated\n---\n# Old\n\n- [ ] Retired.\n")
-    result = read([brain], "tasks")
+    result = read(brain, "tasks")
     assert result["summary"] == {"open": 3, "done": 2, "notes": 3}
     assert result["total"] == 3
     items = cast("list[dict[str, object]]", result["items"])
@@ -41,70 +40,64 @@ def test_tasks_include_source_sections_lines_and_counts_for_canonical_notes(brai
         "line": 8,
         "text": "Read [the source](concepts/evidence.md).",
     }
-    assert "- [ ] Read" in str(read([brain], str(found["ref"]))["text"])
+    assert "- [ ] Read" in str(read(brain, str(found["ref"]))["text"])
     assert [item["text"] for item in items] == ["Resume.", "Read [the source](concepts/evidence.md).", "Numbered."]
-    assert read([brain], "bf://fixture/tasks")["summary"] == result["summary"]
+    assert read(brain, "bf://fixture/tasks")["summary"] == result["summary"]
 
 
-def test_tasks_continue_in_one_stable_order_across_brains(brain: Store, tmp_path: Path) -> None:
-    root = tmp_path / "team"
-    root.mkdir()
-    team = Store(root)
-    team.write("bf.yaml", b"version: 8\nname: team\n")
-    for store in (brain, team):
-        store.write("projects/work.md", ("# Work\n\n" + "\n".join(f"- [ ] Task {n}." for n in range(63))).encode())
-    stores = [team, brain]
+def test_tasks_continue_in_one_stable_order(brain: Store) -> None:
+    for path in ("projects/work.md", "concepts/notes.md"):
+        brain.write(path, ("# Work\n\n" + "\n".join(f"- [ ] Task {n}." for n in range(63))).encode())
     offset = 0
     results = []
     while True:
-        result = read(stores, "tasks", offset=offset)
+        result = read(brain, "tasks", offset=offset)
         assert result["summary"] == {"open": 126, "done": 0, "notes": 2}
         assert result["total"] == 126
         items = cast("list[dict[str, object]]", result["items"])
         assert len(items) <= pages.PAGE
-        results.extend((item["line"], item["brain"]) for item in items)
+        results.extend((item["line"], item["note"]) for item in items)
         if "next_offset" not in result:
             break
         offset = cast("int", result["next_offset"])
-    assert results == [(line, name) for line in range(3, 66) for name in ("fixture", "team")]
-    assert read(list(reversed(stores)), "tasks")["items"] == read(stores, "tasks")["items"]
-    assert read(stores, "tasks", offset=MAX_OFFSET)["items"] == []
+    assert results == [(line, note) for note in ("concepts/notes.md", "projects/work.md") for line in range(3, 66)]
+    assert read(brain, "tasks", offset=MAX_OFFSET)["items"] == []
 
 
 def test_tasks_refresh_changed_deleted_and_invalid_notes_and_report_incompleteness(brain: Store) -> None:
     path = "projects/changing.md"
     brain.write(path, b"# Change\n\n- [ ] First.\n- [ ] Second.\n")
-    assert read([brain], "tasks")["total"] == 2
+    assert read(brain, "tasks")["total"] == 2
     brain.write(path, b"# Change\n\n- [x] First.\n")
-    assert read([brain], "tasks")["summary"] == {"open": 0, "done": 1, "notes": 1}
+    assert read(brain, "tasks")["summary"] == {"open": 0, "done": 1, "notes": 1}
     brain.write(path, b"---\nstale_after: invalid\n---\n# Change\n\n- [ ] First.\n")
-    result = read([brain], "tasks")
+    result = read(brain, "tasks")
     assert result["total"] == 0
     assert path in str(result["problems"])
     (brain.root / path).unlink()
-    assert "problems" not in read([brain], "tasks")
+    assert "problems" not in read(brain, "tasks")
 
 
 def test_task_page_identity_cannot_be_claimed_by_notes_or_records(brain: Store) -> None:
     for metadata in ("entity: bf://fixture/tasks", "aliases: [bf://fixture/tasks]"):
         brain.write("projects/owner.md", f"---\ntype: project\n{metadata}\n---\n# Owner\n".encode())
         assert not validate(brain)["valid"]
-        assert read([brain], "tasks")["problems"]
+        assert read(brain, "tasks")["problems"]
     brain.delete("projects/owner.md")
     records_file(brain, "mail", [Record(id="owner", title="Owner", aliases=["bf://fixture/tasks"])])
     assert not validate(brain)["valid"]
-    assert read([brain], "tasks")["problems"]
+    assert read(brain, "tasks")["problems"]
     brain.delete("memories/mail/4c1029697ee358715d3a14a2add817c4b01651440de808371f78165ac90dc581.json")
     brain.write("projects/link.md", b"---\ntype: project\n---\n# Link\n\n[Queue](bf://fixture/tasks).\n")
     assert validate(brain)["valid"]
-    assert "problems" not in read([brain], "tasks")
+    assert "problems" not in read(brain, "tasks")
 
 
 def test_task_items_preview_a_long_note_title(brain: Store) -> None:
     tasks = "\n".join(f"- [ ] Task {n}." for n in range(pages.PAGE))
     # A whole-message title would crowd the page: each task shows its note's title as listings preview it.
     brain.write("projects/long.md", f"# {'word ' * 800}\n\n## Next\n\n{tasks}\n".encode())
-    result = read([brain], "tasks")
+    result = read(brain, "tasks")
     titles = [str(item["title"]) for item in cast("list[dict[str, object]]", result["items"])]
     assert (len(titles), "next_offset" in result) == (pages.PAGE, False)
     assert all(len(title) <= index.TITLE and title.endswith("…") for title in titles)
@@ -114,7 +107,7 @@ def test_task_page_has_no_sections(brain: Store) -> None:
     # Invalid input before any brain is read, as a section of any other page.
     for ref in ("bf://fixture/tasks#section", "tasks#section"):
         with pytest.raises(InputError, match="pages have no sections"):
-            read([brain], ref)
+            read(brain, ref)
 
 
 def test_task_parser_excludes_literal_code_and_escaped_checkbox_examples(brain: Store) -> None:
@@ -124,13 +117,13 @@ def test_task_parser_excludes_literal_code_and_escaped_checkbox_examples(brain: 
         b"~~~markdown\n- [ ] Fenced.\n~~~\n\n    - [ ] Indented code.\n\n"
         b"> - [ ] Quoted source.\n> > - [ ] Nested quote.\n\n- plain\n  - [ ] Nested.\n",
     )
-    result = read([brain], "tasks")
+    result = read(brain, "tasks")
     assert [item["text"] for item in cast("list[dict[str, object]]", result["items"])] == ["Real.", "Nested."]
 
 
 def test_task_counts_and_items_share_a_cache_snapshot(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write("projects/concurrent.md", b"# Work\n\n- [ ] Keep this snapshot.\n")
-    assert read([brain], "tasks")["total"] == 1
+    assert read(brain, "tasks")["total"] == 1
     original = index.database
     changed = False
 
@@ -149,7 +142,7 @@ def test_task_counts_and_items_share_a_cache_snapshot(brain: Store, monkeypatch:
             yield connection, state
 
     monkeypatch.setattr(index, "database", concurrent)
-    result = read([brain], "tasks")
+    result = read(brain, "tasks")
     assert changed
     assert result["summary"] == {"open": 1, "done": 0, "notes": 1}
     assert len(cast("list", result["items"])) == 1

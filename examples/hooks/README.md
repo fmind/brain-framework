@@ -1,6 +1,6 @@
 # Example hooks
 
-Standalone scripts that agent hosts run on their own events. Copy one into a folder only you write, such as your personal brain's `hooks/`, review it, and register it in your host; Brain Framework neither bundles nor installs hooks. The host runs a registered hook at every session or prompt, without a `bf` command, so never register one from a brain others can push to: a pulled change would run unreviewed with your permissions. For the agent procedures themselves, install the skills with `bf skills DIR` (see the [skills guide](../../src/bf/skills/README.md)).
+Standalone scripts that agent hosts run on their own events. Copy one into a folder only you write, such as your personal brain's `hooks/`, review it, and register it in your host; Brain Framework neither bundles nor installs hooks. The host runs a registered hook at every session or prompt, without a `bf` command, so never register one from a brain others can push to: a pulled change would run unreviewed with your permissions. For the agent procedures themselves, install the skill with `bf skill install` (see [Agent workflows](../../docs/docs/agents.md)).
 
 | Hook                 | Event            | Arguments | Output                                                                                                                                                                                                                                      |
 | -------------------- | ---------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -19,7 +19,7 @@ From the framework checkout after `uv sync --locked`, this subshell creates a fi
   hook_demo=$(cd "$hook_demo" && pwd -P)
   trap 'rm -rf -- "$hook_demo"' EXIT
   unset BF_BRAIN
-  export XDG_CONFIG_HOME="$hook_demo/config" XDG_STATE_HOME="$hook_demo/state"
+  export XDG_CONFIG_HOME="$hook_demo/config"
   uv run bf init "$hook_demo/brain" --name hook-demo
   cat > "$hook_demo/brain/projects/new-website.md" <<'EOF'
 ---
@@ -139,7 +139,7 @@ Both hosts add a command hook's standard output to the agent's context on sessio
 
 Hosts without hooks can run the session script from their session instructions. Start a session in a repository that a project note names in its `aliases` and check that the context appears; `bf status` then counts its reads under `usage`. Then ask about a saved topic and check that the prompt hook's context reached the agent, for example in Claude Code's [debug log](https://code.claude.com/docs/en/hooks#debug-hooks). Local tests of the scripts do not establish host delivery.
 
-For an existing action, the `bf-action` skill's [handoff guide](../../src/bf/skills/bf-action/references/handoff.md) adds a size checker and an optional Claude Code check after compaction or resume. It reports Context and Resume refs and counts without inserting their text; refresh the action through the agent before a planned compaction.
+For an existing action, keep its `Context` and `Resume` sections brief and current so another session or compacted context can resume without copying raw evidence; run `bf guide authoring` for action conventions.
 
 ## What the hooks guarantee
 

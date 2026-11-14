@@ -30,7 +30,7 @@ def emit(*items: Mapping[str, object]) -> bytes:
 
 
 def configure(brain: Store, sensor: str) -> None:
-    brain.write("bf.yaml", f"version: 8\nname: fixture\nsensors:\n  mail:\n{sensor}".encode())
+    brain.write("bf.yaml", f"version: 9\nname: fixture\nsensors:\n  mail:\n{sensor}".encode())
 
 
 def stored(brain: Store, source: str = "mail") -> list[str]:
@@ -166,13 +166,13 @@ def test_expire_after_is_bounded(brain: Store) -> None:
 def test_a_disabled_program_may_omit_its_command(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n  retired:\n    enabled: false\nroutines:\n  old:\n    enabled: false\n",
+        b"version: 9\nname: fixture\nsensors:\n  retired:\n    enabled: false\nroutines:\n  old:\n    enabled: false\n",
     )
     config = load(brain)
     assert config.sensors["retired"].command == []
     assert invoke("validate", "--brain", "fixture")["valid"] is True
     for sensor in ("retired:\n    refresh: 60\n", "retired:\n    enabled: true\n"):
-        brain.write("bf.yaml", f"version: 8\nname: fixture\nsensors:\n  {sensor}".encode())
+        brain.write("bf.yaml", f"version: 9\nname: fixture\nsensors:\n  {sensor}".encode())
         with pytest.raises(Error, match="command is required unless enabled: false"):
             load(brain)
 
@@ -180,19 +180,19 @@ def test_a_disabled_program_may_omit_its_command(brain: Store) -> None:
 def test_collect_input_checks_saved_output_without_running_or_saving(brain: Store, tmp_path: Path) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nfields:\n  sender:\n    description: Sender.\n    type: identity\n    cardinality: many\n"
-        b"    relation: true\n    path: /attributes/sender_refs\nsensors:\n  mail:\n    enabled: false\n",
+        b'version: 9\nname: fixture\nfields:\n  sender:\n    description: Sender.\n    targets: ["person:"]\n'
+        b"sensors:\n  mail:\n    enabled: false\n",
     )
     fixture = tmp_path / "mail.json"
     fixture.write_text(
-        json.dumps([{"id": "m1", "title": "Hi", "attributes": {"sender_refs": ["person:email/alice@example.test"]}}])
+        json.dumps([{"id": "m1", "title": "Hi", "relations": {"sender": "person:email/alice@example.test"}}])
     )
     result = invoke("collect", "mail", "--input", str(fixture), "--brain", "fixture")
     assert result["added"] == 1
-    assert result["samples"][0]["fields"] == {"sender": ["person:email/alice@example.test"]}
+    assert result["samples"][0]["relations"] == {"sender": "person:email/alice@example.test"}
     assert stored(brain) == []
     piped = invoke("collect", "mail", "--input", "-", "--brain", "fixture", stdin=fixture.read_text())
-    assert piped["samples"][0]["fields"] == result["samples"][0]["fields"]
+    assert piped["samples"][0]["relations"] == result["samples"][0]["relations"]
     # Invalid output fails like a run, naming the record, and still saves nothing.
     fixture.write_text(json.dumps([{"id": "m1"}]))
     with pytest.raises(Error, match=r"0\.title: Field required; nothing was written"):
@@ -248,7 +248,7 @@ def test_programs_receive_their_name_window_and_private_state_directory(brain: S
     brain.write("sensors/env.py", script.encode())
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n  env:\n    command: [python3, sensors/env.py]\n",
+        b"version: 9\nname: fixture\nsensors:\n  env:\n    command: [python3, sensors/env.py]\n",
     )
     os.environ["BF_TRIGGER"] = "inherited"
     try:
@@ -261,13 +261,13 @@ def test_programs_receive_their_name_window_and_private_state_directory(brain: S
     # Inherited values of the variables BF owns never reach a program.
     assert (seen["BF_TRIGGER"], seen["BF_SCHEDULE"]) == ("", "")
     assert seen["mode"] == "0o700"
-    assert seen["inside"] is False
+    assert seen["inside"] is True
 
 
 def test_routines_receive_their_window(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nroutines:\n  check:\n    command: [python3, routines/check.py]\n",
+        b"version: 9\nname: fixture\nroutines:\n  check:\n    command: [python3, routines/check.py]\n",
     )
     brain.write(
         "routines/check.py",
@@ -315,11 +315,11 @@ def test_status_reports_the_last_run_retention_counts(brain: Store) -> None:
     printed = emit({"id": "hidden", "title": "Hidden"}, {"id": "shown", "title": "Shown"})
     collect(brain, "mail", start=START, end=END, runner=lambda *_: printed, clock=lambda: NOW)
     status = invoke("status", "--brain", "fixture")
-    assert status["brains"][0]["sources"]["mail"]["last_run"]["forgotten"] == 1
+    assert status["sources"]["mail"]["last_run"]["forgotten"] == 1
     # A later run without forgotten records resets the count, which status then leaves out.
     shown = emit({"id": "shown", "title": "Shown"})
     collect(brain, "mail", start=START, end=END, runner=lambda *_: shown, clock=lambda: NOW)
-    assert "forgotten" not in invoke("status", "--brain", "fixture")["brains"][0]["sources"]["mail"]["last_run"]
+    assert "forgotten" not in invoke("status", "--brain", "fixture")["sources"]["mail"]["last_run"]
 
 
 def test_forget_rejects_an_unknown_source_and_validate_checks_the_list(brain: Store) -> None:

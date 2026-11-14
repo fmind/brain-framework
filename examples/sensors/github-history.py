@@ -20,6 +20,7 @@ MAX_BYTES = 16 << 20
 MAX_PAGES = 100
 MAX_RECORDS = 10000
 KINDS = {"commits": "commit", "issues": "issue", "pulls": "pull-request"}
+TYPES = {"commits": "Commit", "issues": "Issue", "pulls": "PullRequest"}
 LABELS = {"issues": "Issue", "pulls": "Pull request"}
 InvalidError = _sensor.InvalidError
 
@@ -132,16 +133,16 @@ def record(repository: str, kind: str, item: dict[str, Any]) -> dict[str, Any]:
         url = f"https://github.com/{repository}/{route}/{number}"
         alias = f"github:{repository}/{route}/{number}"
     instant(when)
-    attributes["repository_refs"] = [repo_ref]
     attributes["kind"] = KINDS[kind]
     return _sensor.record(
         f"{repository}/{kind}/{key}",
         f"{repository}: {title}",
+        item_type=TYPES[kind],
         text=text,
         time=when,
         url=url,
-        links=[repo_ref],
         aliases=[alias],
+        relations={"repository": [repo_ref]},
         attributes=attributes,
     )
 

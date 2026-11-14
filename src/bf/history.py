@@ -1,7 +1,7 @@
 """Run history and logs of sensors, routines and assistants, and the environment programs inherit.
 
-Status, retrieval and dashboards read this history without importing the process runner. History stays on this
-machine outside the brain; logs live in the brain's logs/ folder, which Git ignores and retrieval never reads.
+Status, retrieval and dashboards read this history without importing the process runner. History lives in the brain's
+`.bf/state/` directory and logs live in `logs/`, both ignored by Git and never indexed by retrieval.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 from pydantic import Field, ValidationError, field_validator
 
 from bf.models import NAME, Error, Model, decode, encode, explain, timestamp
-from bf.storage import Store, appending, state_store
+from bf.storage import Store, appending, private_dir
 
 SENSORS = "sensors.json"
 ROUTINES = "routines.json"
@@ -107,20 +107,27 @@ def environment() -> dict[str, str]:
     return env
 
 
+def _state_name(file: str) -> str:
+    if not file or file in {".", ".."} or "/" in file or "\\" in file or "\x00" in file:
+        raise Error("invalid history file name")
+    return file
+
+
 def state(store: Store, file: str = SENSORS) -> dict[str, dict[str, object]]:
-    """Per-sensor, per-routine or per-assistant run history, kept on this machine outside the brain."""
+    """Per-sensor, per-routine or per-assistant run history inside `<brain>/.bf/state/`."""
+    name = _state_name(file)
     try:
-        value = decode(state_store(store.root).read(file))
+        value = decode(store.read(f".bf/state/{name}"))
     except FileNotFoundError, Error:
         return {}
     if not isinstance(value, dict):
         return {}
     valid = {}
-    for name, entry in value.items():
-        if not isinstance(name, str) or not re.fullmatch(NAME, name):
+    for entry_name, entry in value.items():
+        if not isinstance(entry_name, str) or not re.fullmatch(NAME, entry_name):
             continue
         try:
-            valid[name] = _Run.model_validate(entry).model_dump(exclude_unset=True)
+            valid[entry_name] = _Run.model_validate(entry).model_dump(exclude_unset=True)
         except ValidationError:
             # Disposable run history must not stop evidence recovery or other sensors.
             continue
@@ -129,14 +136,15 @@ def state(store: Store, file: str = SENSORS) -> dict[str, dict[str, object]]:
 
 def remember(store: Store, name: str, file: str = SENSORS, /, **values: object) -> None:
     """Update local history while the caller holds the brain writer lock or, for routines, `storage.recording`."""
-    current = state(store, file)
+    filename = _state_name(file)
+    current = state(store, filename)
     try:
         entry = _Run.model_validate({**current.get(name, {}), **values})
     except ValidationError as error:
         # Fail the write: the next read would silently drop the program's whole history instead.
         raise Error(f"{name}: invalid run history: {explain(error)}") from error
     current[name] = entry.model_dump(exclude_unset=True)
-    state_store(store.root).write(file, encode(current))
+    private_dir(store, ".bf", "state").write(filename, encode(current))
 
 
 # A program's log keeps its newest whole entries within this size.

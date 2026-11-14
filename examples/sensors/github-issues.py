@@ -4,16 +4,8 @@
 Usage: github-issues.py OWNER/REPO [START END]. BF passes the window in BF_START and BF_END; START and END serve a
 manual run. Needs `_sensor.py` in the same folder.
 
-Each issue lists its labels as lowercase `label:github.com/OWNER/REPO/NAME` identities in `attributes.label_refs`,
-which the standard `label` relation of a new brain maps. A brain whose bf.yaml lacks that field declares it under
-`fields:` first:
-
-  label:
-    description: Label the provider attaches to the item.
-    type: identity
-    cardinality: many
-    relation: true
-    path: /attributes/label_refs
+Each issue sets `@type` to `"Issue"` and asserts `repository`, `author`, `assignee` and lowercase
+`label:github.com/OWNER/REPO/NAME` `label` edges directly under `relations`.
 """
 
 import json
@@ -83,23 +75,25 @@ def issue(repository: str, item: object, start: datetime, end: datetime) -> dict
     return _sensor.record(
         f"{repository}/issues/{number}",
         f"{repository}: {title}",
+        item_type="Issue",
         # Issue bodies sometimes quote a pasted token: mask common credential shapes before saving.
         text="\n".join(lines) + ("\n\n" + _sensor.redact(body) if isinstance(body, str) and body else ""),
         time=created,
         url=item.get("url") or "",
-        links=[repository_ref, *author_refs, *assignee_refs],
         aliases=[f"github:{repository}/issues/{number}"],
+        relations={
+            "author": author_refs,
+            "assignee": assignee_refs,
+            "repository": [repository_ref],
+            "label": label_refs,
+        },
         attributes={
             "number": number,
             "kind": "issue",
             "status": status,
             **({"reason": reason.lower()} if isinstance(reason, str) and reason else {}),
             "labels": names,
-            "label_refs": label_refs,
             "updated": updated,
-            "author_refs": author_refs,
-            "assignee_refs": assignee_refs,
-            "repository_refs": [repository_ref],
         },
     )
 

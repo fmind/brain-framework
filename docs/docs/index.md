@@ -9,7 +9,7 @@ description: Keep evidence, decisions and next steps in plain files that you and
 
 **🧠 Brain Framework: from information to informed actions.**
 
-Brain Framework (BF) is a local-first brain for you and your AI agents. It collects evidence from your tools into plain files you own, connects them through an ontology you declare, lets any agent harness search and read offline, and wakes your harness when declarative `when:` rules or reviewed gates detect changes. No BF account or built-in model is required.
+Brain Framework (BF) is a local-first brain for you and your AI agents. It collects evidence from your tools into plain files you own, connects them through typed relations and identities, lets any agent harness search and read offline, and wakes your harness when declarative `when:` rules or reviewed gates detect changes. No BF account or built-in model is required.
 
 **Start with [Getting started](getting-started.md): save a decision, search its reason and verify the result** on Linux or macOS (or WSL2 on Windows).
 
@@ -18,7 +18,7 @@ Brain Framework (BF) is a local-first brain for you and your AI agents. It colle
 | Step                 | In the website example                                                                         |
 | -------------------- | ---------------------------------------------------------------------------------------------- |
 | Gather               | A sensor collects a selected brief into `memories/`.                                           |
-| Normalize            | BF maps provider attributes into shared `fields:` with a stable `SOURCE:ID` ref.               |
+| Normalize            | Sensors emit `@type`, `relations` and `attributes` with a stable `SOURCE:ID` ref.              |
 | Organize and connect | The project note links its decision to that ref.                                               |
 | Act                  | You or an agent track the session in `actions/` and settle it when done.                       |
 | Learn                | `bf read review` flags `newer_evidence`; you reconcile the project and promote reusable rules. |
@@ -65,7 +65,7 @@ While `bf watch` runs, `when:` checks SQLite every 10 minutes without spawning a
 | Understand the model   | [Core concepts](concepts.md), including boundaries and what stays authoritative.                                                                                               |
 | Use it each day        | [Write notes](brain.md), [search and read](search.md), [link knowledge](links.md) and [check your brain](checks.md).                                                           |
 | Collect and automate   | [Add a sensor](sensors.md), [run routines](routines.md), [assistants](prompts.md), [channels](channels.md) and [watch and schedule](schedule.md).                              |
-| Work with others       | [Agent workflows](agents.md), [MCP](mcp.md), [team setup](team.md) and [privacy and security](privacy.md).                                                                     |
+| Work with others       | [Agent workflows](agents.md), [MCP](mcp.md) and [privacy and security](privacy.md).                                                                                            |
 | Look up exact behavior | [Commands](commands.md), [configuration](configuration.md), [notes and fields](schema.md), [link rules](link-reference.md), [retrieval](retrieval.md) and [limits](limits.md). |
 | Resolve or upgrade     | [Troubleshooting](troubleshooting.md), [install and update](upgrades.md) and the [changelog](../changelog.md).                                                                 |
 

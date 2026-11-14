@@ -238,16 +238,18 @@ def collect(
                 _sensor.record(
                     key,
                     _sensor.line(f"{relative}: {subject}", relative),
+                    item_type="Commit",
                     time=when,
                     text=f"Repository: {relative}\nCommit: {commit}\nAuthor: {author}\nCommitted: {when}\n\n{message}",
-                    links=[*repo_refs, *author_refs],
                     aliases=["commit:local/" + quote(key, safe="/@")],
+                    relations={
+                        "author": author_refs,
+                        "repository": repo_refs,
+                    },
                     attributes={
                         "repository": relative,
                         "commit": commit,
                         "author_email": author,
-                        "author_refs": author_refs,
-                        "repository_refs": repo_refs,
                     },
                 )
             )

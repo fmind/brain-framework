@@ -6,8 +6,8 @@ Follow the [four-tool walkthrough](../../docs/docs/context-hub.md) page. `tests/
 
 | File                               | Purpose                                                                                                                                              |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [bf.yaml](bf.yaml)                 | Maps each tool's project and status fields to the shared `project` relation and `status`.                                                            |
-| [sensors/demo.py](sensors/demo.py) | Prints `fixtures/TOOL.json` as that tool's record; contacts nothing.                                                                                 |
+| [bf.yaml](bf.yaml)                 | Declares the four snapshot sensors and constrains the `project` relation to `project:` targets.                                                      |
+| [sensors/demo.py](sensors/demo.py) | Normalizes `fixtures/TOOL.json` to `@type`, `relations.project`, and `attributes.status`; contacts nothing.                                          |
 | `fixtures/*.json`                  | Fictional tool output; `jira-done.json` is the review once Done, changed upstream at collection.                                                     |
 | `projects/new-website.md`          | The minimal project note that the records link to through its `project:new-website` alias.                                                           |
 | `evals/retrieval.yaml`             | Ten retrieval cases: `bf eval` reports `"score":"10/10"`.                                                                                            |

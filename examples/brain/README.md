@@ -11,7 +11,7 @@ mkdir "$bf_example"
 cp -R examples/brain/. "$bf_example"
 cd "$bf_example"
 bf() {
-  env -u BF_BRAIN XDG_CONFIG_HOME="$bf_demo/config" XDG_STATE_HOME="$bf_demo/state" \
+  env -u BF_BRAIN XDG_CONFIG_HOME="$bf_demo/config" \
     uv run --project "$bf_checkout" bf "$@"
 }
 bf update --dry-run
@@ -50,7 +50,7 @@ bf read bf://example/projects/example
 bf read 'bf://example/projects/example.md#now'
 ```
 
-Read the concept's `backlinks` to find the project under `related-to`. Read the project's `claims` to find the same link and its origin, `projects/example.md#now`. These are two views of one declared relation. `bf read repo:example/project` also groups the collected record under its `repository` relation; `bf.yaml` restricts that relation to `repo:` identities with `targets`, so a sensor mapping any other value fails without saving. Use real identities when adapting the example.
+Read the concept's `backlinks` to find the project under `related-to`. Read the project's `claims` to find the same link and its origin, `projects/example.md#now`. These are two views of one declared relation. `bf read repo:example/project` also groups the collected record under its `repository` relation; `bf.yaml` restricts that relation to `repo:` identities with `targets`, so a sensor passing any other value fails without saving. Use real identities when adapting the example.
 
 `bf.yaml` also declares `depends-on` with `broader: related-to`, so a `related-to` relation page lists dependencies too:
 
@@ -84,7 +84,7 @@ A script that needs every record of one source exports it whole, without reading
 bf export --kind items --scope memories/demo
 ```
 
-It prints one line: the demo record with its mapped `fields`, its `time` and `observed` times, and `"ref":"demo:retention","source":"demo","text":"Keep original evidence because upstream content can disappear."`. See [export the graph](../../docs/docs/commands.md#export-the-graph).
+It prints one line: the demo record with its `attributes`, its `time` and `observed` times, and `"ref":"demo:retention","relations":{"repository":["repo:example/project"]},"source":"demo","text":"Keep original evidence because upstream content can disappear."`. See [export the graph](../../docs/docs/commands.md#export-the-graph).
 
 ## Review a decision
 
@@ -120,13 +120,13 @@ Retain the exact policy section locally without inserting its body into an agent
 (
   set -o pipefail -o noclobber
   umask 077
-  helper="$bf_checkout/src/bf/skills/bf-use/scripts/evidence.py"
   policy='bf://example/concepts/archive-policy.md#retention'
   capture=actions/2026-09-25_retention-review/inputs/policy-v1.json
   mkdir -p "${capture%/*}"
   exec 3> "$capture" || exit 1
-  bf read "$policy" | python3 "$helper" capture >&3 || { rm -f -- "$capture"; exit 1; }
-  { cat "$capture"; bf read "$policy"; } | python3 "$helper" compare
+  bf read "$policy" >&3 || { rm -f -- "$capture"; exit 1; }
+  current=$(bf read "$policy") || exit 1
+  if [ "$current" = "$(cat "$capture")" ]; then echo '"state":"unchanged"'; else echo '"state":"changed"'; fi
 )
 ```
 
@@ -134,13 +134,15 @@ The comparison returns `"state":"unchanged"`. Edit the policy body in this dispo
 
 ```bash
 sed -i.bak 's/latest version/two latest versions/' concepts/archive-policy.md
-{
-  cat actions/2026-09-25_retention-review/inputs/policy-v1.json
-  bf read 'bf://example/concepts/archive-policy.md#retention'
-} | python3 "$bf_checkout/src/bf/skills/bf-use/scripts/evidence.py" compare
+current=$(bf read 'bf://example/concepts/archive-policy.md#retention')
+if [ "$current" = "$(cat actions/2026-09-25_retention-review/inputs/policy-v1.json)" ]; then
+  echo '"state":"unchanged"'
+else
+  echo '"state":"changed"'
+fi
 ```
 
-It returns `"state":"changed"`, while the capture retains the old body. It does not revise the dependent decision for you. Incomplete evidence yields `unknown` or an error, never permission to dismiss an intention. The helper needs Python 3.11 or later. A direct pipe suits this short section: `bf read` returns the text of replies above 32 KiB in pages, which `capture` refuses. For those, pipe the helper's `read REF --brain BRAIN` mode instead: it runs `bf` from PATH and assembles the pages, as the [evidence guide](../../src/bf/skills/bf-use/references/evidence.md#retain-a-revision) shows.
+It returns `"state":"changed"`, while the capture retains the old body. It does not revise the dependent decision for you. Incomplete evidence never grants permission to dismiss an intention.
 
 ### Share the procedure with a team brain
 
@@ -154,7 +156,7 @@ bf validate --brain "$bf_team"
 bf read concepts/selected-evidence.md --brain "$bf_team"
 ```
 
-The integration test exercises this isolated destination with retrieval cases. It checks this prepared fixture, not automatic redaction of arbitrary notes. For real transfers, use the [sharing guide](../../src/bf/skills/bf-use/references/evidence.md#share-across-audiences); review the complete candidate for its audience before an authorized write or publication.
+The integration test exercises this isolated destination with retrieval cases. It checks this prepared fixture, not automatic redaction of arbitrary notes; always review a complete transfer candidate for its audience before an authorized write or publication.
 
 ## Try a brain-local skill
 

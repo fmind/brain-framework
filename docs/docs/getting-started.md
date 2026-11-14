@@ -127,7 +127,10 @@ record = {
     "id": "website-brief",
     "title": "Product brief",
     "text": brief.read_text(encoding="utf-8"),
-    "attributes": {"updated": datetime.fromtimestamp(brief.stat().st_mtime, UTC).isoformat()},
+    "attributes": {
+        "kind": "document",
+        "updated": datetime.fromtimestamp(brief.stat().st_mtime, UTC).isoformat(),
+    },
 }
 print(json.dumps([record]))
 ```
@@ -141,11 +144,9 @@ sensors:
     command: [uv, run, --no-project, --python, "3.14", sensors/brief.py]
     mode: snapshot
     refresh: 0
-    fields:
-      kind: { value: document }
 ```
 
-`mode: snapshot` treats stdout as the full catalog, `refresh: 0` keeps runs manual, and `fields` sets the [standard `kind` field](schema.md#standard-vocabulary):
+`mode: snapshot` treats stdout as the full catalog, `refresh: 0` keeps runs manual, and `attributes.kind` classifies the item ([record format](schema.md#record-schema)):
 
 ```bash
 bf collect brief
@@ -161,7 +162,7 @@ Collection reports `"records":1`, and the exact read returns:
   "record": {
     "id": "website-brief",
     "text": "Visitors need a clear product explanation before signing up.\n",
-    "fields": { "kind": "document" }
+    "attributes": { "kind": "document" }
   }
 }
 ```
@@ -209,7 +210,7 @@ Read `brief:website-brief` and update the project to clear the flag. [Add a sens
 | ------------------------------------ | -------------------------------------------------------------------- |
 | Understand the model                 | [Core concepts](concepts.md)                                         |
 | Author notes and track work sessions | [Write notes and actions](brain.md)                                  |
-| Connect an agent and install skills  | `bf skills ~/.agents/skills`, then [Agent workflows](agents.md)      |
+| Connect an agent and install `/bf`   | `bf skill install --global`, then [Agent workflows](agents.md)       |
 | Collect sources and watch schedules  | [Add a sensor](sensors.md) and [Watch and schedule](schedule.md)     |
 | Wake your harness on new evidence    | [Assistants](prompts.md) and [Four-tool walkthrough](context-hub.md) |
-| Collaborate or troubleshoot          | [Team setup](team.md) and [Troubleshooting](troubleshooting.md)      |
+| Check health or troubleshoot         | [Troubleshooting](troubleshooting.md)                                |

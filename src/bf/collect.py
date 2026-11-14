@@ -504,11 +504,11 @@ def _envelope(printed: object) -> tuple[object, dict[str, int]]:
     return printed["records"], {"missed": incomplete["missed"], "of": incomplete["of"]}
 
 
-def _project(position: int, record: Record, sensor: Sensor, config: Config, observed: str) -> Record:
-    """Map one printed record and stamp when it was observed; an error names its zero-based position, never a value."""
+def _prepare(position: int, record: Record, config: Config, observed: str) -> Record:
+    """Validate optional constraints and stamp when observed; an error names zero-based position, never a value."""
     try:
-        projected = ontology.project(record, sensor, config)
-        stamped = projected.model_copy(update={"attributes": {**projected.attributes, "observed": observed}})
+        ontology.validate(record, config)
+        stamped = record.model_copy(update={"attributes": {**record.attributes, "observed": observed}})
         # Already valid, and `observed` is BF's own canonical instant: the stamp can only exceed the size bound.
         return stamped.readable()
     except (Error, ValueError) as error:
@@ -587,10 +587,10 @@ def collect(
             truncated_count = 0
             if isinstance(printed, list):
                 for position, item in enumerate(printed):
-                    # Collection maps fields itself. Checked before validation, which would name invalid keys or the
-                    # 1,000-name bound instead of this rule.
-                    if isinstance(item, dict) and item.get("fields"):
-                        raise Error(f"record {position}: sensors must supply mapped output, not precomputed fields")
+                    if isinstance(item, dict) and "fields" in item:
+                        raise Error(
+                            f"record {position}: sensors must output @type, relations and attributes, not fields"
+                        )
                     if isinstance(item, dict) and isinstance(item.get("text"), str):
                         try:
                             encoded_text = item["text"].encode("utf-8")
@@ -627,9 +627,7 @@ def collect(
                 incoming = TypeAdapter(Annotated[list[Record], FailFast()]).validate_python(printed)
             except ValidationError as error:
                 raise Error("collector must print one JSON array of records: " + explain(error, RECORD_KEYS)) from error
-            incoming = [
-                _project(position, record, sensor, config, observed) for position, record in enumerate(incoming)
-            ]
+            incoming = [_prepare(position, record, config, observed) for position, record in enumerate(incoming)]
             if len({r.id for r in incoming}) != len(incoming):
                 raise Error("collector returned duplicate record ids")
             cutoff = (
@@ -741,20 +739,18 @@ def _retention(retention: records.Retention) -> dict[str, int]:
 
 
 def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, object]:
-    """Re-apply a sensor's current field mappings to its stored records; never runs the sensor or removes a record.
+    """Re-validate and normalize a sensor's stored records against current ontology constraints; never deletes.
 
-    Changed records are committed like a window collection, in transactions of up to REPROJECT records that keep
-    memory bounded: an interrupted run leaves each record either reprojected or as it was, and a rerun completes it.
-    A record the current mappings reject keeps its stored fields and is counted as failed.
+    Changed records are committed in transactions of up to REPROJECT records that keep memory bounded: an interrupted
+    run leaves each record either normalized or as it was, and a rerun completes it. Records failing validation keep
+    their stored files and are counted as failed.
     """
     config = load(store)
-    sensor = config.sensors.get(name)
-    if sensor is None:
-        raise Error(f"sensor {name} is not declared in bf.yaml; reprojection applies its field mappings")
+    if name not in config.sensors:
+        raise Error(f"sensor {name} is not declared in bf.yaml")
     counts = {"records": 0, "changed": 0, "unchanged": 0, "failed": 0}
     problems: list[dict[str, str]] = []
     with ExitStack() as stack:
-        # The sensor's own lock keeps a collection from committing an older projection in between.
         stack.enter_context(collecting(store, name))
         if dry_run:
             stack.enter_context(records.reading(store))
@@ -766,21 +762,21 @@ def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, ob
             counts["records"] += 1
             try:
                 stored = records.load(store, file)
-                projected = ontology.reproject(stored, sensor, config)
-            except Error as error:
+                normalized = Record.model_validate(stored.model_dump(by_alias=True))
+                ontology.validate(normalized, config)
+            except (Error, ValidationError) as error:
                 counts["failed"] += 1
-                # Count every failure, but keep only what the reply shows.
                 if len(problems) <= LIMIT:
-                    problems.append({"file": file, "error": str(error).removeprefix(f"{file}: ")})
+                    message = explain(error, RECORD_KEYS) if isinstance(error, ValidationError) else str(error)
+                    problems.append({"file": file, "error": message.removeprefix(f"{file}: ")})
                 continue
-            if projected.fields == stored.fields:
+            if normalized == stored:
                 counts["unchanged"] += 1
                 continue
             counts["changed"] += 1
             if dry_run:
-                # A preview counts changes without holding the reprojected corpus.
                 continue
-            changed.append(projected)
+            changed.append(normalized)
             if len(changed) >= REPROJECT:
                 records.upsert(store, name, changed, snapshot=False)
                 changed = []
@@ -877,7 +873,7 @@ def validate_action_markdown(
         raise Error(f"{path}: proposed action requires status: draft")
     for key in sorted(markdown.attributes):
         if key in config.ontology and key not in Knowledge.model_fields:
-            raise Error(f"{path}: {key}: declared fields belong under fields:, such as fields: {{{key}: ...}}")
+            raise Error(f"{path}: {key}: relations belong under relations:, such as relations: {{{key}: ...}}")
     rules = config.validation
     if rules.required_status is not None and markdown.attributes.get("status") not in rules.required_status:
         allowed = ", ".join(rules.required_status)
@@ -1080,6 +1076,24 @@ def parse_reply(raw: bytes) -> str:
         raise Error("assistant command must print UTF-8") from error
 
 
+def _pointer(document: JsonValue, path: str) -> JsonValue:
+    """Read a JSON Pointer; a missing member is absent, an invalid traversal is an error."""
+    value = document
+    for encoded in path[1:].split("/"):
+        key = encoded.replace("~1", "/").replace("~0", "~")
+        if isinstance(value, dict):
+            if key not in value:
+                return None
+            value = value[key]
+        elif isinstance(value, list) and key.isascii() and key.isdecimal() and (key == "0" or not key.startswith("0")):
+            if int(key) >= len(value):
+                return None
+            value = value[int(key)]
+        else:
+            raise Error("reply pointer cannot traverse the assistant output")
+    return value
+
+
 def structured_reply(raw: bytes, pointer: str) -> tuple[JsonValue, dict[str, JsonValue]]:
     """The value at `pointer` of a JSON reply, and the reply's other members; the error never quotes the output."""
     try:
@@ -1091,12 +1105,12 @@ def structured_reply(raw: bytes, pointer: str) -> tuple[JsonValue, dict[str, Jso
     if not pointer:
         return cast(JsonValue, document), {}
     try:
-        value = ontology.pointer(cast(JsonValue, document), pointer)
+        value = _pointer(cast(JsonValue, document), pointer)
     except Error:
         # A pointer into a string, a number or a non-decimal array index finds no reply: report it as missing.
         return None, cast(dict[str, JsonValue], document)
     parent, _, key = pointer.rpartition("/")
-    holder = ontology.pointer(cast(JsonValue, document), parent) if parent else document
+    holder = _pointer(cast(JsonValue, document), parent) if parent else document
     if isinstance(holder, dict):
         # The answer becomes the record's text: keep it once.
         holder.pop(key.replace("~1", "/").replace("~0", "~"), None)

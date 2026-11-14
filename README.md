@@ -73,30 +73,32 @@ Continue with [Getting started](https://fmind.github.io/brain-framework/docs/get
 
 Five steps run in one loop: **gather → normalize → organize and connect → act → learn.**
 
-| Folder      | Role                                                                          |
-| ----------- | ----------------------------------------------------------------------------- |
-| `memories/` | Collected JSON records keyed by SHA-256 of `id`, with provenance and `fields` |
-| `projects/` | Project state (`Now`), decisions (`Decision`) and open tasks (`Next actions`) |
-| `concepts/` | Durable reusable patterns and reference syntheses                             |
-| `actions/`  | Tracked work sessions (`draft` open, `stable` settled, `deprecated` retired)  |
-| `sensors/`  | Stdlib scripts (built on `_sensor.py`) printing JSON or JSONL from your tools |
-| `routines/` | Deterministic scripts (built on `_bf.py`) run on intervals, `at` or Git hooks |
+| Folder      | Role                                                                                                    |
+| ----------- | ------------------------------------------------------------------------------------------------------- |
+| `memories/` | Collected JSON records keyed by SHA-256 of `id`, with provenance, `@type`, `relations` and `attributes` |
+| `projects/` | Project state (`Now`), decisions (`Decision`) and open tasks (`Next actions`)                           |
+| `concepts/` | Durable reusable patterns and reference syntheses                                                       |
+| `actions/`  | Tracked work sessions (`draft` open, `stable` settled, `deprecated` retired)                            |
+| `sensors/`  | Stdlib scripts (built on `_sensor.py`) printing JSON or JSONL from your tools                           |
+| `routines/` | Deterministic scripts (built on `_bf.py`) run on intervals, `at` or Git hooks                           |
 
 `bf.yaml` declares shared [fields and mappings](https://fmind.github.io/brain-framework/docs/schema/#shared-fields-and-sensor-mappings), [sensors](https://fmind.github.io/brain-framework/docs/sensors/), [routines](https://fmind.github.io/brain-framework/docs/routines/) and [assistants](https://fmind.github.io/brain-framework/docs/prompts/). A disposable SQLite cache in `.bf/` powers offline BM25 search, graph backlinks (`bf read project:new-website`), triage (`bf read review`) and JSONL exports (`bf export --kind items`). See the [directory reference](https://fmind.github.io/brain-framework/docs/brain/#directory-reference).
 
 ## Open your agent in your brain
 
-Install the packaged skills for [Claude Code](https://code.claude.com/docs/en/overview), [Codex](https://openai.com/codex/), [GitHub Copilot](https://github.com/features/copilot) or any [Agent Skills](https://agentskills.io/specification) host:
+Install the packaged `/bf` skill for [Claude Code](https://code.claude.com/docs/en/overview), [Codex](https://openai.com/codex/), [GitHub Copilot](https://github.com/features/copilot) or any [Agent Skills](https://agentskills.io/specification) host:
 
 ```bash
-bf skills ~/.agents/skills        # global host discovery (~/.claude/skills for Claude Code)
-bf skills skills --link           # inside a brain: links .agents/skills and .claude/skills
+bf skill install --global         # ~/.agents/skills/bf (and links ~/.claude/skills/bf if present)
+bf skill install                  # inside a brain: skills/bf, linked to .agents/skills/bf and .claude/skills/bf
 ```
 
-- **`bf-use`**: orient with `bf read review`, verify and cite `SOURCE:ID` refs, update owning notes and compile new evidence into `projects/` and `concepts/`.
-- **`bf-action`**: start, resume, hand off and settle tracked work sessions (`bf action new`, `bf action status`).
-- **`bf-setup`**: create a brain, connect CLI or [MCP](https://fmind.github.io/brain-framework/docs/mcp/) access, discover sources and import vaults.
-- **`bf-maintain`**: add sensors/routines/assistants, run `bf watch`, recover queues and resolve Git conflicts.
+The `/bf` router connects your harness to built-in offline documentation via `bf guide`:
+
+- **`bf guide retrieval`**: orient with `bf read review`, verify and cite `SOURCE:ID` refs and export graph claims.
+- **`bf guide authoring`**: update owning `projects/` and `concepts/`, manage tracked `actions/` (`bf action new`, `bf action status`) and connect entities.
+- **`bf guide getting-started` / `bf guide operations`**: initialize or register brains, run [MCP](https://fmind.github.io/brain-framework/docs/mcp/), validate, evaluate and troubleshoot.
+- **`bf guide jobs` / `bf guide events`**: configure sensors, routines, assistants and `bf watch`, recover queues and use Git hooks.
 
 See [agent workflows](https://fmind.github.io/brain-framework/docs/agents/) and optional repository [hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks).
 
@@ -148,6 +150,6 @@ assistants:
 
 1. **Local-first and private.** No BF server, account or telemetry; retrieval is 100% offline ([privacy and security](https://fmind.github.io/brain-framework/docs/privacy/)).
 1. **Harnesses reason; BF verifies.** BF runs no LLM and ships no provider SDKs or embeddings (`bf export --kind items` feeds external retrievers; [what BF does not do](https://fmind.github.io/brain-framework/docs/concepts/#what-bf-does-not-do)).
-1. **Git-native collaboration.** Version notes and programs in Git and federate [team brains](https://fmind.github.io/brain-framework/docs/team/) with `brains:`; major releases batch breaking changes cleanly ([versioning](https://fmind.github.io/brain-framework/docs/upgrades/#versioning-and-stability)).
+1. **Git-native collaboration.** Version notes, ontology, programs and evals in Git while keeping local memories and `.bf/` caches out of shared history; major releases batch breaking changes cleanly ([versioning](https://fmind.github.io/brain-framework/docs/upgrades/#versioning-and-stability)).
 
 [Commands](https://fmind.github.io/brain-framework/docs/commands/) · [Issues](https://github.com/fmind/brain-framework/issues) · [Contribute](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md) · [Governance](https://github.com/fmind/brain-framework/blob/main/GOVERNANCE.md) · [MIT License](https://github.com/fmind/brain-framework/blob/main/LICENSE) · [Third-party notices](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md)

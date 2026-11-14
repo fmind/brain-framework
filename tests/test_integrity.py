@@ -37,15 +37,12 @@ def test_health_check_passes_while_a_live_writer_holds_the_brain(brain: Store, m
     with writer(brain):
         result = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
         # Retrieval keeps serving the previous generation and says so.
-        assert search([brain], Query(text="latecomer"), counted=False)["stale"] == ["fixture"]
+        assert search(brain, Query(text="latecomer"), counted=False)["stale"] == ["fixture"]
     assert result.exit_code == 0, result.output
     reply = json.loads(result.stdout)
-    assert reply["brains"][0]["cache"] == "busy"
+    assert reply["cache"] == "busy"
     assert reply["healthy"]
-    assert (
-        json.loads(CliRunner().invoke(app, ["status", "--brain", str(brain.root)]).stdout)["brains"][0]["cache"]
-        == "ready"
-    )
+    assert json.loads(CliRunner().invoke(app, ["status", "--brain", str(brain.root)]).stdout)["cache"] == "ready"
 
 
 @pytest.mark.parametrize("linkable", [True, False])
@@ -115,15 +112,15 @@ def test_exact_reads_do_not_wait_out_a_writer(brain: Store, monkeypatch: pytest.
     index.refresh(brain)
     with writer(brain):
         # One file reads whole without the lock, marked like a busy brain's cache.
-        reply = read([brain], "meetings:decision-1", counted=False)
+        reply = read(brain, "meetings:decision-1", counted=False)
         assert cast("dict[str, object]", reply["record"])["title"] == "Preserve durable evidence"
         assert reply["stale"] == ["fixture"]
         # A missing file proves nothing while records change: fail at once instead of claiming absence.
         with pytest.raises(BusyError, match="retry the read shortly"):
-            read([brain], "meetings:absent", counted=False)
-    assert "stale" not in read([brain], "meetings:decision-1", counted=False)
+            read(brain, "meetings:absent", counted=False)
+    assert "stale" not in read(brain, "meetings:decision-1", counted=False)
     with pytest.raises(Error, match="not found"):
-        read([brain], "meetings:absent", counted=False)
+        read(brain, "meetings:absent", counted=False)
 
 
 def test_an_exact_record_read_shares_one_wait_with_the_cache(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,7 +130,7 @@ def test_an_exact_record_read_shares_one_wait_with_the_cache(brain: Store, monke
     index.refresh(brain)
     with writer(brain):
         started = time.monotonic()
-        reply = read([brain], "meetings:decision-1", counted=False)
+        reply = read(brain, "meetings:decision-1", counted=False)
         elapsed = time.monotonic() - started
     assert reply["stale"] == ["fixture"]
     assert elapsed < 1.5  # the two waits in a row took 1.8 s
@@ -167,9 +164,9 @@ def test_a_damaged_cache_is_discarded_and_rebuilt(brain: Store, table: str) -> N
     if table == "items":
         # Freshness reads only file fingerprints: the first query to meet the damage fails and discards it.
         with pytest.raises(Error, match="search cache is unavailable"):
-            search([brain], Query(text="offline"), counted=False)
+            search(brain, Query(text="offline"), counted=False)
         assert not (brain.root / index.CACHE).exists()
-    reply = search([brain], Query(text="offline retrieval"), counted=False)
+    reply = search(brain, Query(text="offline retrieval"), counted=False)
     assert cast("list[dict[str, object]]", reply["items"])[0]["ref"] == "projects/offline.md"
     assert "stale" not in reply
     assert _intact(brain)
@@ -179,20 +176,20 @@ def test_damage_in_one_brain_discards_only_its_own_cache(brain: Store, tmp_path:
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 8\nname: team\n")
+    team.write("bf.yaml", b"version: 9\nname: team\n")
     team.write("concepts/team.md", b"---\ntype: concept\nstatus: stable\n---\n# Team offline notes\n")
     for store in (brain, team):
         index.refresh(store)
     kept = (brain.root / index.CACHE).stat().st_ino
     _damage(team, "items")
-    reply = search([brain, team], Query(text="offline"), counted=False)
-    assert reply["problems"] == [{"brain": "team", "error": "inaccessible brain or cache; run bf status"}]
+    with pytest.raises(Error, match="search cache is unavailable"):
+        search(team, Query(text="offline"), counted=False)
     assert not (team.root / index.CACHE).exists()
     assert (brain.root / index.CACHE).stat().st_ino == kept
-    # An intact generation survives a discard request, as when another brain's error reached it.
+    # An intact generation survives a stale discard request for generation 0.
     index._discard(brain, 0)  # noqa: SLF001 - the guard every damage report passes through
     assert (brain.root / index.CACHE).stat().st_ino == kept
-    found = search([brain, team], Query(text="offline"), counted=False)["items"]
+    found = search(team, Query(text="offline"), counted=False)["items"]
     refs = [item["ref"] for item in cast("list[dict[str, object]]", found)]
     assert "concepts/team.md" in refs
 
@@ -220,7 +217,7 @@ def test_update_rebuilds_a_damaged_cache_instead_of_reporting_ok(brain: Store, t
     report = update(brain)
     assert report["ok"], report
     assert _intact(brain)
-    assert search([brain], Query(text="offline retrieval"), counted=False)["items"]
+    assert search(brain, Query(text="offline retrieval"), counted=False)["items"]
 
 
 def test_reads_ignore_a_completed_commit_whose_cleanup_was_interrupted(
@@ -235,8 +232,8 @@ def test_reads_ignore_a_completed_commit_whose_cleanup_was_interrupted(
             records.upsert(brain, "meetings", [Record(id="decision-1", title="Moved")], snapshot=False)
     assert json.loads(brain.read("memories/.pending/manifest.json"))["complete"]
     # Every record was committed: reads, searches and validation need not wait for the next writer's cleanup.
-    assert cast("dict[str, object]", read([brain], "meetings:decision-1")["record"])["title"] == "Moved"
-    assert search([brain], Query(text="moved"), counted=False)["items"]
+    assert cast("dict[str, object]", read(brain, "meetings:decision-1")["record"])["title"] == "Moved"
+    assert search(brain, Query(text="moved"), counted=False)["items"]
     assert validate(brain)["valid"]
     report = update(brain)
     assert report["ok"], report
@@ -252,7 +249,7 @@ def test_update_reports_skipped_evidence_as_failure(brain: Store) -> None:
 
 def test_malformed_yaml_scalar_does_not_hide_healthy_evidence(brain: Store) -> None:
     brain.write("projects/oversized.md", b"---\nprivate-field: " + b"9" * 5000 + b"\n---\n# Broken\n")
-    reply = search([brain], Query(text="offline"), counted=False)
+    reply = search(brain, Query(text="offline"), counted=False)
     assert reply["items"]
     assert "'file': 'projects/oversized.md', 'error': 'invalid YAML" in str(reply["problems"])
     assert "private-field" not in str(reply)
@@ -288,17 +285,17 @@ def test_missing_identity_in_skipped_evidence_is_not_proven_absent(brain: Store)
     brain.write("projects/broken.md", b"---\nstale_after: invalid\n---\n# Broken\n")
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 8\ncases:\n- name: absent\n  read: 'repo:example/absent'\n  empty: true\n",
+        b"version: 9\ncases:\n- name: absent\n  read: 'repo:example/absent'\n  empty: true\n",
     )
     assert not evaluate(brain)["passed"]
     with pytest.raises(Error, match="incomplete"):
-        read([brain], "repo:example/absent")
+        read(brain, "repo:example/absent")
 
 
 @pytest.mark.parametrize("path", ["memories/orphan.json", "memories/Bad/item.json", "memories/mail/2026-99.json"])
 def test_invalid_record_paths_never_produce_unreadable_refs(brain: Store, path: str) -> None:
     brain.write(path, b'{"id":"item","title":"Misplacedneedle"}\n')
-    reply = search([brain], Query(text="misplacedneedle"), counted=False)
+    reply = search(brain, Query(text="misplacedneedle"), counted=False)
     assert reply["items"] == []
     assert reply["problems"]
     assert not validate(brain)["valid"]
@@ -314,7 +311,7 @@ def test_unreadable_note_is_skipped_without_hiding_healthy_files(brain: Store, m
         return original(self, name, limit)
 
     monkeypatch.setattr(Store, "read", denied)
-    reply = search([brain], Query(text="offline"), counted=False)
+    reply = search(brain, Query(text="offline"), counted=False)
     assert reply["items"]
     assert "inaccessible file" in str(reply["problems"])
     assert "private operating-system detail" not in str(reply)
@@ -373,7 +370,7 @@ def test_an_unreadable_top_level_folder_leaves_the_rest_of_the_brain_answering(
     # A first collection run as root can leave memories/ unreadable; a nested folder was already skipped alone.
     (brain.root / folder).chmod(mode)
     try:
-        reply = search([brain], Query(text="offline"), counted=False)
+        reply = search(brain, Query(text="offline"), counted=False)
         assert reply["items"]
         assert [item["file"] for item in cast("list[dict[str, str]]", reply["problems"])] == [problem]
         reasons = {item["file"]: item["error"] for item in cast("list[dict[str, str]]", validate(brain)["problems"])}
@@ -381,28 +378,28 @@ def test_an_unreadable_top_level_folder_leaves_the_rest_of_the_brain_answering(
         assert reasons[problem] == "unreadable folder; grant read and search permission or move it out of the brain"
         if folder == "memories":
             with pytest.raises(Error, match="source meetings is unreadable"):
-                read([brain], "meetings:decision-1", counted=False)
+                read(brain, "meetings:decision-1", counted=False)
         else:
-            assert read([brain], "meetings:decision-1", counted=False)["record"]
+            assert read(brain, "meetings:decision-1", counted=False)["record"]
     finally:
         (brain.root / folder).chmod(0o700)
 
 
 def test_notes_with_thousands_of_invalid_values_keep_replies_small(brain: Store) -> None:
-    # Five 40 KB notes once produced 4 MB of problems: every search and read of the brain, and of brains referencing
-    # it, failed. A list over its bound is one error; within it, the first reasons stand for the rest.
+    # Five 40 KB notes once produced 4 MB of problems: every search and read of the brain failed.
+    # A list over its bound is one error; within it, the first reasons stand for the rest.
     for number in range(5):
         aliases = b",".join([b"1"] * 19_000)
         brain.write(f"concepts/bulk-{number}.md", b"---\ntype: concept\naliases: [" + aliases + b"]\n---\n# Bulk\n")
     brain.write("concepts/many.md", b"---\ntype: concept\nlinks: [" + b",".join([b"1"] * 999) + b"]\n---\n# Many\n")
-    reply = search([brain], Query(text="offline"), counted=False)
+    reply = search(brain, Query(text="offline"), counted=False)
     assert reply["items"]
     errors = {item["file"]: item["error"] for item in cast("list[dict[str, str]]", reply["problems"])}
     assert errors["concepts/bulk-0.md"] == (
         "invalid frontmatter: aliases: List should have at most 1000 items after validation, not 19000"
     )
     assert errors["concepts/many.md"].endswith("links.4: Input should be a valid string; and 994 more")
-    assert read([brain], "projects/offline.md", counted=False)["text"]
+    assert read(brain, "projects/offline.md", counted=False)["text"]
 
 
 def test_unchanged_recovery_refresh_runs_beside_readers_without_writing(

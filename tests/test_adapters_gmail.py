@@ -58,32 +58,22 @@ def test_gmail_headers_collect_participants_threads_and_message_ids(provider: Pr
     records = provider.records("gmail-headers.py", START, END, "--query=-category:promotions")
     assert [record.id for record in records] == ["a1", "b2"]
     launch, reply = records
-    assert (launch.title, launch.time) == ("Launch budget", "2026-09-01T10:00:00.000000Z")
+    assert (launch.type, launch.title, launch.time) == ("EmailMessage", "Launch budget", "2026-09-01T10:00:00.000000Z")
     assert launch.text == (
         "Subject: Launch budget\nFrom: alice@example.test\nTo: bob@example.test, carol@example.test\n"
         "Labels: IMPORTANT, INBOX"
     )
-    assert launch.links == [
-        "gmail-thread:f1",
-        "person:email/alice@example.test",
-        "person:email/bob@example.test",
-        "person:email/carol@example.test",
-    ]
     assert launch.aliases == ["mid:launch.1@example.test"]
     assert launch.url == "https://mail.google.com/mail/#all/f1"
-    # The refs a `cardinality: many` identity field can map to typed relations; labels are Gmail label ids.
-    assert launch.attributes == {
-        "thread": "f1",
-        "labels": ["IMPORTANT", "INBOX"],
-        # The standard part-of and label relations; the thread link stays for brains without them.
-        "parent_refs": ["gmail-thread:f1"],
-        "label_refs": ["gmail-label:IMPORTANT", "gmail-label:INBOX"],
-        "sender_refs": ["person:email/alice@example.test"],
-        "recipient_refs": ["person:email/bob@example.test", "person:email/carol@example.test"],
-        "cc_refs": [],
+    assert launch.relations == {
+        "part-of": ["gmail-thread:f1"],
+        "label": ["gmail-label:IMPORTANT", "gmail-label:INBOX"],
+        "sender": ["person:email/alice@example.test"],
+        "recipient": ["person:email/bob@example.test", "person:email/carol@example.test"],
     }
-    # Both messages link their thread: reading gmail-thread:f1 lists the conversation.
-    assert "gmail-thread:f1" in reply.links
+    assert launch.attributes == {"thread": "f1", "labels": ["IMPORTANT", "INBOX"]}
+    # Both messages assert their thread: reading gmail-thread:f1 lists the conversation.
+    assert "gmail-thread:f1" in reply.relations["part-of"]
     assert reply.title == "(no subject)"
     # Only metadata is requested: Gmail never sends a body.
     gets = [json.loads(call[-1]) for call in provider.calls("gws") if "get" in call]
@@ -175,14 +165,13 @@ def test_gmail_headers_reject_inconsistent_replies_and_queries(
 
 
 def test_gmail_headers_keep_each_address_list_within_the_mapped_field_bound(provider: Provider) -> None:
-    # A mapped `cardinality: many` field holds at most 1,000 values: 18.5.0 kept every sender, so one message from
-    # 1,001 addresses failed each collection that mapped `sender_refs`, and its window never advanced.
+    # Each relation holds at most 1,000 targets in input order while text keeps every address.
     senders = [f"sender{index:04d}@example.test" for index in range(1001)]
     headers = {"From": ", ".join(senders), "To": "bob@example.test"}
     provider.install("gws", [LISTED, {"match": ["get"], "stdout": message("a1", "f1", 1788256800000, headers)}])
     [record] = provider.records("gmail-headers.py", START, END)
-    assert record.attributes["sender_refs"] == [f"person:email/{sender}" for sender in senders[:1000]]
-    assert record.attributes["recipient_refs"] == ["person:email/bob@example.test"]
-    assert (len(record.links), record.links[0]) == (1000, "gmail-thread:f1")
+    assert record.relations["sender"] == [f"person:email/{sender}" for sender in senders[:1000]]
+    assert record.relations["recipient"] == ["person:email/bob@example.test"]
+    assert record.relations["part-of"] == ["gmail-thread:f1"]
     # The text still names every address.
     assert record.text.count("@example.test") == 1002

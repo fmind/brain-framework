@@ -70,7 +70,7 @@
     },
     "Problem": {
       "description": "Why part of a reply may be incomplete; an incomplete empty result does not prove absence.",
-      "properties": { "brain": { "type": "string" }, "error": { "type": "string" }, "file": { "type": "string" } },
+      "properties": { "error": { "type": "string" }, "file": { "type": "string" } },
       "required": ["error"],
       "type": "object"
     },
@@ -209,113 +209,91 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "brains": {
-      "items": {
-        "anyOf": [
-          {
-            "properties": {
-              "assistants": { "additionalProperties": { "$ref": "#/$defs/Assistant" }, "type": "object" },
-              "attention": { "items": { "$ref": "#/$defs/Attention" }, "type": "array" },
-              "brain": { "type": "string" },
-              "cache": { "enum": ["ready", "busy", "stale", "missing"] },
-              "coverage": {
-                "description": "Sources and indexed records per source state.",
-                "properties": {
-                  "active": {
-                    "properties": {
-                      "records": { "minimum": 0, "type": "integer" },
-                      "sources": { "minimum": 0, "type": "integer" }
-                    },
-                    "required": ["sources", "records"],
-                    "type": "object"
-                  },
-                  "disabled": {
-                    "properties": {
-                      "records": { "minimum": 0, "type": "integer" },
-                      "sources": { "minimum": 0, "type": "integer" }
-                    },
-                    "required": ["sources", "records"],
-                    "type": "object"
-                  },
-                  "historical": {
-                    "properties": {
-                      "records": { "minimum": 0, "type": "integer" },
-                      "sources": { "minimum": 0, "type": "integer" }
-                    },
-                    "required": ["sources", "records"],
-                    "type": "object"
-                  }
-                },
-                "required": ["active", "disabled", "historical"],
-                "type": "object"
-              },
-              "messaging": {
-                "description": "The assistant queue as bf queue lists it, without message bodies: `jobs`, `deliveries`, `counts`, `delivery_counts`, `delivery_failures`, `transports` and `wakes`.",
-                "type": "object"
-              },
-              "notes": { "minimum": 0, "type": "integer" },
-              "path": { "type": "string" },
-              "pending_transaction": { "const": true },
-              "problems": { "items": { "$ref": "#/$defs/Problem" }, "type": "array" },
-              "routines": { "additionalProperties": { "$ref": "#/$defs/Routine" }, "type": "object" },
-              "runtime": {
-                "description": "The installed bf version and the one the brain's uv.lock pins, if any.",
-                "properties": { "installed": { "type": "string" }, "pinned": { "type": "string" } },
-                "required": ["installed"],
-                "type": "object"
-              },
-              "sources": { "additionalProperties": { "$ref": "#/$defs/Source" }, "type": "object" },
-              "usage": {
-                "properties": { "30d": { "$ref": "#/$defs/Usage" }, "7d": { "$ref": "#/$defs/Usage" } },
-                "required": ["7d", "30d"],
-                "type": "object"
-              },
-              "warnings": {
-                "description": "Never fail `--check`.",
-                "items": {
-                  "description": "A `warning`, such as `directory nears the scan limit` with its `directory`, `entries` and `limit`.",
-                  "required": ["warning"],
-                  "type": "object"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "brain",
-              "path",
-              "runtime",
-              "cache",
-              "notes",
-              "problems",
-              "attention",
-              "sources",
-              "coverage",
-              "usage"
-            ],
-            "title": "Brain",
-            "type": "object"
+    "assistants": { "additionalProperties": { "$ref": "#/$defs/Assistant" }, "type": "object" },
+    "attention": { "items": { "$ref": "#/$defs/Attention" }, "type": "array" },
+    "brain": { "type": "string" },
+    "cache": { "enum": ["ready", "busy", "stale", "missing"] },
+    "coverage": {
+      "description": "Sources and indexed records per source state.",
+      "properties": {
+        "active": {
+          "properties": {
+            "records": { "minimum": 0, "type": "integer" },
+            "sources": { "minimum": 0, "type": "integer" }
           },
-          {
-            "description": "A brain that cannot be read or is ambiguous.",
-            "properties": {
-              "brain": { "type": "string" },
-              "error": { "type": "string" },
-              "path": { "type": "string" }
-            },
-            "required": ["brain", "error"],
-            "title": "Unavailable brain",
-            "type": "object"
-          }
-        ]
+          "required": ["sources", "records"],
+          "type": "object"
+        },
+        "disabled": {
+          "properties": {
+            "records": { "minimum": 0, "type": "integer" },
+            "sources": { "minimum": 0, "type": "integer" }
+          },
+          "required": ["sources", "records"],
+          "type": "object"
+        },
+        "historical": {
+          "properties": {
+            "records": { "minimum": 0, "type": "integer" },
+            "sources": { "minimum": 0, "type": "integer" }
+          },
+          "required": ["sources", "records"],
+          "type": "object"
+        }
       },
-      "type": "array"
+      "required": ["active", "disabled", "historical"],
+      "type": "object"
     },
     "healthy": {
-      "description": "False on a problem or attention entry, a stale or missing cache, or an unavailable brain or reference.",
+      "description": "False on a problem or attention entry, or a stale or missing cache.",
       "type": "boolean"
+    },
+    "messaging": {
+      "description": "The assistant queue as bf queue lists it, without message bodies: `jobs`, `deliveries`, `counts`, `delivery_counts`, `delivery_failures`, `transports` and `wakes`.",
+      "type": "object"
+    },
+    "notes": { "minimum": 0, "type": "integer" },
+    "path": { "type": "string" },
+    "pending_transaction": { "const": true },
+    "problems": { "items": { "$ref": "#/$defs/Problem" }, "type": "array" },
+    "registered": { "type": "boolean" },
+    "routines": { "additionalProperties": { "$ref": "#/$defs/Routine" }, "type": "object" },
+    "runtime": {
+      "description": "The installed bf version and the one the brain's uv.lock pins, if any.",
+      "properties": { "installed": { "type": "string" }, "pinned": { "type": "string" } },
+      "required": ["installed"],
+      "type": "object"
+    },
+    "sources": { "additionalProperties": { "$ref": "#/$defs/Source" }, "type": "object" },
+    "usage": {
+      "properties": { "30d": { "$ref": "#/$defs/Usage" }, "7d": { "$ref": "#/$defs/Usage" } },
+      "required": ["7d", "30d"],
+      "type": "object"
+    },
+    "warnings": {
+      "description": "Never fail `--check`.",
+      "items": {
+        "description": "A `warning`, such as `directory nears the scan limit` with its `directory`, `entries` and `limit`.",
+        "required": ["warning"],
+        "type": "object"
+      },
+      "type": "array"
     }
   },
-  "required": ["healthy", "brains"],
+  "required": [
+    "healthy",
+    "brain",
+    "path",
+    "registered",
+    "runtime",
+    "cache",
+    "notes",
+    "problems",
+    "attention",
+    "sources",
+    "coverage",
+    "usage"
+  ],
   "title": "bf status reply",
   "type": "object"
 }

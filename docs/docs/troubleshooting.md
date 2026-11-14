@@ -20,13 +20,13 @@ Diagnostics write one `bf:` line to stderr naming the file, field or program wit
 | Symptom                                                           | Fix                                                                                                                                                                                |
 | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bf: command not found`                                           | Run `uv tool update-shell` and open a new shell.                                                                                                                                   |
-| Wrong brain, or `pass --brain PATH or run inside the brain`       | Execution commands (`collect`, `run`, `channel`, `queue`, `update`, `watch`) act on one brain: `cd` into it or pass `--brain PATH` ([selection](configuration.md#select-a-brain)). |
+| Wrong brain, or `pass --brain PATH or run inside the brain`       | `cd` into the brain, pass `--brain PATH`, set `BF_BRAIN`, or mark a registry default with `bf register --default` ([selection](configuration.md#select-a-brain)).                  |
 | `… has no bf.yaml` or `registered brain directory is absent …`    | Point `--brain`, `BF_BRAIN` or `bf register` at the root holding `bf.yaml`.                                                                                                        |
 | Unknown CLI option (such as `--no-*`)                             | Check `bf COMMAND -h` and [match docs to your version](upgrades.md#match-the-docs-to-your-version); boolean flags are positive-only (`--check`, `--force`, `--dry-run`, `--link`). |
 | `bf.yaml declares version …` or rejected config field             | Apply the [changelog](../changelog.md) upgrade steps and check against `bf schema` ([editor schemas](schema.md#editor-schemas)).                                                   |
-| `"valid":false` or `reference exists in several brains`           | Repair each reported `file`/`error` ([checks](checks.md)), or disambiguate with `bf://NAME/...`.                                                                                   |
+| `"valid":false`                                                   | Repair each reported `file`/`error` ([checks](checks.md)).                                                                                                                         |
 | Reply carries `problems` or `stale`                               | Repair unreadable/skipped files, or retry once an active writer finishes.                                                                                                          |
-| `state directory … is inaccessible` or `may not contain symlinks` | Ensure `~/.local/state/bf` (or `XDG_STATE_HOME`) is a real user-owned directory.                                                                                                   |
+| `state directory … is inaccessible` or `may not contain symlinks` | Ensure `<brain>/.bf` (and `.bf/state`, `.bf/locks`) is a real user-owned mode-`700` directory with no symlinks.                                                                    |
 | SQLite `< 3.35.0`, PyYAML without libyaml, or missing `mcp` extra | [Reinstall BF](#reinstall-bf).                                                                                                                                                     |
 
 ### Reinstall BF
@@ -56,8 +56,8 @@ Common assistant and queue errors:
   - `assistant queue is full; …` or `admitted N of M messages` — resolve `failed`/`uncertain` items in `bf queue`.
   - `assistant queue lacks answer space for this job; …` — waits automatically until running jobs free space (`bf run` cancels its run; retry afterwards).
   - `assistant queue holds unresolved work admitted under this brain's previous path or name; …` — restore the previous path/name, drain `bf queue`, then move/rename again.
-  - `assistant queue predates this release; …` or `unexpected assistant queue schema; …` — preserve `queue.sqlite3` and follow the [changelog](../changelog.md) upgrade steps using the release that created it.
-  - `assistant queue holds an interrupted write; …` — keep `queue.sqlite3` and `queue.sqlite3-journal` together and run `bf queue` to roll back cleanly.
+  - `assistant queue predates this release; …` or `unexpected assistant queue schema; …` — preserve `.bf/runtime.sqlite3` and follow the [changelog](../changelog.md) upgrade steps using the release that created it.
+  - `assistant queue holds an interrupted write; …` — keep `.bf/runtime.sqlite3` and `.bf/runtime.sqlite3-journal` together and run `bf queue` to roll back cleanly.
 
 ## Updates do not run
 
@@ -78,7 +78,7 @@ bf validate
 bf status --check
 ```
 
-`bf build` rolls back interrupted record writes from `memories/.pending/` hard-link backups and atomically rebuilds `.bf/index.sqlite`. If `memories/.pending` itself is corrupted (`unexpected file in memories/.pending` or `invalid memories/.pending manifest`), move the named stray file or `memories/.pending` outside the brain, run `bf build && bf validate`, and recollect that source.
+`bf build` rolls back interrupted record writes from `memories/.pending/` hard-link backups and atomically rebuilds `.bf/cache.sqlite3`. If `memories/.pending` itself is corrupted (`unexpected file in memories/.pending` or `invalid memories/.pending manifest`), move the named stray file or `memories/.pending` outside the brain, run `bf build && bf validate`, and recollect that source.
 
 For file-level issues:
 

@@ -148,24 +148,26 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
             attendee_refs = sorted(ref for ref in map(_sensor.person, invited) if ref)
             if agenda_days:
                 references.append(_sensor.reference("calendar:" + key))
-            # One invalid record fails the whole run: past 1,000 links, keep the organizer, source, attachments and
-            # agenda link, then invitees in email order, and flag the cut. `participants` keeps every address.
-            linked = list(dict.fromkeys(filter(None, [*organizer_refs, *references, *participant_refs])))
-            truncated = max(len(linked), len(participant_refs), len(attendee_refs)) > _sensor.MAX_LINKS
+            # Attachments and agenda references go in links; organizer, attendee and participant identities become typed
+            # relations (each bounded to BF's 1,000 targets). `participants` keeps every raw address.
+            truncated = max(len(references), len(participant_refs), len(attendee_refs)) > _sensor.MAX_LINKS
             alias = _sensor.reference(("agenda:" if agenda_days else "calendar:") + key)
             records.append(
                 _sensor.record(
                     identifier,
                     title,
+                    item_type="Event",
                     time=when,
                     text="\n".join(lines),
                     url=str(event.get("htmlLink", "")),
-                    links=linked,
+                    links=references,
                     aliases=[alias] if alias else (),
+                    relations={
+                        "organizer": organizer_refs,
+                        "attendee": attendee_refs,
+                        "participant": participant_refs,
+                    },
                     attributes={
-                        "organizer_refs": organizer_refs,
-                        "attendee_refs": attendee_refs,
-                        "participant_refs": participant_refs,
                         "start": event_start,
                         "end": event_end,
                         # `updated` is BF's reserved provider-modification time: only a valid timestamp maps to it.

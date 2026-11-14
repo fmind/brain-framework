@@ -14,7 +14,7 @@ Run from the Brain Framework checkout after `uv sync --locked`. This subshell co
   cp -R examples/retrieval "$bf_demo/brain"
   cd "$bf_demo/brain"
   bf() {
-    env -u BF_BRAIN TZ=UTC XDG_CONFIG_HOME="$bf_demo/config" XDG_STATE_HOME="$bf_demo/state" \
+    env -u BF_BRAIN TZ=UTC XDG_CONFIG_HOME="$bf_demo/config" \
       uv run --project "$bf_checkout" bf "$@"
   }
   bf validate
@@ -28,7 +28,7 @@ Run from the Brain Framework checkout after `uv sync --locked`. This subshell co
 
 Expect validation to return `{"notes":15,"problems":[],"records":9,"valid":true}` and evaluation to return `"passed":true`, `"score":"26/26"` and `"mrr":1.0`. The cases require Atlas's budget of 4200 credits to rank first, excluding Zephyr's competing budget of 900 credits.
 
-`bf.yaml`, `projects/`, `concepts/`, `actions/` and `memories/` form the brain; `evals/retrieval.yaml` holds its questions and expected results. The records are checked in: a disabled `catalog` sensor entry only sets that source's `priority: low`, and nothing is collected. There are no routines or related brains. The example pins UTC and uses fixed dates. Retrieval may refresh the disposable `.bf/` cache; it does not collect or count evaluation reads as user usage.
+`bf.yaml`, `projects/`, `concepts/`, `actions/` and `memories/` form the brain; `evals/retrieval.yaml` holds its questions and expected results. The records are checked in: a disabled `catalog` sensor entry only sets that source's `priority: low`, and nothing is collected. There are no routines. The example pins UTC and uses fixed dates. Retrieval may refresh the disposable `.bf/` cache; it does not collect or count evaluation reads as user usage.
 
 For your own brain, adapt its starter `evals/retrieval.yaml` to the questions you need answered; see [Check your brain](../../docs/docs/checks.md). The [workflow example](../brain/README.md) demonstrates collection and actions as well as retrieval.
 
@@ -43,7 +43,7 @@ These two cases in `evals/retrieval.yaml` check the Atlas budget. Zephyr has a d
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/checks/
-version: 8
+version: 9
 cases:
   - name: atlas-budget-first-result
     query: What is the Atlas launch budget?

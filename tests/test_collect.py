@@ -29,14 +29,14 @@ from bf.collect import Runner, collect, due, run
 from bf.health import source_health
 from bf.history import LOG_LIMIT, SENSORS, environment, log_path, remember, state
 from bf.models import MAX_FIELDS, Command, Error, Record, Sensor, encode, timestamp
-from bf.storage import BusyError, Store, collecting, state_store, writer
+from bf.storage import BusyError, Store, collecting, private_dir, writer
 from bf.update import update
 from bf.watch import snapshot
 
 START = "2026-09-01T00:00:00.000000Z"
 END = "2026-09-02T00:00:00.000000Z"
 NOW = datetime(2026, 9, 2, tzinfo=UTC)
-CONFIG = b"""version: 8
+CONFIG = b"""version: 9
 name: fixture
 sensors:
   sample:
@@ -144,8 +144,11 @@ def test_invalid_output_writes_nothing_and_is_remembered(
 def test_provider_keys_never_reach_errors_or_history(configured: Store) -> None:
     for output, match in [
         (b'[{"id":"x","title":"A","From: ceo@corp.example Subject: layoffs":1}]', "one JSON array.*<key>"),
-        # Collection maps fields itself: printed ones fail before validation, whatever their keys.
-        (b'[{"id":"x","title":"A","fields":{"From: ceo@corp.example":1}}]', "record 0: .* not precomputed fields"),
+        # Collection rejects precomputed fields itself: printed ones fail before validation, whatever their keys.
+        (
+            b'[{"id":"x","title":"A","fields":{"From: ceo@corp.example":1}}]',
+            "record 0: sensors must output @type, relations and attributes, not fields",
+        ),
     ]:
         with pytest.raises(Error, match=match) as failure:
             collect(configured, "sample", start=START, end=END, runner=lambda *_, data=output: data)
@@ -154,15 +157,15 @@ def test_provider_keys_never_reach_errors_or_history(configured: Store) -> None:
 
 
 def test_provider_relation_names_never_reach_errors_history_or_status(configured: Store) -> None:
-    # A sensor controls a link's `?rel=` value: an undeclared one fails the run without being quoted.
-    output = emit({"id": "a", "title": "t", "links": ["bf://fixture/x?rel=ignore-previous-instructions"]})
-    with pytest.raises(Error, match="link relation is undeclared") as failure:
+    # A sensor controls a link's `?rel=` value: an invalid one fails the run without being quoted.
+    output = emit({"id": "a", "title": "t", "links": ["bf://fixture/x?rel=Ignore_Previous_Instructions"]})
+    with pytest.raises(Error, match="invalid BF link") as failure:
         collect(configured, "sample", start=START, end=END, runner=lambda *_: output)
-    assert "ignore-previous" not in str(failure.value)
-    assert "ignore-previous" not in json.dumps(state(configured))
+    assert "Ignore_Previous" not in str(failure.value)
+    assert "Ignore_Previous" not in json.dumps(state(configured))
     status = CliRunner().invoke(app, ["status", "--brain", str(configured.root)])
-    assert "ignore-previous" not in status.stdout
-    assert "link relation is undeclared" in status.stdout
+    assert "Ignore_Previous" not in status.stdout
+    assert "invalid BF link" in status.stdout
 
 
 def test_large_invalid_output_reports_only_its_first_invalid_record(configured: Store) -> None:
@@ -179,7 +182,7 @@ def test_large_invalid_output_reports_only_its_first_invalid_record(configured: 
 def test_printed_fields_fail_by_their_rule_whatever_their_keys(configured: Store) -> None:
     # Validation would name the 1,000-name bound or each invalid key instead of the rule the sensor broke.
     printed: dict[str, object] = {"id": "x", "title": "t", "fields": {f"Key {n}": n for n in range(100_000)}}
-    message = "record 1: sensors must supply mapped output, not precomputed fields; nothing was written"
+    message = "record 1: sensors must output @type, relations and attributes, not fields; nothing was written"
     with pytest.raises(Error, match=re.escape(message)):
         collect(
             configured, "sample", start=START, end=END, runner=lambda *_: emit({"id": "ok", "title": "OK"}, printed)
@@ -189,7 +192,7 @@ def test_printed_fields_fail_by_their_rule_whatever_their_keys(configured: Store
 
 def test_the_observed_stamp_cannot_push_a_record_over_the_size_bound(configured: Store) -> None:
     # Fields other than text exactly at the bound: valid as printed, but not once collection stamps `observed`.
-    padding = MAX_FIELDS - len(encode(["x", "t", "", [], [], {"blob": ""}, {}]))
+    padding = MAX_FIELDS - len(encode(["x", "", "t", "", [], [], {}, {"blob": ""}]))
     printed: dict[str, object] = {"id": "x", "title": "t", "attributes": {"blob": "a" * padding}}
     assert Record.model_validate(printed)
     with pytest.raises(Error, match=r"sample: record 0: fields other than text exceed 2 MiB.*; nothing was written"):
@@ -498,7 +501,7 @@ def stubborn(store: Store, markers: list[Path]) -> dict[str, object]:
         marker.name: {"command": ["sensors/stubborn.sh", str(marker)], "refresh": 60, "timeout": 120}
         for marker in markers
     }
-    return {"version": 8, "name": "fixture", "sensors": sensors}
+    return {"version": 9, "name": "fixture", "sensors": sensors}
 
 
 def graced(seconds: float) -> list[str]:
@@ -672,7 +675,7 @@ def test_only_a_program_using_home_needs_a_home_directory(
 def test_missing_source_does_not_prevent_other_sources(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n"
+        b"version: 9\nname: fixture\nsensors:\n"
         b"  a-missing:\n    command: [sensors/missing.py]\n    refresh: 3600\n"
         b'  b-good:\n    command: [echo, "[]"]\n    refresh: 3600\n',
     )
@@ -933,7 +936,7 @@ def test_cancellation_kills_collector_and_descendants(
         "bf.yaml",
         json.dumps(
             {
-                "version": 8,
+                "version": 9,
                 "name": "fixture",
                 "sensors": {"sample": {"command": ["sensors/wait.sh", str(marker)]}},
             }
@@ -1016,7 +1019,7 @@ def test_cancelled_update_stops_sensors_running_in_parallel(configured: Store, t
     sensors = {
         marker.name: {"command": ["sensors/wait.sh", str(marker)], "refresh": 60, "timeout": 120} for marker in markers
     }
-    configured.write("bf.yaml", json.dumps({"version": 8, "name": "fixture", "sensors": sensors}).encode())
+    configured.write("bf.yaml", json.dumps({"version": 9, "name": "fixture", "sensors": sensors}).encode())
     child = subprocess.Popen(  # noqa: S603 - exercise the CLI boundary with temporary, synthetic collectors
         [sys.executable, "-m", "bf", "update", "--brain", str(configured.root)],
         stdout=subprocess.PIPE,
@@ -1050,18 +1053,18 @@ def test_cancelled_update_stops_sensors_running_in_parallel(configured: Store, t
 
 
 def test_invalid_history_and_cache_errors_do_not_stop_update(configured: Store, tmp_path: Path) -> None:
-    state_store(configured.root).write(
+    private_dir(configured, ".bf", "state").write(
         "sensors.json",
         b'{"sample":{"success":"2026-09-01T02:00:00+02:00"},"manual":{"success":"not-a-date"},'
         b'"folders":[],"Bad Name":{}}',
     )
     # Each invalid entry is dropped alone, and instants read back in canonical UTC.
     assert state(configured) == {"sample": {"success": START}}
-    state_store(configured.root).write("sensors.json", b"[]")
+    private_dir(configured, ".bf", "state").write("sensors.json", b"[]")
     assert state(configured) == {}
-    state_store(configured.root).write("sensors.json", b"broken")
+    private_dir(configured, ".bf", "state").write("sensors.json", b"broken")
     assert state(configured) == {}
-    configured.write(".bf", b"not a directory")
+    (configured.root / ".bf/cache.sqlite3").mkdir(parents=True)
     report = cast("Any", update(configured, now=NOW, runner=lambda *_: b"[]"))
     assert not report["ok"]
     assert report["index"]["error"]
@@ -1273,7 +1276,7 @@ def test_failed_run_history_reports_that_records_were_committed(
 
 @pytest.mark.parametrize("previous_start", ["2026-08-01T00:00:00.000000Z", "2026-12-01T00:00:00.000000Z"])
 def test_future_run_history_cannot_block_current_collection(configured: Store, previous_start: str) -> None:
-    state_store(configured.root).write(
+    private_dir(configured, ".bf", "state").write(
         "sensors.json",
         json.dumps({"sample": {"start": previous_start, "end": "2027-01-01T00:00:00Z", "success": START}}).encode(),
     )
@@ -1319,7 +1322,7 @@ def test_line_list_file_expansion_and_oversized_text_truncation(configured: Stor
     configured.write("settings/repos.txt", b"# Tracked repositories\n\n org/alpha \norg/beta\n")
     configured.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n  scoped:\n"
+        b"version: 9\nname: fixture\nsensors:\n  scoped:\n"
         b'    command: [echo, "{{lines:settings/repos.txt}}"]\n'
         b"    max_text_bytes: 10\n",
     )
@@ -1372,7 +1375,7 @@ def test_oversized_text_fails_without_truncation_opt_in(configured: Store) -> No
 
 def test_truncation_leaves_invalid_unicode_text_to_record_validation(configured: Store) -> None:
     configured.write(
-        "bf.yaml", b"version: 8\nname: fixture\nsensors:\n  sample:\n    command: [echo]\n    max_text_bytes: 10\n"
+        "bf.yaml", b"version: 9\nname: fixture\nsensors:\n  sample:\n    command: [echo]\n    max_text_bytes: 10\n"
     )
     # A lone surrogate cannot be measured in UTF-8: the run names the field, not inaccessible files.
     with pytest.raises(Error, match=r"0\.text: .*unicode.*; nothing was written"):
@@ -1385,7 +1388,7 @@ def test_truncation_leaves_invalid_unicode_text_to_record_validation(configured:
 def test_update_executes_due_sensors_concurrently(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n"
+        b"version: 9\nname: fixture\nsensors:\n"
         b"  s1:\n    command: [echo]\n    refresh: 60\n"
         b"  s2:\n    command: [echo]\n    refresh: 60\n",
     )
@@ -1572,7 +1575,7 @@ def test_run_history_of_an_earlier_release_keeps_loading(configured: Store) -> N
         "elapsed_seconds": 0.5,
         "output_bytes": 10,
     }
-    state_store(configured.root).write(SENSORS, encode({"sample": entry}))
+    private_dir(configured, ".bf", "state").write(SENSORS, encode({"sample": entry}))
     assert state(configured)["sample"] == entry
     assert "degraded" not in source_health(configured, now=NOW)["sample"]
     collect(configured, "sample", start=START, end=END, runner=lambda *_: envelope(1, 2), clock=lambda: NOW)

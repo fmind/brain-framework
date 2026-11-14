@@ -11,7 +11,6 @@ import yaml
 from typer.testing import CliRunner
 
 from bf.cli import app
-from bf.config import load
 from bf.storage import Store
 
 EXAMPLE = Path(__file__).parents[1] / "examples/brain"
@@ -77,7 +76,7 @@ def test_prepared_knowledge_transfer_works_without_the_source_brain(tmp_path: Pa
     store.write(manifest["files"][0], candidate)
     store.write(
         "evals/retrieval.yaml",
-        b"version: 8\ncases:\n  - name: shared-procedure\n    read: concepts/selected-evidence.md\n"
+        b"version: 9\ncases:\n  - name: shared-procedure\n    read: concepts/selected-evidence.md\n"
         b"    text: [draft, Partial evidence remains partial, No successful outcome]\n"
         b"  - name: no-private-history\n    query: unverified belief\n    empty: true\n",
     )
@@ -87,7 +86,6 @@ def test_prepared_knowledge_transfer_works_without_the_source_brain(tmp_path: Pa
     reply = runner.invoke(app, ["read", "concepts/selected-evidence.md", "--brain", str(destination)])
     assert reply.exit_code == 0, reply.output
     assert json.loads(reply.stdout)["brain"] == "example-team"
-    assert not load(store).brains
 
 
 def test_example_broader_relation_page_matches_the_readme(tmp_path: Path) -> None:

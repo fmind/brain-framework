@@ -20,7 +20,7 @@ Run from the Brain Framework checkout after `uv sync --locked`. This subshell co
   cp -R examples/prompts "$prompt_demo/brain"
   cd "$prompt_demo/brain"
   bf() {
-    env -u BF_BRAIN TZ=UTC XDG_CONFIG_HOME="$prompt_demo/config" XDG_STATE_HOME="$prompt_demo/state" \
+    env -u BF_BRAIN TZ=UTC XDG_CONFIG_HOME="$prompt_demo/config" \
       uv run --project "$bf_checkout" bf "$@"
   }
   bf validate

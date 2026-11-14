@@ -23,7 +23,7 @@ Review the downloaded scripts before running them; `chmod +x` restores the execu
 
 ## Configure a sensor
 
-In `bf.yaml`, replace the `brief` entry under `sensors:` with this one. Keep `version`, `name`, the `fields:` entries and other settings:
+In `bf.yaml`, replace the `brief` entry under `sensors:` with this one. Keep `version`, `name` and other settings:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
@@ -32,8 +32,6 @@ sensors:
     command: [sensors/local-documents.py, website-demo, "{{brain}}/inputs/website-demo"]
     mode: snapshot
     refresh: 0
-    fields:
-      kind: { value: document }
 ```
 
 `website-demo` is the stable label used in record ids, and the last argument selects the demo folder. The script needs Python 3.11 or later as `python3` ([sensor settings](#sensor-settings)).
@@ -56,7 +54,7 @@ The dry run executes the script and previews up to three records (`added`, `upda
     "id": "website-demo/brief.txt",
     "title": "brief.txt",
     "text": "Visitors need a clear product explanation and pricing before signing up.\n",
-    "fields": { "kind": "document" }
+    "attributes": { "scope": "website-demo" }
   }
 }
 ```
@@ -88,7 +86,7 @@ curl -fsSLo inputs/highlights.json "$examples/highlights.json"
 chmod +x sensors/highlights.py
 ```
 
-Add `highlights` under `sensors:` and `source-document` under `fields:`, keeping existing entries:
+Add `highlights` under `sensors:`, keeping existing entries (`highlights.py` already sets `@type`, `relations.source-document` and `attributes`):
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
@@ -97,14 +95,6 @@ sensors:
     command: [sensors/highlights.py, reading, "{{brain}}/inputs/highlights.json"]
     mode: snapshot
     refresh: 0
-    fields:
-      source-document: { path: /url }
-fields:
-  source-document:
-    description: The document containing this selected passage.
-    type: identity
-    cardinality: one
-    relation: true
 ```
 
 ```bash
@@ -112,7 +102,7 @@ bf collect highlights
 bf read highlights:reading/brief-clarity
 ```
 
-`record.text` holds the selection, `record.url` and `record.fields.source-document` name the document, `record.attributes.locator` gives the page or section, and `record.attributes.annotation` keeps your note out of full-text search so your commentary never passes as source text. See the [sensor's README](https://github.com/fmind/brain-framework/blob/main/examples/sensors/README.md#highlights-export) for the export format.
+`record.text` holds the selection, `record["@type"]` is `"Highlight"`, `record.url` and `record.relations["source-document"]` name the document, `record.attributes.locator` gives the page or section, and `record.attributes.annotation` keeps your note out of full-text search so your commentary never passes as source text. See the [sensor's README](https://github.com/fmind/brain-framework/blob/main/examples/sensors/README.md#highlights-export) for the export format.
 
 ## Sensor settings
 
@@ -121,7 +111,6 @@ The command is a program on PATH or in `sensors/`, followed by its arguments, ru
 | Setting          | Default  | Meaning                                                                                                                                                                                                                 |
 | ---------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `command`        | required | Program and arguments; optional only with `enabled: false`.                                                                                                                                                             |
-| `fields`         | `{}`     | [Field mappings](schema.md#shared-fields-and-sensor-mappings).                                                                                                                                                          |
 | `enabled`        | `true`   | Disabled sensors never run; their records stay searchable.                                                                                                                                                              |
 | `mode`           | `window` | `window` updates returned records; `snapshot` replaces the complete list.                                                                                                                                               |
 | `refresh`        | `0`      | Seconds between automatic runs; `0` keeps the sensor manual.                                                                                                                                                            |
@@ -145,13 +134,13 @@ Command rules ([limits](limits.md#size-bounds)):
 
 Sensors and routines run from the brain root with stdin closed (except `bf run --stdin` or hooks) and loader-injection variables stripped, plus:
 
-| Variable       | Value                                                                                                                         |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `BF_BRAIN`     | Brain root, so nested `bf` calls read this brain.                                                                             |
-| `BF_PROGRAM`   | Program name in `bf.yaml`.                                                                                                    |
-| `BF_START`     | Window start (`{{start}}`), such as `2026-09-01T00:00:00.000000Z`.                                                            |
-| `BF_END`       | Window end (`{{end}}`).                                                                                                       |
-| `BF_STATE_DIR` | Private machine directory (mode `700`) outside the brain for cursors; deleting it makes the next run fall back to `lookback`. |
+| Variable       | Value                                                                                                                            |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `BF_BRAIN`     | Brain root, so nested `bf` calls read this brain.                                                                                |
+| `BF_PROGRAM`   | Program name in `bf.yaml`.                                                                                                       |
+| `BF_START`     | Window start (`{{start}}`), such as `2026-09-01T00:00:00.000000Z`.                                                               |
+| `BF_END`       | Window end (`{{end}}`).                                                                                                          |
+| `BF_STATE_DIR` | Private directory (`<brain>/.bf/state/SENSOR/`, mode `700`) for cursors; deleting it makes the next run fall back to `lookback`. |
 
 #### Credentials {#credentials}
 
@@ -246,18 +235,18 @@ When one feed or account among several fails, a sensor can keep the rest by prin
 - `secret(path)` reads mode-`600` credential files; `run(*argv, timeout=..., max_bytes=...)` and `fetch(url, timeout=..., max_bytes=...)` bound subprocess and HTTPS calls; `git_remote_identity(url)` normalizes repository identities.
 - `redact(text)` masks credential shapes before building records; `record(...)` normalizes UTF-8 text and URLs; `emit(records, missed=..., of=...)` prints validated output within BF's bounds.
 
-Emit attributes from the [standard vocabulary](schema.md#standard-vocabulary) (`author_refs`, `parent_refs`, `label_refs`, `kind`, `status`) so `bf init` brains map them automatically.
+Emit `@type`, `relations`, and `attributes` directly ([record format](schema.md#record-schema)) so records connect into the graph with zero `bf.yaml` boilerplate.
 
 ### Check saved output
 
-Validate saved JSON array or JSONL output against the brain's current `fields:` mappings without running the sensor or saving records:
+Validate saved JSON array or JSONL output against BF's record rules and any ontology constraints in `bf.yaml` without running the sensor or saving records:
 
 ```bash
 python3 sensors/github-issues.py > /tmp/issues.jsonl
 bf collect github-issues --input /tmp/issues.jsonl
 ```
 
-The reply matches `--dry-run` (change counts plus up to three projected samples with `fields`), works even when `enabled: false`, and accepts `--input -` from stdin.
+The reply matches `--dry-run` (change counts plus up to three validated sample records), works even when `enabled: false`, and accepts `--input -` from stdin.
 
 ## Keep, forget and expire records
 

@@ -3,7 +3,6 @@
     "Activity": {
       "description": "Records of one source within a period, with the page listing them.",
       "properties": {
-        "brain": { "type": "string" },
         "page": { "type": "string" },
         "priority": { "const": "low" },
         "records": { "minimum": 0, "type": "integer" },
@@ -15,7 +14,6 @@
     "Attention": {
       "description": "A program or channel that needs action, identified by kind and name.",
       "properties": {
-        "brain": { "type": "string" },
         "degraded": {
           "const": true,
           "description": "Three or more committed collections in a row reported missing parts; the source's `degraded` coverage gives the counts."
@@ -38,18 +36,13 @@
         "items": {
           "items": {
             "properties": {
-              "brain": { "type": "string" },
+              "@type": { "type": "string" },
               "date": {
                 "description": "A calendar date as written, such as 2026-09-28.",
                 "format": "date",
                 "type": "string"
               },
               "excerpt": { "description": "A preview of at most 160 characters.", "type": "string" },
-              "fields": {
-                "additionalProperties": { "type": ["string", "number", "boolean"] },
-                "description": "Declared single-value fields, such as a status or an assignee, each at most 200 characters.",
-                "type": "object"
-              },
               "kind": { "enum": ["note", "record"] },
               "ref": { "type": "string" },
               "source": { "type": "string" },
@@ -60,8 +53,7 @@
                 "type": "string"
               },
               "title": { "type": "string" },
-              "type": { "type": "string" },
-              "uri": { "type": "string" }
+              "type": { "type": "string" }
             },
             "required": ["ref", "kind"],
             "type": "object"
@@ -78,14 +70,13 @@
     "Claim": {
       "description": "A link, typed when it names a relation, and the section or record asserting it.",
       "properties": {
-        "brain": { "type": "string" },
         "date": { "description": "The asserting note's date.", "format": "date", "type": "string" },
         "origin": { "type": "string" },
         "relation": { "type": "string" },
         "subject": { "type": "string" },
         "target": { "type": "string" },
         "target_ref": {
-          "description": "The ref of the one item in the asserting brain that the target names, when exactly one does, as a bf:// address with several brains: read it to follow the claim.",
+          "description": "The ref of the one item that the target names, when exactly one does: read it to follow the claim.",
           "type": "string"
         },
         "target_title": { "description": "The title of the item `target_ref` names.", "type": "string" },
@@ -101,7 +92,6 @@
     "Coverage": {
       "description": "A source's local collection state; freshness never proves complete provider history.",
       "properties": {
-        "brain": { "type": "string" },
         "changed": {
           "description": "When this brain last gained a new or changed record of the source.",
           "format": "date-time",
@@ -161,26 +151,21 @@
     "Item": {
       "description": "A note, note section or record in a search result, listing or relation page.",
       "properties": {
+        "@type": { "description": "A record's optional @type.", "type": "string" },
         "also": {
-          "description": "Other sources' records sharing this record's URL; bf:// addresses with several brains.",
+          "description": "Other sources' records sharing this record's URL.",
           "items": { "type": "string" },
           "maxItems": 5,
           "type": "array"
         },
         "blocked_by": {
-          "description": "Up to ten unresolved draft actions this action depends on; bf:// addresses with several brains.",
+          "description": "Up to ten unresolved draft actions this action depends on.",
           "items": { "type": "string" },
           "maxItems": 10,
           "type": "array"
         },
-        "brain": { "description": "Present when several brains are selected.", "type": "string" },
         "date": { "description": "A note's `updated` date as written.", "format": "date", "type": "string" },
         "excerpt": { "description": "A one-line preview; read the ref for exact text.", "type": "string" },
-        "fields": {
-          "additionalProperties": { "type": ["string", "number", "boolean"] },
-          "description": "Declared single-value fields, such as a status or an assignee, each at most 200 characters.",
-          "type": "object"
-        },
         "generated": {
           "const": true,
           "description": "Model output an assistant recorded; read what it cites before relying on it."
@@ -197,7 +182,7 @@
           "type": "integer"
         },
         "newer": {
-          "description": "Up to five of those items, newest first, to read before relying on the note; bf:// addresses with several brains.",
+          "description": "Up to five of those items, newest first, to read before relying on the note.",
           "items": { "type": "string" },
           "maxItems": 5,
           "type": "array"
@@ -230,7 +215,7 @@
         },
         "review_source": { "enum": ["stale_after", "modified"] },
         "sections": {
-          "description": "Other matching sections of this note, best first; bf:// addresses with several brains.",
+          "description": "Other matching sections of this note, best first.",
           "items": { "type": "string" },
           "maxItems": 3,
           "type": "array"
@@ -253,7 +238,6 @@
           "format": "date-time",
           "type": "string"
         },
-        "uri": { "description": "Portable bf:// address; present when several brains are selected.", "type": "string" },
         "url": { "description": "A record's source URL.", "type": "string" }
       },
       "required": ["ref", "kind"],
@@ -262,7 +246,7 @@
     "OutlineEntry": {
       "properties": {
         "characters": { "minimum": 0, "type": "integer" },
-        "ref": { "description": "The section's ref; a bf:// address with several brains.", "type": "string" },
+        "ref": { "type": "string" },
         "title": { "type": "string" }
       },
       "required": ["ref", "title", "characters"],
@@ -270,7 +254,7 @@
     },
     "Problem": {
       "description": "Why part of a reply may be incomplete; an incomplete empty result does not prove absence.",
-      "properties": { "brain": { "type": "string" }, "error": { "type": "string" }, "file": { "type": "string" } },
+      "properties": { "error": { "type": "string" }, "file": { "type": "string" } },
       "required": ["error"],
       "type": "object"
     },
@@ -303,7 +287,7 @@
           "type": "integer"
         },
         "stale": {
-          "description": "Brains whose search cache could not refresh.",
+          "description": "Present when the search cache could not refresh.",
           "items": { "type": "string" },
           "type": "array"
         },
@@ -328,7 +312,7 @@
         "page": { "const": "review" },
         "problems": { "items": { "$ref": "#/$defs/Problem" }, "type": "array" },
         "stale": {
-          "description": "Brains whose search cache could not refresh.",
+          "description": "Present when the search cache could not refresh.",
           "items": { "type": "string" },
           "type": "array"
         },
@@ -359,7 +343,7 @@
         },
         "sources": { "items": { "$ref": "#/$defs/Activity" }, "type": "array" },
         "stale": {
-          "description": "Brains whose search cache could not refresh.",
+          "description": "Present when the search cache could not refresh.",
           "items": { "type": "string" },
           "type": "array"
         },
@@ -381,7 +365,7 @@
         "problems": { "items": { "$ref": "#/$defs/Problem" }, "type": "array" },
         "sources": { "items": { "$ref": "#/$defs/Coverage" }, "type": "array" },
         "stale": {
-          "description": "Brains whose search cache could not refresh.",
+          "description": "Present when the search cache could not refresh.",
           "items": { "type": "string" },
           "type": "array"
         }
@@ -403,7 +387,7 @@
         "relation": { "description": "On a relation page, the listed relation.", "type": "string" },
         "sources": { "items": { "$ref": "#/$defs/Coverage" }, "type": "array" },
         "stale": {
-          "description": "Brains whose search cache could not refresh.",
+          "description": "Present when the search cache could not refresh.",
           "items": { "type": "string" },
           "type": "array"
         },
@@ -418,13 +402,11 @@
         "items": {
           "items": {
             "properties": {
-              "brain": { "type": "string" },
               "line": { "minimum": 0, "type": "integer" },
               "note": { "type": "string" },
               "ref": { "type": "string" },
               "text": { "type": "string" },
-              "title": { "type": "string" },
-              "uri": { "type": "string" }
+              "title": { "type": "string" }
             },
             "required": ["ref", "note", "line", "text"],
             "type": "object"
@@ -436,7 +418,7 @@
         "page": { "const": "tasks" },
         "problems": { "items": { "$ref": "#/$defs/Problem" }, "type": "array" },
         "stale": {
-          "description": "Brains whose search cache could not refresh.",
+          "description": "Present when the search cache could not refresh.",
           "items": { "type": "string" },
           "type": "array"
         },
@@ -460,11 +442,9 @@
         "items": {
           "items": {
             "properties": {
-              "brain": { "type": "string" },
               "ref": { "type": "string" },
               "tag": { "type": "string" },
-              "total": { "minimum": 0, "type": "integer" },
-              "uri": { "type": "string" }
+              "total": { "minimum": 0, "type": "integer" }
             },
             "required": ["ref", "tag", "total"],
             "type": "object"
@@ -476,7 +456,7 @@
         "page": { "const": "tags" },
         "problems": { "items": { "$ref": "#/$defs/Problem" }, "type": "array" },
         "stale": {
-          "description": "Brains whose search cache could not refresh.",
+          "description": "Present when the search cache could not refresh.",
           "items": { "type": "string" },
           "type": "array"
         },
@@ -495,7 +475,7 @@
           "type": "integer"
         },
         "claims": {
-          "description": "Typed claims the subject makes (declared relations, cites, tagged-with), up to 20 per relation and 50 in all. Untyped links stay in the text, in each target's `links` backlinks and in bf export.",
+          "description": "Typed claims the subject makes (relations, cites, tagged-with), up to 20 per relation and 50 in all. Untyped links stay in the text, in each target's `links` backlinks and in bf export.",
           "items": { "$ref": "#/$defs/Claim" },
           "type": "array"
         },
@@ -504,7 +484,7 @@
         "page": { "type": "string" },
         "problems": { "items": { "$ref": "#/$defs/Problem" }, "type": "array" },
         "stale": {
-          "description": "Brains whose search cache could not refresh.",
+          "description": "Present when the search cache could not refresh.",
           "items": { "type": "string" },
           "type": "array"
         }
@@ -523,7 +503,7 @@
         },
         "brain": { "type": "string" },
         "claims": {
-          "description": "Typed claims the subject makes (declared relations, cites, tagged-with), up to 20 per relation and 50 in all. Untyped links stay in the text, in each target's `links` backlinks and in bf export.",
+          "description": "Typed claims the subject makes (relations, cites, tagged-with), up to 20 per relation and 50 in all. Untyped links stay in the text, in each target's `links` backlinks and in bf export.",
           "items": { "$ref": "#/$defs/Claim" },
           "type": "array"
         },
@@ -541,7 +521,7 @@
           "type": "integer"
         },
         "newer": {
-          "description": "Up to five of those items, newest first, to read before relying on the note; bf:// addresses with several brains.",
+          "description": "Up to five of those items, newest first, to read before relying on the note.",
           "items": { "type": "string" },
           "maxItems": 5,
           "type": "array"
@@ -568,7 +548,7 @@
         "review_source": { "enum": ["stale_after", "modified"] },
         "sha256": { "description": "SHA-256 of the whole file.", "pattern": "^[0-9a-f]{64}$", "type": "string" },
         "stale": {
-          "description": "Brains whose search cache could not refresh.",
+          "description": "Present when the search cache could not refresh.",
           "items": { "type": "string" },
           "type": "array"
         },
@@ -597,7 +577,7 @@
         },
         "brain": { "type": "string" },
         "claims": {
-          "description": "Typed claims the subject makes (declared relations, cites, tagged-with), up to 20 per relation and 50 in all. Untyped links stay in the text, in each target's `links` backlinks and in bf export.",
+          "description": "Typed claims the subject makes (relations, cites, tagged-with), up to 20 per relation and 50 in all. Untyped links stay in the text, in each target's `links` backlinks and in bf export.",
           "items": { "$ref": "#/$defs/Claim" },
           "type": "array"
         },
@@ -666,11 +646,12 @@
         "record": {
           "description": "The stored record without default values; later text pages carry only its `text` slice.",
           "properties": {
+            "@type": { "type": "string" },
             "aliases": { "items": { "type": "string" }, "type": "array" },
             "attributes": { "type": "object" },
-            "fields": { "type": "object" },
             "id": { "type": "string" },
             "links": { "items": { "type": "string" }, "type": "array" },
+            "relations": { "type": "object" },
             "text": { "type": "string" },
             "time": {
               "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
@@ -685,7 +666,7 @@
         "ref": { "type": "string" },
         "sha256": { "description": "SHA-256 of the whole file.", "pattern": "^[0-9a-f]{64}$", "type": "string" },
         "stale": {
-          "description": "Brains whose search cache could not refresh.",
+          "description": "Present when the search cache could not refresh.",
           "items": { "type": "string" },
           "type": "array"
         },

@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from pydantic import JsonValue, ValidationError
@@ -30,7 +30,7 @@ from bf.watch import Job, snapshot
 NOW = datetime(2026, 9, 25, 8, tzinfo=UTC)
 START = "2026-09-24T08:00:00.000000Z"
 END = "2026-09-25T08:00:00.000000Z"
-CONFIG = b"""version: 8
+CONFIG = b"""version: 9
 name: fixture
 assistants:
   assistant:
@@ -81,7 +81,7 @@ def stored(store: Store, source: str = "assistant") -> list[Record]:
 
 
 def test_configuration_validates_assistants() -> None:
-    assert Config.model_validate({"version": 8, "name": "x", "assistants": None}).assistants == {}
+    assert Config.model_validate({"version": 9, "name": "x", "assistants": None}).assistants == {}
     default = Assistant.model_validate({"prompt": "prompts/a.md", "command": ["agy", "-p={{prompt}}"]})
     assert (default.schedules, default.timeout, default.max_bytes, default.reply) == ({}, 900, 1 << 20, None)
     for path in ("notes/a.md", "prompts/../a.md", "prompts/a.txt"):
@@ -103,7 +103,7 @@ def test_configuration_validates_assistants() -> None:
         with pytest.raises(ValidationError, match="program names must be distinct"):
             Config.model_validate(
                 {
-                    "version": 8,
+                    "version": 9,
                     "name": "x",
                     kind: {"assistant": {"command": ["echo"]}},
                     "assistants": {"assistant": {"command": ["echo"], "prompt": "prompts/a.md"}},
@@ -160,7 +160,7 @@ def test_expansion_and_record_preserve_harness_contract(configured: Store) -> No
     assert record.attributes["trigger"] == "schedule"
     assert record.attributes["window"] == {"start": START, "end": END}
     assert state(configured, ASSISTANTS)["assistant"]["runs"] == 1
-    assert cast("dict", read([configured], result["record"])["record"])["title"] == "Two replies owed"
+    assert cast("dict", read(configured, result["record"])["record"])["title"] == "Two replies owed"
 
 
 def test_direct_and_preview_runs_leave_named_schedule_progress_alone(configured: Store, agent: Path) -> None:
@@ -257,17 +257,18 @@ def test_update_keeps_assistants_outside_collection_lock(configured: Store) -> N
 def test_assistant_records_are_retrievable_but_lower_priority(configured: Store) -> None:
     result = ask(configured)
     assert pages.low(configured) == ["assistant", "paused", "piped"]
-    page = read([configured], "memories/assistant")
+    page = read(configured, "memories/assistant")
     assert cast("list[dict]", page["items"])[0]["ref"] == result["record"]
 
 
 def test_status_and_watch_show_assistant_schedules_and_records(configured: Store) -> None:
     result = update(configured, runner=lambda *_: REPLY, kinds=frozenset({"assistant"}))
-    brain = cast("list[dict]", health.report([configured])["brains"])[0]
-    assert brain["assistants"]["assistant"]["schedules"]["review"]["freshness"] == "fresh"
-    assert brain["assistants"]["assistant"]["record"] == cast("list[dict]", result["assistants"])[0]["record"]
-    assert brain["assistants"]["piped"]["freshness"] == "manual"
-    assert brain["assistants"]["paused"]["state"] == "disabled"
+    brain = health.report(configured)
+    reported = cast("dict[str, Any]", brain["assistants"])
+    assert reported["assistant"]["schedules"]["review"]["freshness"] == "fresh"
+    assert reported["assistant"]["record"] == cast("list[dict]", result["assistants"])[0]["record"]
+    assert reported["piped"]["freshness"] == "manual"
+    assert reported["paused"]["state"] == "disabled"
     rows = {row.name: row for row in snapshot(configured)}
     assert rows["assistant"].kind == "assistant"
     assert rows["assistant"].runs == 1
@@ -348,7 +349,7 @@ def test_keep_never_removes_the_run_it_just_recorded(configured: Store) -> None:
 def test_wall_clock_schedules_context_schedule_silent_noop_and_idempotent_retry(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nassistants:\n"
+        b"version: 9\nname: fixture\nassistants:\n"
         b"  brief:\n"
         b"    prompt: prompts/brief.md\n"
         b"    command: [agent]\n"
@@ -386,7 +387,7 @@ def test_wall_clock_schedules_context_schedule_silent_noop_and_idempotent_retry(
     assert Queue(configured).progress("schedule:brief:schedule:morning")["end"] == "2026-08-31T08:05:00.000000Z"
 
 
-TOLD = b"""version: 8
+TOLD = b"""version: 9
 name: fixture
 channels:
   chat:
@@ -438,7 +439,7 @@ def test_harness_learns_its_trigger_schedule_and_window(
         assert re.fullmatch(r"trigger=manual schedule= start=\S+Z end=\S+Z", text), text
 
 
-CHECKED = b"""version: 8
+CHECKED = b"""version: 9
 name: fixture
 assistants:
   checked:
@@ -666,7 +667,7 @@ def test_harness_learns_it_runs_for_a_wake(configured: Store) -> None:
     assert stored(configured, "checked") == []
 
 
-GATED = b"""version: 8
+GATED = b"""version: 9
 name: fixture
 assistants:
   dev:
@@ -837,7 +838,7 @@ def test_when_gates_trigger_scoped_args_tempfail_retries_wakes_and_proposed_acti
 
     brain.write(
         "bf.yaml",
-        b"""version: 8
+        b"""version: 9
 name: fixture
 sensors:
   feed:
@@ -1015,7 +1016,7 @@ def test_when_cursor_defers_until_finish_gated_schedules_supersede_failures_and_
     brain.write("prompts/assistant.md", b"Prompt {{context}}\n{{input}}\n")
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\n"
+        b"version: 9\nname: fixture\n"
         b"sensors:\n  feed:\n    command: [feed-cli]\n"
         b"channels:\n  chat:\n    stream: {command: [stream-chat]}\n    send: {command: [send-chat]}\n"
         b"assistants:\n"

@@ -270,6 +270,6 @@ Connect `inputs:` only to channels whose adapter authenticates and admits exclus
 Keep scheduled triage read-only and isolate mutations behind your review:
 
 1. **Zero-write proposals (`propose: true`)**: a read-only scheduled assistant (`--allowedTools "Bash(bf read *),Bash(bf search *)"`, `propose: true`, `idempotent: [schedule, wake]`) triages untrusted mail/chat evidence and emits validated `status: draft` `ACTION.md` proposals without any file-edit tool.
-2. **Trigger-scoped or split execution**: either review proposed actions in your interactive session (`bf read review` + `bf-action`), or grant narrow edit permissions (`Edit(projects/**)`) only on owner-authenticated messages via `input_args:` on a single assistant — or on a second `actor` assistant with `inputs:` and no `schedules:` so untrusted background evidence never invokes wider tools.
+2. **Trigger-scoped or split execution**: either review proposed actions in your interactive session (`bf read review` + `/bf`), or grant narrow edit permissions (`Edit(projects/**)`) only on owner-authenticated messages via `input_args:` on a single assistant — or on a second `actor` assistant with `inputs:` and no `schedules:` so untrusted background evidence never invokes wider tools.
 
 See [Channels and recovery](channels.md#queue-and-recovery) and [Privacy](privacy.md).

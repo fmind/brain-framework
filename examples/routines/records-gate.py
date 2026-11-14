@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Records gate: report each record a source gained or changed during a schedule's window, once; no model involved.
 
-Usage: records-gate.py SOURCE [SOURCE...] [--where FIELD=VALUE]... [--period PERIOD]
+Usage: records-gate.py SOURCE [SOURCE...] [--where ATTRIBUTE=VALUE]... [--period PERIOD]
 
 An assistant's schedule runs it as its gate. For each SOURCE, it streams `bf export --kind items --scope
 memories/SOURCE` from the first `bf` on PATH and keeps the records whose `observed` time, when BF first collected or
-last changed them, falls from 10 minutes before BF_START until BF_END. `--where` keeps records whose single-value
-field, as the export lists it, reads VALUE; repeated, every condition must hold. It prints `{"events": [...]}`, one
-event per record named by its `bf://BRAIN/REF` address, and remembers the reported records in BF_STATE_DIR so the
-harness hears of each change once. The export also lists the brains this brain references: their records count too.
+last changed them, falls from 10 minutes before BF_START until BF_END. `--where` keeps records whose scalar
+attribute, as the export lists it, reads VALUE; repeated, every condition must hold. It prints `{"events": [...]}`,
+one event per record named by its `bf://BRAIN/REF` address, and remembers the reported records in BF_STATE_DIR so the
+harness hears of each change once.
 
 Any failure prints one line on stderr that quotes no record, exits 1 and reports nothing, so BF retries the gate.
 Invalid arguments or a missing BF_START, BF_END or BF_STATE_DIR exit 2.
@@ -119,12 +119,12 @@ def export(bf: str, scope: str, deadline: float) -> Generator[dict[str, Any]]:
 
 
 def address(brain: str, ref: str) -> str:
-    """A record's address, spelled as a search result's `uri`: a referenced brain can hold the same ref."""
+    """A record's address, spelled as a search result's `uri`."""
     return f"bf://{brain}/{quote(ref, safe='/@:')}"
 
 
 def spelled(value: object) -> str | None:
-    """A field value as `--where` spells it: text as is, true or false, a number as JSON writes it."""
+    """An attribute value as `--where` spells it: text as is, true or false, a number as JSON writes it."""
     if isinstance(value, str):
         return value
     if isinstance(value, bool | int | float):
@@ -133,10 +133,9 @@ def spelled(value: object) -> str | None:
 
 
 def matches(record: dict[str, Any], where: list[tuple[str, str]]) -> bool:
-    """Whether every condition holds. The export lists declared single-value fields of up to 200 characters only: a
-    `cardinality: many` field never matches."""
-    fields = record.get("fields", {})
-    return isinstance(fields, dict) and all(spelled(fields.get(field)) == expected for field, expected in where)
+    """Whether every condition holds against the record's exported `attributes`. Lists or objects never match."""
+    attributes = record.get("attributes", {})
+    return isinstance(attributes, dict) and all(spelled(attributes.get(field)) == expected for field, expected in where)
 
 
 def line(title: object) -> str:

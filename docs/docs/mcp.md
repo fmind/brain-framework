@@ -84,7 +84,7 @@ Ask your agent: **“Use the brain MCP tools to find why we chose a single produ
 
 ## What the host can read
 
-- **Selected brain and direct `brains:` references** (or all registered brains when started outside any brain without `--brain` / `BF_BRAIN`).
+- **One selected brain** (`--brain`, `BF_BRAIN`, enclosing `bf.yaml`, or configured `default` in `~/.config/bf/config.yaml`).
 - **Read-only access**: `search` and `read` refresh only the disposable `.bf/` cache and private usage counts, and accept `bf://NAME/...` addresses plus `rel` (`{"ref":"projects/new-website.md","rel":"cites"}`; [MCP tool contract](retrieval.md#mcp-tool-contract)). Review your host's model data policy ([privacy](privacy.md#your-agent-has-its-own-privacy-rules)).
 
 ## Why local stdio and two tools

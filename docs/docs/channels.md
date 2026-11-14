@@ -123,7 +123,7 @@ bf queue JOB_ID --cancel
 
 ### Where the queue lives
 
-`queue.sqlite3` under `$XDG_STATE_HOME/bf/runtime/<dev>-<ino>/` is **durable state** (`synchronous=EXTRA`): back it up while no BF process runs, keep any `-journal` rollback file (`assistant queue holds an interrupted write; run bf queue to recover it`), and never delete it to clear errors. Schema mismatches report `assistant queue predates this release; preserve it and follow the upgrade steps in the changelog` or `unexpected assistant queue schema; preserve it and repair it`.
+`.bf/runtime.sqlite3` inside `<brain>/.bf/` is **durable state** (`synchronous=EXTRA`): back it up while no BF process runs, keep any `-journal` rollback file (`assistant queue holds an interrupted write; run bf queue to recover it`), and never delete it to clear errors. Schema mismatches report `assistant queue predates this release; preserve it and follow the upgrade steps in the changelog` or `unexpected assistant queue schema; preserve it and repair it`.
 
 Capacity and retention bounds:
 
@@ -135,8 +135,7 @@ Capacity and retention bounds:
 
 Drain `bf queue` before moving or renaming a brain:
 
-- Same-filesystem moves/renames rebind automatically once no unresolved work remains; otherwise assistant commands refuse (`assistant queue holds unresolved work admitted under this brain's previous path or name; …`) while collection continues unaffected.
-- Device renumbering (such as btrfs across reboots) rebinds by inode and path; ambiguous or unreadable runtime folders report `several assistant queues in the state folder runtime/ are bound to this brain (…)` or `assistant queue in the state folder runtime/ (NAMES) may belong to this brain but cannot be read`.
+- Moving or renaming a brain whose `.bf/runtime.sqlite3` still holds unresolved work from the previous path or brain `name` refuses assistant commands (`assistant queue holds unresolved work admitted under this brain's previous path or name; …`) until drained, while collection continues unaffected.
 
 ### Configuration changes
 

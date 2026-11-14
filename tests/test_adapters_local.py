@@ -143,12 +143,13 @@ def test_git_history_projects_commits_of_nested_checkouts(provider: Provider, tm
     records = provider.records("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     assert len(records) == 1
     commit = records[0]
-    assert commit.attributes["author_refs"] == ["person:email/owner@fmind.dev"]
-    assert "repo:local/owner/project" in cast(list[str], commit.attributes["repository_refs"])
+    assert commit.type == "Commit"
+    assert commit.relations["author"] == ["person:email/owner@fmind.dev"]
+    assert "repo:local/owner/project" in commit.relations["repository"]
     assert commit.title == "owner/project: feat: keep durable evidence"
     assert commit.time == "2026-09-01T10:00:00.000000Z"
     assert "Because providers forget." in commit.text
-    assert commit.links == ["person:email/owner@fmind.dev", "repo:local/owner/project"]
+    assert not commit.links
     assert commit.aliases == [f"commit:local/{commit.id}"]
     assert provider.records("git-history.py", str(root), "2026-09-02T00:00:00Z", "2026-09-03T00:00:00Z") == []
     assert provider.run("git-history.py", str(tmp_path / "absent"), "2026-09-01T00:00:00Z", "x").returncode == 1
@@ -227,7 +228,9 @@ def test_git_history_collects_repositories_scanned_only_through_worktrees(provid
     expected = {".archive/legacy": ["Legacy"], "project.git": ["Feature", "Start"], "review": ["Review", "Start"]}
     assert collected() == expected
     records = provider.records("git-history.py", *window)
-    assert {link for record in records for link in record.links if link.startswith("repo:")} == {
+    assert {
+        target for record in records for target in record.relations.get("repository", []) if target.startswith("repo:")
+    } == {
         "repo:local/.archive/legacy",
         "repo:local/project.git",
         "repo:local/review",
@@ -258,7 +261,7 @@ def test_people_and_repository_identities_join_across_providers(
         ],
     )
     commits = provider.records("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
-    assert "repo:github.com/owner/project" in commits[0].links
+    assert "repo:github.com/owner/project" in commits[0].relations["repository"]
     provider.install(
         "gws",
         [
@@ -281,7 +284,7 @@ def test_people_and_repository_identities_join_across_providers(
     events = provider.records("google-calendar.py", "primary", "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     for source, records in [("git", commits), ("calendar", events)]:
         records_file(brain, source, records)
-    result = search([brain], Query(text="person:email/owner@fmind.dev"))
+    result = search(brain, Query(text="person:email/owner@fmind.dev"))
     items = cast("list[dict[str, object]]", result["items"])
     assert {item["source"] for item in items} == {"git", "calendar"}
 
@@ -347,7 +350,7 @@ def test_git_history_links_the_origin_remote_it_recognizes(
     result = provider.run("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     assert result.returncode == 0, result.stderr
     [commit] = json.loads(result.stdout)
-    assert commit["attributes"]["repository_refs"] == ["repo:local/site", *([expected] if expected else [])]
+    assert commit["relations"]["repository"] == ["repo:local/site", *([expected] if expected else [])]
     assert "token-1234" not in result.stdout + result.stderr
     assert "team/web" not in result.stdout
 
@@ -360,9 +363,10 @@ def test_calendar_keeps_organizer_separate_from_invited_attendees(provider: Prov
     }
     provider.install("gws", [{"match": ["events", "list"], "stdout": {"kind": "calendar#events", "items": [event]}}])
     record = provider.records("google-calendar.py", "team", "2026-09-01T00:00:00Z", "2026-09-03T00:00:00Z")[0]
-    assert record.attributes["organizer_refs"] == ["person:email/owner@example.test"]
-    assert record.attributes["attendee_refs"] == ["person:email/guest@example.test"]
-    assert set(cast(list[str], record.attributes["participant_refs"])) == {
+    assert record.type == "Event"
+    assert record.relations["organizer"] == ["person:email/owner@example.test"]
+    assert record.relations["attendee"] == ["person:email/guest@example.test"]
+    assert set(record.relations["participant"]) == {
         "person:email/owner@example.test",
         "person:email/guest@example.test",
     }
@@ -459,7 +463,7 @@ def test_git_history_reads_history_refs_only(provider: Provider, tmp_path: Path)
     # Stash and notes commits stay out; a tab and an empty message still give one-line titles.
     assert sorted(record.title for record in records) == ["my project:", "my project: keep evidence"]
     assert {record.aliases[0].partition("@")[0] for record in records} == {"commit:local/my%20project"}
-    assert all("repo:local/my%20project" in record.links for record in records)
+    assert all("repo:local/my%20project" in record.relations["repository"] for record in records)
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can list every folder")
@@ -596,7 +600,7 @@ def test_git_history_drops_an_author_link_beyond_the_reference_bound(provider: P
         "git", [GIT_VERSION, {"match": ["log"], "stdout": log}, {"match": ["remote"], "code": 2, "repeat": True}]
     )
     records = provider.records("git-history.py", str(tmp_path / "code"), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
-    assert [(record.links, record.attributes["author_refs"]) for record in records] == [(["repo:local/project"], [])]
+    assert [(record.relations, record.links) for record in records] == [({"repository": ["repo:local/project"]}, [])]
 
 
 def test_git_history_reads_a_relative_root_below_the_brain_folder(provider: Provider, tmp_path: Path) -> None:

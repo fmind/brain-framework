@@ -34,7 +34,7 @@ from conftest import plain
 NOW = datetime(2026, 9, 25, 8, tzinfo=UTC)
 START = "2026-09-24T08:00:00.000000Z"
 END = "2026-09-25T08:00:00.000000Z"
-CONFIG = b"""version: 8
+CONFIG = b"""version: 9
 name: fixture
 routines:
   digest:
@@ -71,18 +71,18 @@ def printing(output: bytes, calls: list[list[str]] | None = None) -> Runner:
 
 def test_configuration_names_routines_like_action_slugs() -> None:
     assert Config.model_validate(
-        {"version": 8, "name": "b", "routines": {"weekly-review": {"command": ["x"]}}}
+        {"version": 9, "name": "b", "routines": {"weekly-review": {"command": ["x"]}}}
     ).routines
     for name in ("Weekly", "weekly-", "a--b", "1st"):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 8, "name": "b", "routines": {name: {"command": ["x"]}}})
+            Config.model_validate({"version": 9, "name": "b", "routines": {name: {"command": ["x"]}}})
     with pytest.raises(ValidationError, match="distinct"):
         Config.model_validate(
-            {"version": 8, "name": "b", "sensors": {"x": {"command": ["x"]}}, "routines": {"x": {"command": ["x"]}}}
+            {"version": 9, "name": "b", "sensors": {"x": {"command": ["x"]}}, "routines": {"x": {"command": ["x"]}}}
         )
     for settings in ({"command": ["x"], "max_bytes": 5 << 20}, {"command": ["x", "{{secret}}"]}, {"command": []}):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 8, "name": "b", "routines": {"digest": settings}})
+            Config.model_validate({"version": 9, "name": "b", "routines": {"digest": settings}})
 
 
 def test_a_routine_writes_one_action_per_day_after_success(configured: Store) -> None:
@@ -112,7 +112,7 @@ def test_a_routine_writes_one_action_per_day_after_success(configured: Store) ->
     again = routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
     assert again == {"routine": "digest", "skipped": SKIPPED}
     assert configured.read(f"{FOLDER}/ACTION.md") == b"# Digest\n\nReviewed by a person.\n"
-    assert refs(read([configured], "actions")) == [f"{FOLDER}/ACTION.md"]
+    assert refs(read(configured, "actions")) == [f"{FOLDER}/ACTION.md"]
     # Before, a preview then still reported a new action that the real run would never write.
     preview = routine(
         configured, "digest", start=START, end=END, runner=printing(ACTION), dry_run=True, clock=lambda: NOW
@@ -252,7 +252,7 @@ def test_empty_output_means_nothing_to_review(configured: Store) -> None:
         (b"---\ntype: action\nverified: [{by: human:owner}]\n---\n# Bad\n", "require by and at"),
         (b"---\nunclosed\n", "unclosed frontmatter"),
         (b"\xff\xfe", "UTF-8"),
-        (b"# Bad\n\n[x](bf://fixture/projects/offline.md?rel=undeclared)\n", "declare it in bf.yaml fields"),
+        (b"# Bad\n\n[x](bf://fixture/projects/offline.md?rel=links)\n", "untyped links need no"),
         (b"---\nentity: bf://other/people/x\n---\n# Foreign\n", "own brain namespace"),
         (b"---\naliases: [bf://other/people/x]\n---\n# Foreign\n", "own brain namespace"),
     ],
@@ -406,8 +406,8 @@ def test_status_and_home_report_failing_routines(configured: Store) -> None:
     assert health["manual"] == {"state": "active", "freshness": "manual"}
     assert health["paused"] == {"state": "disabled", "freshness": "unknown"}
     assert attention(configured, NOW) == [{"kind": "routine", "name": "digest", "freshness": "never", "failed": True}]
-    assert pages.home([configured], NOW)["attention"] == [
-        {"brain": "fixture", "kind": "routine", "name": "digest", "freshness": "never", "failed": True}
+    assert pages.home(configured, NOW)["attention"] == [
+        {"kind": "routine", "name": "digest", "freshness": "never", "failed": True}
     ]
     result = CliRunner().invoke(app, ["status", "--check", "--brain", str(configured.root)])
     assert result.exit_code == 1
@@ -433,7 +433,7 @@ def fixed_action_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=1))
 
 
-HOOKED = b"""version: 8
+HOOKED = b"""version: 9
 name: fixture
 routines:
   check:
@@ -580,7 +580,7 @@ def test_update_selection_suggests_close_names(hooked: Store) -> None:
 def test_hooks_are_distinct_slugs() -> None:
     for hooks in (["pre-push", "pre-push"], ["Pre-Push"], ["pre push"]):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 8, "name": "b", "routines": {"x": {"command": ["x"], "hooks": hooks}}})
+            Config.model_validate({"version": 9, "name": "b", "routines": {"x": {"command": ["x"], "hooks": hooks}}})
 
 
 def test_update_names_the_manual_programs_it_skipped(hooked: Store) -> None:
@@ -592,7 +592,7 @@ def test_update_names_the_manual_programs_it_skipped(hooked: Store) -> None:
 def test_keep_removes_older_unchanged_reports_and_spares_edited_ones(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 2\n",
+        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 2\n",
     )
     report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     written = []
@@ -622,7 +622,7 @@ def test_update_skips_a_program_another_process_is_running(configured: Store) ->
 def test_run_suggests_prompt_names_too(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nassistants:\n  assistant:\n    prompt: prompts/a.md\n    command: [agent]\n",
+        b"version: 9\nname: fixture\nassistants:\n  assistant:\n    prompt: prompts/a.md\n    command: [agent]\n",
     )
     result = CliRunner().invoke(app, ["run", "asistant", "--brain", str(brain.root)])
     assert result.exit_code == 1
@@ -634,7 +634,7 @@ def test_run_suggests_prompt_names_too(brain: Store) -> None:
 def test_keep_spares_a_report_folder_holding_anything_else(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
     )
     report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     first = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)
@@ -650,7 +650,7 @@ def test_keep_spares_a_report_folder_holding_anything_else(brain: Store) -> None
 def test_keep_never_removes_the_action_it_just_wrote(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
     )
     report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     # Another clone, in a time zone ahead, already dated its report tomorrow.
@@ -667,7 +667,7 @@ def test_keep_never_removes_the_action_it_just_wrote(brain: Store) -> None:
 def test_keep_logs_what_it_cannot_remove_and_never_fails_the_run(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
     )
     report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     first = str(routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)["action"])
@@ -701,7 +701,7 @@ def test_keep_logs_what_it_cannot_remove_and_never_fails_the_run(brain: Store) -
 def test_keep_puts_a_report_back_when_its_folder_gains_an_entry(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+        b"version: 9\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
     )
     report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     first = str(routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)["action"])
@@ -728,7 +728,7 @@ def test_routines_support_wall_clock_schedules_and_declarative_when_gates(brain:
 
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n  feed:\n    command: [echo]\n"
+        b"version: 9\nname: fixture\nsensors:\n  feed:\n    command: [echo]\n"
         b"routines:\n  digest:\n    command: [routines/digest.py]\n    at: '08:00'\n    timezone: UTC\n"
         b"    output: action\n    when:\n      sources: [feed]\n",
     )

@@ -6,17 +6,20 @@ import errno
 import json
 import os
 import re
+import sqlite3
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
-from pydantic import JsonValue, ValidationError
+from pydantic import ValidationError
 
-from bf import index, ontology, records, retrieve, storage
+from bf import index, records, retrieve, storage
 from bf.collect import collect, reproject
-from bf.config import load, register
+from bf.config import register
 from bf.models import MAX_FIELDS, MAX_RECORD, Error, Query, Record, encode
 from bf.storage import Store, writer
 from bf.update import update
@@ -37,11 +40,12 @@ def test_fields_beside_text_stay_within_a_readable_size() -> None:
     # The reply limit counts bytes: 1.2 million characters of euro signs encode to 3.6 MB.
     with pytest.raises(ValidationError, match="fields other than text exceed 2 MiB"):
         Record(id="euros", title="Euros", links=[f"repo:example/{n}-" + "€" * 4000 for n in range(300)])
-    # A record file of up to 16 MiB could hold millions of invalid field names: one error names the whole map.
-    with pytest.raises(ValidationError) as raised:
-        Record.model_validate({"id": "many", "title": "Many", "fields": {f"F{n}": 1 for n in range(100_000)}})
-    assert raised.value.error_count() == 1
-    assert "fields hold at most 1,000 names" in str(raised.value)
+    # A record file of up to 16 MiB could hold millions of invalid key names: one error names the whole map.
+    for key in ("attributes", "relations"):
+        with pytest.raises(ValidationError) as raised:
+            Record.model_validate({"id": "many", "title": "Many", key: {f"k{n}": "v" for n in range(100_000)}})
+        assert raised.value.error_count() == 1
+        assert f"{key} hold at most 1,000 names" in str(raised.value)
 
 
 def test_window_upsert_adds_updates_moves_and_keeps_unchanged(brain: Store) -> None:
@@ -148,11 +152,11 @@ def test_absent_record_parses_the_source_unless_a_ready_cache_already_did(
     loaded.clear()
     # Exact reads pass `complete` only from a ready cache that reported no problem in the source.
     with pytest.raises(Error, match="not found"):
-        retrieve.read([brain], "meetings:absent")
+        retrieve.read(brain, "meetings:absent")
     assert loaded == [absent]
     brain.write(records.path("meetings", "misnamed"), b'{"id":"elsewhere","title":"Misnamed"}\n')
     with pytest.raises(Error, match="SHA-256 filename"):
-        retrieve.read([brain], "meetings:elsewhere")
+        retrieve.read(brain, "meetings:elsewhere")
 
 
 def test_find_reads_records_without_the_cache(brain: Store) -> None:
@@ -182,7 +186,7 @@ def test_invalid_record_keys_stay_out_of_diagnostics(brain: Store) -> None:
     with pytest.raises(Error, match=r"invalid record: <key>") as failure:
         records.load(brain, path)
     assert "private" not in str(failure.value)
-    reply = retrieve.search([brain], Query(text="absent"))
+    reply = retrieve.search(brain, Query(text="absent"))
     assert "<key>" in str(reply["problems"])
     assert "private" not in str(reply["problems"])
 
@@ -273,7 +277,7 @@ def test_update_recovers_an_interrupted_transaction_that_reads_refuse(brain: Sto
     orphan = "memories/meetings/.write-" + "a" * 32
     brain.write(orphan, b"a write killed before its rename")
     with pytest.raises(Error, match="run bf build or bf update"):
-        retrieve.search([brain], Query(text="durable evidence"))
+        retrieve.search(brain, Query(text="durable evidence"))
     assert brain.read(DECISION) != original
     # Update holds the writer lock like build: it rolls the journal back before refreshing the cache.
     report = update(brain)
@@ -281,7 +285,7 @@ def test_update_recovers_an_interrupted_transaction_that_reads_refuse(brain: Sto
     assert brain.read(DECISION) == original
     assert not (brain.root / "memories/.pending").exists()
     assert not (brain.root / orphan).exists()
-    assert retrieve.search([brain], Query(text="durable evidence"))["items"]
+    assert retrieve.search(brain, Query(text="durable evidence"))["items"]
 
 
 def test_temporary_files_of_killed_writes_are_swept_and_never_count_as_records(brain: Store, tmp_path: Path) -> None:
@@ -510,8 +514,8 @@ def test_untrusted_pending_journal_cannot_mutate_evidence_through_reads(
     before = {name: brain.read(name) for name in brain.files("memories")}
     actions = (
         lambda: records.find(brain, "meetings", "decision-1"),
-        lambda: retrieve.read([brain], "meetings:decision-1"),
-        lambda: retrieve.search([brain], Query(text="durable evidence")),
+        lambda: retrieve.read(brain, "meetings:decision-1"),
+        lambda: retrieve.search(brain, Query(text="durable evidence")),
         lambda: index.refresh(brain),
     )
     for action in actions:
@@ -619,40 +623,89 @@ def test_pruning_passes_over_a_record_it_cannot_read(brain: Store) -> None:
 
 
 ATTENDED = (
-    b"version: 8\nname: fixture\nfields:\n  attendee:\n    description: A person who attended.\n    type: identity\n"
-    b"    cardinality: many\n    relation: true\nsensors:\n  meetings:\n    command: [sensors/meetings.py]\n"
-    b"    fields:\n      attendee:\n        path: /attributes/people\n"
+    b"version: 9\nname: fixture\nfields:\n  attendee:\n    description: A person who attended.\n"
+    b"    targets: ['person:']\nsensors:\n  meetings:\n    command: [sensors/meetings.py]\n"
 )
 
 
-def test_projected_fields_keep_the_bounds_of_every_stored_record(brain: Store) -> None:
+def test_reproject_normalizes_and_bounds_every_stored_record(brain: Store) -> None:
     brain.write("bf.yaml", ATTENDED)
-    config = load(brain)
-    # 1.4 MB of participants fit a printed record; copied into its fields, they exceed what an exact read shows.
-    people: list[JsonValue] = [f"person:email/{n}-{'x' * 1400}@example.test" for n in range(1000)]
-    printed = Record(id="all-hands", title="All hands", attributes={"people": people})
-    with pytest.raises(Error, match=r"^fields other than text exceed 2 MiB"):
-        ontology.project(printed, config.sensors["meetings"], config)
+    people = [f"person:email/{n}-{'x' * 1400}@example.test" for n in range(1000)]
 
-    def runner(*_args: object) -> bytes:
-        return encode([printed.model_dump(exclude_defaults=True)])
+    def oversized_runner(*_args: object) -> bytes:
+        return encode(
+            [
+                {
+                    "id": "all-hands",
+                    "title": "All hands",
+                    "relations": {"attendee": people},
+                    "attributes": {"people": people},
+                }
+            ]
+        )
 
-    # Collection once reported success and saved a record that every later read and search rejected.
-    with pytest.raises(Error, match=r"record 0: fields other than text exceed 2 MiB"):
-        collect(brain, "meetings", start="2026-09-01T00:00:00Z", end="2026-09-02T00:00:00Z", runner=runner)
+    # Collection rejects records whose non-text fields exceed 2 MiB before mutating storage.
+    with pytest.raises(Error, match=r"0: fields other than text exceed 2 MiB"):
+        collect(brain, "meetings", start="2026-09-01T00:00:00Z", end="2026-09-02T00:00:00Z", runner=oversized_runner)
     name = records.path("meetings", "all-hands")
     assert not (brain.root / name).exists()
-    # Reprojection counts such a stored record as failed and keeps it as it was.
-    observed = {**printed.attributes, "observed": "2026-09-01T00:00:00.000000Z"}
-    records_file(brain, "meetings", [printed.model_copy(update={"attributes": observed})])
+    # Reprojection counts an oversized stored record as failed and keeps it untouched, while normalizing valid records.
+    brain.write(
+        name,
+        encode(
+            {
+                "id": "all-hands",
+                "title": "All hands",
+                "relations": {"attendee": people},
+                "attributes": {"people": people},
+            }
+        ),
+    )
+    uncanon = records.path("meetings", "lunch")
+    brain.write(
+        uncanon,
+        encode(
+            {
+                "id": "lunch",
+                "title": "Lunch plans",
+                "time": "2026-08-30T14:00:00+02:00",
+                "relations": {"attendee": "person:alice"},
+            }
+        ),
+    )
     before = brain.read(name)
+    dry = reproject(brain, "meetings", dry_run=True)
+    assert (dry["records"], dry["changed"], dry["unchanged"], dry["failed"]) == (3, 0, 2, 1)
+    assert records.load(brain, uncanon).relations["attendee"] == "person:alice"
     report = reproject(brain, "meetings")
-    assert (report["records"], report["changed"], report["failed"]) == (3, 0, 1)
+    assert (report["records"], report["changed"], report["unchanged"], report["failed"]) == (3, 0, 2, 1)
     assert report["problems"] == [
-        {"file": name, "error": "fields other than text exceed 2 MiB; keep bulky content in text"}
+        {"file": name, "error": "invalid record: fields other than text exceed 2 MiB; keep bulky content in text"}
     ]
     assert brain.read(name) == before
-    records.load(brain, name)
+    assert records.load(brain, uncanon).time == "2026-08-30T12:00:00.000000Z"
+
+
+def test_record_and_note_writes_never_open_runtime_queue_db(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[str] = []
+    real_connect = cast("Callable[..., sqlite3.Connection]", sqlite3.connect)
+
+    def guarded(
+        target: str | bytes | os.PathLike[str] | os.PathLike[bytes], *args: object, **kwargs: object
+    ) -> sqlite3.Connection:
+        opened.append(os.fsdecode(os.fspath(target)))
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", guarded)
+    records.upsert(
+        brain,
+        "meetings",
+        [Record(id="note-free", title="No runtime lock", **{"@type": "Event"}, relations={"attendee": "person:alice"})],
+        snapshot=False,
+    )
+    brain.write("concepts/plain.md", b"---\ntype: concept\nrelations:\n  owner: person:alice\n---\n# Plain\n")
+    assert not any("runtime.sqlite3" in target for target in opened)
+    assert not (brain.root / storage.QUEUE).exists()
 
 
 def test_a_commit_whose_completion_landed_succeeds_despite_a_late_sync_failure(

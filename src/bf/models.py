@@ -30,16 +30,31 @@ MAX_NOTE = 4 << 20
 # An expanded prompt, read from a file or piped in, stays below Linux's 128 KiB bound on one argument.
 MAX_PROMPT = 120_000
 MAX_FILES = 100_000
+MAX_RELATIONS = 1000
+MAX_ATTRIBUTES = 1000
+MAX_ATTRIBUTE_DEPTH = 16
+MAX_ATTRIBUTE_NODES = 10_000
 # Continuation offsets stay integers every JSON client represents exactly.
 MAX_OFFSET = 2**53 - 1
 NAME = r"^[a-z][a-z0-9-]{0,63}$"
 SLUG = r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
 ACTION_SLUG = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
+RELATION = r"^[a-z][a-zA-Z0-9]*(?:-[a-z0-9]+)*$"
+ATTR = r"^[a-zA-Z_][a-zA-Z0-9_-]*$"
+TYPE_NAME = r"[A-Za-z][A-Za-z0-9_-]*"
 # JSON Schema regex engines may match `$` before a final newline; Rust's validator does not.
 Name = Annotated[str, Field(pattern=NAME, json_schema_extra={"not": {"pattern": "[^a-z0-9-]"}})]
 Slug = Annotated[str, Field(pattern=SLUG, max_length=64, json_schema_extra={"not": {"pattern": "[^a-z0-9-]"}})]
 ActionSlug = Annotated[
     str, Field(pattern=ACTION_SLUG, max_length=64, json_schema_extra={"not": {"pattern": "[^a-z0-9-]"}})
+]
+RelationName = Annotated[
+    str,
+    Field(pattern=RELATION, min_length=1, max_length=64, json_schema_extra={"not": {"pattern": "[^a-zA-Z0-9-]"}}),
+]
+AttrName = Annotated[
+    str,
+    Field(pattern=ATTR, min_length=1, max_length=64, json_schema_extra={"not": {"pattern": "[^a-zA-Z0-9_-]"}}),
 ]
 SchemaKind = Literal["brain", "registry", "eval", "search-reply", "read-reply", "status-reply", "assistant-reply"]
 ProgramKind = Literal["sensor", "routine", "assistant"]
@@ -82,7 +97,8 @@ class InputError(Error):
         self.argument = argument
 
 
-CACHE = "the search cache is unavailable; run bf build"
+CACHE = ".bf/cache.sqlite3"
+CACHE_ERROR = "the search cache is unavailable; run bf build"
 # The failures the CLI and MCP report as one message; any other exception is a bug.
 FAILURES = (Error, OSError, UnicodeError, sqlite3.DatabaseError)
 
@@ -103,7 +119,7 @@ def failure(error: Error | OSError | UnicodeError | sqlite3.DatabaseError) -> st
         return "an argument or the terminal encoding is not UTF-8; use UTF-8 arguments and a UTF-8 locale"
     if isinstance(error, sqlite3.DatabaseError):
         # Retrieval recovers a damaged cache itself; one it cannot open is a cache problem, not a bug.
-        return CACHE
+        return CACHE_ERROR
     # strerror names the cause; the exception's own text would add the absolute path.
     cause = f" ({error.strerror})" if error.strerror else ""
     return f"inaccessible file or directory{cause}; check the brain and path"
@@ -125,7 +141,7 @@ class FormatError(Error):
 
 # The one brain format, declared by bf.yaml and each evaluation suite: it changes only when stored files need
 # converting (docs/docs/upgrades.md#versioning-and-stability).
-FORMAT = 8
+FORMAT = 9
 
 
 def check_version(value: dict[str, object], name: str) -> None:
@@ -239,8 +255,8 @@ def local(value: str) -> str:
         return value
 
 
-# Provider data and declared field values: replies return them exactly as the record or note stores them.
-_VERBATIM = frozenset({"attributes", "fields", "values"})
+# Provider data and relation/attribute values: replies return them exactly as the record or note stores them.
+_VERBATIM = frozenset({"attributes", "relations", "fields", "values"})
 # Status maps keyed by program name: a sensor may be named `time` or `fields`, so only the entries are presented.
 _NAMED = frozenset({"assistants", "channels", "schedules", "routines", "sources"})
 
@@ -512,10 +528,70 @@ def unicode[T](value: T) -> T:
     return value
 
 
+def _bounded_mapping(name: str, limit: int):
+    """Fail closed before key validation when a dict exceeds its size bound."""
+
+    def check(value: object) -> object:
+        if isinstance(value, dict) and len(value) > limit:
+            raise ValueError(f"{name} hold at most {limit:,} names")
+        return value
+
+    return check
+
+
+def _valid_relations(values: dict[str, str | list[str]]) -> dict[str, str | list[str]]:
+    """Validate explicit relation edges via links.identity() without inferring from prose or duplicating targets."""
+    from bf import links
+
+    normalized: dict[str, str | list[str]] = {}
+    for key, raw in values.items():
+        if key in {TAGGED, LINKS}:
+            raise ValueError(f"relation {key} is reserved")
+        items = raw if isinstance(raw, list) else [raw]
+        if isinstance(raw, list) and len(items) > MAX_RELATIONS:
+            raise ValueError(f"relations.{key} holds at most {MAX_RELATIONS:,} targets")
+        targets: list[str] = []
+        for item in items:
+            try:
+                targets.append(links.identity(item))
+            except Error as error:
+                raise ValueError(str(error)) from None
+        deduped = list(dict.fromkeys(targets))
+        normalized[key] = deduped if isinstance(raw, list) else deduped[0]
+    return normalized
+
+
+def _valid_attributes(values: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Enforce bounded nesting depth and total container entries on metadata attributes without recursion."""
+    stack: list[tuple[JsonValue, int]] = [(values, 0)]
+    nodes = 0
+    while stack:
+        item, depth = stack.pop()
+        if depth > MAX_ATTRIBUTE_DEPTH:
+            raise ValueError(f"attributes exceed maximum nesting depth of {MAX_ATTRIBUTE_DEPTH}")
+        if isinstance(item, (dict, list)):
+            nodes += len(item)
+            if nodes > MAX_ATTRIBUTE_NODES:
+                raise ValueError(f"attributes exceed {MAX_ATTRIBUTE_NODES:,} entries")
+            children = item.values() if isinstance(item, dict) else item
+            stack.extend((child, depth + 1) for child in children if isinstance(child, (dict, list)))
+    return values
+
+
 class Record(Model):
-    """One normalized source item; `id` is stable per source and `attributes` keep structured details."""
+    """One normalized source item; `id` is stable per source, `relations` assert edges and `attributes` hold metadata."""
+
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
 
     id: Annotated[str, Field(min_length=1, max_length=4096)]
+    type: Annotated[
+        str,
+        Field(
+            alias="@type",
+            max_length=128,
+            json_schema_extra={"pattern": rf"^(?:{TYPE_NAME})?$", "not": {"pattern": "[^A-Za-z0-9_-]"}},
+        ),
+    ] = ""
     title: Annotated[str, Field(min_length=1, max_length=4096)]
     text: Annotated[str, Field(max_length=4 << 20)] = ""
     time: str = ""
@@ -523,13 +599,17 @@ class Record(Model):
     url: Annotated[str, Field(max_length=8192)] = ""
     links: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
     aliases: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
-    attributes: dict[str, JsonValue] = Field(default_factory=dict)
-    fields: dict[Annotated[str, Field(pattern=NAME)], JsonValue] = Field(default_factory=dict)
+    relations: dict[RelationName, str | list[str]] = Field(default_factory=dict)
+    attributes: dict[AttrName, JsonValue] = Field(default_factory=dict)
 
     _clean = field_validator("id", "title")(clean)
     _identities = field_validator("links")(identities)
     _aliases = field_validator("aliases")(aliased)
-    _unicode = field_validator("links", "aliases", "attributes", "fields")(unicode)
+    _unicode = field_validator("links", "aliases", "relations", "attributes")(unicode)
+    _few_relations = field_validator("relations", mode="before")(_bounded_mapping("relations", MAX_RELATIONS))
+    _few_attributes = field_validator("attributes", mode="before")(_bounded_mapping("attributes", MAX_ATTRIBUTES))
+    _relations = field_validator("relations")(_valid_relations)
+    _attribute_bounds = field_validator("attributes")(_valid_attributes)
 
     @field_validator("id")
     @classmethod
@@ -538,12 +618,11 @@ class Record(Model):
             raise ValueError(f"id exceeds {MAX_ENCODED} characters once percent-encoded in a BF address")
         return value
 
-    @field_validator("fields", mode="before")
+    @field_validator("type")
     @classmethod
-    def few_fields(cls, value: object) -> object:
-        # Bounded before its keys are checked: pydantic reports every invalid key, and a 16 MiB file holds millions.
-        if isinstance(value, dict) and len(value) > 1000:
-            raise ValueError("fields hold at most 1,000 names")
+    def valid_type(cls, value: str) -> str:
+        if value and not re.fullmatch(TYPE_NAME, value):
+            raise ValueError("type must match schema.org name pattern [A-Za-z][A-Za-z0-9_-]*")
         return value
 
     @field_validator("url")
@@ -560,14 +639,15 @@ class Record(Model):
     @classmethod
     def provenance(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
         value = value.copy()
-        for key in ("updated", "observed"):
+        for key in ("updated", "observed", "created"):
             if key in value:
                 instant = value[key]
                 if not isinstance(instant, str):
                     raise ValueError(f"attributes.{key} requires a timestamp string")
                 value[key] = timestamp(instant) if instant else ""
-        if "partial" in value and not isinstance(value["partial"], bool):
-            raise ValueError("attributes.partial requires a boolean")
+        for key in ("partial", "generated"):
+            if key in value and not isinstance(value[key], bool):
+                raise ValueError(f"attributes.{key} requires a boolean")
         return value
 
     def readable(self) -> Record:
@@ -575,7 +655,7 @@ class Record(Model):
 
         Counted in encoded bytes, as the reply limit is: non-ASCII or escaped characters take more than one.
         """
-        others = [self.id, self.title, self.url, self.links, self.aliases, self.attributes, self.fields]
+        others = [self.id, self.type, self.title, self.url, self.links, self.aliases, self.relations, self.attributes]
         if len(encode(others)) > MAX_FIELDS:
             raise ValueError("fields other than text exceed 2 MiB; keep bulky content in text")
         return self
@@ -592,10 +672,23 @@ class Record(Model):
         value = self.attributes.get("observed", "")
         return value if isinstance(value, str) else ""
 
+    @property
+    def created(self) -> str:
+        value = self.attributes.get("created", "")
+        return value if isinstance(value, str) else ""
 
-# The location keys a record's explanation names: its fields and pydantic's mark of an invalid mapping key. Any other
-# key, which the record's provider printed, may be private text.
-RECORD_KEYS = frozenset({*Record.model_fields, "[key]"})
+    @property
+    def partial(self) -> bool:
+        return self.attributes.get("partial") is True
+
+    @property
+    def generated(self) -> bool:
+        return self.attributes.get("generated") is True
+
+
+# The location keys a record's explanation names: its fields (plus `@type`) and pydantic's mark of an invalid mapping key.
+# Any other key, which the record's provider printed, may be private text.
+RECORD_KEYS = frozenset({*Record.model_fields, "@type", "[key]"})
 
 
 def tag_name(value: str) -> str:
@@ -627,10 +720,15 @@ class Knowledge(BaseModel):
     aliases: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
     links: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
     entity: Annotated[str, Field(max_length=8192)] = ""
-    # Values of fields declared in bf.yaml, checked against their declaration like a record's.
-    fields: dict[str, JsonValue] = Field(default_factory=dict)
+    relations: dict[RelationName, str | list[str]] = Field(default_factory=dict)
+    attributes: dict[AttrName, JsonValue] = Field(default_factory=dict)
 
     _identities = field_validator("aliases", "links")(identities)
+    _unicode = field_validator("relations", "attributes")(unicode)
+    _few_relations = field_validator("relations", mode="before")(_bounded_mapping("relations", MAX_RELATIONS))
+    _few_attributes = field_validator("attributes", mode="before")(_bounded_mapping("attributes", MAX_ATTRIBUTES))
+    _relations = field_validator("relations")(_valid_relations)
+    _attribute_bounds = field_validator("attributes")(_valid_attributes)
 
     @field_validator("entity", "resource", "aliases")
     @classmethod
@@ -677,45 +775,13 @@ class Knowledge(BaseModel):
 
 
 class SchemaField(Model):
-    """A shared meaning; its type and cardinality check sensor mappings, stored records and note fields."""
+    """Optional relation metadata and target constraints declared in bf.yaml `fields:`."""
 
-    model_config = ConfigDict(
-        frozen=True,
-        json_schema_extra={
-            "allOf": [
-                {
-                    "if": {"properties": {"relation": {"const": True}}, "required": ["relation"]},
-                    "then": {"properties": {"type": {"const": "identity"}}},
-                },
-                {
-                    "if": {
-                        "anyOf": [
-                            {"required": ["broader"], "properties": {"broader": {"type": "string"}}},
-                            {"required": ["targets"], "properties": {"targets": {"type": "array"}}},
-                        ]
-                    },
-                    "then": {"properties": {"relation": {"const": True}}, "required": ["relation"]},
-                },
-            ]
-        },
-    )
+    model_config = ConfigDict(frozen=True)
 
-    description: Annotated[str, Field(min_length=1, max_length=4096)] = Field(
-        description="What a value of this field means, such as the account explicitly credited as the author."
-    )
-    type: Literal["string", "integer", "number", "boolean", "timestamp", "identity"] = Field(
-        description="Strict value type; a relation requires identity."
-    )
-    cardinality: Literal["one", "optional", "many"] = Field(
-        default="optional",
-        description=(
-            "Required scalar, optional scalar, or up to 1000 scalars, for sensor mappings and note fields; only "
-            "collection requires a one value."
-        ),
-    )
-    relation: bool = Field(default=False, description="Create directed graph claims; requires type: identity.")
+    description: Annotated[str, Field(max_length=4096)] = Field(default="", description="What this relation means.")
     # Read time only: the parent's relation page also lists this relation's links; stored edges keep their own.
-    broader: Name | None = Field(
+    broader: RelationName | None = Field(
         default=None,
         description="A declared relation, without its own broader, whose relation page also lists this relation's links.",
     )
@@ -727,99 +793,18 @@ class SchemaField(Model):
         | None
     ) = Field(
         default=None,
-        description="Allowed identity prefixes, such as person:email/; collection rejects other mapped values.",
-    )
-    examples: Annotated[list[JsonValue], Field(max_length=20)] = Field(
-        default_factory=list, description="Complete field values checked against type and cardinality; never defaults."
-    )
-    path: Annotated[str, Field(max_length=4096, pattern=r"^/(?:[^~]|~[01])*$")] | None = Field(
-        default=None,
-        description="Optional default JSON Pointer into sensor output when a sensor does not specify its own mapping.",
+        description="Allowed identity prefixes, such as person:email/; rejects targets outside them.",
     )
 
-    def allows(self, value: JsonValue) -> bool:
-        """Whether each identity of a field value starts with one of the declared targets; any value without them."""
-        values = value if isinstance(value, list) else [value]
-        return self.targets is None or all(str(item).startswith(tuple(self.targets)) for item in values)
+    @field_validator("description")
+    @classmethod
+    def valid_description(cls, value: str) -> str:
+        return clean(value) if value else ""
 
-    def scalar(self, value: JsonValue) -> JsonValue:
-        valid = {
-            "string": isinstance(value, str),
-            "integer": type(value) is int,
-            "number": type(value) in (int, float),
-            "boolean": type(value) is bool,
-            "timestamp": isinstance(value, str),
-            "identity": isinstance(value, str),
-        }[self.type]
-        if not valid:
-            raise ValueError("expected " + self.type)
-        if isinstance(value, str):
-            if len(value) > 8192:
-                raise ValueError("field value exceeds 8192 characters")
-            clean(value)
-            if self.type == "timestamp":
-                return timestamp(value)
-            if self.type == "identity" and not re.fullmatch(IDENTITY, value):
-                raise ValueError("expected an explicit namespaced identity")
-            if self.type == "identity" and invisible(value):
-                raise ValueError(INVISIBLE)
-        return value
-
-    def normalize(self, value: JsonValue) -> JsonValue:
-        if self.cardinality == "many":
-            if not isinstance(value, list) or len(value) > 1000:
-                raise ValueError("expected a list of at most 1000 scalar values")
-            # Each distinct value once, in input order.
-            return list(dict.fromkeys(self.scalar(item) for item in value))
-        return self.scalar(value)
-
-    @model_validator(mode="after")
-    def consistent(self) -> SchemaField:
-        if self.relation and self.type != "identity":
-            raise ValueError("relation fields require type: identity")
-        if (self.broader is not None or self.targets is not None) and not self.relation:
-            raise ValueError("broader and targets require relation: true")
-        for number, example in enumerate(self.examples):
-            try:
-                value = self.normalize(example)
-            except ValueError as error:
-                raise ValueError(f"examples.{number}: {error}") from error
-            if not self.allows(value):
-                raise ValueError(f"examples.{number}: value outside the declared targets")
-        return self
-
-
-class Mapping(Model):
-    """One JSON Pointer into sensor output, or one literal value; never executable expressions."""
-
-    model_config = ConfigDict(
-        frozen=True,
-        json_schema_extra={
-            "oneOf": [
-                {"required": ["path"], "not": {"required": ["value"]}, "properties": {"path": {"type": "string"}}},
-                {
-                    "required": ["value"],
-                    "not": {"required": ["path"]},
-                    "properties": {"value": {"not": {"type": "null"}}},
-                },
-            ],
-        },
-    )
-
-    path: Annotated[str, Field(max_length=4096, pattern=r"^/(?:[^~]|~[01])*$")] | None = Field(
-        default=None, description="JSON Pointer into sensor output; escape / as ~1 and ~ as ~0. Use instead of value."
-    )
-    value: JsonValue = Field(
-        default=None, description="Non-null constant checked against the shared field. Use instead of path."
-    )
-
-    @model_validator(mode="after")
-    def exclusive(self) -> Mapping:
-        if self.model_fields_set not in ({"path"}, {"value"}):
-            raise ValueError("use exactly one of path or value")
-        if self.path is None and self.value is None:
-            raise ValueError("mapping value cannot be null")
-        return self
+    def allows(self, value: str | Collection[str]) -> bool:
+        """Whether each identity of a relation value starts with one of the declared targets; any value without them."""
+        values = (value,) if isinstance(value, str) else value
+        return self.targets is None or all(item.startswith(tuple(self.targets)) for item in values)
 
 
 def _valid_arguments(values: list[str], placeholders: tuple[str, ...], *, skip_executable: bool = False) -> list[str]:
@@ -1026,7 +1011,7 @@ class Reconciliation(Model):
 
 
 class Sensor(Program):
-    """Execution and explicit mapping of sensor output into the declared fields."""
+    """Execution settings of a brain sensor."""
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -1035,11 +1020,6 @@ class Sensor(Program):
         },
     )
 
-    fields: dict[Name, Mapping] = Field(
-        default_factory=dict,
-        json_schema_extra=_nullable,
-        description="Map declared shared fields to output paths or constants; unmapped fields do not apply.",
-    )
     # A window sensor upserts the items it returns; a snapshot sensor replaces its complete catalog.
     mode: Literal["window", "snapshot"] = Field(
         default="window", description="Window upserts returned ids; snapshot replaces the complete selected catalog."
@@ -1073,8 +1053,6 @@ class Sensor(Program):
         description="Seconds after which a record's event time (or, without one, when it was last observed) makes "
         "collection remove it and skip it when printed again; unset keeps records.",
     )
-
-    _empty = field_validator("fields", mode="before")(empty)
 
     @model_validator(mode="after")
     def reconciliation_mode(self) -> Sensor:
@@ -1478,18 +1456,6 @@ class Assistant(Command):
         return self
 
 
-class BrainReference(Model):
-    """A directly related brain, located relative to the declaring brain."""
-
-    model_config = ConfigDict(frozen=True)
-
-    path: Annotated[str, Field(min_length=1, max_length=4096)] = Field(
-        description="Relative to the declaring brain; absolute and home-relative paths also work."
-    )
-
-    _clean = field_validator("path")(clean)
-
-
 class WatchSettings(Model):
     """Optional watch preferences; CLI values override bf.yaml, then defaults apply. Restart to reload."""
 
@@ -1572,30 +1538,24 @@ class ValidateSettings(Model):
 
 
 class Config(Model):
-    """One brain: its name, related brains, declared fields, and the sensors, routines and assistants it may run."""
+    """One brain: its name, optional relation declarations, and the sensors, routines and assistants it may run."""
 
     # One validated configuration is shared by a whole command; freezing keeps it intact. Freezing does not
     # reach its dictionaries: read them, never change them, or a later load returns the changed value.
     model_config = ConfigDict(frozen=True)
 
-    version: Literal[8] = Field(
+    version: Literal[9] = Field(
         description=(
             "Brain format of bf.yaml, evaluation suites, the memories/<source>/<sha256>.json layout and the record "
             "envelope; independent of the package version."
         )
     )
-    name: Name = Field(description="Stable namespace in bf:// addresses; unique among selected brains.")
-    brains: dict[Name, BrainReference] = Field(
-        default_factory=dict,
-        max_length=32,
-        json_schema_extra=_nullable,
-        description="Direct references keyed by the target name; retrieval only, without recursion or execution.",
-    )
-    ontology: dict[Name, SchemaField] = Field(
+    name: Name = Field(description="Stable namespace in bf:// addresses; used as default identity prefix.")
+    ontology: dict[RelationName, SchemaField] = Field(
         default_factory=dict,
         alias="fields",
         json_schema_extra=_nullable,
-        description="Declared shared fields and relations that sensors map, records store and notes set.",
+        description="Optional relation metadata and target prefix constraints for documentation, hierarchy and validation.",
     )
     sensors: dict[Name, Sensor] = Field(
         default_factory=dict,
@@ -1637,13 +1597,11 @@ class Config(Model):
     )
 
     _empty = field_validator(
-        "brains", "ontology", "sensors", "watch", "validation", "routines", "channels", "assistants", mode="before"
+        "ontology", "sensors", "watch", "validation", "routines", "channels", "assistants", mode="before"
     )(empty)
 
     @model_validator(mode="after")
     def mapped(self) -> Config:
-        if self.name in self.brains:
-            raise ValueError("a brain cannot reference its own name")
         # One rule for the whole program namespace: a sensor's or assistant's name is its records' source, and a
         # `bf:ID` ref reads as a BF address; routines and channels share the rule, so no rename can reach it.
         for kind, programs in (
@@ -1695,26 +1653,18 @@ class Config(Model):
         for name, field in self.ontology.items():
             parent = self.ontology.get(field.broader) if field.broader else None
             # One level keeps a relation page one lookup: a parent lists its children, never their children.
-            if field.broader and (parent is None or not parent.relation or parent.broader or field.broader == name):
+            if field.broader and (parent is None or parent.broader or field.broader == name):
                 raise ValueError(f"fields.{name}.broader: name another declared relation without its own broader")
-        for sensor_name, sensor in self.sensors.items():
-            for name, mapping in sensor.fields.items():
-                if name not in self.ontology:
-                    # bf.yaml is owner-authored: naming its keys points at the line to fix.
-                    raise ValueError(f"sensors.{sensor_name}.fields.{name}: not declared in fields")
-                if mapping.path is not None:
-                    continue
-                try:
-                    value = self.ontology[name].normalize(mapping.value)
-                except ValueError as error:
-                    raise ValueError(f"sensors.{sensor_name}.fields.{name}.value: {error}") from error
-                if not self.ontology[name].allows(value):
-                    raise ValueError(f"sensors.{sensor_name}.fields.{name}: value outside the declared targets")
         return self
 
     def narrower(self, relation: str) -> list[str]:
         """The declared relations whose `broader` is this one: its relation page lists their links too."""
-        return sorted(name for name, field in self.ontology.items() if field.relation and field.broader == relation)
+        return sorted(name for name, field in self.ontology.items() if field.broader == relation)
+
+
+def starter_config(name: str) -> Config:
+    """Minimal starter bf.yaml configuration with zero fields: boilerplate."""
+    return Config(version=FORMAT, name=name)
 
 
 class Registration(Model):
@@ -1739,16 +1689,26 @@ class Registration(Model):
 
 
 class UserConfig(Model):
-    """The brains this user selects by default outside a brain directory."""
+    """Registered brains on this machine and the optional default selected outside a brain directory."""
 
+    default: Annotated[str, Field(pattern=NAME, json_schema_extra={"not": {"pattern": "[^a-z0-9-]"}})] | None = Field(
+        default=None,
+        description="Registered brain name selected by default outside a brain directory.",
+    )
     brains: dict[Name, Registration] = Field(
         default_factory=dict,
         json_schema_extra=_nullable,
-        description="Names and local paths selected outside a brain when no explicit selection is supplied.",
+        description="Names and local paths registered on this machine.",
     )
 
-    # Deleting the last entry, as the documentation suggests, leaves `brains:` null.
+    # Deleting the last entry leaves `brains:` null.
     _empty = field_validator("brains", mode="before")(empty)
+
+    @model_validator(mode="after")
+    def valid_default(self) -> UserConfig:
+        if self.default is not None and self.default not in self.brains:
+            raise ValueError(f"default brain {self.default} is not registered in brains")
+        return self
 
 
 def fold(text: str) -> str:

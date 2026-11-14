@@ -1,6 +1,6 @@
-"""Explicit, deterministic field projection, identity checks and the claims that notes and records assert.
+"""Explicit identity checks, optional relation constraints, and the claims that notes and records assert.
 
-No expressions, inference or provider access.
+No expressions, inference, attribute scanning, or provider access.
 """
 
 from __future__ import annotations
@@ -8,11 +8,9 @@ from __future__ import annotations
 import re
 from contextlib import suppress
 
-from pydantic import JsonValue, ValidationError
-
 from bf import links
 from bf.markdown import Note, authored, reference, split_ref
-from bf.models import CITES, RECORD_KEYS, Config, Error, Record, Sensor, explain
+from bf.models import CITES, Config, Error, Record
 
 _PAGES = "home, folder roots, review, tasks, periods, tags and memories are computed page addresses"
 # Reads resolve such a path as a record ref, so an entity or alias there would never reach its owner.
@@ -20,64 +18,6 @@ _RECORDS = "a BF path whose first segment contains ':' names a source:id record"
 # Reads open such a path as that file, so an entity or alias there would never reach its owner either.
 _NOTES = "a BF path to a .md file in projects, actions or concepts names that note"
 _ACTION_FOLDERS = "a BF path to an action folder in actions/ names its ACTION.md"
-
-
-def pointer(document: JsonValue, path: str) -> JsonValue:
-    """Read a JSON Pointer; a missing member is absent, an invalid traversal is an error."""
-    value = document
-    for encoded in path[1:].split("/"):
-        key = encoded.replace("~1", "/").replace("~0", "~")
-        if isinstance(value, dict):
-            if key not in value:
-                return None
-            value = value[key]
-        elif isinstance(value, list) and key.isascii() and key.isdecimal() and (key == "0" or not key.startswith("0")):
-            if int(key) >= len(value):
-                return None
-            value = value[int(key)]
-        else:
-            raise Error("field mapping cannot traverse the sensor value")
-    return value
-
-
-def project(record: Record, sensor: Sensor, config: Config) -> Record:
-    """Map reviewed sensor output into common fields before any evidence is committed.
-
-    The record holds no fields: collection rejects printed ones and reprojection clears the stored ones.
-    """
-    document = record.model_dump(mode="json")
-    fields: dict[str, JsonValue] = {}
-    for name, definition in config.ontology.items():
-        mapping = sensor.fields.get(name)
-        if mapping is None:
-            if definition.path is None:
-                continue
-            value = pointer(document, definition.path)
-            if value is None:
-                continue
-        else:
-            value = pointer(document, mapping.path) if mapping.path is not None else mapping.value
-            if value is None:
-                if definition.cardinality == "one":
-                    raise Error(f"field {name}: required mapped value is missing")
-                continue
-        try:
-            fields[name] = definition.normalize(value)
-        except ValueError as error:
-            raise Error(f"field {name}: {error}") from error
-    result = _with(record, fields)
-    validate(result, config)
-    return result
-
-
-def _with(record: Record, fields: dict[str, JsonValue]) -> Record:
-    """The record with these fields, checked as `records.load` reads it: mapped values can exceed its bounds."""
-    if fields == record.fields:
-        return record
-    try:
-        return Record.model_validate({**record.model_dump(), "fields": fields})
-    except ValidationError as error:
-        raise Error(explain(error, RECORD_KEYS)) from error
 
 
 def outside(config: Config, claim: links.Claim) -> bool:
@@ -94,27 +34,24 @@ def _reject(errors: list[str] | None, message: str) -> None:
 
 
 def validate(record: Record, config: Config, *, errors: list[str] | None = None) -> None:
-    """Validate persisted fields, aliases and links, including historical sources with no active sensor.
+    """Validate persisted relations, aliases and links against optional bf.yaml constraints.
 
-    Relation values and typed links must also start with their relation's declared targets. Raise the first problem,
-    or with `errors` add each one to it. Never quote a value: a sensor's output controls it, and collection errors
-    reach run history and status.
+    Metadata in `attributes` is never scanned as graph edges. Raise the first problem, or with `errors` add each one
+    to it. Never quote a value: a sensor's output controls it, and collection errors reach run history and status.
     """
-    for name, value in record.fields.items():
+    for name, value in record.relations.items():
+        if name in {links.TAGGED, links.LINKS}:
+            _reject(errors, f"relation {name} is reserved")
+            continue
+        targets = value if isinstance(value, list) else [value]
+        try:
+            checked_targets = [links.identity(target) for target in targets]
+        except Error as error:
+            _reject(errors, f"relation {name}: {error}")
+            continue
         definition = config.ontology.get(name)
-        if name == links.TAGGED:
-            _reject(errors, f"field {name} is reserved for tag membership")
-        elif definition is None:
-            _reject(errors, f"field {name} is not declared in bf.yaml fields")
-        else:
-            try:
-                definition.normalize(value)
-                if definition.relation and not definition.allows(
-                    [links.identity(str(target)) for target in (value if isinstance(value, list) else [value])]
-                ):
-                    raise ValueError("identity outside the declared targets")
-            except (Error, ValueError) as error:
-                _reject(errors, f"field {name}: {error}")
+        if definition is not None and not definition.allows(checked_targets):
+            _reject(errors, f"relation {name}: identity outside the declared targets")
     try:
         _reachable(record.aliases, config, "aliases")
     except Error as error:
@@ -156,34 +93,16 @@ def _reachable(values: list[str], config: Config, declared: str) -> None:
 
 
 def relations(record: Record, config: Config) -> list[tuple[str, str]]:
-    """Each edge is supported by this record; replacement removes its obsolete edges.
-
-    Edges follow the current schema, so a schema edit never hides a stored record: a field no longer declared as a
-    relation adds no edge, while a declared relation keeps every stored value that is an identity, whatever
-    cardinality or type the field was collected with. `bf validate` names the values the schema now rejects.
-    """
+    """Each explicit relation edge supported by this record (`record.relations`); attributes are never edges."""
     _reachable(record.aliases, config, "aliases")
-    result = []
-    for name, value in record.fields.items():
-        if (definition := config.ontology.get(name)) is None or not definition.relation:
+    result: list[tuple[str, str]] = []
+    for name, value in record.relations.items():
+        if name in {links.TAGGED, links.LINKS}:
             continue
         for target in value if isinstance(value, list) else [value]:
             with suppress(Error):
-                # A value collected before the field became an identity never named one; it claims nothing.
-                result.append((name, links.identity(str(target))))
+                result.append((name, links.identity(target)))
     return result
-
-
-def reproject(record: Record, sensor: Sensor, config: Config) -> Record:
-    """A stored record with the fields its sensor's current mappings give it; its other values stay as stored.
-
-    Mappings read the record as its sensor printed it: without the fields they computed and the `observed` time
-    collection added. A value the sensor never printed cannot be mapped now.
-    """
-    printed = {key: value for key, value in record.attributes.items() if key != "observed"}
-    projected = project(record.model_copy(update={"fields": {}, "attributes": printed}), sensor, config)
-    # The `observed` time returns beside the new fields: the stored record must still load.
-    return _with(record, projected.fields)
 
 
 def qualify(config: Config, ref: str, fragment: str = "") -> str:
@@ -195,11 +114,8 @@ def note_claims(
 ) -> list[links.Claim]:
     """Each link claims a relation from the note's entity, otherwise its file, supported by its section.
 
-    Each OKF source cites its resource from the whole note, unless it is a BF link naming another relation. A path,
-    entity, alias or resource that could never name the note raises: retrieval drops the note. Otherwise a link
-    naming an undeclared relation stays an untyped link and an invalid field claims nothing, as retrieval keeps
-    them; a `strict` check raises the first such problem, or with `errors` adds each one to it once, where it first
-    occurs: a relation renamed in bf.yaml can leave hundreds of links naming it.
+    Each OKF source cites its resource from the whole note, unless it is a BF link naming another relation. Any valid
+    relation name works without bf.yaml declaration; optional `fields:` target constraints apply when declared.
     """
     file = qualify(config, note.path)
     try:
@@ -244,7 +160,7 @@ def note_claims(
     for key, values, relation in (("links", note.knowledge.links, ""), ("sources", note.sources, CITES)):
         for value in values:
             found = claim(value, file, key)
-            # A source cites unless it names another relation: an undeclared one names none, so it still cites.
+            # A source cites unless it names another valid relation; a reserved one falls back to cites.
             if found is None or not found.relation:
                 found = links.Claim(subject, relation, found.target if found else target(value), file)
             result.append(found)
@@ -253,29 +169,27 @@ def note_claims(
         result.append(claim(value, origin, f"line {line}") or links.Claim(subject, "", target(value), origin))
     for message, where in rejected.items():
         _reject(errors, f"{note.path}: {where}: {message}")
-    for name, value in note.knowledge.fields.items():
-        # Like a record's mapped fields: declared, typed and within their targets. The whole note supports them.
-        definition = config.ontology.get(name)
-        try:
-            if definition is None:
-                raise ValueError("not declared in bf.yaml fields")
-            normalized = definition.normalize(value)
-            targets = normalized if isinstance(normalized, list) else [normalized]
-            claims = (
-                [links.Claim(subject, name, links.identity(str(t)), file) for t in targets]
-                if definition.relation
-                else []
-            )
-        except (Error, ValueError) as error:
+    for name, value in note.knowledge.relations.items():
+        if name in {links.TAGGED, links.LINKS}:
             if checked:
-                _reject(errors, f"{note.path}: fields.{name}: {error}")
+                _reject(errors, f"{note.path}: relations.{name}: relation {name} is reserved")
             continue
-        result.extend(claims)
+        targets = value if isinstance(value, list) else [value]
+        try:
+            checked_targets = [links.identity(item) for item in targets]
+        except Error as error:
+            if checked:
+                _reject(errors, f"{note.path}: relations.{name}: {error}")
+            continue
+        definition = config.ontology.get(name)
+        if checked and definition is not None and not definition.allows(checked_targets):
+            _reject(errors, f"{note.path}: relations.{name}: identity outside the declared targets")
+        result.extend(links.Claim(subject, name, item, file) for item in checked_targets)
     return result
 
 
 def record_claims(record: Record, config: Config, ref: str) -> list[links.Claim]:
-    """A record's claims as retrieval keeps them; `validate` names the relations and values the schema rejects."""
+    """A record's claims as retrieval keeps them; `validate` checks optional `fields:` target constraints."""
     origin = qualify(config, ref)
     result = [links.Claim(origin, relation, target, origin) for relation, target in relations(record, config)]
     result.extend(

@@ -218,8 +218,8 @@ def published_replies(monkeypatch: pytest.MonkeyPatch) -> None:
         _published("read-reply" if "page" in result or "sha256" in result else "search-reply", result)
         return result
 
-    def status(stores: list[Store], now: datetime | None = None) -> dict[str, object]:
-        result = report(stores, now)
+    def status(store: Store, now: datetime | None = None) -> dict[str, object]:
+        result = report(store, now)
         _published("status-reply", result)
         return result
 
@@ -275,7 +275,7 @@ def brain(tmp_path: Path) -> Store:
     root = tmp_path / "brain"
     root.mkdir()
     store = Store(root)
-    store.write("bf.yaml", b"version: 8\nname: fixture\nsensors: {}\n")
+    store.write("bf.yaml", b"version: 9\nname: fixture\nsensors: {}\n")
     store.write("projects/offline.md", PROJECT)
     store.write(
         "concepts/evidence.md",

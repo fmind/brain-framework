@@ -36,7 +36,7 @@ from bf.health import attention
 from bf.history import state
 from bf.models import WEEKDAYS, Error, WatchSettings, encode, local, timestamp
 from bf.runtime import Queue
-from bf.storage import Store, collecting, state_store
+from bf.storage import Store, collecting, private_dir
 from bf.watch import (
     Dashboard,
     Job,
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
-CONFIG = b"""version: 8
+CONFIG = b"""version: 9
 name: fixture
 sensors:
   calendar:
@@ -102,7 +102,7 @@ class FakeLive:
 def test_snapshot_reads_counts_and_status_without_executing(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
     now = datetime.now(UTC)
-    state_store(brain.root).write(
+    private_dir(brain, ".bf", "state").write(
         "sensors.json",
         encode(
             {
@@ -126,7 +126,7 @@ def test_snapshot_reads_counts_and_status_without_executing(brain: Store) -> Non
             }
         ),
     )
-    state_store(brain.root).write(
+    private_dir(brain, ".bf", "state").write(
         "routines.json", encode({"review": {"success": now.isoformat(), "action": "actions/review/ACTION.md"}})
     )
     rows = {row.name: row for row in snapshot(brain, ("calendar",))}
@@ -151,7 +151,7 @@ def test_snapshot_reads_counts_and_status_without_executing(brain: Store) -> Non
     # A disabled program's last failure is history: like bf status, the row reports no error.
     assert (rows["disabled"].error, rows["disabled"].log) == ("", "")
     assert rows["review"].action.endswith("ACTION.md")
-    state_store(brain.root).write(
+    private_dir(brain, ".bf", "state").write(
         "sensors.json", encode({"calendar": {"success": (now - timedelta(days=1)).isoformat()}})
     )
     assert {row.name: row.status for row in snapshot(brain)}["calendar"] is State.DUE
@@ -770,7 +770,7 @@ def test_watcher_names_a_selected_program_bf_yaml_no_longer_declares(
 def test_job_runs_selected_program_and_retains_state(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n  sample:\n    command: [python3, sensors/sample.py]\n    refresh: 60\n",
+        b"version: 9\nname: fixture\nsensors:\n  sample:\n    command: [python3, sensors/sample.py]\n    refresh: 60\n",
     )
     brain.write("sensors/sample.py", b'import json\nprint(json.dumps([{"id":"one","title":"Local fixture"}]))\n')
     job = Job(brain, ("sample",), ())
@@ -882,7 +882,7 @@ def test_a_cancellation_while_stopping_still_waits_then_kills(brain: Store, monk
 def test_job_tells_skipped_cache_files_apart_from_failed_programs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n"
+        b"version: 9\nname: fixture\nsensors:\n"
         b"  sample:\n    command: [python3, sensors/sample.py]\n    refresh: 60\n"
         b"  failing:\n    command: [python3, sensors/failing.py]\n    refresh: 60\n",
     )
@@ -927,7 +927,7 @@ def test_tui_exit_restores_terminal_and_cancels_sensor(
 ) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nsensors:\n  slow:\n    command: [python3, sensors/slow.py]\n    refresh: 60\n",
+        b"version: 9\nname: fixture\nsensors:\n  slow:\n    command: [python3, sensors/slow.py]\n    refresh: 60\n",
     )
     marker = tmp_path / "started"
     brain.write(
@@ -1032,7 +1032,7 @@ def test_json_watch_reports_completion_rows_and_delivery_warning(
     brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], delivered: bool
 ) -> None:
     brain.write("bf.yaml", CONFIG)
-    state_store(brain.root).write(
+    private_dir(brain, ".bf", "state").write(
         "sensors.json", encode({"calendar": {"success": "2026-09-01T14:00:00+02:00", "records": 10, "added": 1}})
     )
     starts: list[float] = []
@@ -1065,7 +1065,7 @@ def test_json_watch_reports_completion_rows_and_delivery_warning(
 
 def test_json_watch_writes_utf8_whatever_the_locale(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write("bf.yaml", CONFIG)
-    state_store(brain.root).write(
+    private_dir(brain, ".bf", "state").write(
         "sensors.json", encode({"calendar": {"run": "2026-09-01T12:00:00Z", "error": "échec du fournisseur"}})
     )
     raw = io.BytesIO()
@@ -1268,7 +1268,7 @@ def test_a_sensor_that_keeps_missing_parts_needs_attention_after_three_runs(brai
     def history(runs: int) -> None:
         missing = {"success": now, "run": now, "incomplete_runs": runs, "missed": 1, "of": 3}
         # A manual and a disabled sensor show their gap, but neither needs attention, as in bf status.
-        state_store(brain.root).write(
+        private_dir(brain, ".bf", "state").write(
             "sensors.json", encode(dict.fromkeys(("calendar", "manual", "disabled"), missing))
         )
 
@@ -1297,7 +1297,7 @@ def test_a_new_assistant_schedule_needs_attention_only_once_due(brain: Store) ->
     # A weekday three days away is never today, even if the test crosses midnight.
     later = WEEKDAYS[(datetime.now(UTC).weekday() + 3) % 7]
     waiting = HELPER + f"    schedules:\n      weekly: {{at: '00:00', timezone: UTC, days: [{later}]}}\n".encode()
-    brain.write("bf.yaml", b"version: 8\nname: fixture\n" + waiting)
+    brain.write("bf.yaml", b"version: 9\nname: fixture\n" + waiting)
     dashboard = Dashboard("fixture", rows=snapshot(brain))
     [helper] = dashboard.rows
     # As in bf status, the row says `never` but stays out of attention until its first slot.
@@ -1306,7 +1306,7 @@ def test_a_new_assistant_schedule_needs_attention_only_once_due(brain: Store) ->
     dashboard.key("\t")
     assert dashboard.visible() == []
     # An interval schedule without a success is due at once, so both views count it.
-    brain.write("bf.yaml", b"version: 8\nname: fixture\n" + waiting + b"      hourly: {every: 3600}\n")
+    brain.write("bf.yaml", b"version: 9\nname: fixture\n" + waiting + b"      hourly: {every: 3600}\n")
     dashboard.replace_rows(snapshot(brain))
     [helper] = dashboard.rows
     assert (helper.status, helper.early) == (State.NEVER, False)

@@ -31,7 +31,7 @@ from bf.models import (
     retried,
     timestamp,
 )
-from bf.storage import QUEUE, BusyError, Store, collecting, lock_file, runtime_store
+from bf.storage import QUEUE, BusyError, Store, collecting, lock_file, private_dir
 
 # The queue format this release reads and writes; any other is preserved, never adapted.
 VERSION = 2
@@ -229,7 +229,7 @@ class Queue:
 
     def __init__(self, store: Store) -> None:
         self.brain = store
-        self.store = runtime_store(store)
+        self.store = store
 
     def exists(self) -> bool:
         try:
@@ -242,6 +242,7 @@ class Queue:
     def connect(self) -> Generator[sqlite3.Connection]:
         """One immediate transaction that checks, or rebinds, the brain path and name the queue serves."""
         try:
+            private_dir(self.store, ".bf")
             # Never open/close a live SQLite inode ourselves: POSIX close drops this process's locks,
             # including another thread's transaction. Serialize creation before SQLite can see the file.
             with _CREATE, self.store.parent(QUEUE) as (parent, name):

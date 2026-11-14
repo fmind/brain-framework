@@ -120,8 +120,9 @@ def test_a_long_record_address_gets_a_hashed_key_and_is_still_reported_once(prov
     assert (result.returncode, result.stdout, result.stderr) == (0, '{"events": []}\n', "")
 
 
-def test_records_of_referenced_brains_are_named_by_address(provider: Provider, tmp_path: Path) -> None:
-    # `bf export` also lists the brains this brain references, where the same plain ref can name another record.
+def test_records_with_distinct_brains_or_reserved_characters_keep_their_address(
+    provider: Provider, tmp_path: Path
+) -> None:
     observed = "2026-09-29T10:30:00Z"
     export = lines(item("mail:m1", observed), {**item("mail:m1", observed), "brain": "team"})
     provider.install("bf", [{"match": ["export"], "stdout": export}])
@@ -130,7 +131,6 @@ def test_records_of_referenced_brains_are_named_by_address(provider: Provider, t
         ("bf://team/mail:m1@2026-09-29T10:30:00.000000Z", "bf://team/mail:m1"),
         ("bf://fixture/mail:m1@2026-09-29T10:30:00.000000Z", "bf://fixture/mail:m1"),
     ]
-    # A change in one brain is reported alone; the other brain's unchanged record stays remembered.
     export = lines(item("mail:m1", observed), {**item("mail:m1", "2026-09-29T10:50:00Z"), "brain": "team"})
     provider.install("bf", [{"match": ["export"], "stdout": export}])
     assert [event["ref"] for event in events(gate(provider, state, "mail"))] == ["bf://team/mail:m1"]
@@ -139,12 +139,12 @@ def test_records_of_referenced_brains_are_named_by_address(provider: Provider, t
     assert [event["ref"] for event in events(gate(provider, state, "mail"))] == ["bf://fixture/mail:a%20b%23c%3Fd%25"]
 
 
-def test_where_keeps_matching_single_value_fields_and_conditions_combine(provider: Provider, tmp_path: Path) -> None:
+def test_where_keeps_matching_scalar_attributes_and_conditions_combine(provider: Provider, tmp_path: Path) -> None:
     observed = "2026-09-29T10:30:00Z"
     export = lines(
-        item("mail:a", observed, fields={"kind": "message", "status": "open", "priority": 1, "flagged": True}),
-        item("mail:b", observed, fields={"kind": "message", "status": "closed"}),
-        item("mail:c", observed, fields={"kind": "reply", "status": "open"}),
+        item("mail:a", observed, attributes={"kind": "message", "status": "open", "priority": 1, "flagged": True}),
+        item("mail:b", observed, attributes={"kind": "message", "status": "closed"}),
+        item("mail:c", observed, attributes={"kind": "reply", "status": "open"}),
         item("mail:d", observed),
     )
     provider.install("bf", [{"match": ["export"], "stdout": export, "repeat": True}])
@@ -412,7 +412,7 @@ def test_the_gate_reads_records_collected_by_the_same_update(brain: Store, monke
     brain.write("prompts/watcher.md", b"Events: {{context}}\n")
     record = {"id": "m1 #launch", "title": "Launch moved", "time": "2026-09-29T12:00:00Z"}
     config = {
-        "version": 8,
+        "version": 9,
         "name": "fixture",
         "sensors": {"mail": {"command": ["printf", json.dumps([record])], "refresh": 3600}},
         "assistants": {

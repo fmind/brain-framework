@@ -11,7 +11,19 @@ from functools import cache
 
 from bf import links, ontology, pages, records
 from bf.config import load
-from bf.markdown import Note, authored, broken, editor_lock, entry_note, note, okf, parse, resolve, scheme, validate_okf
+from bf.markdown import (
+    Note,
+    authored,
+    broken,
+    editor_lock,
+    entry_note,
+    note,
+    okf,
+    parse,
+    resolve,
+    scheme,
+    validate_okf,
+)
 from bf.markdown import lines as markdown_lines
 from bf.models import (
     AUTHORED,
@@ -420,7 +432,7 @@ class _Validation:
                     self.problems.append(_problem(name, str(error)))
                 # OKF ignores unknown keys: a relation named at the top level would silently assert nothing.
                 self.problems.extend(
-                    _problem(name, f"{key}: declared fields belong under fields:, such as fields: {{{key}: ...}}")
+                    _problem(name, f"{key}: relations belong under relations:, such as relations: {{{key}: ...}}")
                     for key in sorted(markdown.attributes)
                     if key in config.ontology and key not in Knowledge.model_fields
                 )
@@ -528,8 +540,22 @@ class _Validation:
                 # A path holding a control character or backslash has no BF address: note_claims reported it.
                 with suppress(Error):
                     owners.setdefault(links.target(alias), {})[item.path] = item.path
+
+        def present(name: str) -> bool:
+            return (
+                self._exists(name)
+                or name in self.skipped
+                or (name.endswith("/ACTION.md") and name.removesuffix("/ACTION.md") in self.skipped)
+            )
+
         for item in self.parsed:
-            self.problems.extend(_problem(item.path, message) for message in broken(item, self._exists, self.slugs))
+            self.problems.extend(
+                _problem(item.path, message) for message in broken(item, present, self.slugs, self.unresolved)
+            )
+            for value in item.knowledge.relations.values():
+                for target in value if isinstance(value, list) else [value]:
+                    if links.parse(target):
+                        self.written.setdefault(links.target(target), set()).add(item.path)
             for target in item.targets:
                 source = scheme(item.path, target)
                 written_source, _, record_id = target.partition(":")
@@ -553,7 +579,7 @@ class _Validation:
                     # Only a bf:// link carries a relation; another identity would silently become a different one.
                     self.problems.append(
                         _problem(
-                            item.path, f"?rel= types bf:// links only; set the relation in fields instead: {target}"
+                            item.path, f"?rel= types bf:// links only; set the relation in relations instead: {target}"
                         )
                     )
 
@@ -601,9 +627,10 @@ class _Validation:
                 continue
             errors = set()
             resolved = f"{parsed.path}/ACTION.md" if re.fullmatch(r"actions/[^/#]+", parsed.path) else parsed.path
+            action_target = bool(re.fullmatch(r"actions/[^/#]+/ACTION\.md", resolved))
             for path in self.owners.get(links.address(parsed.brain, resolved), {}) or {resolved}:
                 source, separator, record_id = path.partition(":")
-                if path in self.invalid:
+                if path in self.invalid or path in self.skipped:
                     continue
                 if path in self.slugs:
                     if parsed.fragment and parsed.fragment not in self.slugs[path]:
@@ -611,6 +638,16 @@ class _Validation:
                 elif separator and record_id in self.ids.get(source, set()):
                     if parsed.fragment:
                         errors.add("record cannot select a Markdown section")
+                elif (
+                    action_target
+                    and path == resolved
+                    and resolved.removesuffix("/ACTION.md") not in self.skipped
+                    and any(authored(file) for file in files)
+                ):
+                    self.unresolved.add(value)
+                    for file in sorted(files):
+                        if not authored(file):
+                            self.problems.append(_problem(file, f"unresolved BF target: {value}"))
                 else:
                     errors.add("unresolved BF target")
             self.problems.extend(

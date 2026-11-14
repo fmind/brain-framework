@@ -27,26 +27,19 @@ from bf.storage import BusyError, Store, building, writer
 from bf.validate import validate
 from conftest import records_file
 
-FIELDS = b"""version: 8
+FIELDS = b"""version: 9
 name: fixture
 sensors: {}
 fields:
   owner:
     description: Who answers for the work.
-    type: identity
-    relation: true
-  stage:
-    description: Delivery stage.
-    type: string
-    cardinality: one
+    targets: ["person:"]
 """
 REVIEWER = b"""  reviewer:
     description: Who checks the work.
-    type: identity
-    relation: true
 """
 # Documentation, `broader`, `targets` and sensors leave the cached rows as they are: no rebuild follows.
-REWORDED = b"""version: 8
+REWORDED = b"""version: 9
 name: fixture
 sensors:
   tickets:
@@ -55,17 +48,9 @@ sensors:
 fields:
   owner:
     description: The accountable owner.
-    type: identity
-    relation: true
-    examples: [person:ada]
-  stage:
-    description: Delivery stage.
-    type: string
-    cardinality: one
+    targets: ["person:"]
   reviewer:
     description: Who reviews the work.
-    type: identity
-    relation: true
     broader: owner
     targets: ["person:"]
 """
@@ -75,8 +60,9 @@ status: draft
 updated: 2026-09-10
 tags: [atlas, retention]
 aliases: ["project:atlas"]
-fields:
+relations:
   owner: person:ada
+attributes:
   stage: build
 ---
 
@@ -101,6 +87,7 @@ QUERIES = (
     "person:ada",
     "project:atlas",
     "repo:example/project",
+    "build",
     "provders",
 )
 PAGES = (
@@ -116,7 +103,7 @@ PAGES = (
 
 
 def refs(store: Store, text: str) -> list[str]:
-    items = search([store], Query(text=text), counted=False)["items"]
+    items = search(store, Query(text=text), counted=False)["items"]
     return [str(item["ref"]) for item in cast("list[dict[str, object]]", items)]
 
 
@@ -141,12 +128,12 @@ def rows(store: Store) -> dict[str, object]:
             key: (item.get(owner, f"orphan {owner}"), fragment)
             for key, owner, fragment in connection.execute("SELECT id,item,fragment FROM passages")
         }
-        columns = "ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,tasks_open,tasks_done"
+        columns = "ref,path,kind,source,title,time,type,item_type,status,lead,url,updated,observed,partial,tasks_open,tasks_done"
         return {
             "signature": connection.execute("SELECT signature FROM ontology").fetchall(),
             "files": sorted(connection.execute("SELECT path,tree,error FROM files")),
             "trees": sorted(connection.execute("SELECT path,entries FROM trees")),
-            "items": sorted(connection.execute(f"SELECT {columns},next,weight,stale_after,fields FROM items")),  # noqa: S608 - fixed columns
+            "items": sorted(connection.execute(f"SELECT {columns},next,weight,stale_after FROM items")),  # noqa: S608 - fixed columns
             "passages": sorted(
                 (passage[key], title, original)
                 for key, title, original in connection.execute("SELECT id,title,original FROM passages")
@@ -166,15 +153,15 @@ def snapshot(store: Store) -> dict[str, object]:
     """What search, read and export answer from a brain's cache, and the rows they answer from."""
     answers: dict[str, object] = {}
     for text in QUERIES:
-        answers[f"search {text}"] = search([store], Query(text=text, limit=50), counted=False)
+        answers[f"search {text}"] = search(store, Query(text=text, limit=50), counted=False)
     for ref, relation in [*((page, "") for page in PAGES), ("person:ada", "owner")]:
         try:
-            answers[f"read {ref} {relation}"] = read([store], ref, rel=relation, counted=False)
+            answers[f"read {ref} {relation}"] = read(store, ref, rel=relation, counted=False)
         except Error as error:
             answers[f"read {ref} {relation}"] = str(error)
     with ExitStack() as stack:
-        for kind, export in (("edges", retrieve.edges), ("identities", retrieve.identities)):
-            stream, extra = export([store], stack)
+        for kind, export in (("edges", retrieve.edges), ("identities", retrieve.identities), ("items", retrieve.items)):
+            stream, extra = export(store, stack)
             answers[f"export {kind}"] = [list(stream), extra]
     return {**answers, **rows(store)}
 
@@ -220,7 +207,7 @@ def test_incremental_refreshes_match_a_full_rebuild(
             assert incremental[key] == value, f"{step}: {key}"
 
     brain.write("bf.yaml", FIELDS)
-    check("declare fields", (True, 4, 0))
+    check("declare fields")
     brain.write("projects/atlas.md", ATLAS)
     brain.write(
         "concepts/ada.md", b"---\ntype: concept\nentity: person:ada\n---\n# Ada\n\nAda owns the atlas budget.\n"
@@ -231,13 +218,15 @@ def test_incremental_refreshes_match_a_full_rebuild(
         [
             Record(
                 id="T-1",
+                type="Ticket",
                 title="Atlas budget",
                 text="Budget review for zircon.",
                 time="2026-09-12T09:00:00Z",
                 url="https://tickets.example/T-1",
                 links=["project:atlas"],
                 aliases=["jira:T-1"],
-                fields={"owner": "person:bob", "stage": "review"},
+                relations={"owner": "person:bob"},
+                attributes={"stage": "review"},
             ),
             Record(
                 id="T-2",
@@ -245,7 +234,7 @@ def test_incremental_refreshes_match_a_full_rebuild(
                 text="Zircon samples arrived.",
                 time="2026-09-14T09:00:00Z",
                 links=["bf://fixture/projects/atlas.md#budget"],
-                fields={"stage": "done"},
+                attributes={"stage": "done"},
             ),
         ],
     )
@@ -265,10 +254,12 @@ def test_incremental_refreshes_match_a_full_rebuild(
         [
             Record(
                 id="T-1",
+                type="Ticket",
                 title="Atlas budget approved",
                 time="2026-09-15T09:00:00Z",
                 links=["project:atlas", "meetings:decision-1"],
-                fields={"owner": "person:ada", "stage": "done"},
+                relations={"owner": "person:ada"},
+                attributes={"stage": "done"},
             )
         ],
     )
@@ -282,10 +273,10 @@ def test_incremental_refreshes_match_a_full_rebuild(
     records_file(brain, "tickets", [Record(id="T-3", title="Zircon follow-up", time="2026-09-16T09:00:00Z")])
     check("repair files", (False, 2, 0))
     brain.write("bf.yaml", FIELDS + REVIEWER)
-    check("declare another relation", (True, 8, 0))
+    check("declare another relation")
     brain.write("bf.yaml", REWORDED)
     brain.write(
-        "projects/review.md", b"---\ntype: project\nfields:\n  reviewer: person:dan\n---\n# Review\n\nZircon.\n"
+        "projects/review.md", b"---\ntype: project\nrelations:\n  reviewer: person:dan\n---\n# Review\n\nZircon.\n"
     )
     check("reword documentation, broader and targets", (False, 1, 0))
     moved = brain.read("projects/atlas.md")
@@ -333,19 +324,19 @@ def test_bf_yaml_changed_during_a_refresh_rebuilds_at_the_next_one(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     index.refresh(brain)
-    brain.write("concepts/owned.md", b"---\ntype: concept\nfields:\n  owner: person:ada\n---\n# Owned\n")
-    indexing = index._index  # noqa: SLF001 - declare the relation while the note is indexed
+    brain.write("concepts/owned.md", b"---\ntype: concept\nrelations:\n  owner: person:ada\n---\n# Owned\n")
+    indexing = index._index  # noqa: SLF001 - rename the brain while the note is indexed
 
-    def declaring(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
-        brain.write("bf.yaml", FIELDS)
+    def renaming(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
+        brain.write("bf.yaml", b"version: 9\nname: renamed\n")
         indexing(connection, store, path, config)
 
     with monkeypatch.context() as patch:
-        patch.setattr(index, "_index", declaring)
+        patch.setattr(index, "_index", renaming)
         assert index.refresh(brain)["skipped"] == 0
-    # The generation keeps the configuration it was indexed with; the next refresh sees the new one and rebuilds.
+    # The generation keeps the configuration it was indexed with; the next refresh sees the new brain name and rebuilds.
     assert index.refresh(brain) == {"files": 5, "changed": 5, "removed": 0, "skipped": 0}
-    backlinks = cast("list[dict[str, object]]", read([brain], "person:ada", counted=False)["backlinks"])
+    backlinks = cast("list[dict[str, object]]", read(brain, "person:ada", counted=False)["backlinks"])
     assert [(group["relation"], [i["ref"] for i in cast("list[dict]", group["items"])]) for group in backlinks] == [
         ("owner", ["concepts/owned.md"])
     ]
@@ -528,7 +519,7 @@ def test_a_source_holding_a_folder_is_listed_at_every_check(brain: Store) -> Non
     age(brain)
     assert listed(brain) == {"memories/meetings"}
     brain.write("memories/meetings/nested/other.json", b"{}")
-    problems = cast("list[dict[str, str]]", search([brain], Query(text="lunch"), counted=False)["problems"])
+    problems = cast("list[dict[str, str]]", search(brain, Query(text="lunch"), counted=False)["problems"])
     assert {problem["file"] for problem in problems} == {
         "memories/meetings/nested/stray.json",
         "memories/meetings/nested/other.json",
@@ -588,7 +579,7 @@ def test_long_problems_are_cut_so_replies_stay_within_their_limit(
         indexing(connection, store, path, config)
 
     monkeypatch.setattr(index, "_index", failing)
-    reply = search([brain], Query(text="offline"), counted=False)
+    reply = search(brain, Query(text="offline"), counted=False)
     assert cast("list[dict[str, object]]", reply["items"])[0]["ref"] == "projects/offline.md"
     problems = cast("list[dict[str, str]]", reply["problems"])
     assert [problem["file"] for problem in problems] == hostile
@@ -637,7 +628,7 @@ def test_an_sqlite_build_without_cache_features_is_named(brain: Store, monkeypat
         # As a build without FTS5 or JSON functions answers the probe; the version alone would pass.
         patch.setattr(index, "_PROBE", "SELECT value FROM absent_table_function('[1]')")
         with pytest.raises(Error, match=r"needs SQLite .* which this Python's SQLite \S+ lacks"):
-            search([brain], Query(text="offline"), counted=False)
+            search(brain, Query(text="offline"), counted=False)
     # A failed check is not kept: the next connection checks again.
     assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
 
@@ -658,7 +649,7 @@ def test_a_transient_read_failure_is_retried_on_the_next_refresh(brain: Store, m
     assert index.refresh(brain)["skipped"] == 1
     monkeypatch.setattr(Store, "read", original)
     assert index.refresh(brain)["skipped"] == 0
-    assert [item["ref"] for item in cast("list[dict]", search([brain], Query(text="billing"))["items"])] == [
+    assert [item["ref"] for item in cast("list[dict]", search(brain, Query(text="billing"))["items"])] == [
         "projects/atlas.md"
     ]
 
@@ -666,7 +657,7 @@ def test_a_transient_read_failure_is_retried_on_the_next_refresh(brain: Store, m
 def test_a_cache_another_program_locks_names_the_lock(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     index.refresh(brain, full=True)
     brain.write("projects/new.md", b"# New\n")
-    with closing(sqlite3.connect(brain.root / ".bf/index.sqlite", timeout=0)) as holder:
+    with closing(sqlite3.connect(brain.root / index.CACHE, timeout=0)) as holder:
         holder.execute("BEGIN EXCLUSIVE")
         # Without SQLite's 30-second busy wait: it used to end in advice to check free space and run bf build.
         connect = sqlite3.connect
@@ -683,9 +674,9 @@ def plant(store: Store, *statements: str) -> None:
     """Add rows no brain file supports, as a cloned or extracted cache could carry, and optional schema objects."""
     with closing(sqlite3.connect(store.root / index.CACHE)) as connection, connection:
         connection.execute(
-            "INSERT INTO items(id,ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-            "tasks_open,tasks_done,next,weight,stale_after,fields,field_values) VALUES(999,'projects/roadmap.md',"
-            "'projects/roadmap.md','note','','Roadmap','','project','','planted','','','',0,0,0,'',1,'','','')"
+            "INSERT INTO items(id,ref,path,kind,source,title,time,type,item_type,status,lead,url,updated,observed,"
+            "partial,tasks_open,tasks_done,next,weight,stale_after) VALUES(999,'projects/roadmap.md',"
+            "'projects/roadmap.md','note','','Roadmap','','project','','','planted','','','',0,0,0,'',1,'')"
         )
         connection.execute("INSERT INTO passages(id,item,fragment,title,original) VALUES(999,999,'','Roadmap','')")
         connection.execute("INSERT INTO search(rowid,title,text,names) VALUES(999,'roadmap','zanzibar planted','')")
@@ -787,9 +778,9 @@ def test_one_reply_compares_files_with_the_cache_once_per_brain(brain: Store, mo
 
     monkeypatch.setattr(index, "fresh", counted)
     # A note with backlinks opens the cache for identities, backlinks and claims.
-    read([brain], "projects/offline.md")
+    read(brain, "projects/offline.md")
     assert checked == [brain.root]
-    search([brain], Query(text="offline"))
+    search(brain, Query(text="offline"))
     assert checked == [brain.root, brain.root]
 
 
@@ -805,7 +796,7 @@ def test_outdated_or_corrupt_cache_is_rebuilt(brain: Store) -> None:
     cache.write_bytes(b"not a database")
     assert refs(brain, "offline")[0] == "projects/offline.md"
     cache.unlink()
-    (brain.root / ".bf/index.sqlite").symlink_to(brain.root / "bf.yaml")
+    (brain.root / index.CACHE).symlink_to(brain.root / "bf.yaml")
     with pytest.raises(Error, match="regular file"):
         refs(brain, "offline")
 
@@ -869,7 +860,7 @@ def test_concurrent_searches_after_an_edit_all_answer_fresh(brain: Store, monkey
 
     monkeypatch.setattr(index, "_scan", aligned)
     with ThreadPoolExecutor(max_workers=4) as executor:
-        replies = list(executor.map(lambda _: search([brain], Query(text="latecomer"), counted=False), range(4)))
+        replies = list(executor.map(lambda _: search(brain, Query(text="latecomer"), counted=False), range(4)))
     # No writer holds the brain: a search waits out the others' short refreshes instead of answering stale.
     assert [reply.get("stale") for reply in replies] == [None] * 4
     assert [[item["ref"] for item in cast("list[dict]", reply["items"])] for reply in replies] == [
@@ -883,7 +874,7 @@ def test_a_busy_writer_serves_the_current_cache_as_stale(brain: Store, monkeypat
     refs(brain, "offline")
     brain.write("concepts/late.md", b"# Late\n\nLatecomer.\n")
     with writer(brain):
-        reply = search([brain], Query(text="latecomer"))
+        reply = search(brain, Query(text="latecomer"))
     # The stale cache does not hold the word yet: `stale` marks that answer, and its unmatched word, as outdated.
     assert reply == {
         "items": [],
@@ -942,7 +933,7 @@ def test_concurrent_first_search_waits_for_a_complete_cache(
         build = executor.submit(original_refresh, brain)
         try:
             assert ingest_started.wait(10)
-            result = executor.submit(search, [brain], Query(text="offline retrieval"), counted=False)
+            result = executor.submit(search, brain, Query(text="offline retrieval"), counted=False)
             assert reader_refreshing.wait(10)
             assert waits == [120]  # Incomplete generations cannot be served as stale evidence.
         finally:
@@ -971,7 +962,7 @@ def test_a_search_that_builds_the_cache_answers_with_a_collection_committed_mean
 
     monkeypatch.setattr(index, "_index", pausing)
     with ThreadPoolExecutor(max_workers=1) as executor:
-        query = executor.submit(search, [brain], Query(text="osmium lunch"), counted=False)
+        query = executor.submit(search, brain, Query(text="osmium lunch"), counted=False)
         try:
             assert paused.wait(10)
             # The build reads the brain without the writer lock, so a snapshot collection commits meanwhile.
@@ -1014,7 +1005,7 @@ def test_failed_or_abandoned_full_rebuilds_keep_the_live_cache(brain: Store, mon
     for suffix in ("", "-journal"):
         (brain.root / (index.BUILD + suffix)).write_bytes(b"abandoned build")
     assert index.refresh(brain, full=True)["files"] == 4
-    assert sorted(path.name for path in (brain.root / ".bf").iterdir()) == ["index.sqlite"]
+    assert sorted(path.name for path in (brain.root / ".bf").iterdir()) == ["cache.sqlite3", "locks"]
     assert cache_file(brain) != live
 
 
@@ -1049,7 +1040,7 @@ def test_a_full_build_keeps_serving_and_refreshing_the_live_cache_until_it_publi
         assert build.result(timeout=10) == {"files": 4, "changed": 4, "removed": 0, "skipped": 0}
     assert cache_file(brain) != live
     # The file added after the build's scan has no fingerprint in the new generation: the next refresh indexes it.
-    reply = search([brain], Query(text="osmium lunch"), counted=False)
+    reply = search(brain, Query(text="osmium lunch"), counted=False)
     assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])] == ["concepts/late.md"]
     assert "problems" not in reply
 
@@ -1107,16 +1098,19 @@ def test_a_first_build_publishes_by_its_rename_alone(brain: Store, monkeypatch: 
 
 
 def test_rewording_schema_documentation_keeps_the_cache(brain: Store) -> None:
-    schema = b"version: 8\nname: fixture\nfields:\n  owner:\n    description: Who owns it.\n    type: identity\n"
-    brain.write("bf.yaml", schema + b"    relation: true\n")
+    schema = b"version: 9\nname: fixture\nfields:\n  owner:\n    description: Who owns it.\n"
+    brain.write("bf.yaml", schema)
     index.refresh(brain)
     generation = cache_file(brain)
     reworded = schema.replace(b"Who owns it.", b"The accountable owner.")
-    brain.write("bf.yaml", reworded + b"    relation: true\n    examples: [person:ada]\n")
+    brain.write("bf.yaml", reworded + b'    targets: ["person:"]\n')
     assert index.refresh(brain)["changed"] == 0
     assert cache_file(brain) == generation
-    # A structural change still rebuilds: edges follow relation fields.
-    brain.write("bf.yaml", reworded)
+    # Adding or removing relation metadata also keeps the cache; renaming the brain rebuilds it.
+    brain.write("bf.yaml", b"version: 9\nname: fixture\n")
+    assert index.refresh(brain)["changed"] == 0
+    assert cache_file(brain) == generation
+    brain.write("bf.yaml", b"version: 9\nname: renamed\n")
     assert index.refresh(brain)["changed"] == 4
     assert cache_file(brain) != generation
 
@@ -1128,11 +1122,11 @@ def test_live_pending_commit_serves_stale_cache_but_abandoned_commit_errors(
     expected = refs(brain, "offline retrieval")
     with writer(brain):
         brain.write("memories/.pending/0.before", b"staged original")
-        reply = search([brain], Query(text="offline retrieval"), counted=False)
+        reply = search(brain, Query(text="offline retrieval"), counted=False)
     assert reply["stale"] == ["fixture"]
     assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])] == expected
     with pytest.raises(Error, match="interrupted transaction"):
-        search([brain], Query(text="offline retrieval"), counted=False)
+        search(brain, Query(text="offline retrieval"), counted=False)
     assert brain.read("memories/.pending/0.before") == b"staged original"
 
 
@@ -1142,7 +1136,7 @@ def test_current_schema_cache_with_missing_table_rebuilds(brain: Store) -> None:
         connection.execute("DROP TABLE files")
     connection.close()
     assert refs(brain, "offline")[0] == "projects/offline.md"
-    assert read([brain], "meetings:decision-1")["ref"] == "meetings:decision-1"
+    assert read(brain, "meetings:decision-1")["ref"] == "meetings:decision-1"
 
 
 def test_direct_record_read_survives_unavailable_cache(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1154,7 +1148,7 @@ def test_direct_record_read_survives_unavailable_cache(brain: Store, monkeypatch
         "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json",
         b"malformed unrelated newer record\n",
     )
-    assert read([brain], "meetings:decision-1")["ref"] == "meetings:decision-1"
+    assert read(brain, "meetings:decision-1")["ref"] == "meetings:decision-1"
 
 
 @pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
@@ -1194,7 +1188,7 @@ def test_a_search_opens_a_generation_published_after_its_freshness_check(
 
     monkeypatch.setattr(index, "fresh", paused_fresh)
     with ThreadPoolExecutor(max_workers=1) as executor:
-        query = executor.submit(search, [brain], Query(text="offline"), counted=False)
+        query = executor.submit(search, brain, Query(text="offline"), counted=False)
         try:
             assert checked.wait(10)
             # A checked reader holds no connection yet, so the build publishes without waiting for it.
@@ -1218,7 +1212,7 @@ def test_read_only_brains_name_the_cache_they_need(brain: Store) -> None:
     message = r"^the search cache needs write access to the brain.s \.bf directory;"
     try:
         with pytest.raises(Error, match=message):
-            search([brain], Query(text="offline"))
+            search(brain, Query(text="offline"))
         with pytest.raises(Error, match=message):
             index.status(brain)
     finally:
@@ -1257,18 +1251,18 @@ def test_the_cache_directory_must_be_your_own_directory(
     elsewhere.chmod(0o755)
     cache.symlink_to(elsewhere)
     with pytest.raises(Error, match=r"^\.bf: expected a directory"):
-        search([brain], Query(text="offline"))
+        search(brain, Query(text="offline"))
     # The check never follows the link, so it tightens nothing elsewhere.
     assert stat.S_IMODE(elsewhere.stat().st_mode) == 0o755
     cache.unlink()
     cache.write_bytes(b"not a directory")
     with pytest.raises(Error, match=r"^\.bf: expected a directory"):
-        search([brain], Query(text="offline"))
+        search(brain, Query(text="offline"))
     cache.unlink()
     cache.mkdir()
     monkeypatch.setattr(os, "getuid", lambda: os.geteuid() + 1)
     with pytest.raises(Error, match="belongs to another user"):
-        search([brain], Query(text="offline"))
+        search(brain, Query(text="offline"))
 
 
 def test_the_cache_is_private_and_distrusts_its_own_schema(brain: Store) -> None:
@@ -1280,3 +1274,56 @@ def test_the_cache_is_private_and_distrusts_its_own_schema(brain: Store) -> None
     with index.database(brain) as (connection, _state):
         assert not connection.getconfig(sqlite3.SQLITE_DBCONFIG_TRUSTED_SCHEMA)
         assert connection.getconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE)
+
+
+def test_schema_constants_and_type_relations_attributes(brain: Store) -> None:
+    assert index.SCHEMA == 42
+    assert index.CACHE == ".bf/cache.sqlite3"
+    brain.write(
+        "concepts/ada.md",
+        b"---\ntype: concept\nentity: person:ada\n---\n# Ada\n\nAda owns the platform.\n",
+    )
+    brain.write(
+        "projects/attrs.md",
+        b"---\ntype: project\nrelations:\n  blockedBy: person:ada\nattributes:\n  sprint: alpha\n  score: 7\n---\n"
+        b"# Attrs\n\nTrack attributes.\n",
+    )
+    records_file(
+        brain,
+        "tickets",
+        [
+            Record(
+                id="T-9",
+                type="Task",
+                title="Harden cache",
+                text="Verify schema invariants.",
+                relations={"blockedBy": "meetings:decision-1"},
+                attributes={"priority": 1, "meta": {"team": "infra", "labels": ["urgent"]}},
+            )
+        ],
+    )
+    assert refs(brain, "infra") == ["tickets:T-9"]
+    assert refs(brain, "urgent") == ["tickets:T-9"]
+    assert refs(brain, "alpha") == ["projects/attrs.md"]
+    ticket_hit = cast("list[dict[str, object]]", search(brain, Query(text="infra"), counted=False)["items"])[0]
+    assert ticket_hit["@type"] == "Task"
+    assert "type" not in ticket_hit
+    record_reply = cast("dict[str, object]", read(brain, "tickets:T-9", counted=False)["record"])
+    assert (record_reply["@type"], record_reply["relations"], record_reply["attributes"]) == (
+        "Task",
+        {"blockedBy": "meetings:decision-1"},
+        {"priority": 1, "meta": {"team": "infra", "labels": ["urgent"]}},
+    )
+    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
+        edge_relations = {row[0] for row in connection.execute("SELECT DISTINCT relation FROM edges")}
+    assert "blockedBy" in edge_relations
+    assert not (edge_relations & {"sprint", "score", "priority", "meta", "team", "infra"})
+    with ExitStack() as stack:
+        stream, extra = retrieve.items(brain, stack)
+        exported = {str(item["ref"]): item for item in stream}
+    assert extra["omitted"] == []
+    assert exported["tickets:T-9"]["@type"] == "Task"
+    assert exported["tickets:T-9"]["relations"] == {"blockedBy": "meetings:decision-1"}
+    assert exported["tickets:T-9"]["attributes"] == {"priority": 1, "meta": {"team": "infra", "labels": ["urgent"]}}
+    assert exported["projects/attrs.md"]["relations"] == {"blockedBy": "person:ada"}
+    assert exported["projects/attrs.md"]["attributes"] == {"sprint": "alpha", "score": 7}

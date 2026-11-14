@@ -11,13 +11,13 @@ from bf.collect import collect, due
 from bf.health import report
 from bf.history import state
 from bf.models import Error, Sensor, encode
-from bf.storage import Store, state_store
+from bf.storage import Store, private_dir
 from bf.update import update
 from bf.watch import snapshot
 
 NOW = datetime(2026, 9, 8, tzinfo=UTC)
 AT = "2026-09-08T00:00:00.000000Z"
-CONFIG = b"""version: 8
+CONFIG = b"""version: 9
 name: fixture
 sensors:
   mail:
@@ -48,7 +48,7 @@ def test_daily_reconciliation_preserves_hourly_resume_and_reports_cost(brain: St
     assert due(brain, NOW + timedelta(days=1)) == [
         ("mail", "2026-09-02T00:00:00.000000Z", "2026-09-09T00:00:00.000000Z", True)
     ]
-    result = cast(Any, report([brain], now=NOW + timedelta(hours=1)))["brains"][0]["sources"]["mail"]
+    result = cast(Any, report(brain, now=NOW + timedelta(hours=1)))["sources"]["mail"]
     assert result["last_run"]["unchanged"] == 1
     assert result["last_run"]["output_bytes"] == 33
     assert result["last_run"]["elapsed_seconds"] >= 0
@@ -79,22 +79,22 @@ def test_future_success_cannot_freeze_schedules_after_a_clock_correction(brain: 
     now = datetime.now(UTC)
     future = "9999-12-31T23:59:59Z" if extreme else (now + timedelta(days=1)).isoformat()
     brain.write("bf.yaml", CONFIG + b"routines:\n  review:\n    command: [review]\n    refresh: 3600\n")
-    local = state_store(brain.root)
+    local = private_dir(brain, ".bf", "state")
     local.write("sensors.json", encode({"mail": {"success": future, "reconciled": future}}))
     local.write("routines.json", encode({"review": {"success": future}}))
-    assert not report([brain], now=now)["healthy"]
+    assert not report(brain, now=now)["healthy"]
     assert {row.name: row.status for row in snapshot(brain)} == {"mail": "due", "review": "due"}
     plan = cast(Any, update(brain, dry_run=True, now=now))
     assert plan["sensors"][0]["reconcile"] is True
     assert plan["routines"][0]["routine"] == "review"
     assert update(brain, now=now, runner=lambda argv, *_: b"" if argv[0] == "review" else b"[]")["ok"]
-    assert report([brain], now=now)["healthy"]
+    assert report(brain, now=now)["healthy"]
     assert due(brain, now) == []
 
 
 def test_ancient_resume_timestamp_respects_the_catchup_bound(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
-    state_store(brain.root).write("sensors.json", encode({"mail": {"end": "0001-01-01T00:00:00Z"}}))
+    private_dir(brain, ".bf", "state").write("sensors.json", encode({"mail": {"end": "0001-01-01T00:00:00Z"}}))
     assert due(brain, NOW)[0][1] == "2026-08-09T00:00:00.000000Z"
 
 

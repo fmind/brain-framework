@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/docs/channels/
-version: 8
+version: 9
 name: channel-demo
 channels:
   local:

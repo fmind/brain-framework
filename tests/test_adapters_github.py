@@ -52,9 +52,10 @@ def test_github_main_commits_respect_half_open_window(provider: Provider) -> Non
     provider.install("gh", [{"match": ["commits"], "stdout": response([COMMIT, later])}])
     [record] = provider.records("github-history.py", "Example/Project", "commits", START, END)
     assert record.id == "example/project/commits/" + "a" * 40
+    assert record.type == "Commit"
     assert record.attributes["kind"] == "commit"
     assert "Keep the rationale searchable." in record.text
-    assert record.links == ["repo:github.com/example/project"]
+    assert record.relations == {"repository": ["repo:github.com/example/project"]}
     [call] = provider.calls("gh")
     assert {"sha=main", "github.com", "GET", "--include", "per_page=100", "since=2026-08-31T23:59:59+00:00"} <= set(
         call

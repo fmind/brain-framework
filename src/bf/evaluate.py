@@ -131,7 +131,7 @@ class Case(Model):
 class Suite(Model):
     """A bounded collection of retrieval assertions; evaluated offline without executing programs."""
 
-    version: Literal[8] = Field(description="Brain format, shared with bf.yaml; independent of the package version.")
+    version: Literal[9] = Field(description="Brain format, shared with bf.yaml; independent of the package version.")
     cases: Annotated[list[Case], Field(min_length=1, max_length=200)] = Field(
         description="One to 200 retrieval cases with unique names."
     )
@@ -172,7 +172,7 @@ def _text(reply: dict[str, object]) -> str:
 
 def _whole(store: Store, ref: str) -> dict[str, object]:
     """Assemble a paged exact read like a client would: every page names the same file digest."""
-    first = reply = read([store], ref, counted=False)
+    first = reply = read(store, ref, counted=False)
     if "total_characters" not in reply:
         return reply
     parts = []
@@ -180,7 +180,7 @@ def _whole(store: Store, ref: str) -> dict[str, object]:
         parts.append(_text(reply))
         if "next_offset" not in reply:
             break
-        reply = read([store], ref, offset=cast("int", reply["next_offset"]), counted=False)
+        reply = read(store, ref, offset=cast("int", reply["next_offset"]), counted=False)
         if reply.get("sha256") != first["sha256"]:
             raise Error("exact reply changed during evaluation; rerun bf eval")
     text = "".join(parts)
@@ -194,11 +194,7 @@ def _whole(store: Store, ref: str) -> dict[str, object]:
 
 
 def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], list[str], str, list[tuple[str, str]]]:
-    """The reply, its refs, the refs and addresses expectations match, its text and a search's ranking to DEPTH.
-
-    A plain ref names the evaluated brain's file: an item of a referenced brain, which can hold the same path,
-    matches only by its `bf://` address.
-    """
+    """The reply, its refs, the refs and addresses expectations match, its text and a search's ranking to DEPTH."""
     name = load(store).name
     if case.read is not None:
         try:
@@ -207,8 +203,7 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
             # Nothing to read answers "is anything there?"; every other failure fails the case.
             reply = {}
         pairs = [(key, value) for key, value in _strings(reply) if key != "notice"]
-        # An entry without a brain belongs to the evaluated one, the only brain its reply selected. An exact record
-        # read names no kind: address it as a record, whose id may hold `#`, never as a note's section.
+        # An exact record read names no kind: address it as a record, whose id may hold `#`, never as a note's section.
         entries = [(str(entry.get("brain", name)), entry) for entry in _entries(reply)]
         return (
             reply,
@@ -224,7 +219,7 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
     found: list[dict[str, object]] = []
     offset = 0
     while True:
-        reply = search([store], query(case.query, case.scope, limit=DEPTH - len(found), offset=offset), counted=False)
+        reply = search(store, query(case.query, case.scope, limit=DEPTH - len(found), offset=offset), counted=False)
         found += cast("list[dict[str, object]]", reply["items"])
         if len(found) >= DEPTH or "next_offset" not in reply or reply.get("problems") or reply.get("stale"):
             break

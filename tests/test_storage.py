@@ -25,7 +25,18 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from bf import config, storage
-from bf.config import load, one, register, related, select, user_config, user_path, yaml_object
+from bf.config import (
+    is_registered,
+    load,
+    one,
+    register,
+    registration,
+    select,
+    unregister,
+    user_config,
+    user_path,
+    yaml_object,
+)
 from bf.markdown import note
 from bf.models import (
     RECORD_KEYS,
@@ -38,13 +49,23 @@ from bf.models import (
     Sensor,
     UserConfig,
     decode,
-    digest,
     explain,
     moment,
     timestamp,
 )
 from bf.retrieve import search
-from bf.storage import BusyError, Store, collecting, generation, lock_file, reader, relative, state_store, writer
+from bf.storage import (
+    BusyError,
+    Store,
+    collecting,
+    generation,
+    lock_file,
+    private_dir,
+    program_state,
+    reader,
+    relative,
+    writer,
+)
 from bf.watch_settings import settings
 
 
@@ -132,8 +153,8 @@ def test_sockets_are_named_like_other_special_files(brain: Store, monkeypatch: p
         skipped: dict[str, tuple[int, int, int, int]] = {}
         assert brain.files("concepts", skipped=skipped) == ["concepts/evidence.md"]
         assert list(skipped) == ["concepts/talk.md"]
-        problems = search([brain], Query(text="durable"))["problems"]
-        assert problems == [{"brain": "fixture", "file": "concepts/talk.md", "error": "expected a regular file"}]
+        problems = search(brain, Query(text="durable"))["problems"]
+        assert problems == [{"file": "concepts/talk.md", "error": "expected a regular file"}]
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
@@ -398,20 +419,17 @@ def test_a_waiting_cache_replacement_goes_before_new_readers(brain: Store, monke
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
-def test_an_inaccessible_state_directory_is_named(
-    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    locked = tmp_path / "read-only-state"
-    locked.mkdir()
-    locked.chmod(0o500)
-    monkeypatch.setenv("XDG_STATE_HOME", str(locked))
+def test_an_inaccessible_state_directory_is_named(brain: Store) -> None:
+    private_dir(brain, ".bf")
+    bf_dir = brain.root / ".bf"
+    bf_dir.chmod(0o500)
     try:
-        # Locks live there too: searches name the directory instead of a generic inaccessible path.
-        for action in (lambda: state_store(brain.root), lambda: search([brain], Query(text="offline"))):
-            with pytest.raises(Error, match=r"state directory .*read-only-state/bf is inaccessible.*XDG_STATE_HOME"):
+        # Locks live under .bf/locks: searches name the missing inaccessible directory.
+        for action in (lambda: lock_file(brain, "write.lock"), lambda: search(brain, Query(text="offline"))):
+            with pytest.raises(Error, match=r"state directory locks is inaccessible"):
                 action()
     finally:
-        locked.chmod(0o700)
+        bf_dir.chmod(0o700)
 
 
 def test_links_share_regular_files_without_following_or_replacing_links(brain: Store, tmp_path: Path) -> None:
@@ -445,38 +463,28 @@ def test_rmdir_refuses_files_and_symlinks(brain: Store) -> None:
     assert not (brain.root / "empty").exists()
 
 
-def test_state_stays_outside_the_brain_and_private(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    state = state_store(brain.root)
-    assert not state.root.is_relative_to(brain.root)
-    # mkdir's mode applies to the last directory only; the shared bf/ root is private too.
-    assert state.root.stat().st_mode & 0o077 == state.root.parent.stat().st_mode & 0o077 == 0
-    monkeypatch.setenv("XDG_STATE_HOME", str(brain.root / "state"))
-    with pytest.raises(Error, match="outside the brain"):
-        state_store(brain.root)
+def test_state_stays_private_inside_bf(brain: Store) -> None:
+    state = program_state(brain, "env")
+    assert state.root == brain.root / ".bf" / "state" / "env"
+    for directory in (brain.root / ".bf", brain.root / ".bf" / "state", state.root):
+        assert directory.stat().st_mode & 0o077 == 0
     target = brain.root.parent / "elsewhere"
     target.mkdir()
-    (brain.root.parent / "redirect").symlink_to(target)
-    monkeypatch.setenv("XDG_STATE_HOME", str(brain.root.parent / "redirect"))
+    state.root.rmdir()
+    state.root.symlink_to(target)
     with pytest.raises(Error, match="symlinks"):
-        state_store(brain.root)
-    # A linked ancestor, such as /home -> /var/home on some systems, is part of the machine, not a redirect.
-    (brain.root.parent / "linked-home").symlink_to(target)
-    monkeypatch.setenv("XDG_STATE_HOME", str(brain.root.parent / "linked-home" / "state"))
-    assert state_store(brain.root).root.is_relative_to(target.resolve() / "state" / "bf")
+        program_state(brain, "env")
 
 
-def test_existing_state_must_be_private(brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    home = tmp_path / "private-state"
-    monkeypatch.setenv("XDG_STATE_HOME", str(home))
-    shared = home / "bf" / digest(os.fsencode(brain.root))
-    shared.mkdir(parents=True, mode=0o755)
+def test_existing_state_must_be_private(brain: Store) -> None:
+    shared = brain.root / ".bf"
+    shared.mkdir(mode=0o755)
     shared.chmod(0o755)
     with pytest.raises(Error, match="owned by you with mode 700"):
-        state_store(brain.root)
+        private_dir(brain, ".bf")
     shared.chmod(0o700)
     folder, _name = lock_file(brain, "write.lock")
-    # The shared root created with the default umask is restricted too, so others cannot list brain digests.
-    for directory in (state_store(brain.root).root, folder.root, home / "bf"):
+    for directory in (shared, folder.root):
         assert directory.stat().st_mode & 0o077 == 0
 
 
@@ -485,10 +493,8 @@ def test_empty_or_relative_xdg_directories_are_ignored(
     brain: Store, monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
     # The XDG specification treats empty and relative values as unset.
-    monkeypatch.setenv("XDG_STATE_HOME", value)
     monkeypatch.setenv("XDG_CONFIG_HOME", value)
     home = Path.home()
-    assert state_store(brain.root).root.is_relative_to(home.resolve() / ".local/state/bf")
     assert user_path() == home / ".config/bf/config.yaml"
     register(brain)
     assert not (brain.root.parent / "relative").exists()
@@ -563,13 +569,13 @@ def test_the_scan_limit_bounds_each_source_of_memories(brain: Store, monkeypatch
 
 
 def test_program_locks_follow_the_physical_brain(brain: Store, tmp_path: Path) -> None:
-    # A bind mount, container mount or case variant reaches one directory through another path.
-    alias = tmp_path / "alias"
-    alias.symlink_to(brain.root, target_is_directory=True)
+    # A bind mount, container mount or linked parent reaches one directory through another path.
+    via = tmp_path / "via"
+    via.symlink_to(brain.root.parent, target_is_directory=True)
     other = Store(brain.root)
-    other.root = alias
+    other.root = via / brain.root.name
+    assert other.root != brain.root
     assert other.identity == brain.identity
-    assert state_store(other.root).root != state_store(brain.root).root
     for name in (".update", "mail"):
         with (
             collecting(brain, name),
@@ -577,33 +583,28 @@ def test_program_locks_follow_the_physical_brain(brain: Store, tmp_path: Path) -
             collecting(other, name),
         ):
             pass
-    stores, problems = related([brain, other])
-    assert stores == [brain]
-    assert not problems
 
 
 def test_writers_of_one_physical_brain_share_a_lock_whatever_the_path(brain: Store, tmp_path: Path) -> None:
     (tmp_path / "alias").symlink_to(brain.root, target_is_directory=True)
     with writer(brain), pytest.raises(BusyError), writer(Store(tmp_path / "alias")):
         pass
-    # The lock stays in private state: nothing is created in the brain.
+    # Locks live inside private .bf/locks with owner-only permissions.
     folder, name = lock_file(brain, "write.lock")
     assert (folder.root / name).is_file()
-    assert not folder.root.is_relative_to(brain.root)
+    assert folder.root == brain.root / ".bf" / "locks"
+    assert folder.root.stat().st_mode & 0o077 == 0
 
 
-def test_writers_with_different_state_directories_still_exclude_each_other(
-    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Each state directory holds its own lock file: a shell and an MCP host with different XDG_STATE_HOME values
-    # used to commit at once, and a recovery could roll back the other writer's committed records.
+def test_writers_exclude_other_writers_and_readers(brain: Store, tmp_path: Path) -> None:
+    (tmp_path / "alias").symlink_to(brain.root, target_is_directory=True)
+    aliased = Store(tmp_path / "alias")
     with writer(brain):
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "other-state"))
-        with pytest.raises(BusyError), writer(brain, wait=0.1):
+        with pytest.raises(BusyError), writer(aliased, wait=0.1):
             pass
-        with pytest.raises(BusyError), reader(brain, wait=0.1):
+        with pytest.raises(BusyError), reader(aliased, wait=0.1):
             pass
-    with reader(brain), reader(brain, wait=0.1):
+    with reader(brain), reader(aliased, wait=0.1):
         pass
 
 
@@ -683,10 +684,10 @@ def test_yaml_follows_the_1_2_core_schema(brain: Store) -> None:
         "t": [True, 17, 15, 31, "1:30", 1.5, None],
     }
     assert note("concepts/x.md", b"---\ntags: [yes, 2026]\n---\n# X\n").knowledge.tags == ["yes", "2026"]
-    brain.write("bf.yaml", b"version: 8\nname: fixture\nsensors:\n  on:\n    command: [echo]\n    timeout: 1:30\n")
+    brain.write("bf.yaml", b"version: 9\nname: fixture\nsensors:\n  on:\n    command: [echo]\n    timeout: 1:30\n")
     with pytest.raises(Error, match=r"sensors\.on\.timeout"):
         load(brain)
-    brain.write("bf.yaml", b"version: 8\nname: fixture\nwatch:\n  notifications: off\n")
+    brain.write("bf.yaml", b"version: 9\nname: fixture\nwatch:\n  notifications: off\n")
     assert settings(brain).notifications == "off"
 
 
@@ -738,11 +739,13 @@ def test_models_are_strict_and_canonical() -> None:
         {"id": "x", "title": "T", "url": "https://example.test/" + "x" * 8192},
         {"id": "x", "title": "T", "aliases": ["Plain Name"]},
         {"id": "x", "title": "T", "attributes": {"path": "caf\udce9.txt"}},
-        {"id": "x", "title": "T", "fields": {"kind": ["\ud800"]}},
+        {"id": "x", "title": "T", "attributes": {"kind": ["\ud800"]}},
+        {"id": "x", "title": "T", "relations": {"owner": "not-an-identity"}},
+        {"id": "x", "title": "T", "@type": "1Bad"},
         {"id": "x", "title": "T", "links": ["repo:\ud800"]},
         {"id": "x", "title": "T", "aliases": ["file:caf\udce9"]},
     ]:
-        with pytest.raises(ValidationError, match=r"url|aliases|attributes|fields|links"):
+        with pytest.raises(ValidationError, match=r"url|aliases|attributes|relations|links|@type"):
             Record.model_validate(bad)
     assert Record(id="x", title="T", url="https://example.test/a").url == "https://example.test/a"
     for command in [["{{start}}"], ["x", "{{secret}}"], ["x", "a\x00"], ["/usr/bin/env"], ["sensors/../x.sh"]]:
@@ -775,7 +778,7 @@ def test_relative_moments_resolve_deterministically() -> None:
             moment(bad, now)
 
 
-def test_configuration_is_strict_and_version_8(brain: Store) -> None:
+def test_configuration_is_strict_and_version_9(brain: Store) -> None:
     assert load(brain).name == "fixture"
     # One diagnostic names the supported format instead of every field a format change renamed.
     for data, problem in (
@@ -785,46 +788,61 @@ def test_configuration_is_strict_and_version_8(brain: Store) -> None:
         (b'version: "7"\nname: fixture\n', "declares an invalid version"),
     ):
         brain.write("bf.yaml", data)
-        with pytest.raises(Error, match=rf"^bf\.yaml {problem}; this release reads version: 8$"):
+        with pytest.raises(Error, match=rf"^bf\.yaml {problem}; this release reads version: 9$"):
             load(brain)
-    brain.write("bf.yaml", b"version: 8\nname: fixture\nunknown: 1\n")
+    brain.write("bf.yaml", b"version: 9\nname: fixture\nunknown: 1\n")
     with pytest.raises(Error, match="unknown"):
         load(brain)
 
 
 def test_registry_selection(brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert user_path().read_text().startswith("# https://fmind.github.io/brain-framework/")
+    assert is_registered(brain) is True
+    assert registration(brain) == ("fixture", Registration(path=str(brain.root)))
     other = tmp_path / "team"
     other.mkdir()
     team = Store(other)
-    team.write("bf.yaml", b"version: 8\nname: team\n")
+    team.write("bf.yaml", b"version: 9\nname: team\n")
     register(team)
-    assert [s.root for s in select()] == [brain.root, team.root]
+    with pytest.raises(Error, match="no default brain configured"):
+        select()
     assert one("team").root == team.root
     assert one(str(other)).root == team.root
-    with pytest.raises(Error, match="several brains"):
-        one()
-    monkeypatch.setenv("BF_BRAIN", "fixture")
-    assert [s.root for s in select()] == [brain.root]
-    assert one("team").root == team.root
-    monkeypatch.chdir(team.root)
-    assert [s.root for s in select()] == [brain.root]
+    assert register(brain, default=True)["default"] is True
+    assert select().root == brain.root
+    monkeypatch.setenv("BF_BRAIN", "team")
+    assert select().root == team.root
+    monkeypatch.chdir(brain.root)
+    assert select().root == team.root
     monkeypatch.delenv("BF_BRAIN")
     monkeypatch.chdir(brain.root / "projects")
-    assert [s.root for s in select()] == [brain.root]
+    assert select().root == brain.root
+    monkeypatch.chdir(team.root)
+    assert select().root == team.root
     clone = tmp_path / "clone"
     clone.mkdir()
-    Store(clone).write("bf.yaml", b"version: 8\nname: team\n")
+    Store(clone).write("bf.yaml", b"version: 9\nname: team\n")
     with pytest.raises(Error, match="already registered as team"):
         register(Store(clone))
-    brain.write("bf.yaml", b"version: 8\nname: renamed\n")
+    brain.write("bf.yaml", b"version: 9\nname: renamed\n")
     with pytest.raises(Error, match="already registered as fixture"):
         register(brain)
+    brain.write("bf.yaml", b"version: 9\nname: fixture\n")
     monkeypatch.chdir(tmp_path)
     user_path().write_text(f"brains:\n  fixture:\n    path: {brain.root}\n  gone:\n    path: {tmp_path / 'gone'}\n")
-    assert [s.root for s in select()] == [brain.root]
+    assert select("fixture").root == brain.root
     with pytest.raises(Error, match=r"^gone: registered brain directory is absent on this machine; restore it"):
         select("gone")
+    assert register(brain, default=True)["default"] is True
+    assert unregister(brain) == {
+        "brain": "fixture",
+        "path": str(brain.root),
+        "config": str(user_path()),
+        "cleared_default": True,
+    }
+    assert is_registered(brain) is False
+    assert registration(brain) is None
+    assert user_config().default is None
     user_path().write_text("brains:\n  bad:\n    path: 1\n")
     with pytest.raises(Error, match="invalid"):
         user_config()
@@ -868,7 +886,7 @@ def test_registering_keeps_an_entry_whose_directory_cannot_be_reached(
     clone, other = tmp_path / "clone", tmp_path / "other"
     for root, name in ((clone, "fixture"), (other, "other")):
         root.mkdir()
-        Store(root).write("bf.yaml", f"version: 8\nname: {name}\n".encode())
+        Store(root).write("bf.yaml", f"version: 9\nname: {name}\n".encode())
     # A locked brain folder itself can be stated but not listed: it once counted as another brain of that name.
     target = locked if folder == "parent" else locked / "brain"
     target.chmod(0)
@@ -893,17 +911,18 @@ def test_registration_conflicts_name_the_entry_to_change(brain: Store, tmp_path:
     registry = re.escape(str(user_path()))
     clone = tmp_path / "clone"
     clone.mkdir()
-    Store(clone).write("bf.yaml", b"version: 8\nname: fixture\n")
+    Store(clone).write("bf.yaml", b"version: 9\nname: fixture\n")
     # Two present brains claim one name: the owner chooses which entry to keep.
     with pytest.raises(
         Error,
         match=rf"^another brain is already registered as fixture at {re.escape(str(brain.root))}; remove that entry "
-        rf"from {registry}, or rename one of the brains in its bf\.yaml$",
+        rf"from {registry}, or pass a different --name$",
     ):
         register(Store(clone))
-    brain.write("bf.yaml", b"version: 8\nname: renamed\n")
+    brain.write("bf.yaml", b"version: 9\nname: renamed\n")
     with pytest.raises(
-        Error, match=rf"^this brain is already registered as fixture; remove that entry from {registry}, then run"
+        Error,
+        match=rf"^this brain is already registered as fixture; unregister fixture from {registry}, then run bf register again$",
     ):
         register(brain)
     assert user_config().brains == {"fixture": Registration(path=str(brain.root))}
@@ -958,7 +977,7 @@ def test_registering_in_place_keeps_a_home_relative_entry(
     # link, such as /home -> /var/home.
     root = Path.home() / "brains" / "three"
     root.mkdir(parents=True)
-    Store(root).write("bf.yaml", b"version: 8\nname: three\n")
+    Store(root).write("bf.yaml", b"version: 9\nname: three\n")
     if linked:
         (tmp_path / "linked").symlink_to(Path.home(), target_is_directory=True)
         monkeypatch.setenv("HOME", str(tmp_path / "linked"))
@@ -975,7 +994,7 @@ def test_registering_in_place_keeps_a_home_relative_entry(
 
 def test_nothing_selected_is_actionable(tmp_path: Path) -> None:
     os.chdir(tmp_path)
-    with pytest.raises(Error, match="bf register"):
+    with pytest.raises(Error, match="register one with --default"):
         select()
 
 
@@ -985,7 +1004,7 @@ def test_concurrent_registrations_keep_every_brain(tmp_path: Path, monkeypatch: 
         root = tmp_path / f"brain-{number}"
         root.mkdir()
         store = Store(root)
-        store.write("bf.yaml", f"version: 8\nname: brain-{number}\n".encode())
+        store.write("bf.yaml", f"version: 9\nname: brain-{number}\n".encode())
         stores.append(store)
     original = config._registry  # noqa: SLF001 - every registration reads the registry here
     start = Barrier(len(stores))

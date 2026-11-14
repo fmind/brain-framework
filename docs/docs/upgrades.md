@@ -27,12 +27,12 @@ This documentation tracks `main`. Check `bf --version` and `bf COMMAND --help` f
 
 Releases follow `MAJOR.MINOR.PATCH` ([contract rules](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md#keep-the-contract)):
 
-- **Within a major**: `search`, `read` and `status` [reply schemas](retrieval.md#reply-schemas) only gain optional fields or narrow values; `bf.yaml` and `evals/*.yaml` only widen accepted inputs; brain format `version` (currently `8`) stays constant.
+- **Within a major**: `search`, `read` and `status` [reply schemas](retrieval.md#reply-schemas) only gain optional fields or narrow values; `bf.yaml` and `evals/*.yaml` only widen accepted inputs; brain format `version` (currently `9`) stays constant.
 - **Across majors**: breaking CLI, configuration, queue or reply changes batch cleanly without legacy shims and list manual upgrade steps in the [changelog](../changelog.md) ([queued breaks](https://github.com/fmind/brain-framework/blob/main/GOVERNANCE.md#next-major)). Format `version` increments only when stored brain files require conversion.
 
 ## Update
 
-1. **Before upgrading**: stop `bf watch` / timers, read the [changelog](../changelog.md), drain `bf queue` on the current release if assistant/channel schemas or settings change, and back up both the brain and `$XDG_STATE_HOME/bf/runtime/*/queue.sqlite3` while idle.
+1. **Before upgrading**: stop `bf watch` / timers, read the [changelog](../changelog.md), drain `bf queue` on the current release if assistant/channel schemas or settings change, and back up the brain (including `.bf/runtime.sqlite3`) while idle.
 2. **Upgrade the package**:
 
 ```bash
@@ -48,10 +48,10 @@ cd ~/brain
 bf validate
 bf eval
 bf status --check
-bf skills ~/.agents/skills
+bf skill install --global
 ```
 
-Repeat `bf skills` for each installed host directory (`~/.claude/skills`, or `bf skills skills --link` inside a personal brain; pass `--force` only after backing up local skill edits). Restart watchers and MCP hosts afterwards.
+Pass `--global` to update `~/.agents/skills` and `~/.claude/skills`, or omit `--global` inside a registered personal brain to install into its `.agents/skills` and `.claude/skills` directories (pass `--force` only after backing up customized skill files). Restart watchers and MCP hosts afterwards.
 
 ## Pin a brain's runtime
 
@@ -65,4 +65,4 @@ echo /.venv/ >> .gitignore
 uv run --locked bf --version
 ```
 
-Commit `pyproject.toml` and `uv.lock` (never `.venv/`). Run execution commands through `uv run --locked bf update` (or `uv run --project ~/brain --locked bf watch --json --brain ~/brain` in services and `.git/hooks`), while keeping interactive retrieval and skills on your globally installed `bf` ([running code](privacy.md#running-code)). Always audit `pyproject.toml`, `uv.lock`, `.python-version` and `uv.toml` and delete any shipped `.venv/` before running a shared brain's pin.
+Commit `pyproject.toml` and `uv.lock` (never `.venv/`). Run execution commands through `uv run --locked bf update` (or `uv run --project ~/brain --locked bf watch --json --brain ~/brain` in services and `.git/hooks`), while keeping interactive retrieval and `/bf` on your globally installed `bf` unless inside a registered, audited brain ([running code](privacy.md#running-code)). Always audit `pyproject.toml`, `uv.lock`, `.python-version` and `uv.toml` and delete any shipped `.venv/` before running a shared brain's pin.

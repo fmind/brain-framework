@@ -1,12 +1,9 @@
 # https://fmind.github.io/brain-framework/docs/configuration/
-version: 8
+version: 9
 name: retrieval-eval
 fields:
   repository:
     description: Repository explicitly discussed by this fictional record.
-    type: identity
-    cardinality: many
-    relation: true
 sensors:
   # The catalog's records are checked in: this disabled entry only lowers the source's priority.
   catalog:

@@ -1,4 +1,4 @@
-"""Confined, bounded filesystem access, private state and the locks that follow each physical brain."""
+"""Confined, bounded filesystem access, brain-local private state and the locks that follow each physical brain."""
 
 from __future__ import annotations
 
@@ -6,14 +6,13 @@ import errno
 import fcntl
 import os
 import re
-import sqlite3
 import stat
 import time
 from collections.abc import Callable, Generator
 from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 
-from bf.models import MAX_FILE, MAX_FILES, Error, decode, digest
+from bf.models import MAX_FILE, MAX_FILES, Error
 
 
 class BusyError(Error):
@@ -31,8 +30,8 @@ _TEMPORARY = re.compile(r"\.write-[0-9a-f]{32}")
 UNNAMED = "file name is not valid UTF-8 or contains a backslash; rename it"
 # A link BF never follows, to a file or to a folder such as memories/: its owner puts the real one in its place.
 LINKED = "symlinks are not followed; replace the link with the file or folder itself"
-# The assistant queue's file in its runtime folder (bf.runtime owns its schema).
-QUEUE = "queue.sqlite3"
+# The assistant queue's file inside <brain>/.bf/ (bf.runtime owns its schema).
+QUEUE = ".bf/runtime.sqlite3"
 
 
 def temporary(path: str) -> bool:
@@ -466,160 +465,58 @@ def xdg(name: str, default: str) -> Path:
         raise Error(f"cannot find the home directory; set HOME or {name}") from error
 
 
-def _state(*parts: str, root: Path) -> tuple[Path, Path]:
-    """The state home and a directory below its bf/ root, checked but not created."""
-    base = xdg("XDG_STATE_HOME", ".local/state")
-    if base.resolve().is_relative_to(root):
-        raise Error("state directory must be outside the brain")
-    # Operating systems may link an ancestor, such as /home to /var/home; the state root itself may not be a link.
-    home = base.parent.resolve() / base.name
-    directory = home.joinpath("bf", *parts)
-    # Reject redirected state roots before creating any descendant: check each level from home down.
-    if any(path.is_symlink() for path in (directory, *directory.parents[: len(parts) + 1])):
-        raise Error("state directory may not contain symlinks")
-    return home, directory
-
-
-def _private(*parts: str, root: Path) -> Store:
-    """A private directory below XDG_STATE_HOME, or ~/.local/state, outside the evidence brain."""
-    home, directory = _state(*parts, root=root)
-    # mkdir applies its mode to the last directory only: create the shared bf/ root explicitly too.
-    top = home / "bf"
+def private_dir(store: Store, *parts: str) -> Store:
+    """Ensure a brain-local private directory under `<brain>/.bf/` exists with mode 700, owned by you and
+    reached without following symlinks."""
+    target = parts or (".bf",)
+    for part in target:
+        if not part or part in {".", ".."} or "/" in part or "\\" in part or "\x00" in part:
+            raise Error("invalid private state path")
+    descriptor = os.open(store.root, _DIR)
     try:
-        top.mkdir(mode=0o700, parents=True, exist_ok=True)
-        info = top.stat()
-        if info.st_uid != os.getuid():
-            raise Error("state directory must be owned by you with mode 700")
-        if info.st_mode & 0o077:
-            # Other users could list the per-brain directories; each one below is verified on its own.
-            top.chmod(0o700)
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077:
-            raise Error("state directory must be owned by you with mode 700")
-    except OSError as error:
-        # Locks, run history and usage live there: every command needs it, whichever brain it reads.
-        cause = f" ({error.strerror})" if error.strerror else ""
-        raise Error(
-            f"state directory {top} is inaccessible{cause}; make it writable or set XDG_STATE_HOME to a writable directory"
-        ) from error
-    return Store(directory)
-
-
-def state_store(root: Path) -> Store:
-    """Private run history and usage counts stay outside the evidence brain, keyed by its resolved path."""
-    return _private(digest(os.fsencode(root)), root=root)
-
-
-def runtime_store(store: Store) -> Store:
-    """Durable assistant obligations follow the physical brain, as its execution locks do.
-
-    The queue also checks the canonical path and configured name to reject accidental identity reuse.
-    A drained queue follows a move or rename; unresolved work refuses execution until the brain is restored. Never
-    discard this directory as a search cache.
-    """
-    found, unread = _renumbered(store)
-    if unread:
-        names = ", ".join(sorted(unread))
-        raise Error(
-            f"assistant queue in the state folder runtime/ ({names}) may belong to this brain but cannot be read, "
-            f"such as after an interrupted write; if it is this brain's, rename it {store.identity}, otherwise run "
-            "bf queue in its own brain"
-        )
-    if len(found) > 1:
-        names = ", ".join(sorted(found))
-        raise Error(
-            f"several assistant queues in the state folder runtime/ are bound to this brain ({names}); move all but "
-            f"the one to keep out of runtime/, then rename it {store.identity}"
-        )
-    return _private("runtime", store.identity, root=store.root)
-
-
-_UNREAD = "\x00"  # _bound's result for a queue that exists but cannot be read, never a brain path
-
-
-def _bound(folder: Path) -> str | None:
-    """The brain path a runtime folder's queue was last bound to, read without changing it.
-
-    None when the folder holds no bound queue; _UNREAD when its queue cannot be read, such as one holding the journal
-    of an interrupted write, which SQLite refuses to open read-only.
-    """
-    database = folder / QUEUE
-    try:
-        info = database.lstat()
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return _UNREAD
-    if not stat.S_ISREG(info.st_mode):
-        return _UNREAD
-    if not info.st_size:
-        return None  # created, schema not committed yet: it holds nothing
-    try:
-        connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True, timeout=1)
-        try:
-            if not connection.execute("SELECT 1 FROM sqlite_master WHERE name='checkpoints'").fetchone():
-                return _UNREAD
-            row = connection.execute("SELECT value FROM checkpoints WHERE key='binding'").fetchone()
-        finally:
-            connection.close()
-        binding = decode(row[0]) if row is not None else None
-    except sqlite3.Error, Error:
-        return _UNREAD
-    path = binding.get("path") if isinstance(binding, dict) else None
-    return path if isinstance(path, str) else None
-
-
-def _renumbered(store: Store) -> tuple[list[str], list[str]]:
-    """Keep the queue and program state when only the brain's device number changed.
-
-    Return the old names that block it: several bound to this path, and queues that cannot be read.
-
-    Some filesystems, such as btrfs, can number a device anew at boot, which renames the identity of the same folder.
-    When the brain has no runtime folder yet, the one folder with the same inode whose queue is bound to this path,
-    and its program state, take the new name. A copy or a move to another filesystem has another path or inode, so
-    its old queue stays where it is. Several matches, or a queue that cannot be read, move nothing.
-    """
-    # Only the per-brain folders are private: mkdir gave their shared parents the default mode.
-    runtime = _state("runtime", root=store.root)[1]
-    if not runtime.is_dir() or os.path.lexists(runtime / store.identity):
-        return [], []
-    inode = "-" + store.identity.rsplit("-", 1)[1]
-    with _lock(store, "renumber.lock", 30, busy="another process is checking this brain's state; retry"):
-        if os.path.lexists(runtime / store.identity):
-            return [], []
-        bound = {
-            entry.name: _bound(Path(entry.path))
-            for entry in os.scandir(runtime)
-            if entry.name.endswith(inode) and entry.is_dir(follow_symlinks=False)
-        }
-        found = [name for name, path in bound.items() if path == str(store.root)]
-        unread = [name for name, path in bound.items() if path == _UNREAD]
-        if len(found) != 1 or unread:
-            return found, unread
-        programs = _state("programs", root=store.root)[1]
-        if (programs / found[0]).is_dir() and not os.path.lexists(programs / store.identity):
-            (programs / found[0]).rename(programs / store.identity)
-        (runtime / found[0]).rename(runtime / store.identity)
-    return [], []
+        for part in target:
+            try:
+                os.mkdir(part, 0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            except OSError as error:
+                cause = f" ({error.strerror})" if error.strerror else ""
+                raise Error(f"state directory {part} is inaccessible{cause}") from error
+            else:
+                os.fsync(descriptor)
+            try:
+                child = os.open(part, _DIR, dir_fd=descriptor)
+            except OSError as error:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise Error("state directory must be a directory and may not contain symlinks") from error
+                cause = f" ({error.strerror})" if error.strerror else ""
+                raise Error(f"state directory {part} is inaccessible{cause}") from error
+            os.close(descriptor)
+            descriptor = child
+            info = os.fstat(descriptor)
+            if info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise Error("state directory must be owned by you with mode 700")
+    finally:
+        os.close(descriptor)
+    return Store(store.root.joinpath(*target))
 
 
 def program_state(store: Store, name: str) -> Store:
-    """A program's private directory on this machine, for cursors and tokens kept between runs.
+    """A program's private directory under `<brain>/.bf/state/<name>/`, for cursors and tokens kept between runs.
 
-    It follows the physical brain like its locks, never enters the brain, and may be deleted: a program must then
+    It stays inside `.bf/state/`, ignored by Git and excluded from search, and may be deleted: a program must then
     start again from its lookback.
     """
-    if not name or name.startswith(".") or "/" in name or "\x00" in name:
+    if not name or name.startswith(".") or "/" in name or "\\" in name or "\x00" in name:
         raise Error("invalid program name")
-    # Collection never waits for the queue: an ambiguous queue is runtime_store's error, not a program's.
-    _renumbered(store)
-    return _private("programs", store.identity, name, root=store.root)
+    return private_dir(store, ".bf", "state", name)
 
 
 def lock_file(store: Store, name: str) -> tuple[Store, str]:
-    """Where a lock lives: every lock follows the physical brain, whatever path or mount reached it."""
-    leaf = f"{store.identity}.lock" if name == "write.lock" else f"{store.identity}-{name}"
-    return _private("locks", root=store.root), leaf
+    """Where a brain-local lock lives: `<brain>/.bf/locks/<name>`."""
+    if not name or name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
+        raise Error("invalid lock name")
+    return private_dir(store, ".bf", "locks"), name
 
 
 @contextmanager
@@ -631,17 +528,17 @@ def _lock(
     shared: bool = False,
     busy: str = "another writer is active for this brain; retry after it finishes",
 ) -> Generator[None]:
-    # The writer lock also holds the brain directory; other locks order work that only this state directory sees.
+    # The writer lock also holds the brain directory; other locks serialize brain-local operations inside .bf/locks/.
     whole = name == "write.lock"
-    state, name = lock_file(store, name)
-    with state.parent(name) as (parent, leaf):
+    state, leaf = lock_file(store, name)
+    with state.parent(leaf) as (parent, entry):
         flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
-            fd = os.open(leaf, flags | os.O_CREAT, 0o600, dir_fd=parent)
+            fd = os.open(entry, flags | os.O_CREAT, 0o600, dir_fd=parent)
         except FileNotFoundError:
             # Concurrent first creation can report ENOENT on macOS. Reopen only an existing lock;
             # keep the pinned parent and safety flags, and never replace a missing lock on recovery.
-            fd = os.open(leaf, flags, dir_fd=parent)
+            fd = os.open(entry, flags, dir_fd=parent)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise Error("invalid writer lock")

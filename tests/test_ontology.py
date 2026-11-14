@@ -1,67 +1,44 @@
-"""Schema contracts preserve relations and make the derived graph recoverable from records."""
+"""Schema-less relations, optional bf.yaml targets/broader rules, @type, and reprojection."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import cast
 
 import pytest
 from mcp.types import CallToolResult
-from pydantic import JsonValue, ValidationError
+from pydantic import ValidationError
+from typer.testing import CliRunner
 
-from bf import index, ontology, records
+from bf import index, records
+from bf.cli import app
 from bf.collect import collect
 from bf.config import load
 from bf.evaluate import evaluate
 from bf.mcp import server
-from bf.models import Config, Error, Mapping, Query, Record, SchemaField, encode
-from bf.retrieve import read
-from bf.retrieve import search as retrieve_search
+from bf.models import Config, Error, Knowledge, Query, Record, SchemaField, encode
+from bf.retrieve import read, search
 from bf.storage import Store, writer
 from bf.validate import validate
 from test_interfaces import invoke
 
-
-def search(stores: list[Store], query: Query) -> dict:
-    return cast(dict, retrieve_search(stores, query))
-
-
-CONFIG = b"""version: 8
+CONFIG = b"""version: 9
 name: fixture
 fields:
   sender:
     description: Account that sent the message.
-    type: identity
-    cardinality: one
-    relation: true
-    examples: [person:alice]
   recipient:
     description: Explicit recipients of this message.
-    type: identity
-    cardinality: many
-    relation: true
-    examples: [[person:bob, person:carol]]
-  label:
-    description: Reviewed category.
-    type: string
-  kind:
-    description: Common record kind.
-    type: string
-    cardinality: one
 sensors:
   mail:
     command: [fake-provider]
-    fields:
-      sender: {path: /attributes/from}
-      recipient: {path: /attributes/to}
-      label: {path: /attributes/category}
-      kind: {value: message}
 """
 
 
 def linking(brain: Store, identity: str, relation: str) -> list[str]:
     """Refs linking to an identity through one explicit relation, from its read."""
-    groups = cast(list[dict], read([brain], identity)["backlinks"])
+    groups = cast("list[dict]", read(brain, identity)["backlinks"])
     return [i["ref"] for g in groups if g.get("relation") == relation for i in g["items"]]
 
 
@@ -71,171 +48,228 @@ def ingest(brain: Store, values: list[dict], sensor: str = "mail") -> dict:
     )
 
 
-def test_relations_replacement_aliases_and_cache_rebuild(brain: Store) -> None:
-    brain.write("bf.yaml", CONFIG)
+def test_undeclared_camel_and_kebab_relations_work_and_rebuild_cleanly(brain: Store) -> None:
+    brain.write("bf.yaml", b"version: 9\nname: fixture\nsensors:\n  mail:\n    command: [fake-provider]\n")
     brain.write("projects/alice.md", b"---\ntype: person\naliases: [person:alice, account:alice]\n---\n# Alice\n")
-    first = {"id": "one", "title": "Planning", "attributes": {"from": "person:alice", "to": ["person:bob"]}}
-    second = {"id": "two", "title": "Reply", "attributes": {"from": "person:bob", "to": ["person:alice"]}}
+    brain.write(
+        "projects/note.md",
+        b"---\ntype: project\nrelations:\n  depends-on: bf://fixture/projects/alice.md\n---\n"
+        b"# Note\n\n[Assignee](person:bob?rel=assignedTo) invalid-inline\n",
+    )
+    brain.write(
+        "projects/inline.md",
+        b"---\ntype: project\n---\n# Inline\n\n[Owner](bf://fixture/projects/alice.md?rel=worksWith)\n",
+    )
+    first = {"id": "one", "title": "Planning", "relations": {"assignedTo": "person:alice", "blocked-by": "person:bob"}}
+    second = {"id": "two", "title": "Reply", "relations": {"worksWith": "account:alice"}}
     assert ingest(brain, [first, second])["added"] == 2
-    assert linking(brain, "person:alice", "sender") == ["mail:one"]
-    assert linking(brain, "account:alice", "sender") == ["mail:one"]
-    assert linking(brain, "person:alice", "recipient") == ["mail:two"]
-    assert search([brain], Query(text="message"))["items"]
-    assert cast(dict, read([brain], "mail:one")["record"])["fields"] == {
-        "sender": "person:alice",
-        "recipient": ["person:bob"],
-        "kind": "message",
-    }
-    assert validate(brain)["valid"]
+    assert linking(brain, "person:alice", "assignedTo") == ["mail:one"]
+    assert set(linking(brain, "account:alice", "worksWith")) == {"mail:two", "projects/inline.md"}
+    assert linking(brain, "person:alice", "depends-on") == ["projects/note.md"]
+    assert linking(brain, "person:bob", "blocked-by") == ["mail:one"]
+    # Rebuild .bf/cache.sqlite3 cleanly from authoritative files alone.
     with writer(brain):
         brain.delete(index.CACHE)
-    assert linking(brain, "person:alice", "sender") == ["mail:one"]
-    first["attributes"]["from"] = "person:carol"
+    assert linking(brain, "person:alice", "assignedTo") == ["mail:one"]
+    first["relations"] = {"assignedTo": "person:carol"}
     ingest(brain, [first])
-    assert linking(brain, "person:alice", "sender") == []
-    assert linking(brain, "person:alice", "recipient") == ["mail:two"]
+    assert linking(brain, "person:alice", "assignedTo") == []
+    assert set(linking(brain, "person:alice", "worksWith")) == {"mail:two", "projects/inline.md"}
     with writer(brain):
         records.upsert(brain, "mail", [], snapshot=True)
-    assert read([brain], "person:alice")["backlinks"] == []
+    assert linking(brain, "person:alice", "worksWith") == ["projects/inline.md"]
 
 
-def test_invalid_batch_writes_nothing_and_does_not_leak(brain: Store) -> None:
+def test_relation_naming_boundaries_and_invisible_characters_are_enforced() -> None:
+    for valid in ("owner", "assignedTo", "depends-on", "a1-b2"):
+        Record(id="x", title="Ok", relations={valid: "person:alice"})
+        Knowledge(type="concept", relations={valid: "person:alice"})
+    for invalid in ("Assigned", "bad--name", "bad_name", "-lead", "tail-", "links", "tagged-with"):
+        with pytest.raises(ValidationError):
+            Record(id="x", title="Bad", relations={invalid: "person:alice"})
+    for identity, ok in [
+        ("person:alice", True),
+        ("person:ali\u200bce", False),
+        ("person:alice\ufeff", False),
+        ("bf://fixture/people/ali%E2%80%8Bce", False),
+        ("https://example.test/ali%E2%80%8Bce", True),
+    ]:
+        if ok:
+            Record(id="x", title="Ok", links=[identity])
+        else:
+            with pytest.raises(ValidationError, match=r"invisible|format|invalid BF link"):
+                Record(id="x", title="Bad", relations={"owner": identity})
+    Record(id="x", title="Ok", links=["https://example.test/ali%E2%80%8Bce"])
+
+
+def test_attributes_and_item_type_stay_distinct_from_graph_relations(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
-    good = {"id": "one", "title": "Good", "attributes": {"from": "person:alice"}}
-    bad = {"id": "two", "title": "Bad", "attributes": {"from": "PRIVATE-SECRET"}}
-    with pytest.raises(Error, match="field sender") as caught:
+    brain.write(
+        "concepts/plan.md",
+        b"---\ntype: concept\nattributes:\n  note_ref: person:ghost\n  bf_ref: bf://fixture/projects/ghost.md\n  tag_word: sapphire\n---\n# Plan\n",
+    )
+    ingest(
+        brain,
+        [
+            {
+                "id": "one",
+                "title": "Planning",
+                "@type": "Message",
+                "relations": {"sender": "person:alice"},
+                "attributes": {
+                    "category": "urgent",
+                    "ghost": "person:ghost",
+                    "bf_ref": "bf://fixture/projects/ghost.md",
+                },
+            },
+            {"id": "two", "title": "Plain", "attributes": {"category": "urgent"}},
+        ],
+    )
+    # Attributes are indexed without their keys; @type appears only when present; no "type": "record" leaks.
+    found = {
+        item["ref"]: (item.get("@type"), "type" in item)
+        for item in cast("list[dict]", search(brain, Query(text="urgent"))["items"])
+    }
+    assert found == {
+        "mail:one": ("Message", False),
+        "mail:two": (None, False),
+    }
+    assert search(brain, Query(text="category tag_word"))["items"] == []
+    assert search(brain, Query(text="sapphire"))["items"]
+    exact_one = cast("dict", read(brain, "mail:one")["record"])
+    exact_two = cast("dict", read(brain, "mail:two")["record"])
+    assert exact_one["@type"] == "Message"
+    assert exact_one["relations"] == {"sender": "person:alice"}
+    assert exact_one["attributes"]["category"] == "urgent"
+    assert "@type" not in exact_two
+    assert "relations" not in exact_two
+    exported_run = CliRunner().invoke(app, ["export", "--brain", str(brain.root), "--kind", "items"])
+    assert exported_run.exit_code == 0, exported_run.output
+    exported = {
+        item["ref"]: item for item in (json.loads(line) for line in exported_run.stdout.splitlines() if line.strip())
+    }
+    assert exported["mail:one"]["@type"] == "Message"
+    assert "@type" not in exported["mail:two"]
+    assert "type" not in exported["mail:one"]
+    # Attribute values shaped like identities or BF URIs never create graph edges.
+    with pytest.raises(Error, match="not found"):
+        read(brain, "person:ghost")
+    assert "claims" not in read(brain, "concepts/plan.md")
+
+
+def test_invalid_batch_writes_nothing_and_rejects_legacy_fields(brain: Store) -> None:
+    brain.write("bf.yaml", CONFIG)
+    good = {"id": "one", "title": "Good", "relations": {"sender": "person:alice"}}
+    bad = {"id": "two", "title": "Bad", "relations": {"sender": "PRIVATE-SECRET"}}
+    with pytest.raises(Error, match="relations") as caught:
         ingest(brain, [good, bad])
     assert "PRIVATE-SECRET" not in str(caught.value)
     assert records.files(brain, "mail") == []
-    with pytest.raises(Error, match="required mapped value"):
-        ingest(brain, [{"id": "one", "title": "Missing"}])
-    with pytest.raises(Error, match="not precomputed"):
+    with pytest.raises(Error, match="not fields"):
         ingest(brain, [{**good, "fields": {"sender": "person:mallory"}}])
 
 
-@pytest.mark.parametrize(
-    ("kind", "value", "valid"),
-    [
-        ("integer", 2, True),
-        ("integer", True, False),
-        ("number", 1.5, True),
-        ("number", "2", False),
-        ("boolean", False, True),
-        ("boolean", 1, False),
-        ("timestamp", "2026-01-01T01:00:00+01:00", True),
-        ("timestamp", "2026-01-01", False),
-        ("identity", "person:alice", True),
-        ("identity", "Alice", False),
-        ("identity", "person:ali\u200bce", False),
-        ("identity", "person:alice\ufeff", False),
-        # A BF address decodes its path, so a percent-encoded invisible character counts; another URI keeps it.
-        ("identity", "bf://fixture/people/ali%E2%80%8Bce", False),
-        ("identity", "https://example.test/ali%E2%80%8Bce", True),
-        ("string", "", False),
-        ("string", "a" * 8193, False),
-        ("string", {}, False),
-    ],
-)
-def test_scalar_contracts(kind: str, value: JsonValue, valid: bool) -> None:
-    field = SchemaField.model_validate({"description": "Example", "type": kind})
-    if valid:
-        assert field.normalize(value) is not None
-    else:
-        with pytest.raises(ValueError, match=r"expected|requires|exceeds|nonempty|invisible"):
-            field.normalize(value)
-
-
-def test_config_contracts_and_pointer_escaping() -> None:
-    with pytest.raises(ValidationError, match="relation fields"):
-        SchemaField(description="Wrong", type="string", relation=True)
-    with pytest.raises(ValidationError):
-        SchemaField(description="Wrong", type="integer", examples=[True])
-    field = SchemaField(description="Many", type="string", cardinality="many")
-    assert field.normalize(["a", "a", "b"]) == ["a", "b"]
-    invalid_values: list[JsonValue] = ["a", ["a"] * 1001, [1]]
-    for invalid in invalid_values:
-        with pytest.raises(ValueError, match=r"expected|requires|exceeds|nonempty"):
-            field.normalize(invalid)
-    for invalid in [{}, {"path": None}, {"path": "/x", "value": 1}, {"path": "x"}, {"path": "/~2"}, {"value": None}]:
+def test_optional_field_rules_validate_targets_and_broader_without_legacy_keys() -> None:
+    for rejected in (
+        {"description": "X", "type": "identity"},
+        {"description": "X", "cardinality": "one"},
+        {"description": "X", "relation": True},
+        {"description": "X", "examples": ["person:a"]},
+    ):
         with pytest.raises(ValidationError):
-            Mapping.model_validate(invalid)
-    assert ontology.pointer({"a/b": {"~": ["ok"]}}, "/a~1b/~0/0") == "ok"
-    assert ontology.pointer({}, "/missing") is None
-    assert ontology.pointer([], "/1") is None
-    for document, path in [(1, "/x"), ([], "/01"), ([], "/x")]:
-        with pytest.raises(Error, match="cannot traverse"):
-            ontology.pointer(document, path)
-    with pytest.raises(ValidationError, match=r"sensors\.x\.fields\.missing: not declared in fields"):
-        Config.model_validate(
-            {
-                "version": 8,
-                "name": "test",
-                "sensors": {"x": {"command": ["fake"], "fields": {"missing": {"value": "x"}}}},
-            }
-        )
+            SchemaField.model_validate(rejected)
+    for schema, message in [
+        ({"cites": {"description": "R."}}, "reserved for OKF sources"),
+        ({"links": {"description": "R."}}, "reserved for untyped"),
+        ({"tagged-with": {"description": "R."}}, "reserved for tag"),
+        ({"owner": {"broader": "owner"}}, r"fields\.owner\.broader"),
+        ({"owner": {"broader": "absent"}}, r"fields\.owner\.broader"),
+        ({"a": {}, "b": {"broader": "a"}, "c": {"broader": "b"}}, r"fields\.c\.broader"),
+        ({"owner": {"targets": ["Person:"]}}, "targets"),
+        ({"owner": {"targets": ["person"]}}, "targets"),
+        ({"owner": {"targets": []}}, "targets"),
+    ]:
+        with pytest.raises(ValidationError, match=message):
+            Config.model_validate({"version": 9, "name": "test", "fields": schema})
     with pytest.raises(ValidationError):
-        Config.model_validate({"version": 3, "name": "old"})
+        Config.model_validate({"version": 9, "name": "test", "sensors": {"x": {"command": ["fake"], "fields": {}}}})
+    with pytest.raises(ValidationError):
+        Config.model_validate({"version": 8, "name": "old"})
 
 
-def test_schema_change_invalidates_cache_and_bad_record_is_reported(brain: Store) -> None:
+TARGETED = CONFIG.replace(
+    b"    description: Account that sent the message.\n",
+    b'    description: Account that sent the message.\n    targets: ["person:", "bf://fixture/people/"]\n',
+)
+
+
+def test_targets_fail_collection_atomically_and_validate_existing_evidence(brain: Store) -> None:
+    brain.write("bf.yaml", TARGETED)
+    first = {"id": "one", "title": "Planning", "relations": {"sender": "person:alice"}}
+    ingest(brain, [first, {"id": "two", "title": "Team", "relations": {"sender": "bf://fixture/people/bob"}}])
+    stored = {name: brain.read(name) for name in records.files(brain, "mail")}
+    outside = {"id": "three", "title": "Team", "relations": {"sender": "team:PRIVATE-TEAM"}}
+    with pytest.raises(Error, match=r"relation sender: identity outside the declared targets") as caught:
+        ingest(brain, [{**first, "title": "Changed"}, outside])
+    assert "PRIVATE-TEAM" not in str(caught.value)
+    linked = {**first, "links": ["bf://fixture/teams/PRIVATE?rel=sender"]}
+    with pytest.raises(Error, match=r"link relation sender: identity outside the declared targets") as caught:
+        ingest(brain, [linked])
+    assert "PRIVATE" not in str(caught.value)
+    assert {name: brain.read(name) for name in records.files(brain, "mail")} == stored
+    # Widening or narrowing targets in bf.yaml reports existing violations while preserving evidence and zero rebuild.
     brain.write("bf.yaml", CONFIG)
-    ingest(brain, [{"id": "one", "title": "Mail", "attributes": {"from": "person:alice"}}])
-    assert linking(brain, "person:alice", "sender") == ["mail:one"]
-    brain.write("bf.yaml", CONFIG.replace(b"relation: true", b"relation: false"))
-    with pytest.raises(Error, match="not found"):
-        read([brain], "person:alice")
-    record = Record(id="bad", title="Invalid", fields={"undeclared": "x"})
+    ingest(brain, [{"id": "four", "title": "Team mail", "relations": {"recipient": "team:core"}}])
+    brain.write("concepts/bob.md", b"---\ntype: person\naliases: [bf://fixture/people/bob]\n---\n# Bob\n")
+    brain.write("concepts/core.md", b"---\ntype: team\nentity: bf://fixture/teams/core\n---\n# Core\n")
     brain.write(
-        "memories/bad/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json", records.serialize(record)
+        "projects/plan.md", b"---\ntype: project\n---\n# Plan\n\n[Core](bf://fixture/teams/core?rel=recipient)\n"
     )
-    reply = search([brain], Query(text="offline"))
-    assert reply["items"]
-    assert reply["problems"]
-    assert not validate(brain)["valid"]
-    with pytest.raises(Error, match="field sender"):
-        ontology.validate(Record(id="bad", title="Bad", fields={"sender": 1}), load(brain))
-
-
-def test_schema_edits_keep_every_stored_identity_edge(brain: Store) -> None:
-    brain.write("bf.yaml", CONFIG)
-    values = {"from": "person:alice", "to": ["person:bob"], "category": "urgent"}
-    ingest(brain, [{"id": "one", "title": "Planning", "attributes": values}])
-    assert linking(brain, "person:bob", "recipient") == ["mail:one"]
-    # A declared relation keeps its stored identities whatever cardinality it now has.
-    many = b"    cardinality: many\n    relation: true\n    examples: [[person:bob, person:carol]]\n"
-    retyped = CONFIG.replace(many, b"    cardinality: optional\n    relation: true\n")
-    brain.write("bf.yaml", retyped)
-    assert linking(brain, "person:bob", "recipient") == ["mail:one"]
-    assert "field recipient" in str(validate(brain)["problems"])
-    # A value stored before its field became an identity names none, so it claims nothing.
-    retyped = retyped.replace(b"    type: string\n  kind:", b"    type: identity\n    relation: true\n  kind:")
-    brain.write("bf.yaml", retyped)
-    reply = search([brain], Query(text="planning urgent", target="person:bob"))
-    assert [item["ref"] for item in reply["items"]] == ["mail:one"]
-    assert "problems" not in reply
-    assert "field label" in str(validate(brain)["problems"])
+    assert validate(brain)["valid"]
+    index.refresh(brain)
+    brain.write(
+        "bf.yaml",
+        TARGETED.replace(
+            b"    description: Explicit recipients of this message.\n",
+            b'    description: Explicit recipients of this message.\n    targets: ["person:"]\n    broader: sender\n',
+        ),
+    )
+    assert index.refresh(brain)["changed"] == 0
+    problems = cast("list[dict]", validate(brain)["problems"])
+    assert problems == [
+        {"file": records.path("mail", "four"), "error": "relation recipient: identity outside the declared targets"},
+        {"file": "projects/plan.md", "error": "recipient link outside the declared targets: bf://fixture/teams/core"},
+    ]
+    # Evidence stays readable under its stored relation, and relation pages roll up narrower relations at read time.
+    assert linking(brain, "team:core", "recipient") == ["mail:four"]
+    assert [i["ref"] for i in cast("list[dict]", read(brain, "team:core", rel="sender")["items"])] == ["mail:four"]
+    assert [i["ref"] for i in cast("list[dict]", read(brain, "bf://fixture/teams/core", rel="sender")["items"])] == [
+        "projects/plan.md"
+    ]
 
 
 def test_cli_mcp_and_evaluation_share_relation_pages(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
-    ingest(brain, [{"id": "one", "title": "Mail", "attributes": {"from": "person:alice"}}])
-    cli = invoke("read", "person:alice")
+    ingest(brain, [{"id": "one", "title": "Mail", "relations": {"sender": "person:alice"}}])
+    cli = invoke("read", "person:alice", "--brain", str(brain.root))
     assert cli["page"] == "person:alice"
 
     async def call() -> dict:
-        result = await server([brain]).call_tool("read", {"ref": "person:alice"})
+        result = await server(brain).call_tool("read", {"ref": "person:alice"})
         assert isinstance(result, CallToolResult)
-        return cast(dict, result.structured_content)
+        return cast("dict", result.structured_content)
 
     assert asyncio.run(call())["backlinks"] == cli["backlinks"]
-    assert invoke("search", "mail", "--scope", "person:alice")["items"][0]["ref"] == "mail:one"
+    assert (
+        invoke("search", "mail", "--scope", "person:alice", "--brain", str(brain.root))["items"][0]["ref"] == "mail:one"
+    )
     brain.write(
         "evals/relations.yaml",
-        b"version: 8\ncases:\n- name: sender\n  read: person:alice\n  expect: [mail:one]\n  text: [sender]\n",
+        b"version: 9\ncases:\n- name: sender\n  read: person:alice\n  expect: [mail:one]\n  text: [sender]\n",
     )
     brain.write(
         "evals/nested/empty.yml",
-        b"version: 8\ncases:\n- name: absent\n  read: person:unknown\n  empty: true\n",
+        b"version: 9\ncases:\n- name: absent\n  read: person:unknown\n  empty: true\n",
     )
     assert evaluate(brain)["score"] == "2/2"
     assert evaluate(brain, "evals/relations.yaml")["score"] == "1/1"
@@ -243,192 +277,63 @@ def test_cli_mcp_and_evaluation_share_relation_pages(brain: Store) -> None:
         with pytest.raises(ValidationError):
             Query.model_validate(params)
     brain.write(
-        "evals/duplicate.yaml", b"version: 8\ncases:\n- name: twice\n  empty: true\n- name: twice\n  empty: true\n"
+        "evals/duplicate.yaml", b"version: 9\ncases:\n- name: twice\n  empty: true\n- name: twice\n  empty: true\n"
     )
     with pytest.raises(Error, match="duplicate"):
         evaluate(brain)
 
 
-def test_field_values_are_searchable_words_without_their_keys(brain: Store) -> None:
+def test_reproject_revalidates_records_and_keeps_target_failures_unchanged(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
     brain.write("bf.yaml", CONFIG)
-    assert ingest(
-        brain, [{"id": "one", "title": "Planning", "attributes": {"from": "person:alice", "category": "urgent"}}]
-    )
-    found = {str(i["ref"]) for i in search([brain], Query(text="urgent"))["items"]}
-    assert "mail:one" in found
-    # Field names and JSON punctuation are not words of the record: "label" and "kind" match nothing here.
-    assert search([brain], Query(text="label kind"))["items"] == []
-
-
-def test_loaded_configurations_are_shared_frozen_and_follow_edits(brain: Store) -> None:
-    brain.write("bf.yaml", CONFIG)
-    first = load(brain)
-    assert load(brain) is first
-    # One command shares this object, so neither the configuration nor its programs accept changes.
-    with pytest.raises(ValidationError):
-        setattr(first, "name", "other")  # noqa: B010 - exercise the frozen model at runtime
-    with pytest.raises(ValidationError):
-        setattr(first.sensors["mail"], "enabled", False)  # noqa: B010 - exercise the frozen model at runtime
-    brain.write("bf.yaml", CONFIG.replace(b"  mail:\n", b"  post:\n"))
-    assert set(load(brain).sensors) == {"post"}
-
-
-def field(**values: object) -> dict[str, object]:
-    return {"description": "A relation.", "type": "identity", "cardinality": "many", "relation": True, **values}
-
-
-@pytest.mark.parametrize(
-    ("schema", "message"),
-    [
-        ({"cites": field()}, "reserved for OKF sources"),
-        ({"owner": field(broader="owner")}, r"fields\.owner\.broader"),
-        ({"owner": field(broader="absent")}, r"fields\.owner\.broader"),
-        ({"owner": field(broader="kind"), "kind": {"description": "Kind.", "type": "string"}}, "broader"),
-        ({"a": field(), "b": field(broader="a"), "c": field(broader="b")}, r"fields\.c\.broader"),
-        ({"owner": field(targets=["Person:"])}, "targets"),
-        ({"owner": field(targets=["person"])}, "targets"),
-        ({"owner": field(targets=[])}, "targets"),
-        ({"owner": field(targets=["person:"], examples=[["team:core"]])}, "declared targets"),
-        ({"owner": field(relation=False, type="identity", targets=["person:"])}, "require relation"),
-        ({"owner": field(relation=False, type="identity", broader="kind")}, "require relation"),
-    ],
-)
-def test_broader_and_targets_are_checked_before_anything_runs(schema: dict, message: str) -> None:
-    with pytest.raises(ValidationError, match=message):
-        Config.model_validate({"version": 8, "name": "test", "fields": schema})
-
-
-def test_constant_mappings_respect_their_targets() -> None:
-    schema = {"owner": field(targets=["person:"])}
-    sensors = {"mail": {"command": ["fake"], "fields": {"owner": {"value": ["team:core"]}}}}
-    with pytest.raises(ValidationError, match=r"sensors\.mail\.fields\.owner: value outside the declared targets"):
-        Config.model_validate({"version": 8, "name": "test", "fields": schema, "sensors": sensors})
-    sensors["mail"]["fields"]["owner"]["value"] = ["person:alice"]
-    config = Config.model_validate({"version": 8, "name": "test", "fields": schema, "sensors": sensors})
-    assert config.ontology["owner"].allows(["person:alice", "person:bob"])
-    assert not config.ontology["owner"].allows(["person:alice", "team:core"])
-
-
-TARGETED = CONFIG.replace(b"    examples: [person:alice]\n", b'    targets: ["person:", "bf://fixture/people/"]\n')
-
-
-def test_targets_fail_a_collection_by_position_without_changing_evidence(brain: Store) -> None:
-    brain.write("bf.yaml", TARGETED)
-    first = {"id": "one", "title": "Planning", "attributes": {"from": "person:alice"}}
-    ingest(brain, [first, {"id": "two", "title": "Team", "attributes": {"from": "bf://fixture/people/bob"}}])
-    stored = {name: brain.read(name) for name in records.files(brain, "mail")}
-    outside = {"id": "three", "title": "Team", "attributes": {"from": "team:PRIVATE-TEAM"}}
-    with pytest.raises(Error, match=r"record 1: field sender: identity outside the declared targets") as caught:
-        ingest(brain, [{**first, "title": "Changed"}, outside])
-    assert "PRIVATE-TEAM" not in str(caught.value)
-    # A typed link names a relation too: its target must fit the same declared targets.
-    linked = {**first, "links": ["bf://fixture/teams/PRIVATE?rel=sender"]}
-    with pytest.raises(Error, match=r"record 0: link relation sender: identity outside the declared targets") as caught:
-        ingest(brain, [linked])
-    assert "PRIVATE" not in str(caught.value)
-    assert {name: brain.read(name) for name in records.files(brain, "mail")} == stored
-
-
-def test_validate_reports_targets_that_stored_records_and_note_links_miss(brain: Store) -> None:
-    brain.write("bf.yaml", CONFIG)
-    ingest(brain, [{"id": "one", "title": "Planning", "attributes": {"from": "team:core"}}])
-    brain.write("concepts/core.md", b"---\ntype: team\nentity: bf://fixture/teams/core\n---\n# Core\n")
-    brain.write("projects/plan.md", b"---\ntype: plan\n---\n# Plan\n\n[Core](bf://fixture/teams/core?rel=recipient)\n")
-    assert validate(brain)["valid"]
-    brain.write(
-        "bf.yaml",
-        TARGETED.replace(b"    examples: [[person:bob, person:carol]]\n", b'    targets: ["person:"]\n'),
-    )
-    problems = cast(list[dict], validate(brain)["problems"])
-    assert problems == [
-        {"file": records.path("mail", "one"), "error": "field sender: identity outside the declared targets"},
-        {"file": "projects/plan.md", "error": "recipient link outside the declared targets: bf://fixture/teams/core"},
-    ]
-    # Evidence stays readable: the claims remain until their files change.
-    assert linking(brain, "team:core", "sender") == ["mail:one"]
-    assert linking(brain, "bf://fixture/teams/core", "recipient") == ["projects/plan.md"]
-
-
-def test_reprojection_applies_current_mappings_to_stored_records(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    brain.write("bf.yaml", CONFIG)
-    first = {"id": "one", "title": "Planning", "attributes": {"from": "person:alice", "to": ["person:bob"]}}
-    second = {"id": "two", "title": "Reply", "attributes": {"from": "person:bob"}}
-    ingest(brain, [first, second, {**second, "id": "three"}])
+    for item in ("one", "two", "three"):
+        brain.write(
+            records.path("mail", item),
+            json.dumps(
+                {
+                    "id": item,
+                    "title": f"Item {item}",
+                    "time": "2026-01-01T00:00:00Z",
+                    "relations": {"sender": "person:alice"},
+                }
+            ).encode(),
+        )
     before = {name: brain.read(name) for name in records.files(brain, "mail")}
-    # Rename a relation: stored records keep the old field, which no longer builds an edge, until reprojected.
-    renamed = CONFIG.replace(b"  sender:\n", b"  author:\n").replace(b"      sender: {", b"      author: {")
-    brain.write("bf.yaml", renamed)
-    assert "field sender is not declared in bf.yaml fields" in str(validate(brain)["problems"])
     preview = invoke("build", "--brain", str(brain.root), "--reproject", "mail", "--dry-run")
-    assert preview == {"sensor": "mail", "dry_run": True, "records": 3, "changed": 3, "unchanged": 0, "failed": 0}
+    assert preview == {"sensor": "mail", "dry_run": True, "records": 3, "changed": 0, "unchanged": 3, "failed": 0}
     assert {name: brain.read(name) for name in records.files(brain, "mail")} == before
     recovered: list[Store] = []
     monkeypatch.setattr(records, "recover", lambda store: recovered.append(store))
-    # Two records per transaction: each commit leaves every record either reprojected or as it was.
-    monkeypatch.setattr("bf.collect.REPROJECT", 2)
     done = invoke("build", "--brain", str(brain.root), "--reproject", "mail")
     assert recovered
-    assert (done["changed"], done["unchanged"], done["failed"]) == (3, 0, 0)
-    assert cast(dict, done["index"])["skipped"] == 0
-    assert validate(brain)["valid"]
-    assert linking(brain, "person:alice", "author") == ["mail:one"]
+    assert (done["changed"], done["unchanged"], done["failed"]) == (0, 3, 0)
+    assert cast("dict", done["index"])["skipped"] == 0
     stored = records.load(brain, records.path("mail", "one"))
-    assert stored.fields == {"author": "person:alice", "recipient": ["person:bob"], "kind": "message"}
-    # Collection's own time and every other stored value stay as they were.
-    previous = Record.model_validate_json(before[records.path("mail", "one")])
-    assert stored.model_dump(exclude={"fields"}) == previous.model_dump(exclude={"fields"})
-    assert invoke("build", "--brain", str(brain.root), "--reproject", "mail")["unchanged"] == 3
-
-
-def test_reprojection_keeps_records_the_current_mappings_reject(brain: Store) -> None:
-    brain.write("bf.yaml", CONFIG)
-    ingest(brain, [{"id": "one", "title": "Planning", "attributes": {"from": "person:alice", "category": "x"}}])
-    ingest(brain, [{"id": "two", "title": "Reply", "attributes": {"from": "person:bob"}}])
-    # `label` becomes required: a record whose sensor never printed a category cannot gain one now.
+    assert stored.relations == {"sender": "person:alice"}
+    # A record violating newly added targets stays untouched on disk and exits with code 1.
     brain.write(
-        "bf.yaml", CONFIG.replace(b"    type: string\n  kind:", b"    type: string\n    cardinality: one\n  kind:")
+        records.path("mail", "two"), encode({"id": "two", "title": "Bad", "relations": {"sender": "team:nope"}})
     )
-    before = brain.read(records.path("mail", "two"))
+    bad_before = brain.read(records.path("mail", "two"))
+    brain.write("bf.yaml", TARGETED)
     reply = invoke("build", "--brain", str(brain.root), "--reproject", "mail", code=1)
-    assert {key: reply[key] for key in ("records", "changed", "unchanged", "failed")} == {
-        "records": 2,
-        "changed": 0,
-        "unchanged": 1,
-        "failed": 1,
-    }
-    assert reply["problems"] == [
-        {"file": records.path("mail", "two"), "error": "field label: required mapped value is missing"}
-    ]
-    assert brain.read(records.path("mail", "two")) == before
+    assert (reply["records"], reply["changed"], reply["unchanged"], reply["failed"]) == (3, 0, 2, 1)
+    assert brain.read(records.path("mail", "two")) == bad_before
     for args, code in ((["--dry-run"], 2), (["--reproject", "Mail"], 2), (["--reproject", "absent"], 1)):
         assert invoke("build", "--brain", str(brain.root), *args, code=code) == {}
 
 
-def test_broader_and_targets_keep_the_cache_like_other_read_time_settings(brain: Store) -> None:
+def test_identity_search_deduplicates_links_and_config_follows_edits(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
-    index.refresh(brain)
-    # Before 17 either setting rebuilt the cache, though relation pages read broader at query time and only
-    # collection and validation check targets: a large brain spent minutes rebuilding identical rows.
-    for changed in (
-        TARGETED,
-        CONFIG.replace(b"    cardinality: many\n", b"    cardinality: many\n    broader: sender\n"),
-    ):
-        brain.write("bf.yaml", changed)
-        assert index.refresh(brain)["changed"] == 0
-    # A structural change, such as a field's type, still rebuilds every row.
-    brain.write(
-        "bf.yaml", CONFIG.replace(b"    type: string\n  kind:", b"    type: string\n    cardinality: many\n  kind:")
-    )
-    assert index.refresh(brain)["changed"] == 4
-
-
-def test_identity_search_lists_a_typed_link_once(brain: Store) -> None:
-    brain.write("bf.yaml", CONFIG)
-    # Like git-history, the sensor emits the sender both as a link and as a mapped relation.
+    first = load(brain)
+    assert load(brain) is first
+    with pytest.raises(ValidationError):
+        setattr(first, "name", "other")  # noqa: B010 - exercise the frozen model at runtime
     ingest(
-        brain, [{"id": "one", "title": "Planning", "links": ["person:alice"], "attributes": {"from": "person:alice"}}]
+        brain, [{"id": "one", "title": "Planning", "links": ["person:alice"], "relations": {"sender": "person:alice"}}]
     )
-    items = cast(list[dict], search([brain], Query(text="person:alice"))["items"])
+    items = cast("list[dict]", search(brain, Query(text="person:alice"))["items"])
     assert [(item["ref"], item["relations"]) for item in items] == [
         (
             "mail:one",
@@ -442,36 +347,5 @@ def test_identity_search_lists_a_typed_link_once(brain: Store) -> None:
             ],
         )
     ]
-    assert linking(brain, "person:alice", "sender") == ["mail:one"]
-
-
-def test_default_schema_field_path_and_sensor_override(brain: Store) -> None:
-    brain.write(
-        "bf.yaml",
-        b"version: 8\nname: fixture\nfields:\n"
-        b"  kind:\n    description: Item kind.\n    type: string\n    path: /attributes/ontology/kind\n"
-        b"  author:\n    description: Author.\n    type: identity\n    relation: true\n    path: /attributes/ontology/author\n"
-        b"sensors:\n  mail:\n    command: [echo]\n  custom:\n    command: [echo]\n    fields:\n      kind:\n        value: override\n",
-    )
-    ingest(
-        brain,
-        [
-            {
-                "id": "m1",
-                "title": "Default mapped",
-                "attributes": {"ontology": {"kind": "message", "author": "person:alice"}},
-            }
-        ],
-        sensor="mail",
-    )
-    ingest(
-        brain,
-        [{"id": "c1", "title": "Overridden", "attributes": {"ontology": {"kind": "message"}}}],
-        sensor="custom",
-    )
-    mail_rec = records.find(brain, "mail", "m1")
-    custom_rec = records.find(brain, "custom", "c1")
-    assert mail_rec is not None
-    assert mail_rec[1].fields == {"kind": "message", "author": "person:alice"}
-    assert custom_rec is not None
-    assert custom_rec[1].fields == {"kind": "override"}
+    brain.write("bf.yaml", CONFIG.replace(b"  mail:\n", b"  post:\n"))
+    assert set(load(brain).sensors) == {"post"}

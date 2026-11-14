@@ -23,7 +23,7 @@ from bf.storage import Store, writer
 from bf.validate import validate
 
 MIB = 1 << 20
-ROUTINES = b"""version: 8
+ROUTINES = b"""version: 9
 name: fixture
 routines:
   count:
@@ -111,7 +111,7 @@ def test_a_pipe_must_close_in_time(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_replies_list_200_skipped_files_then_a_count(brain: Store) -> None:
     for number in range(203):
         (brain.root / f"projects/broken-{number:03}.md").write_bytes(b"---\nstale_after: soon\n---\n# Broken\n")
-    problems = cast("list[dict[str, str]]", search([brain], Query(text="offline"))["problems"])
+    problems = cast("list[dict[str, str]]", search(brain, Query(text="offline"))["problems"])
     assert [problem.get("file") for problem in problems[:200]] == [f"projects/broken-{n:03}.md" for n in range(200)]
     assert "file" not in problems[200]
     assert problems[200]["error"] == "3 more files were skipped; run bf validate"
@@ -119,16 +119,16 @@ def test_replies_list_200_skipped_files_then_a_count(brain: Store) -> None:
     for number in (201, 202):
         (brain.root / f"projects/broken-{number:03}.md").unlink()
     # It once read "1 more files were skipped".
-    problems = cast("list[dict[str, str]]", search([brain], Query(text="offline"))["problems"])
+    problems = cast("list[dict[str, str]]", search(brain, Query(text="offline"))["problems"])
     assert problems[200]["error"] == "1 more file was skipped; run bf validate"
 
 
 def test_a_search_waits_two_seconds_for_a_busy_brain_then_answers_stale(brain: Store) -> None:
-    search([brain], Query(text="offline"))
+    search(brain, Query(text="offline"))
     brain.write("concepts/late.md", b"# Late\n\nLatecomer.\n")
     with writer(brain):
         started = time.monotonic()
-        reply = search([brain], Query(text="latecomer"))
+        reply = search(brain, Query(text="latecomer"))
         waited = time.monotonic() - started
     assert reply["stale"] == ["fixture"]
     # It waits out the bound once, then serves the cache it has: far below the 120 s wait when there is none.
@@ -138,7 +138,7 @@ def test_a_search_waits_two_seconds_for_a_busy_brain_then_answers_stale(brain: S
 def test_evaluation_runs_at_most_100_suites(brain: Store) -> None:
     (brain.root / "evals").mkdir()
     for number in range(101):
-        (brain.root / f"evals/suite-{number:03}.yaml").write_bytes(b"version: 8\ncases: []\n")
+        (brain.root / f"evals/suite-{number:03}.yaml").write_bytes(b"version: 9\ncases: []\n")
     with pytest.raises(Error, match="evaluation exceeds 100 suites"):
         evaluate(brain)
     # A hundred suites pass the limit, so the run reads them and rejects the first one, which has no case.
@@ -164,4 +164,4 @@ def test_frontmatter_references_hold_at_most_8192_characters(brain: Store, key: 
     assert problem["file"] == "projects/plan.md"
     assert problem["error"].startswith(f"invalid frontmatter: {key}: ")
     assert "8192 characters" in problem["error"]
-    assert not search([brain], Query(text="boundneedle"))["items"]
+    assert not search(brain, Query(text="boundneedle"))["items"]

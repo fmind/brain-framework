@@ -2,8 +2,8 @@
 
 Copy this file next to your sensors (`sensors/_sensor.py`) and `import _sensor` from a sensor in the same folder:
 Python finds it beside the script it runs. It is not an importable `bf` module, and it must stay standard-library
-only (Python 3.11+), because sensors run with the owner's `python3`. Written for Brain Framework 20.1 and later,
-record format `version: 8`, and 21.4 or later for `emit`'s `missed`; review it like any sensor code, since it
+only (Python 3.11+), because sensors run with the owner's `python3`. Written for Brain Framework 23.0 and later,
+record format `version: 9`; review it like any sensor code, since it
 belongs to your brain once copied.
 
 The kit enforces the record bounds in https://fmind.github.io/brain-framework/docs/limits/. A sensor built on it
@@ -41,7 +41,10 @@ from urllib.parse import quote, urlsplit
 
 # BF's record bounds, as `docs/limits.md` lists them.
 MAX_ID, MAX_ENCODED_ID, MAX_TITLE, MAX_TEXT = 4096, 7988, 4096, 4 << 20
-MAX_REF, MAX_LINKS = 8192, 1000  # One URL, link, alias or field value; links, aliases and mapped values per record.
+MAX_REF, MAX_LINKS = (
+    8192,
+    1000,
+)  # One URL, link, alias or relation target; links, aliases and relation targets per record.
 MAX_FIELDS = 2 << 20  # Every record field other than `text`, as UTF-8 JSON.
 MAX_OUTPUT = 16 << 20  # One sensor run's JSON array; BF's `max_bytes` defaults to 64 MiB.
 MAX_SECRET = 64 << 10  # One credential file read by `secret`.
@@ -58,6 +61,9 @@ INVISIBLE = re.compile(
     r"\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]"
 )
 IDENTITY = re.compile(r"[a-z][a-z0-9+.-]*:\S+")
+RELATION = re.compile(r"[a-z][a-zA-Z0-9]*(?:-[a-z0-9]+)*")
+TYPE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+RESERVED_RELATIONS = frozenset({"tagged-with", "links", "cites"})
 # Only `https://HOST/OWNER/NAME`, `ssh://git@HOST/OWNER/NAME` and `git@HOST:OWNER/NAME` on a dotted host ending in
 # letters: credentials, other users, ports, nested groups and bare ssh aliases give no repository identity.
 _REMOTE_HOST = r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}"
@@ -484,20 +490,22 @@ def record(
     id: str,
     title: str,
     *,
+    item_type: str = "",
     text: str = "",
     time: str | datetime = "",
     url: str = "",
     links: Iterable[str] = (),
     aliases: Iterable[str] = (),
+    relations: Mapping[str, str | Iterable[str]] | None = None,
     attributes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One record BF accepts: invalid optional values are normalized or dropped, never a whole collection's failure.
 
-    The id must already be valid, since it is the record's identity. Titles become one bounded line, text is cut to
-    BF's bound with `attributes.partial`, lone surrogates in the title, text and attributes become U+FFFD, invalid
-    times, URLs, links and aliases are dropped, links and aliases and each `*_refs` attribute keep their first 1,000
-    valid identities, and an invalid `updated`, `observed`, `kind` or `status` is removed.
-    Never pass `fields`: BF computes them from your mappings.
+    The id must already be valid, since it is the record's identity, as must any non-empty `item_type` (`@type`) or
+    relation key. Titles become one bounded line, text is cut to BF's bound with `attributes.partial`, lone surrogates in
+    the title, text and attributes become U+FFFD, invalid times, URLs, links, relation targets and aliases are dropped,
+    links, aliases and each relation keep their first 1,000 valid identities, and an invalid `updated`, `observed`,
+    `kind` or `status` is removed. Never pass `fields`: sensors emit `@type`, `relations` and `attributes`.
     """
     if (
         not isinstance(id, str)
@@ -508,15 +516,30 @@ def record(
         or len(quote(id, safe="/@:")) > MAX_ENCODED_ID
     ):
         raise InvalidError("a record id is empty, too long or holds control characters or a lone surrogate")
+    if item_type and (not isinstance(item_type, str) or len(item_type) > 128 or not TYPE_NAME.fullmatch(item_type)):
+        raise InvalidError("@type must match schema.org name pattern [A-Za-z][A-Za-z0-9_-]*")
+    typed: dict[str, list[str]] = {}
+    if relations is not None:
+        if not isinstance(relations, Mapping) or len(relations) > MAX_LINKS:
+            raise InvalidError("relations must be a mapping of at most 1000 relations")
+        for relation, targets in relations.items():
+            if (
+                not isinstance(relation, str)
+                or len(relation) > 64
+                or not RELATION.fullmatch(relation)
+                or relation in RESERVED_RELATIONS
+            ):
+                raise InvalidError("relation names must be valid unreserved BF relation names")
+            values = [targets] if isinstance(targets, str) else targets
+            if kept := _identities(values, f"relations.{relation}"):
+                typed[relation] = kept
     extra = _text(dict(attributes or {}))
-    for key in [key for key in extra if key.endswith("_refs")]:
-        extra[key] = _identities(extra[key], f"attributes.{key}")
     for key in [key for key in ("updated", "observed") if key in extra]:
         if instant := _timestamp(extra[key]):
             extra[key] = instant
         else:
             del extra[key]
-    # The standard vocabulary maps `kind` and `status` as single strings: another value would fail the collection.
+    # Keep `kind` and `status` as bounded single strings when present, matching attributes callers filter on.
     for key in [key for key in ("kind", "status") if key in extra]:
         value = extra[key]
         if not isinstance(value, str) or not value.strip() or len(value) > MAX_REF or CONTROL.search(value):
@@ -529,14 +552,16 @@ def record(
         text, extra["partial"] = encoded_text[:MAX_TEXT].decode("utf-8", errors="ignore"), True
     valid = isinstance(url, str) and len(url) <= MAX_REF and not CONTROL.search(url) and not SURROGATE.search(url)
     parts = urlsplit(url) if valid else None
-    item = {
+    item: dict[str, Any] = {
         "id": id,
+        **({"@type": item_type} if item_type else {}),
         "title": line(title, "(untitled)"),
         "text": text,
         "time": _timestamp(time),
         "url": url if parts and parts.scheme in ("http", "https") and parts.hostname else "",
         "links": sorted(_identities(links, "links")),
         "aliases": sorted(_identities(aliases, "aliases")),
+        **({"relations": typed} if typed else {}),
         "attributes": extra,
     }
     others = {key: value for key, value in item.items() if key != "text"}
@@ -553,7 +578,7 @@ def emit(records: Iterable[Mapping[str, Any]], *, missed: int = 0, of: int = 0, 
     records, removes none this run and reports the source `degraded`. Name the missed parts on stderr, which BF
     keeps in the sensor's log, never in status. With `missed=0` it prints the plain array.
 
-    Refuses duplicate ids, which would hide one item, and `fields`, which BF computes itself.
+    Refuses duplicate ids, which would hide one item, and legacy `fields`.
     """
     if type(missed) is not int or type(of) is not int or not 0 <= missed <= of <= MAX_COUNT:
         raise InvalidError(f"missed and of must be integers with 0 <= missed <= of <= {MAX_COUNT}")
@@ -563,7 +588,7 @@ def emit(records: Iterable[Mapping[str, Any]], *, missed: int = 0, of: int = 0, 
         if identifier in seen:
             raise InvalidError("two records share one id")
         if "fields" in item:
-            raise InvalidError("a sensor never prints fields; BF computes them from bf.yaml mappings")
+            raise InvalidError("a sensor prints @type, relations and attributes, never fields")
         seen.add(identifier)
         items.append(item)
     document = {"records": items, "incomplete": {"missed": missed, "of": of}} if missed else items

@@ -605,7 +605,9 @@ def note(path: str, data: bytes | Markdown) -> Note:
     )
 
 
-def broken(note: Note, exists: Callable[[str], bool], slugs: dict[str, set[str]]) -> list[str]:
+def broken(
+    note: Note, exists: Callable[[str], bool], slugs: dict[str, set[str]], unresolved: set[str] | None = None
+) -> list[str]:
     """This note's relative links that name no brain file or, for notes, no heading; the caller names the note."""
     problems = []
     for target in note.targets:
@@ -617,6 +619,9 @@ def broken(note: Note, exists: Callable[[str], bool], slugs: dict[str, set[str]]
             problems.append(f"link leaves the brain: {target}")
         elif name.startswith("/"):
             problems.append(f"absolute link; use a path relative to this file: {target}")
+        elif re.fullmatch(r"actions/[^/#]+(?:/ACTION\.md)?", name) and (not exists(name) or not exists(entry)):
+            if unresolved is not None:
+                unresolved.add(reference(note.path, target))
         elif not exists(name):
             problems.append(f"broken link: {target}")
         elif fragment and entry in slugs and fragment not in slugs[entry]:

@@ -18,10 +18,10 @@ from conftest import BLOCK, FRAGMENT, anywhere
 ROOT = Path(__file__).parents[1]
 EXAMPLE = ROOT / "examples/context-hub"
 SOURCES = [
-    ("workspace", "workspace:brief", "brief", "approved"),
-    ("jira", "jira:review", "issue", "In review"),
-    ("github", "github:implementation", "pull-request", "merged"),
-    ("gcloud", "gcloud:deployment", "deployment", "healthy"),
+    ("workspace", "workspace:brief", "Brief", "brief", "approved"),
+    ("jira", "jira:review", "Issue", "issue", "In review"),
+    ("github", "github:implementation", "PullRequest", "pull-request", "merged"),
+    ("gcloud", "gcloud:deployment", "Deployment", "deployment", "healthy"),
 ]
 
 
@@ -66,11 +66,11 @@ def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path:
     assert [(reply["sensor"], reply["records"]) for reply in collections[:4]] == [(s, 1) for s, *_ in SOURCES]
     assert (collections[4]["sensor"], collections[4]["updated"]) == ("jira", 1)
 
-    # The four tools' differently named fields become one relation, with their states side by side.
+    # The four tools' records become one relation, with their normalized types side by side.
     project = next(reply for reply in replies if "backlinks" in reply)
     group = next(group for group in project["backlinks"] if group["relation"] == "project")
-    assert {item["ref"]: item["fields"]["status"] for item in group["items"]} == {
-        ref: status for _, ref, _, status in SOURCES
+    assert {item["ref"]: item["@type"] for item in group["items"]} == {
+        ref: item_type for _, ref, item_type, _, _ in SOURCES
     }
     assert {"notes": 1, "problems": [], "records": 4, "valid": True}.items() <= next(
         reply for reply in replies if "valid" in reply
@@ -95,7 +95,7 @@ def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path:
     }
     # The issue kept its event time; only its upstream change is new.
     record = [reply for reply in replies if reply.get("ref") == "jira:review"][-1]["record"]
-    assert (datetime.fromisoformat(record["time"]), record["fields"]["status"]) == (
+    assert (datetime.fromisoformat(record["time"]), record["attributes"]["status"]) == (
         datetime(2026, 9, 24, 14, tzinfo=UTC),
         "Done",
     )
@@ -135,10 +135,12 @@ def test_context_hub_stays_readable_without_sensors(tmp_path: Path) -> None:
         assert result.exit_code == 0, result.output
         return json.loads(result.stdout)
 
-    for source, ref, kind, status in SOURCES:
+    for source, ref, item_type, kind, status in SOURCES:
         assert invoke("collect", source)["records"] == 1
         record = invoke("read", ref)["record"]
-        assert record["fields"] == {"project": "project:new-website", "kind": kind, "status": status}
+        assert record["@type"] == item_type
+        assert record["relations"] == {"project": ["project:new-website"]}
+        assert {key: record["attributes"][key] for key in ("kind", "status")} == {"kind": kind, "status": status}
         assert record["url"].startswith("https://example.test/")
 
     # Any attempt to execute a sensor now fails. Retrieval must keep using the saved evidence.
@@ -147,7 +149,7 @@ def test_context_hub_stays_readable_without_sensors(tmp_path: Path) -> None:
     related = {
         item["ref"] for group in project["backlinks"] if group["relation"] == "project" for item in group["items"]
     }
-    assert related == {ref for _, ref, _, _ in SOURCES}
+    assert related == {ref for _, ref, _, _, _ in SOURCES}
     assert "Accessibility review is still open" in invoke("read", "jira:review")["record"]["text"]
     assert invoke("search", "keyboard navigation", "--scope", "memories/jira")["items"][0]["ref"] == "jira:review"
     assert invoke("eval")["score"] == "10/10"
@@ -159,13 +161,13 @@ def test_context_hub_stays_readable_without_sensors(tmp_path: Path) -> None:
         for source in sorted(source for source, *_ in SOURCES)
     ]
 
-    # A broken mapping fails collection without replacing an already collected source.
+    # A violated relation constraint fails collection without replacing an already collected source.
     shutil.copytree(EXAMPLE / "sensors", brain / "sensors")
     record_files = {path: path.read_bytes() for path in (brain / "memories/jira").glob("*.json")}
     config = yaml.safe_load((brain / "bf.yaml").read_text())
-    config["sensors"]["jira"]["fields"]["project"] = {"path": "/attributes/missing"}
+    config["fields"]["project"]["targets"] = ["other:"]
     (brain / "bf.yaml").write_text(yaml.safe_dump(config))
     result = runner.invoke(app, ["collect", "jira", "--brain", str(brain)])
     assert result.exit_code == 1
-    assert "required mapped value is missing" in str(result.exception)
+    assert "identity outside the declared targets" in str(result.exception)
     assert record_files == {path: path.read_bytes() for path in (brain / "memories/jira").glob("*.json")}

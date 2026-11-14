@@ -14,7 +14,7 @@ From the framework checkout, run this isolated walkthrough:
   cp -R examples/channels "$channel_demo/brain"
   cd "$channel_demo/brain"
   bf() {
-    env -u BF_BRAIN TZ=UTC XDG_CONFIG_HOME="$channel_demo/config" XDG_STATE_HOME="$channel_demo/state" \
+    env -u BF_BRAIN TZ=UTC XDG_CONFIG_HOME="$channel_demo/config" \
       uv run --project "$bf_checkout" bf "$@"
   }
   bf validate

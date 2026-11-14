@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
-"""Capture the Drive folders of My Drive and shared-with-me items, linking each to its parents, through gws.
+"""Capture the Drive folders of My Drive and shared-with-me items, asserting parent `part-of` relations, through gws.
 
-Shared drives are outside this catalog (`corpora: user`). Each folder links its parents and lists them in
-`attributes.parent_refs`, which the standard `part-of` relation of a new brain maps. A brain whose bf.yaml lacks that
-field declares it under `fields:` first:
-
-  part-of:
-    description: Containing thread, folder, list, epic, project or other parent item.
-    type: identity
-    cardinality: many
-    relation: true
-    path: /attributes/parent_refs
+Shared drives are outside this catalog (`corpora: user`). Each folder sets `@type` to `"Folder"` and links its
+parents directly in `relations["part-of"]`.
 """
 
 from __future__ import annotations
@@ -93,17 +85,17 @@ def collect() -> list[dict[str, object]]:
                 _sensor.record(
                     identifier,
                     _sensor.line(name, "Untitled Drive folder"),
+                    item_type="Folder",
                     text="Drive folder: " + name,
                     # The folder's creation is its event; modification is the revision BF compares.
                     time=created or modified,
                     url=str(folder.get("webViewLink", "")),
                     aliases=[alias] if alias else (),
-                    links=parent_refs,
+                    relations={"part-of": parent_refs},
                     # Selected fields only: `updated` is BF's reserved provider-modification time.
                     attributes={
                         "name": name,
                         "parents": parents,
-                        "parent_refs": parent_refs,
                         **({"created": created} if created else {}),
                         **({"updated": modified} if modified else {}),
                     },

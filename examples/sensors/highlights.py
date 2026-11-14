@@ -136,10 +136,12 @@ def highlight(value: object, label: str) -> dict[str, object]:
         attributes["source_date"] = source_date
     return {
         "id": f"{label}/{identifier}",
+        "@type": "Highlight",
         "title": title,
         "text": text(item["selection"], "selection"),
         "url": source,
         "time": captured,
+        "relations": {"source-document": [source]},
         "attributes": attributes,
     }
 

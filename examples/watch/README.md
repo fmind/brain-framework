@@ -17,13 +17,13 @@ From a Brain Framework checkout, copy `examples/watch` instead and run each `bf`
 Copy the printed `watch_demo=…` line, then start the watcher with its own local configuration and history; its full-screen dashboard covers this terminal until you press `q`:
 
 ```bash
-env -u BF_BRAIN XDG_CONFIG_HOME="$watch_demo/config" XDG_STATE_HOME="$watch_demo/state" \
+env -u BF_BRAIN XDG_CONFIG_HOME="$watch_demo/config" \
   bf watch --brain "$watch_demo/brain"
 ```
 
 Leave it running and run the other commands in this guide in a second terminal: paste the copied `watch_demo=…` line there first.
 
-The `watch` section in `bf.yaml` checks due work every five seconds, reads history every second and keeps notifications off for the intentional failure. Add `--notify all` to try failure/success/recovery alerts; a second `bf watch` with the same `XDG_STATE_HOME` observes the active collector without starting another. CLI options override `watch` values; restart the watcher after changing these preferences.
+The `watch` section in `bf.yaml` checks due work every five seconds, reads history every second and keeps notifications off for the intentional failure. Add `--notify all` to try failure/success/recovery alerts; a second `bf watch` on the same brain observes the active collector without starting another. CLI options override `watch` values; restart the watcher after changing these preferences.
 
 Inspect the preferences contract without starting a watcher:
 
@@ -65,7 +65,7 @@ The selected program stays selected as sorting or new history moves it. Items co
 Observe the same local history without executing programs; its footer offers `u reread` instead of `f refresh` and no pause:
 
 ```bash
-env -u BF_BRAIN XDG_CONFIG_HOME="$watch_demo/config" XDG_STATE_HOME="$watch_demo/state" \
+env -u BF_BRAIN XDG_CONFIG_HOME="$watch_demo/config" \
   bf status --watch --brain "$watch_demo/brain"
 ```
 

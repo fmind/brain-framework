@@ -41,10 +41,10 @@ def test_drive_folders_page_completely_and_keep_parent_identity(provider: Provid
     )
     records = provider.records("google-drive-folders.py", START, END)
     assert [r.id for r in records] == ["root", "child"]
-    assert records[1].links == ["drive:root"]
+    assert all(r.type == "Folder" for r in records)
     assert records[0].aliases == ["drive:root"]
-    # The standard part-of relation maps the same identities; the links stay for brains without it.
-    assert [r.attributes["parent_refs"] for r in records] == [[], ["drive:root"]]
+    assert records[0].relations == {}
+    assert records[1].relations == {"part-of": ["drive:root"]}
     params = json.loads(provider.calls("gws")[0][-1])
     assert "incompleteSearch" in params["fields"]
     assert params["corpora"] == "user"
@@ -110,6 +110,7 @@ def test_calendar_agenda_uses_future_window_and_distinct_identity(provider: Prov
     params = json.loads(provider.calls("gws")[0][-1])
     assert params["timeMin"] == "2026-08-31T00:00:00+00:00"
     assert params["timeMax"] == "2026-10-02T00:00:00+00:00"
+    assert records[0].type == "Event"
     assert records[0].aliases == ["agenda:primary/appointment"]
     assert "calendar:primary/appointment" in records[0].links
     assert records[0].updated == "2026-09-01T12:00:00.000000Z"
@@ -129,12 +130,13 @@ def test_drive_maps_selected_fields_within_record_bounds(provider: Provider) -> 
     }
     provider.install("gws", [{"match": ["drive"], "stdout": {"kind": "drive#fileList", "files": [folder]}}])
     [record] = provider.records("google-drive-folders.py")
+    assert record.type == "Folder"
     assert (record.title, record.url, record.time) == ("Plans 2026", "", "2026-08-01T00:00:00.000000Z")
+    assert record.relations == {"part-of": ["drive:root"]}
     assert record.attributes == {
         "name": "Plans\u0007 2026",
         "parents": ["root"],
-        "parent_refs": ["drive:root"],
-        "created": "2026-08-01T00:00:00Z",
+        "created": "2026-08-01T00:00:00.000000Z",
         "updated": "2026-09-01T12:00:00.000000Z",
     }
 
@@ -157,8 +159,8 @@ def test_calendar_keeps_records_within_bounds(provider: Provider) -> None:
 
 
 def test_calendar_keeps_a_large_invitee_list_within_the_link_bound(provider: Provider) -> None:
-    # 1,001 invitees plus the organizer and an attachment exceed BF's 1,000 links, and so does each list of
-    # refs a `cardinality: many` identity field may map: the record still collects.
+    # 1,001 invitees plus the organizer and an attachment exceed BF's 1,000 targets per relation: each relation is
+    # bounded at 1,000 targets and attachment references stay in links while the record still collects.
     attendees = [{"email": f"guest{index:04d}@corp.test"} for index in range(1001)]
     event = {
         "id": "allhands",
@@ -170,13 +172,12 @@ def test_calendar_keeps_a_large_invitee_list_within_the_link_bound(provider: Pro
     }
     provider.install("gws", [{"match": ["events"], "stdout": {"kind": "calendar#events", "items": [event]}}])
     [record] = provider.records("google-calendar.py", "team", START, END)
-    assert len(record.links) == 1000
-    assert {"person:email/ceo@corp.test", "https://example.invalid/agenda"} <= set(record.links)
+    assert record.links == ["https://example.invalid/agenda"]
+    assert record.relations["organizer"] == ["person:email/ceo@corp.test"]
     assert record.attributes["participants_truncated"] is True
-    counts = {
-        key: len(cast(list, record.attributes[key])) for key in ("participants", "participant_refs", "attendee_refs")
-    }
-    assert counts == {"participants": 1002, "participant_refs": 1000, "attendee_refs": 1000}
+    assert len(cast(list, record.attributes["participants"])) == 1002
+    assert len(cast(list, record.relations["participant"])) == 1000
+    assert len(cast(list, record.relations["attendee"])) == 1000
 
 
 def test_drive_snapshot_rejects_unknown_responses_and_accepts_verified_empty(provider: Provider) -> None:
@@ -242,7 +243,7 @@ def test_incomplete_provider_snapshot_preserves_saved_records(
     brain.write(
         "bf.yaml",
         yaml.safe_dump(
-            {"version": 8, "name": "fixture", "sensors": {"demo": {"mode": "snapshot", "command": command}}}
+            {"version": 9, "name": "fixture", "sensors": {"demo": {"mode": "snapshot", "command": command}}}
         ).encode(),
     )
     monkeypatch.setenv(
@@ -328,35 +329,29 @@ VOCABULARY: dict[str, tuple[str, list[dict[str, object]], list[str], set[tuple[s
 
 
 @pytest.mark.parametrize("adapter", list(VOCABULARY))
-def test_new_brains_type_parents_and_labels_and_older_brains_keep_their_links(
+def test_zero_declaration_sensors_emit_typed_relations_without_bf_yaml_fields(
     provider: Provider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: str
 ) -> None:
     program, responses, arguments, typed = VOCABULARY[adapter]
     monkeypatch.setenv("PATH", f"{provider.bin}{os.pathsep}{Path(sys.executable).parent}{os.pathsep}/usr/bin:/bin")
-    runner, claims = CliRunner(), {}
-    for kind in ("new", "older"):
-        brain = tmp_path / kind
-        assert runner.invoke(app, ["init", str(brain), "--name", kind]).exit_code == 0
-        config = yaml.safe_load((brain / "bf.yaml").read_text())
-        if kind == "older":
-            # A brain created before the standard vocabulary declares no fields.
-            del config["fields"]
-        config["sensors"] = {"source": {"command": ["python3", f"sensors/{adapter}", *arguments]}}
-        (brain / "bf.yaml").write_text(yaml.safe_dump(config))
-        (brain / "sensors").mkdir()
-        for name in (adapter, "_sensor.py"):
-            (brain / "sensors" / name).write_bytes((ROOT / "examples/sensors" / name).read_bytes())
-        provider.install(program, responses)
-        collected = runner.invoke(app, ["collect", "source", "--brain", str(brain), "--since", START, "--until", END])
-        assert collected.exit_code == 0, collected.output
-        assert runner.invoke(app, ["validate", "--brain", str(brain)]).exit_code == 0
-        exported = runner.invoke(app, ["export", "--brain", str(brain)])
-        assert exported.exit_code == 0, exported.output
-        lines = [json.loads(line) for line in exported.stdout.splitlines()]
-        claims[kind] = {
-            (line["relation"], line["target"]) for line in lines if line["subject"].startswith(f"bf://{kind}/source:")
-        }
-    assert {claim for claim in claims["new"] if claim[0] in {"part-of", "label"}} == typed
-    # Without the fields, the same records keep exactly their untyped links, as before the vocabulary grew.
-    assert claims["older"] == {claim for claim in claims["new"] if claim[0] == "links"}
-    assert claims["older"]
+    runner = CliRunner()
+    brain = tmp_path / "starter"
+    assert runner.invoke(app, ["init", str(brain), "--name", "starter"]).exit_code == 0
+    config = yaml.safe_load((brain / "bf.yaml").read_text())
+    assert "fields" not in config
+    config["sensors"] = {"source": {"command": ["python3", f"sensors/{adapter}", *arguments]}}
+    (brain / "bf.yaml").write_text(yaml.safe_dump(config))
+    (brain / "sensors").mkdir()
+    for name in (adapter, "_sensor.py"):
+        (brain / "sensors" / name).write_bytes((ROOT / "examples/sensors" / name).read_bytes())
+    provider.install(program, responses)
+    collected = runner.invoke(app, ["collect", "source", "--brain", str(brain), "--since", START, "--until", END])
+    assert collected.exit_code == 0, collected.output
+    assert runner.invoke(app, ["validate", "--brain", str(brain)]).exit_code == 0
+    exported = runner.invoke(app, ["export", "--brain", str(brain)])
+    assert exported.exit_code == 0, exported.output
+    lines = [json.loads(line) for line in exported.stdout.splitlines()]
+    claims = {
+        (line["relation"], line["target"]) for line in lines if line["subject"].startswith("bf://starter/source:")
+    }
+    assert {claim for claim in claims if claim[0] in {"part-of", "label"}} == typed

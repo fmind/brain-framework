@@ -19,8 +19,6 @@ from functools import cache, lru_cache
 from pathlib import Path, PurePosixPath
 from typing import cast
 
-from pydantic import JsonValue
-
 from bf import links as bf_links
 from bf import models, ontology, records
 from bf.config import load
@@ -43,8 +41,8 @@ from bf.models import (
 )
 from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, unread, writer
 
-SCHEMA = 41
-CACHE = ".bf/index.sqlite"
+SCHEMA = 42
+CACHE = models.CACHE
 # A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"
 _SIDECARS = ("", "-wal", "-shm", "-journal")
@@ -93,11 +91,10 @@ CREATE TABLE trees(path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime INTEGER N
                    inode INTEGER NOT NULL, entries INTEGER NOT NULL, trusted INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT NOT NULL, kind TEXT NOT NULL,
                    source TEXT NOT NULL, title TEXT NOT NULL, time TEXT NOT NULL, type TEXT NOT NULL,
-                   status TEXT NOT NULL, lead TEXT NOT NULL, url TEXT NOT NULL,
+                   item_type TEXT NOT NULL, status TEXT NOT NULL, lead TEXT NOT NULL, url TEXT NOT NULL,
                    updated TEXT NOT NULL, observed TEXT NOT NULL, partial INTEGER NOT NULL,
                    tasks_open INTEGER NOT NULL, tasks_done INTEGER NOT NULL, next TEXT NOT NULL,
-                   weight INTEGER NOT NULL, stale_after TEXT NOT NULL,
-                   fields TEXT NOT NULL, field_values TEXT NOT NULL);
+                   weight INTEGER NOT NULL, stale_after TEXT NOT NULL);
 CREATE TABLE tasks(item INTEGER NOT NULL, line INTEGER NOT NULL, fragment TEXT NOT NULL,
                    text TEXT NOT NULL, done INTEGER NOT NULL, PRIMARY KEY(item,line)) WITHOUT ROWID;
 -- `search` holds folded words; `original` keeps a passage's text only when folding changed it, for excerpts.
@@ -185,11 +182,6 @@ COVERAGE = 0.2
 CONTEXT = 3.0
 # Result and listing titles are previews of at most this many characters; exact reads keep the whole title.
 TITLE = 200
-# A listed field value longer than this stays in the exact read: listings show short facts only.
-FACT = 200
-# An item's listed fields, in name order, end before this many bytes of JSON: an item that declares hundreds of
-# fields, as a shared brain may, cannot push a listing, home or a note's backlinks past the reply limit.
-FACTS = 2048
 # SQL twins of markdown.action_note and markdown.entry_note over `items i`, for page builders.
 ACTION = (
     "i.kind='note' AND substr(i.path,1,8)='actions/' AND substr(i.path,-10)='/ACTION.md' "
@@ -467,13 +459,9 @@ def _supported() -> None:
 
 
 def _signature(config: Config) -> str:
-    """The configuration a generation's rows depend on. Documentation, such as a field's description, is not, nor
-    are `broader`, which relation pages read at query time, and `targets`, which collection and validation check."""
-    schema = {
-        n: f.model_dump(exclude={"description", "examples", "broader", "targets", "path"})
-        for n, f in config.ontology.items()
-    }
-    return digest(encode({"name": config.name, "fields": schema}))
+    """The configuration a generation's rows depend on. Documentation (`description`), `broader` (read at query time),
+    and `targets` (checked by validation and collection) never alter indexed rows."""
+    return digest(encode({"name": config.name}))
 
 
 def _file(path: Path) -> str:
@@ -546,18 +534,17 @@ def _insert(
     """Insert one file's item with its passages, names, links and claims; SQLite numbers the item and each passage
     after the existing ones. Returns the item's number."""
     defaults: dict[str, str | int] = {
+        "item_type": "",
         "tasks_open": 0,
         "tasks_done": 0,
         "next": "",
         "weight": 1,
         "stale_after": "",
-        "field_values": "",
     }
     item = connection.execute(
-        "INSERT INTO items(ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,tasks_open,"
-        "tasks_done,next,weight,stale_after,fields,field_values) VALUES(:ref,:path,:kind,:source,:title,:time,:type,"
-        ":status,:lead,:url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight,:stale_after,:fields,"
-        ":field_values)",
+        "INSERT INTO items(ref,path,kind,source,title,time,type,item_type,status,lead,url,updated,observed,partial,"
+        "tasks_open,tasks_done,next,weight,stale_after) VALUES(:ref,:path,:kind,:source,:title,:time,:type,:item_type,"
+        ":status,:lead,:url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight,:stale_after)",
         {**defaults, **values},
     ).lastrowid
     # `heading` is what ranks; `title` is what readers see, such as "Note — Section".
@@ -653,40 +640,19 @@ def _spellings(words: Sequence[str]) -> list[list[tuple[str, str]]]:
         return spelled
 
 
-def _values(values: Mapping[str, JsonValue], config: Config) -> str:
-    """Declared multi-value fields serialized as string lists for `bf export --kind items`."""
-    multi: dict[str, list[str]] = {}
-    for name, value in sorted(values.items()):
-        definition = config.ontology.get(name)
-        if definition is None or definition.cardinality != "many":
-            continue
-        with suppress(ValueError):
-            normalized = definition.normalize(value)
-            if isinstance(normalized, list) and normalized:
-                multi[name] = [v if isinstance(v, str) else json.dumps(v, ensure_ascii=False) for v in normalized]
-    return json.dumps(multi, ensure_ascii=False, sort_keys=True) if multi else ""
-
-
-def _facts(values: Mapping[str, JsonValue], config: Config) -> str:
-    """Declared single-value fields, such as a status or an assignee, each at most FACT characters.
-
-    Listings show them beside each item, so sources that disagree appear side by side without another read.
-    """
-    facts = {}
-    size = 0
-    for name, value in sorted(values.items()):
-        definition = config.ontology.get(name)
-        if definition is None or definition.cardinality == "many":
-            continue
-        with suppress(ValueError):
-            normalized = definition.normalize(value)
-            if isinstance(normalized, str | int | float | bool) and len(str(normalized)) <= FACT:
-                # The listed JSON's size: each entry with its two-byte separator, or the braces for the first.
-                size += len(json.dumps({name: normalized}, ensure_ascii=False).encode())
-                if size > FACTS:
-                    break
-                facts[name] = normalized
-    return json.dumps(facts, ensure_ascii=False, sort_keys=True) if facts else ""
+def _scalars(value: object) -> list[str]:
+    """Searchable scalar strings from relations and attributes, skipping JSON keys and booleans."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, bool) or value is None:
+        return []
+    if isinstance(value, int | float):
+        return [str(value)]
+    if isinstance(value, list):
+        return [item for element in value for item in _scalars(element)]
+    if isinstance(value, dict):
+        return [item for element in value.values() for item in _scalars(element)]
+    return []
 
 
 def _index(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
@@ -700,10 +666,8 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
         projection = note(path, store.read(path, MAX_NOTE))
         knowledge = projection.knowledge
         edges = ontology.note_claims(projection, config)
-        # Declared field values are searchable words, like a record's.
-        values = [
-            str(v) for value in knowledge.fields.values() for v in (value if isinstance(value, list) else [value])
-        ]
+        # Explicit relations and attribute scalars are searchable words; attributes never create graph edges.
+        values = [*_scalars(knowledge.relations), *_scalars(knowledge.attributes)]
         stem = PurePosixPath(path).stem
         title_folded = fold(projection.title).lower()
         extra_stem = (
@@ -738,8 +702,6 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
                 "tasks_done": sum(task.done for task in projection.tasks),
                 "next": next((task.text for task in projection.tasks if not task.done), ""),
                 "stale_after": knowledge.stale_after,
-                "fields": _facts(knowledge.fields, config),
-                "field_values": _values(knowledge.fields, config),
             },
             # The whole note ranks under its tags and each section under its stem, aliases and parents (see _lexical).
             [
@@ -787,9 +749,11 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
     record = records.load(store, path)
     ref = f"{source}:{record.id}"
     edges = ontology.record_claims(record, config, ref)
-    # Field values are searchable words; their JSON keys and punctuation would match every record.
-    values = [v for value in record.fields.values() for v in (value if isinstance(value, list) else [value])]
-    identity = " ".join([source, *record.aliases, *record.links, record.url, *map(str, values)])
+    # Explicit relation targets and attribute scalars are searchable words; attributes never create graph edges.
+    values = [*_scalars(record.relations), *_scalars(record.attributes)]
+    identity = " ".join(
+        [source, *([record.type] if record.type else []), *record.aliases, *record.links, record.url, *values]
+    )
     _insert(
         connection,
         {
@@ -800,14 +764,13 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
             "title": record.title,
             "time": record.time,
             "type": "record",
+            "item_type": record.type,
             "status": "",
             "lead": lead(record),
             "url": record.url,
             "updated": record.updated,
             "observed": record.observed,
             "partial": int(record.attributes.get("partial") is True),
-            "fields": _facts(record.fields, config),
-            "field_values": _values(record.fields, config),
         },
         [("", record.title, record.title, record.text, identity, "")],
         sorted({ontology.qualify(config, ref), *(bf_links.target(v) for v in record.aliases)}),
@@ -1230,8 +1193,7 @@ def database(store: Store, counts: dict[str, int] | None = None) -> Generator[tu
                 _discard(store, _DISCARD)
             raise
         return
-    # The shared message: this module's CACHE is the cache's path.
-    raise Error(models.CACHE)
+    raise Error(models.CACHE_ERROR)
 
 
 def terms(text: str) -> list[str]:
@@ -1287,8 +1249,8 @@ MODIFIED = (
     "OR (i.kind='note' AND i.time!='' AND note_time(i.time)>=:since AND note_time(i.time)<:until))"
 )
 _FIELDS = (
-    f"i.ref,i.kind,i.source,({TIME}) AS time,({DATE}) AS date,i.type,i.status,i.url,i.updated,i.observed,i.partial,"
-    "i.fields"
+    f"i.ref,i.kind,i.source,({TIME}) AS time,({DATE}) AS date,i.type,i.item_type,i.status,i.url,i.updated,"
+    "i.observed,i.partial"
 )
 _ROW = f"{_FIELDS},'' AS fragment,i.title,i.lead AS excerpt,i.tasks_open,i.tasks_done,i.next"
 
@@ -1755,8 +1717,7 @@ def incoming(
 ) -> list[dict[str, object]]:
     """Items linking to any target, grouped by explicit relation; links without one come last as LINKS.
 
-    Every group is counted, but only the first GROUPS read their newest items: in this order, those are all that a
-    merge of several brains' groups can preview.
+    Every group is counted, but only the first GROUPS read their newest items.
     """
     values = {**_parameters(targets), "exclude": exclude, "limit": limit}
     groups = []
@@ -1890,14 +1851,15 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
         row["partial"] = True
     else:
         row.pop("partial", None)
-    if isinstance(facts := row.get("fields"), str) and facts:
-        row["fields"] = json.loads(facts)
+    item_type = row.pop("item_type", "")
     if row["kind"] == "note":
         row.pop("source", None)
         row.pop("updated", None)
     else:
-        # Every record's type is `record`, which its kind already states.
+        # Every record's type is `record`, which its kind already states; expose @type only when present.
         row.pop("type", None)
+        if item_type:
+            row["@type"] = item_type
     return {key: value for key, value in row.items() if value not in ("", None)}
 
 

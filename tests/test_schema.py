@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import cast, get_args
+from typing import get_args
 
 import pytest
 import yaml
@@ -32,36 +32,30 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize(
     "value",
     [
-        {"version": 8, "name": "brain\n"},
-        {"version": 8, "name": "brain", "sensors": {"Invalid Name": {"nonsense": True}}},
-        {"version": 8, "name": "brain", "sensors": {"demo\n": {"command": ["echo"]}}},
-        {"version": 8, "name": "brain", "routines": {"bad--slug": {"command": ["echo"]}}},
-        {"version": 8, "name": "brain", "brains": {"Invalid Name": {"path": "../team"}}},
-        {"version": 8, "name": "brain", "fields": {"Invalid Name": {"description": "Kind", "type": "string"}}},
-        {
-            "version": 8,
-            "name": "brain",
-            "fields": {"kind": {"description": "Kind", "type": "string", "relation": True}},
-        },
+        {"version": 9, "name": "brain\n"},
+        {"version": 9, "name": "brain", "sensors": {"Invalid Name": {"nonsense": True}}},
+        {"version": 9, "name": "brain", "sensors": {"demo\n": {"command": ["echo"]}}},
+        {"version": 9, "name": "brain", "routines": {"bad--slug": {"command": ["echo"]}}},
+        {"version": 9, "name": "brain", "brains": {"team": {"path": "../team"}}},
+        {"version": 9, "name": "brain", "fields": {"Invalid Name": {"description": "Kind"}}},
+        {"version": 9, "name": "brain", "fields": {"owner": {"description": "Owner", "type": "identity"}}},
         *(
-            {"version": 8, "name": "brain", "fields": {"owner": {"description": "Owner", "type": "identity", **extra}}}
+            {"version": 9, "name": "brain", "fields": {"owner": {"description": "Owner", **extra}}}
             for extra in (
-                {"targets": ["repo:"]},
-                {"broader": "owner", "relation": False},
-                {"relation": True, "targets": []},
-                {"relation": True, "targets": ["Repo:"]},
-                {"relation": True, "targets": ["repo:\n"]},
-                {"relation": True, "targets": ["repo"]},
-                {"relation": True, "broader": "Owner"},
+                {"targets": []},
+                {"targets": ["Repo:"]},
+                {"targets": ["repo:\n"]},
+                {"targets": ["repo"]},
+                {"broader": "Owner"},
             )
         ),
         {
-            "version": 8,
+            "version": 9,
             "name": "brain",
             "sensors": {"demo": {"command": ["echo"], "mode": "snapshot", "reconcile": {"refresh": 1, "lookback": 1}}},
         },
         *(
-            {"version": 8, "name": "brain", "watch": watch}
+            {"version": 9, "name": "brain", "watch": watch}
             for watch in (
                 [],
                 {"interval": 0},
@@ -74,14 +68,13 @@ ROOT = Path(__file__).resolve().parents[1]
             )
         ),
         {"name": "brain"},
-        {"version": 5, "name": "brain"},
+        {"version": 8, "name": "brain"},
         *(
-            {"version": 8, "name": "brain", "sensors": {"demo": {"command": [executable]}}}
+            {"version": 9, "name": "brain", "sensors": {"demo": {"command": [executable]}}}
             for executable in ("/usr/bin/env", "../escape.sh", "sensors/../x", "sensors//x", "bin/x", ".", "a{b")
         ),
-        {"version": 8, "name": "brain", "routines": {"digest": {"command": ["routines/./digest.py"]}}},
-        {"version": 8, "name": "brain", "sensors": []},
-        {"version": 8, "name": "brain", "brains": {f"brain-{i}": {"path": f"../{i}"} for i in range(33)}},
+        {"version": 9, "name": "brain", "routines": {"digest": {"command": ["routines/./digest.py"]}}},
+        {"version": 9, "name": "brain", "sensors": []},
     ],
 )
 def test_editor_and_runtime_reject_invalid_structure(value: dict) -> None:
@@ -94,22 +87,17 @@ def test_editor_and_runtime_reject_invalid_structure(value: dict) -> None:
     ("kind", "data", "expected"),
     [
         *(
-            ("brain", f"version: 8\nname: brain\n{key}:\n  # demo: {{}}\n".encode(), {"version": 8, "name": "brain"})
-            for key in ("brains", "fields", "sensors", "watch", "routines", "channels", "assistants")
-        ),
-        (
-            "brain",
-            b"version: 8\nname: brain\nsensors:\n  demo:\n    command: [echo]\n    fields:\n      # kind: {path: /a}\n",
-            {"version": 8, "name": "brain", "sensors": {"demo": {"command": ["echo"]}}},
+            ("brain", f"version: 9\nname: brain\n{key}:\n  # demo: {{}}\n".encode(), {"version": 9, "name": "brain"})
+            for key in ("fields", "sensors", "watch", "routines", "channels", "assistants")
         ),
         (
             "brain",
             (
-                b"version: 8\nname: brain\nassistants:\n  helper:\n    prompt: prompts/helper.md\n    command: [echo]\n"
+                b"version: 9\nname: brain\nassistants:\n  helper:\n    prompt: prompts/helper.md\n    command: [echo]\n"
                 b"    schedules:\n      # daily: {at: '09:00'}\n"
             ),
             {
-                "version": 8,
+                "version": 9,
                 "name": "brain",
                 "assistants": {"helper": {"prompt": "prompts/helper.md", "command": ["echo"]}},
             },
@@ -129,44 +117,40 @@ def test_a_mapping_whose_entries_are_all_commented_out_is_empty(kind: Kind, data
     ("value", "message"),
     [
         (
-            {
-                "fields": {"kind": {"description": "Item kind", "type": "string"}},
-                "sensors": {
-                    "mail": {"command": ["echo"]},
-                    "chat": {"command": ["echo"], "fields": {"kind": {"value": 3}}},
-                },
-            },
-            "sensors.chat.fields.kind.value: expected string",
+            {"fields": {"owner": {"targets": ["Repo:"]}}},
+            "fields.owner.targets.0",
         ),
         (
-            {"fields": {"kind": {"description": "Item kind", "type": "string", "examples": ["ok", 3]}}},
-            "fields.kind: examples.1: expected string",
+            {"fields": {"owner": {"broader": "absent"}}},
+            "fields.owner.broader: name another declared relation without its own broader",
         ),
         (
             {"sensors": {"digest": {"command": ["echo"]}}, "routines": {"digest": {"command": ["echo"]}}},
             "sensors.digest and routines.digest: sensor and routine names must be distinct",
         ),
     ],
-    ids=["literal-value", "example", "program-name"],
+    ids=["target-prefix", "missing-broader", "program-name"],
 )
 def test_invalid_literal_values_and_shared_names_are_located(brain: Store, value: dict, message: str) -> None:
-    # JSON is YAML: the configuration names the key to fix among several sensors or examples.
-    brain.write("bf.yaml", json.dumps({"version": 8, "name": "fixture", **value}).encode())
+    # JSON is YAML: the configuration names the key to fix among several fields or programs.
+    brain.write("bf.yaml", json.dumps({"version": 9, "name": "fixture", **value}).encode())
     with pytest.raises(Error, match=rf"^invalid bf\.yaml: {re.escape(message)}"):
         load(brain)
 
 
 @pytest.mark.parametrize(
-    "mapping",
-    [{}, {"path": None}, {"value": None}, {"path": "/title", "value": "x"}, {"path": "title"}, {"path": "/~2"}],
+    "legacy",
+    [
+        {"fields": {"kind": {"description": "Kind", "type": "string"}}},
+        {"fields": {"owner": {"description": "Owner", "cardinality": "one"}}},
+        {"fields": {"owner": {"description": "Owner", "relation": True}}},
+        {"fields": {"owner": {"description": "Owner", "examples": ["person:alice"]}}},
+        {"fields": {"owner": {"description": "Owner", "path": "/attributes/owner"}}},
+        {"sensors": {"demo": {"command": ["echo"], "fields": {"owner": {"path": "/a"}}}}},
+    ],
 )
-def test_editor_rejects_invalid_mapping_forms(mapping: dict) -> None:
-    value = {
-        "version": 8,
-        "name": "brain",
-        "fields": {"kind": {"description": "Item kind", "type": "string"}},
-        "sensors": {"demo": {"command": ["echo"], "fields": {"kind": mapping}}},
-    }
+def test_editor_rejects_legacy_field_and_mapping_keys(legacy: dict) -> None:
+    value = {"version": 9, "name": "brain", **legacy}
     with pytest.raises(ValidationError):
         Config.model_validate(value)
     assert not Draft202012Validator(Config.model_json_schema()).is_valid(value)
@@ -177,7 +161,7 @@ def test_editor_rejects_invalid_mapping_forms(mapping: dict) -> None:
 def test_evaluation_rejects_blank_labels_and_assertions(brain: Store, field: str, blank: str) -> None:
     case = {"name": "missing-evidence", "query": "absentneedle947ab3", "text": ["required evidence"]}
     case[field] = blank if field == "name" else [blank]
-    brain.write("evals/retrieval.yaml", json.dumps({"version": 8, "cases": [case]}).encode())
+    brain.write("evals/retrieval.yaml", json.dumps({"version": 9, "cases": [case]}).encode())
     with pytest.raises(Error, match=r"evals/retrieval.yaml"):
         evaluate(brain)
 
@@ -211,15 +195,15 @@ def test_yaml_is_read_only_through_libyaml(brain: Store, monkeypatch: pytest.Mon
     # PyYAML built without libyaml lacks CSafeLoader: its pure-Python parser is slower and rejects some YAML libyaml
     # accepts, so BF names the reinstall instead of loading a file differently.
     brain.write("projects/plan.md", b"---\ntype: project\n---\n# Plan\n")
-    brain.write("evals/retrieval.yaml", b"version: 8\ncases: [{name: plan, query: plan, expect: [projects/plan.md]}]\n")
+    brain.write("evals/retrieval.yaml", b"version: 9\ncases: [{name: plan, query: plan, expect: [projects/plan.md]}]\n")
     monkeypatch.delattr(yaml, "CSafeLoader")
     # A configuration this process already validated is reused by its digest: drop them, as a new process would.
     monkeypatch.setattr("bf.config._LOADED", {})
     # bf.yaml, the registry, eval suites and note frontmatter all parse through yaml_object; none names its file.
     for name, data, kwargs in (
-        ("bf.yaml", b"version: 8\nname: brain\n", {}),
+        ("bf.yaml", b"version: 9\nname: brain\n", {}),
         ("config.yaml", b"brains: {}\n", {}),
-        ("evals/retrieval.yaml", b"version: 8\n", {}),
+        ("evals/retrieval.yaml", b"version: 9\n", {}),
         ("projects/plan.md", b"type: project\n", {"line": 2}),
     ):
         with pytest.raises(Error, match=LIBYAML):
@@ -265,7 +249,7 @@ main()
 def test_no_program_is_named_bf(brain: Store, kind: str, program: str, fix: str) -> None:
     # A sensor's or assistant's name is its records' source, whose `bf:ID` refs would read as BF addresses; one
     # rule covers the whole program namespace.
-    brain.write("bf.yaml", f"version: 8\nname: fixture\n{kind}:\n  bf: {program}\n".encode())
+    brain.write("bf.yaml", f"version: 9\nname: fixture\n{kind}:\n  bf: {program}\n".encode())
     with pytest.raises(Error, match=rf"^invalid bf\.yaml: {kind}\.bf: the name bf is reserved for BF addresses; {fix}"):
         load(brain)
     result = CliRunner().invoke(app, ["validate", "--brain", str(brain.root)])
@@ -273,53 +257,22 @@ def test_no_program_is_named_bf(brain: Store, kind: str, program: str, fix: str)
     assert f"{kind}.bf: the name bf is reserved" in str(result.exception)
     # Only the exact name: a longer one starting with bf stays valid.
     for name in ("bfx", "bf-notes"):
-        brain.write("bf.yaml", f"version: 8\nname: fixture\n{kind}:\n  {name}: {program}\n".encode())
+        brain.write("bf.yaml", f"version: 9\nname: fixture\n{kind}:\n  {name}: {program}\n".encode())
         assert name in getattr(load(brain), kind)
 
 
-def test_starter_keeps_relations_without_serializing_redundant_defaults(tmp_path: Path) -> None:
+def test_starter_writes_minimal_config_without_boilerplate(tmp_path: Path) -> None:
     root = tmp_path / "new"
     result = CliRunner().invoke(app, ["init", str(root), "--name", "new"])
     assert result.exit_code == 0, result.output
-    document = yaml_object((root / "bf.yaml").read_bytes())
-    assert document["version"] == 8
-    assert not {"brains", "sensors", "routines", "watch"} & document.keys()
-    assert "examples:" not in (root / "bf.yaml").read_text()
+    text = (root / "bf.yaml").read_text()
+    document = yaml_object(text.encode())
+    assert document == {"version": 9, "name": "new"}
+    assert "bf.schema.json" in text
     config = load(Store(root))
-    assert set(config.ontology) == {
-        "author",
-        "owner",
-        "assignee",
-        "participant",
-        "sender",
-        "recipient",
-        "cc",
-        "organizer",
-        "attendee",
-        "repository",
-        "project",
-        "part-of",
-        "label",
-        "kind",
-        "status",
-        "depends-on",
-        "related-to",
-        "supersedes",
-    }
-    # The standard vocabulary maps printed attributes without per-sensor mappings.
-    assert cast("dict[str, dict[str, object]]", document)["fields"]["sender"] == {
-        "description": "Account that sent the message.",
-        "type": "identity",
-        "cardinality": "many",
-        "relation": True,
-        "broader": "participant",
-        "path": "/attributes/sender_refs",
-    }
-    assert config.ontology["status"].path == "/attributes/status"
-    assert config.ontology["depends-on"].path is None
+    assert not config.ontology
     assert not config.sensors
     assert not config.routines
-    assert not config.brains
 
 
 @pytest.mark.parametrize("kind", get_args(Kind))
@@ -354,30 +307,6 @@ def test_example_brains_pass_runtime_and_editor_validation(path: Path) -> None:
     value = yaml_object(path.read_bytes())
     Config.model_validate(value)
     Draft202012Validator(document()).validate(value)
-
-
-@pytest.mark.parametrize(
-    ("mapping", "kind", "expected"),
-    [
-        ({"path": "/attributes/a~1b/~0/0"}, "string", "value"),
-        ({"value": False}, "boolean", False),
-        ({"value": 0}, "integer", 0),
-    ],
-)
-def test_valid_mappings_preserve_escaped_paths_and_false_constants(mapping: dict, kind: str, expected: object) -> None:
-    from bf.models import Record
-    from bf.ontology import project
-
-    value = {
-        "version": 8,
-        "name": "brain",
-        "fields": {"field": {"description": "Meaning", "type": kind}},
-        "sensors": {"demo": {"command": ["echo"], "fields": {"field": mapping}}},
-    }
-    config = Config.model_validate(value)
-    Draft202012Validator(document()).validate(value)
-    record = Record(id="item", title="Item", attributes={"a/b": {"~": ["value"]}})
-    assert project(record, config.sensors["demo"], config).fields == {"field": expected}
 
 
 @pytest.mark.parametrize(
@@ -418,7 +347,7 @@ def test_evaluation_structure_matches_editor_validation(case: dict, valid: bool)
 )
 def test_evaluation_suites_declare_their_format(brain: Store, header: str, problem: str) -> None:
     brain.write("evals/retrieval.yaml", f"{header}cases:\n- name: absent\n  query: word\n  empty: true\n".encode())
-    with pytest.raises(Error, match=rf"^evals/retrieval\.yaml {problem}; this release reads version: 8"):
+    with pytest.raises(Error, match=rf"^evals/retrieval\.yaml {problem}; this release reads version: 9"):
         evaluate(brain)
 
 
@@ -428,25 +357,25 @@ def test_all_evaluation_cases_are_checked_before_retrieval(brain: Store, monkeyp
 
     monkeypatch.setattr("bf.evaluate.search", unexpected)
     valid = {"name": "valid", "query": "word", "text": ["answer"]}
-    brain.write("evals/a.yaml", json.dumps({"version": 8, "cases": [valid]}).encode())
-    brain.write("evals/z.yaml", json.dumps({"version": 8, "cases": [{**valid, "read": ""}]}).encode())
+    brain.write("evals/a.yaml", json.dumps({"version": 9, "cases": [valid]}).encode())
+    brain.write("evals/z.yaml", json.dumps({"version": 9, "cases": [{**valid, "read": ""}]}).encode())
     with pytest.raises(Error, match=r"evals/z.yaml.*use either query or read"):
         evaluate(brain)
     with pytest.raises(ValidationError, match="duplicate evaluation case names"):
-        Suite.model_validate({"version": 8, "cases": [valid, valid]})
+        Suite.model_validate({"version": 9, "cases": [valid, valid]})
 
 
 @pytest.mark.parametrize(
     ("data", "problem"),
     [
-        (b"version: 8\nname: &name brain\n", "anchors and aliases are not supported"),
-        (b"version: 8\nname: brain\nname: other\n", "keys must be unique strings at line 3"),
-        (b"version: 8\nname: brain\n---\nname: other\n", "invalid YAML at line 3"),
-        (b"version: 8\nname: brain\nextra: !!python/object/apply:os.system [PRIVATE]\n", "invalid YAML at line 3"),
-        (b"version: 8\nname: brain\nsensors: !!bool PRIVATE\n", "invalid YAML"),
-        (b"version: 8\nname: brain\nsensors: " + b"[" * 33 + b"]" * 33, "structure exceeds its limit"),
-        (b"version: 8\nname: brain\nextra: [" + b"0," * 20_000 + b"]", "structure exceeds its limit"),
-        (b"version: 8\nname: brain\n#" + b"x" * (1 << 20), "exceeds 1048576 bytes"),
+        (b"version: 9\nname: &name brain\n", "anchors and aliases are not supported"),
+        (b"version: 9\nname: brain\nname: other\n", "keys must be unique strings at line 3"),
+        (b"version: 9\nname: brain\n---\nname: other\n", "invalid YAML at line 3"),
+        (b"version: 9\nname: brain\nextra: !!python/object/apply:os.system [PRIVATE]\n", "invalid YAML at line 3"),
+        (b"version: 9\nname: brain\nsensors: !!bool PRIVATE\n", "invalid YAML"),
+        (b"version: 9\nname: brain\nsensors: " + b"[" * 33 + b"]" * 33, "structure exceeds its limit"),
+        (b"version: 9\nname: brain\nextra: [" + b"0," * 20_000 + b"]", "structure exceeds its limit"),
+        (b"version: 9\nname: brain\n#" + b"x" * (1 << 20), "exceeds 1048576 bytes"),
     ],
     ids=["anchor", "duplicate-key", "two-documents", "python-tag", "bool-tag", "nesting", "events", "size"],
 )

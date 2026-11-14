@@ -1,39 +1,18 @@
 # https://fmind.github.io/brain-framework/
-version: 8
+version: 9
 name: example
 sensors:
   demo:
     command: [sensors/demo.py, "{{start}}", "{{end}}"]
     refresh: 3600
-    fields:
-      kind: { value: event }
-      repository: { path: /attributes/repository_refs }
 fields:
   depends-on:
     description: This conclusion needs review when the target evidence changes.
-    type: identity
-    cardinality: many
-    relation: true
     broader: related-to
   supersedes:
     description: This authored decision explicitly replaces the target decision.
-    type: identity
-    cardinality: many
-    relation: true
   related-to:
     description: An explicit association without a more specific known relation.
-    type: identity
-    cardinality: many
-    relation: true
-  kind:
-    description: Common kind of source item.
-    type: string
-    cardinality: one
-    examples: [event]
   repository:
     description: Repository explicitly discussed in the event.
-    type: identity
-    cardinality: many
-    relation: true
     targets: ["repo:"]
-    examples: [[repo:example/project]]

@@ -15,12 +15,12 @@ Run three offline checks inside your brain to verify structure, retrieval qualit
 
 ## Validate
 
-`bf validate` returns `"valid":true` or up to 200 `problems` (`{file, error}`, then `"problems_truncated":true`), plus cross-brain `unresolved` targets (which do not fail validation; [across brains](link-reference.md#across-brains)):
+`bf validate` returns `"valid":true` or up to 200 `problems` (`{file, error}`, then `"problems_truncated":true`), plus unresolved `bf://` or missing `actions/<slug>` references under `unresolved` (which do not fail validation; [single-brain scope](link-reference.md#across-brains)):
 
 - **Notes and actions**: OKF frontmatter (`type`, `status`, `updated`), valid Markdown/URI syntax, no merge conflict markers, and `actions/YYYY-MM-DD_topic/ACTION.md` folder naming.
-- **Links and relations**: local targets, `#section` anchors, case-sensitive `SOURCE:ID` refs, declared `?rel=` relations on `bf://` URIs, `fields:` placement and `targets` prefix bounds.
+- **Links and relations**: local targets, `#section` anchors, case-sensitive `SOURCE:ID` refs, `?rel=` syntax, `relations:` identities and optional `targets:` prefix bounds.
 - **[Identities](link-reference.md#identity-rules)**: own-brain namespace, whole-subject rule (rejecting `#section`, `.md` paths, pages, `SOURCE:ID` and `bf://NAME/actions/SLUG` action folders), no duplicate owners (`ambiguous identity`) and no invisible format characters.
-- **Records and filesystem**: `<sha256-id>.json` filenames, record schemas, current `fields:` types, and rejection of symlinks, special files or invalid UTF-8 names.
+- **Records and filesystem**: `<sha256-id>.json` filenames, record schemas, relation target bounds, and rejection of symlinks, special files or invalid UTF-8 names.
 - **Enabled programs**: executable scripts (or existing `sensors/`/`routines/`/`channels/` script arguments), `{{lines:...}}` files (<= 128 total args) and assistant `prompt` files (<= 120,000 bytes).
 - **Optional `validate:` policy in `bf.yaml`**: `max_stale_days`, `warn_stale_days`, `index_note` (e.g. `concepts/index.md`), `required_status` and `forbid_patterns` (up to 64 regexes).
 
@@ -41,7 +41,7 @@ Run three offline checks inside your brain to verify structure, retrieval qualit
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/checks/
-version: 8
+version: 9
 cases:
   - name: find-the-reason
     query: visitors clear explanation
@@ -78,7 +78,7 @@ bf eval --path evals/new-website.yaml --baseline ~/new-website-eval.json
 
 ## Suite reference
 
-Each `.yaml`/`.yml` suite (up to 100 suites of 200 cases; `bf schema --kind eval`) sets `version: 8` and `cases`:
+Each `.yaml`/`.yml` suite (up to 100 suites of 200 cases; `bf schema --kind eval`) sets `version: 9` and `cases`:
 
 | Field               | Rule                                                                                                  |
 | ------------------- | ----------------------------------------------------------------------------------------------------- |

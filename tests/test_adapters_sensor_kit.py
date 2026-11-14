@@ -78,28 +78,33 @@ def test_github_issues_maps_the_window_to_standard_attributes(provider: Provider
     result = provider.run("github-issues.py", "Acme/Widgets", environment=WINDOW)
     assert result.returncode == 0, result.stderr
     first, ghost = TypeAdapter(list[Record]).validate_python(json.loads(result.stdout))
-    assert (first.id, first.title) == ("acme/widgets/issues/1", "acme/widgets: Issue 1 second line")
+    assert (first.id, first.type, first.title) == (
+        "acme/widgets/issues/1",
+        "Issue",
+        "acme/widgets: Issue 1 second line",
+    )
     assert (first.time, first.url) == ("2026-08-20T09:00:00.000000Z", "https://github.com/acme/widgets/issues/1")
     assert first.aliases == ["github:acme/widgets/issues/1"]
-    assert first.links == ["person:github.com/alice-dev", "person:github.com/bob", "repo:github.com/acme/widgets"]
+    assert first.relations == {
+        "author": ["person:github.com/alice-dev"],
+        "assignee": ["person:github.com/bob"],
+        "repository": ["repo:github.com/acme/widgets"],
+        "label": ["label:github.com/acme/widgets/bug"],
+    }
     assert first.attributes == {
         "number": 1,
         "kind": "issue",
         "status": "closed",
         "reason": "completed",
         "labels": ["bug"],
-        "label_refs": ["label:github.com/acme/widgets/bug"],
         "updated": "2026-09-01T10:00:00.000000Z",
-        "author_refs": ["person:github.com/alice-dev"],
-        "assignee_refs": ["person:github.com/bob"],
-        "repository_refs": ["repo:github.com/acme/widgets"],
     }
     assert SECRET not in first.text
     assert "GITHUB_TOKEN=[REDACTED]" in first.text
-    assert (ghost.id, ghost.attributes["author_refs"], ghost.links) == (
+    assert (ghost.id, ghost.type, ghost.relations) == (
         "acme/widgets/issues/3",
-        [],
-        ["repo:github.com/acme/widgets"],
+        "Issue",
+        {"repository": ["repo:github.com/acme/widgets"]},
     )
     [argv] = provider.calls("gh")
     assert argv[argv.index("--repo") + 1] == "acme/widgets"
@@ -143,7 +148,7 @@ def test_github_issues_failure_keeps_saved_records(
     for name in ("_sensor.py", "github-issues.py"):
         brain.write(f"sensors/{name}", (ROOT / "examples/sensors" / name).read_bytes())
     command = ["python3", "sensors/github-issues.py", "acme/widgets"]
-    config = {"version": 8, "name": "fixture", "sensors": {"issues": {"command": command}}}
+    config = {"version": 9, "name": "fixture", "sensors": {"issues": {"command": command}}}
     brain.write("bf.yaml", yaml.safe_dump(config).encode())
     monkeypatch.setenv("PATH", f"{provider.bin}{os.pathsep}{Path(sys.executable).parent}{os.pathsep}/usr/bin:/bin")
     provider.install("gh", [{"match": ["issue"], "stdout": [issue(1), issue(2)], "repeat": True}])
@@ -197,7 +202,7 @@ def test_main_emits_one_array_or_fails_closed(tmp_path: Path) -> None:
     assert [item["id"] for item in json.loads(ok.stdout)] == ["a", "b"]
     for body, message in (
         ("_sensor.main(lambda: [_sensor.record('a', 'A'), _sensor.record('a', 'private')], 'x')\n", "share one id"),
-        ("_sensor.main(lambda: [{'id': 'a', 'title': 'A', 'fields': {'kind': 'private'}}], 'x')\n", "never prints"),
+        ("_sensor.main(lambda: [{'id': 'a', 'title': 'A', 'fields': {'kind': 'private'}}], 'x')\n", "never fields"),
         (
             (
                 "def collect():\n    yield _sensor.record('a', 'A')\n    raise KeyError('private provider key')\n"
@@ -225,7 +230,7 @@ def test_emit_reports_what_a_tolerant_sensor_missed(tmp_path: Path, brain: Store
     assert printed["incomplete"] == {"missed": 1, "of": 3}
     assert [item["id"] for item in printed["records"]] == ["a", "b"]
     # BF accepts what the kit prints, as a saved-output check shows.
-    brain.write("bf.yaml", b"version: 8\nname: fixture\nsensors:\n  feeds:\n    command: [echo]\n")
+    brain.write("bf.yaml", b"version: 9\nname: fixture\nsensors:\n  feeds:\n    command: [echo]\n")
     saved = tmp_path / "partial.json"
     saved.write_text(partial.stdout)
     reply = CliRunner().invoke(app, ["collect", "feeds", "--input", str(saved), "--brain", str(brain.root)])
@@ -430,27 +435,32 @@ def test_record_normalizes_what_bf_would_reject() -> None:
     item = sensor.record(
         "plans/2026",
         "Plan\x07\n review " + "x" * 5000,
+        item_type="Document",
         text="y" * ((4 << 20) + 1),
         time="2026-09-01T12:00:00+02:00",
         url="https://example.test/\x85plan",
         links=[*refs, "not an identity", "bad:\u200bhidden", "", "x:" + "a" * 9000],
         aliases=["https://example.test/plan", "Display Name", "person:email/a@example.test"],
-        attributes={"sender_refs": [refs[0], refs[0], "plain", None], "updated": "yesterday", "observed": START},
+        relations={"sender": [refs[0], refs[0], "plain", ""], "ignored": ["not an identity"]},
+        attributes={"updated": "yesterday", "observed": START},
     )
     record = Record.model_validate(item)
+    assert record.type == "Document"
     assert record.title.startswith("Plan review xxx")
     assert len(record.title) == 4096
     assert (record.url, record.time, record.attributes["partial"]) == ("", "2026-09-01T10:00:00.000000Z", True)
     assert len(record.text) == 4 << 20
     assert record.links == sorted(refs[:1000])
     assert record.aliases == ["https://example.test/plan", "person:email/a@example.test"]
-    assert record.attributes["sender_refs"] == [refs[0]]
+    assert record.relations == {"sender": [refs[0]]}
     assert "updated" not in record.attributes
     assert record.observed == START
     naive = sensor.record("t", "T", time=datetime(2026, 9, 1), attributes={"kind": ["x"], "status": "a\nb"})
     assert (naive["time"], naive["attributes"]) == ("", {})
-    huge = sensor.record("many", "Many", attributes={"participant_refs": refs})
-    assert huge["attributes"]["participant_refs"] == refs[:1000]
+    huge = sensor.record("many", "Many", relations={"participant": refs})
+    assert huge["relations"]["participant"] == refs[:1000]
+    single = sensor.record("one", "One", relations={"owner": "person:email/a@example.test"})
+    assert single["relations"] == {"owner": ["person:email/a@example.test"]}
     # A lone surrogate, as JSON decodes a string cut inside a UTF-16 pair, becomes U+FFFD outside the id.
     torn = sensor.record(
         "s",
@@ -458,16 +468,22 @@ def test_record_normalizes_what_bf_would_reject() -> None:
         text="\ud83d",
         url="https://example.test/\udc00",
         links=["person:email/\ud83d@example.test"],
-        attributes={"n": ["\udc00"], "\ud83d": "x"},
+        attributes={"n": ["\udc00"], "note": "\ud83d"},
     )
     loaded = Record.model_validate(torn)
     assert (loaded.title, loaded.text, loaded.url, loaded.links) == ("Launch \ufffd", "\ufffd", "", [])
-    assert torn["attributes"] == {"n": ["\ufffd"], "\ufffd": "x"}
+    assert torn["attributes"] == {"n": ["\ufffd"], "note": "\ufffd"}
+    # Surrogate bytes in attribute keys are also cleaned before BF rejects the non-ASCII key.
+    assert sensor.record("s2", "Title", attributes={"\ud83d": "x"})["attributes"] == {"\ufffd": "x"}
     for bad in ("", " ", "a\x00b", "x" * 4097, "é" * 2000, "a\ud83d"):
         with pytest.raises(sensor.SensorError, match="record id"):
             sensor.record(bad, "Title")
+    with pytest.raises(sensor.SensorError, match="@type"):
+        sensor.record("a", "A", item_type="1bad")
+    with pytest.raises(sensor.SensorError, match="relation names"):
+        sensor.record("a", "A", relations={"links": [refs[0]]})
     with pytest.raises(sensor.SensorError, match="list of identities"):
-        sensor.record("a", "A", attributes={"owner_refs": "person:email/a@example.test"})
+        sensor.record("a", "A", relations={"owner": 42})
     with pytest.raises(sensor.SensorError, match="partial"):
         sensor.record("a", "A", attributes={"partial": "yes"})
     with pytest.raises(sensor.SensorError, match="2 MiB"):

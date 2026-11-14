@@ -48,20 +48,15 @@ def page(brain: str, ref: str = "", offset: int = 0) -> dict[str, Any]:
 
 
 def named(brain: str) -> str:
-    """This brain's configured name, which `bf status --brain` lists alone; any failure stops the review."""
+    """This brain's configured name, which `bf status --brain` returns; any failure stops the review."""
     try:
         reply = _bf.bf_json("status", "--brain", brain, timeout=TIMEOUT, allow_stale=True, max_bytes=REPLY_BYTES)
-        listed = reply.get("brains", [])
-        names = [
-            entry["brain"]
-            for entry in (listed if isinstance(listed, list) else [])
-            if isinstance(entry, dict) and isinstance(entry.get("brain"), str)
-        ]
+        name = reply.get("brain") if isinstance(reply, dict) else None
     except _bf.BfError:
-        names = []
-    if len(names) != 1:
+        name = None
+    if not isinstance(name, str) or not name:
         raise SystemExit("weekly-review: could not name this brain; run bf status")
-    return names[0]
+    return name
 
 
 def projects(brain: str) -> list[dict[str, Any]]:
@@ -274,8 +269,7 @@ def main(argv: list[str]) -> int:
         return 2
     home, week = page(brain), page(brain, "7d")
     # BF records a routine's run only after it exits: this run's own entry would call it late or failed. The guides
-    # name the routine after its file. With brains declared under `brains:`, entries name their brain, and another
-    # brain's routine of this name stays listed.
+    # name the routine after its file. If an entry names its brain, check it against this brain's name.
     entries = home.get("attention", [])
     own = named(brain) if any(isinstance(entry, dict) and "brain" in entry for entry in entries) else ""
     self_name = Path(argv[0]).stem

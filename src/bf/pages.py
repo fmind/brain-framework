@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import heapq
 import json
 import re
 import sqlite3
 import stat
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import ExitStack, suppress
+from collections.abc import Callable, Generator, Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from itertools import islice
 from typing import Literal, TypedDict, cast
 
 from pydantic import ValidationError
@@ -22,8 +20,7 @@ from bf.health import attention, source_health
 from bf.markdown import Markdown, action_note, authored, editor_lock, entry_note, note, preview, reference, split_ref
 from bf.models import (
     AUTHORED,
-    CACHE,
-    LINKS,
+    CACHE_ERROR,
     NAME,
     Bounds,
     Error,
@@ -66,12 +63,6 @@ _MISSING = "page not found; read projects, concepts, actions or memories to brow
 _BELOW = "(i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')"
 # Items outside the :low sources; notes have no source. Period and home lists keep those sources as counts.
 _LOUD = "i.source NOT IN (SELECT value FROM json_each(:low))"
-
-
-Build = Callable[[Store, str, sqlite3.Connection], dict[str, object] | None]
-# A paged page's build: its brain's ordered rows from `skip` on, at most `count` of them.
-Window = Callable[[Store, str, sqlite3.Connection, int, int], dict[str, object] | None]
-Parts = list[tuple[str, dict[str, object]]]
 
 
 class Scope(TypedDict, total=False):
@@ -209,7 +200,7 @@ def _scope(value: str, now: datetime | None) -> Scope:
         parsed = links.parse(value)
         if not tagged and parsed and links.reserved(parsed.path):
             # A page's address, such as bf://brain/projects or bf://brain/7d, is never a link target: it would
-            # scope nothing. Its brain-relative form, such as projects or 7d, scopes every selected brain.
+            # scope nothing. Its brain-relative form, such as projects or 7d, scopes the brain.
             raise Error(_SCOPE)
         if parsed and parsed.fragment:
             # A section's address, as a result's uri gives it, would scope only the links naming that section, an
@@ -307,166 +298,44 @@ def address(brain: str, item: Mapping[str, object]) -> str:
     return links.address(brain, ref) if item.get("kind") == "record" else links.address(brain, *split_ref(ref))
 
 
-def label(brain: str, item: dict[str, object]) -> dict[str, object]:
-    """Name the brain and add the portable address of one cached item."""
-    return {"brain": brain, **item, "uri": address(brain, item)}
-
-
-def local(reply: dict[str, object]) -> dict[str, object]:
-    """With one selected brain, entries need not repeat its name and address; problems still name their brain.
-
-    Only the reply's lists of entries and their backlink groups change: an exact read's own fields stay.
-    """
-    return {
-        key: [_plain(entry) for entry in value] if key != "problems" and isinstance(value, list) else value
-        for key, value in reply.items()
-    }
-
-
-def _plain(entry: object) -> object:
-    """One entry as local() returns it."""
-    if not isinstance(entry, dict):
-        return entry
-    entry = {k: v for k, v in cast("dict[str, object]", entry).items() if k not in {"brain", "uri"}}
-    if isinstance(items := entry.get("items"), list):
-        # A backlink group's previews.
-        entry["items"] = [_plain(item) for item in items]
-    return entry
-
-
-def addressed(reply: dict[str, object]) -> dict[str, object]:
-    """With several selected brains a plain ref can be ambiguous: `newer`, `also`, `sections`, a claim's
-    `target_ref` and an outline's refs name items by address, like each entry's `uri`.
-
-    Listed entries and an exact read each name their brain. Pages fit their items in this shape: with one selected
-    brain, local() keeps refs plain and drops each entry's brain and address, so that reply is only smaller.
-    """
-    lists = {
-        key: [_named(entry) for entry in value] if isinstance(value, list) else value for key, value in reply.items()
-    }
-    return cast("dict[str, object]", _named(lists))
-
-
-def _named(entry: object) -> object:
-    """One entry as addressed() returns it; an entry that names no brain stays as it is."""
-    if not isinstance(entry, dict) or "brain" not in entry:
-        return entry
-    found = cast("dict[str, object]", entry)
-    brain = str(found["brain"])
-    changed: dict[str, object] = {}
-    for key in ("newer", "also", "blocked_by"):
-        if isinstance(refs := found.get(key), list):
-            changed[key] = [links.address(brain, str(ref)) for ref in refs]
-    if isinstance(refs := found.get("sections"), list):
-        # A section ref names its note's path and fragment; a record id or note path may hold a literal `#`.
-        changed["sections"] = [links.address(brain, *split_ref(str(ref))) for ref in refs]
-    if isinstance(outline := found.get("outline"), list):
-        changed["outline"] = [
-            {**entry, "ref": links.address(brain, *split_ref(str(entry["ref"])))}
-            for entry in cast("list[dict[str, object]]", outline)
-        ]
-    if "target_ref" in found:
-        # A claim's target is a whole note or record, never a section: a `#` in it is literal.
-        changed["target_ref"] = links.address(brain, str(found["target_ref"]))
-    return {**found, **changed} if changed else found
-
-
-def brains(
-    stores: list[Store],
-    build: Build,
-    *,
-    strict: bool = True,
-    counted: bool = True,
-    stack: ExitStack | None = None,
-    kind: str = "",
-) -> tuple[Parts, dict[str, object]]:
-    """Build one part per brain; a failing brain is reported unless it is the only one requested.
-
-    A build returns None when its brain has nothing to add, such as an unknown source. With `stack`, each
-    connection stays open for the part's streams; otherwise it closes once the part is built.
-    """
-    parts: Parts = []
-    problems: list[dict[str, object]] = []
-    stale: list[str] = []
-    answered = False
-    for store in stores:
-        name = ""
-        try:
-            name = load(store).name
-            with ExitStack() as local:
-                connection, state = local.enter_context(index.database(store))
-                part = build(store, name, connection)
-                skipped = index.problems(connection)
-                if stack is not None:
-                    # The part's streams keep the connection; a failed build closes it with its error at once.
-                    stack.enter_context(local.pop_all())
-        except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
-            if strict and len(stores) == 1:
-                if isinstance(error, sqlite3.DatabaseError):
-                    raise Error(CACHE) from error
-                raise
-            problems.append(graph.problem(store, name, error))
-            continue
-        answered = True
-        problems.extend({"brain": name, **problem} for problem in skipped)
-        if state != "ready":
-            stale.append(name)
-        if part is None:
-            continue
-        problems.extend(cast("list[dict[str, object]]", part.pop("problems", [])))
-        if counted:
-            usage.note(store, "read", 1, kind=kind)
-        parts.append((name, part))
-    if strict and stores and not answered:
-        raise Error("no selected brain could be read; run bf status with --brain for each brain")
-    return parts, {**({"stale": stale} if stale else {}), **({"problems": problems} if problems else {})}
+@contextmanager
+def _open(store: Store) -> Generator[tuple[str, sqlite3.Connection, dict[str, object]]]:
+    """Load the brain config and open its cache, collecting cache problems and staleness."""
+    try:
+        name = load(store).name
+        with index.database(store) as (connection, state):
+            problems = index.problems(connection)
+            extra: dict[str, object] = {
+                **({"stale": [name]} if state != "ready" else {}),
+                **({"problems": problems} if problems else {}),
+            }
+            yield name, connection, extra
+    except sqlite3.DatabaseError as error:
+        raise Error(CACHE_ERROR) from error
 
 
 def absent(extra: Mapping[str, object], message: str = _MISSING) -> Error:
-    """A missing page or source is NotFoundError only when every selected brain answered from a complete cache."""
+    """A missing page or source is NotFoundError only when the brain answered from a complete cache."""
     if extra.get("problems") or extra.get("stale"):
         return Error("not found in the readable evidence; run bf status before concluding it is absent")
     return NotFoundError(message)
 
 
 def unique(problems: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Each problem once: identity expansion and the page itself can meet the same unavailable brain."""
+    """Each problem once: identity expansion and the page itself can meet the same unreadable cache."""
     return list({encode(problem): problem for problem in problems}.values())
 
 
 def fitting(
-    items: list[dict[str, object]], budget: int = BUDGET, shape: Callable[[object], object] = _named
+    items: list[dict[str, object]], budget: int = BUDGET, shape: Callable[[object], object] = present
 ) -> list[dict[str, object]]:
-    """The leading items within the reply budget; at least one, so a continuation always advances.
-
-    Each item counts as `shape` returns it: by default as addressed() shapes it for several selected brains, so the
-    reply of one brain is smaller.
-    """
+    """The leading items within the reply budget; at least one, so a continuation always advances."""
     size = 0
     for count, item in enumerate(items):
         size += len(encode(shape(item)))
         if count and size > budget:
             return items[:count]
     return items
-
-
-def _gather(parts: Parts, key: str) -> list[dict[str, object]]:
-    return [
-        label(name, item) if "ref" in item else {"brain": name, **item}
-        for name, part in parts
-        for item in cast("list[dict[str, object]]", part.get(key, []))
-    ]
-
-
-def _newest(
-    items: list[dict[str, object]], limit: int | None, *, oldest: bool = False, modified: bool = False
-) -> list[dict[str, object]]:
-    """Newest event first, or newest modification first; a note's date is both. SQL previews use the same key."""
-
-    def key(item: dict[str, object]) -> tuple[str, str]:
-        return str((modified and item.get("updated")) or item.get("time", "")), str(item["ref"])
-
-    return sorted(items, key=key, reverse=not oldest)[:limit]
 
 
 def _rows(
@@ -476,90 +345,44 @@ def _rows(
 
 
 def _paged(
-    stores: list[Store],
-    build: Window,
-    key: Callable[[dict[str, object]], tuple[object, ...]],
-    limit: int,
+    items: list[dict[str, object]],
+    total: int,
     offset: int,
+    extra: Mapping[str, object],
     *,
-    counted: bool,
-    kind: str = "",
-    reverse: bool = False,
-    review: datetime | None = None,
-) -> tuple[dict[str, object], Parts]:
-    """Merge each part's ordered `rows` into one page of the global order, retaining only that page in memory.
-
-    Each part gives its brain's `total`; its other fields, such as a summary, stay in the returned parts. One brain's
-    rows skip the offset in SQL; with several, each gives its first offset + limit rows, which no brain can exceed in
-    the merged window, and the merge skips the offset.
-    """
-    connections: dict[str, sqlite3.Connection] = {}
-    skip = offset if len(stores) == 1 else 0
-
-    def opened(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object] | None:
-        connections[name] = connection
-        return build(store, name, connection, skip, offset + limit - skip)
-
-    with ExitStack() as stack:
-        parts, extra = brains(stores, opened, counted=counted, stack=stack, kind=kind)
-        streams = [cast("Iterator[dict[str, object]]", part.pop("rows")) for _, part in parts]
-        try:
-            merged = heapq.merge(*streams, key=key, reverse=reverse)
-            items = list(islice(islice(merged, offset - skip, None), limit))
-            if review:
-                for name, _ in parts:
-                    if selected := [item for item in items if item["brain"] == name]:
-                        _review(connections[name], selected, review)
-        except sqlite3.DatabaseError as error:
-            raise Error(CACHE) from error
-    # A page's summaries, such as recently changed notes, share its budget: the items fill what they leave.
-    reserved = sum(len(encode({k: v for k, v in part.items() if k != "total"})) for _, part in parts)
-    items = fitting(items, BUDGET - reserved)
-    total = sum(cast("int", part.pop("total")) for _, part in parts)
-    reply: dict[str, object] = {
-        "items": items,
+    reserved: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Fit one SQL page within the reply budget and emit its continuation offset when rows remain."""
+    space = BUDGET - (len(encode(present(dict(reserved)))) if reserved else 0)
+    selected = fitting(items, space)
+    return {
+        "items": selected,
         "total": total,
         **extra,
-        **({"next_offset": offset + len(items)} if offset + len(items) < total else {}),
+        **({"next_offset": offset + len(selected)} if offset + len(selected) < total else {}),
     }
-    return reply, parts
 
 
 def _listing(
-    stores: list[Store],
+    store: Store,
     where: str,
     params: Mapping[str, object],
     order: str,
-    key: Callable[[dict[str, object]], tuple[str, ...]],
     limit: int,
     offset: int,
     *,
     counted: bool,
-    kind: str = "",
-    reverse: bool = True,
+    kind: str,
     review: datetime | None = None,
-    summary: Build | None = None,
-) -> tuple[dict[str, object], Parts]:
-    """Items matching fixed SQL in every brain; `summary` adds a brain's page context, or skips it with None."""
-
-    def build(
-        store: Store, name: str, connection: sqlite3.Connection, skip: int, count: int
-    ) -> dict[str, object] | None:
-        extra = summary(store, name, connection) if summary else {}
-        if extra is None:
-            return None
-        rows, total = index.listing(connection, where, params, order, count, skip)
-        return {**extra, "rows": (label(name, row) for row in rows), "total": total}
-
-    return _paged(stores, build, key, limit, offset, counted=counted, reverse=reverse, review=review, kind=kind)
-
-
-def _time_key(item: dict[str, object]) -> tuple[str, str]:
-    return str(item.get("time", "")), str(item["ref"])
-
-
-def _period_key(item: dict[str, object]) -> tuple[str, str]:
-    return str(item.get("time") or item.get("observed", "")), str(item["ref"])
+) -> dict[str, object]:
+    with _open(store) as (_name, connection, extra):
+        rows, total = index.listing(connection, where, params, order, limit, offset)
+        items = list(rows)
+        if review:
+            _review(connection, items, review)
+        if counted:
+            usage.note(store, "read", 1, kind=kind)
+        return _paged(items, total, offset, extra)
 
 
 def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now: datetime) -> None:
@@ -632,7 +455,7 @@ def _brief(item: dict[str, object]) -> dict[str, object]:
 
 
 # A recently changed note on the home page: which note, when, and whether it needs review; its read holds the rest.
-_CHANGED = ("brain", "ref", "uri", "kind", "title", "time", "date", "modified", "review")
+_CHANGED = ("ref", "kind", "title", "time", "date", "modified", "review")
 # A record changed upstream on a period page: which record, when it happened and when it changed. Each continuation
 # page repeats the list, so its read holds the rest and the page budget goes to the items.
 _UPDATED = ("ref", "kind", "title", "time", "updated")
@@ -642,14 +465,12 @@ def _only(item: dict[str, object], keys: tuple[str, ...]) -> dict[str, object]:
     return {key: item[key] for key in keys if key in item}
 
 
-def home(
-    stores: list[Store], now: datetime | None = None, *, counted: bool = True, single: bool = False
-) -> dict[str, object]:
+def home(store: Store, now: datetime | None = None, *, counted: bool = True) -> dict[str, object]:
     """What needs attention now: projects needing review first, recent actions and notes, activity and the coming week.
 
     Every current project is reviewed; those that fit the page budget are listed, and `projects_total` counts all.
     `changed` names the other notes changed this week. A deprecated note no longer applies, so it leaves every
-    section. The budget is measured on the reply as printed, for one selected brain when `single`.
+    section. The budget is measured on the reply as printed.
     """
     now = now or datetime.now(UTC)
     stamp = timestamp(now.isoformat())
@@ -657,9 +478,7 @@ def home(
     ahead = timestamp((now + timedelta(days=7)).isoformat())
     current = "i.status!='deprecated'"
     project = f"{index.ENTRY} AND i.type='project'"
-
-    def build(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:
-        # Each preview's SQL order matches the Python merge below, so ties at a cap select the same items.
+    with _open(store) as (_name, connection, extra):
         projects = _rows(connection, f"{project} AND {current}", {}, "time DESC,i.ref DESC", -1)
         actions = _rows(connection, f"{index.ACTION} AND i.status='draft'", {}, "i.path DESC", 10)
         # Projects carry their own review signals in `projects`.
@@ -681,49 +500,33 @@ def home(
         # A note listed in several sections carries the same signals in each.
         _review(connection, [*projects, *actions, *changed, *upcoming], now)
         activity = _counts(store, index.activity(connection, day, stamp), "24h")
-        issues: list[dict[str, object]] = []
+        issues = list(cast("list[dict[str, object]]", extra.get("problems", [])))
         try:
             # From this connection: opening the cache again would wait behind a publish that waits for this read.
             alerts = attention(store, now, index.sources(connection))
         except Error, OSError, UnicodeError:
             alerts = []
-            issues.append({"brain": _name, "error": "operational status is unavailable; run bf status"})
-        return {
-            "problems": issues,
-            "projects": projects,
-            "actions": actions,
-            "changed": changed,
-            "activity": activity,
-            "upcoming": upcoming,
-            "attention": alerts,
-        }
-
-    parts, extra = brains(stores, build, counted=counted, kind="home")
-    projects = _newest(_gather(parts, "projects"), None)
+            issues.append({"error": "operational status is unavailable; run bf status"})
+        if counted:
+            usage.note(store, "read", 1, kind="home")
     reply: dict[str, object] = {
         "page": "",
         "projects": [],
         "projects_total": len(projects),
-        "actions": sorted(_gather(parts, "actions"), key=lambda i: str(i["ref"]), reverse=True)[:10],
+        "actions": actions,
         # Orientation previews: titles and times; read an item for its text.
-        "changed": [_only(item, _CHANGED) for item in _newest(_gather(parts, "changed"), SECTION)],
-        "activity": _gather(parts, "activity"),
-        "upcoming": [_brief(item) for item in _newest(_gather(parts, "upcoming"), SECTION, oldest=True)],
-        "attention": _gather(parts, "attention"),
+        "changed": [_only(item, _CHANGED) for item in changed],
+        "activity": activity,
+        "upcoming": [_brief(item) for item in upcoming],
+        "attention": alerts,
         "pages": BROWSE,
-        **extra,
+        **({k: v for k, v in extra.items() if k != "problems"}),
+        **({"problems": issues} if issues else {}),
     }
-
-    # As the CLI and MCP print it: local times, a note's date without the time that ordered it, and with one
-    # selected brain, entries without their brain and address.
-    def printed(value: object) -> object:
-        return present(_plain(value) if single else _named(value))
-
     # Projects needing review first, each group newest first, in what the bounded previews leave of the budget.
     reply["projects"] = fitting(
         sorted(projects, key=lambda item: not item.get("review")),
-        BUDGET - len(encode(present(local(reply) if single else addressed(reply)))),
-        printed,
+        BUDGET - len(encode(present(reply))),
     )
     return reply
 
@@ -768,17 +571,11 @@ def _blocked_by(connection: sqlite3.Connection, actions: list[dict[str, object]]
 
 
 def review_page(
-    stores: list[Store],
-    now: datetime | None = None,
-    *,
-    offset: int = 0,
-    counted: bool = True,
-    single: bool = False,
+    store: Store, now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object]:
     """Computed triage view: paginated non-deprecated notes needing review, open draft actions and attention items."""
     now = now or datetime.now(UTC)
-
-    def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
+    with _open(store) as (_name, connection, extra):
         candidates = _rows(connection, f"{index.ENTRY} AND i.status!='deprecated'", {}, "time DESC,i.ref DESC", -1)
         _review(connection, candidates, now)
         due_items = [
@@ -793,45 +590,30 @@ def review_page(
         )
         previewed = drafts[:SECTION]
         _blocked_by(connection, previewed)
-        issues: list[dict[str, object]] = []
+        issues = list(cast("list[dict[str, object]]", extra.get("problems", [])))
         try:
             alerts = attention(store, now, index.sources(connection))
         except Error, OSError, UnicodeError:
             alerts = []
-            issues.append({"brain": name, "error": "operational status is unavailable; run bf status"})
-        return {
-            "problems": issues,
-            "items": due_items,
-            "actions": previewed,
-            "actions_total": len(drafts),
-            "attention": alerts,
-        }
-
-    parts, extra = brains(stores, build, counted=counted, kind="review")
+            issues.append({"error": "operational status is unavailable; run bf status"})
+        if counted:
+            usage.note(store, "read", 1, kind="review")
     ordered = sorted(
-        _gather(parts, "items"),
+        due_items,
         key=lambda item: (str(item.get("review_due", "9999-99-99")), str(item["ref"])),
     )
     total = len(ordered)
-    window = ordered[offset : offset + PAGE]
-    actions = sorted(_gather(parts, "actions"), key=lambda item: str(item["ref"]), reverse=True)[:SECTION]
-    actions_total = sum(cast("int", part.get("actions_total", 0)) for _, part in parts)
-    alerts = _gather(parts, "attention")
     reply: dict[str, object] = {
         "page": "review",
         "items": [],
         "total": total,
-        "actions": actions,
-        "actions_total": actions_total,
+        "actions": previewed,
+        "actions_total": len(drafts),
         "attention": alerts,
-        **extra,
+        **({k: v for k, v in extra.items() if k != "problems"}),
+        **({"problems": issues} if issues else {}),
     }
-
-    def printed(value: object) -> object:
-        return present(_plain(value) if single else _named(value))
-
-    budget = BUDGET - len(encode(present(local(reply) if single else addressed(reply))))
-    selected = fitting(window, budget, printed)
+    selected = fitting(ordered[offset : offset + PAGE], BUDGET - len(encode(present(reply))))
     reply["items"] = selected
     if offset + len(selected) < total:
         reply["next_offset"] = offset + len(selected)
@@ -977,15 +759,12 @@ def evaluate_when(
     return bool(events), cap_events(events, total=total), next_cursor
 
 
-def timeline(
-    stores: list[Store], name: str, found: Period, *, offset: int = 0, counted: bool = True
-) -> dict[str, object]:
+def timeline(store: Store, name: str, found: Period, *, offset: int = 0, counted: bool = True) -> dict[str, object]:
     """Items dated within a period, items modified within it, and each source's share of the period.
 
     Low-priority sources, such as a news feed, appear only in `sources`: their records would crowd out the rest.
     """
-
-    def build(store: Store, brain: str, connection: sqlite3.Connection, skip: int, count: int) -> dict[str, object]:
+    with _open(store) as (_brain, connection, extra):
         params = {"since": found.since, "until": found.until, "low": json.dumps(low(store))}
         # Brief before the page measures what its summaries leave the items.
         changed = [
@@ -1004,19 +783,20 @@ def timeline(
             f"{index.PERIOD_WITHIN} AND {_LOUD}",
             params,
             f"({index.PERIOD_TIME}) DESC,i.ref DESC",
-            count,
-            skip,
+            PAGE,
+            offset,
         )
-        return {"changed": changed, "sources": sources, "rows": (label(brain, row) for row in rows), "total": total}
-
-    reply, parts = _paged(stores, build, _period_key, PAGE, offset, counted=counted, reverse=True, kind="period")
+        items = list(rows)
+        if counted:
+            usage.note(store, "read", 1, kind="period")
+    reply = _paged(items, total, offset, extra, reserved={"changed": changed, "sources": sources})
     return {
         "page": name,
         "since": found.since,
         "until": found.until,
         **reply,
-        "changed": _newest(_gather(parts, "changed"), SECTION, modified=True),
-        "sources": _gather(parts, "sources"),
+        "changed": changed,
+        "sources": sources,
         **({"previous": found.previous, "next": found.next} if found.previous else {}),
     }
 
@@ -1031,9 +811,9 @@ def _kind(store: Store, path: str) -> int:
 
 
 def folder(
-    stores: list[Store], path: str, now: datetime | None = None, *, offset: int = 0, counted: bool = True
+    store: Store, path: str, now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object]:
-    """Notes below an authored folder, with a continuation through the complete global order."""
+    """Notes below an authored folder, with a continuation through the complete order."""
     now = now or datetime.now(UTC)
     top = path.split("/")[0]
     where = index.ACTION if path == "actions" else f"i.kind='note' AND {_BELOW}"
@@ -1041,32 +821,22 @@ def folder(
         "projects": "i.status='deprecated',time DESC,i.ref DESC",
         "concepts": "i.title,i.ref",
     }.get(top, "i.path DESC")
-
-    def key(item: dict[str, object]) -> tuple[str, ...]:
-        if top == "projects":
-            return (str(item.get("status") != "deprecated"), *_time_key(item))
-        if top == "concepts":
-            return str(item.get("title", "")), str(item["ref"])
-        return (str(item["ref"]),)
-
-    reply, _ = _listing(
-        stores,
+    reply = _listing(
+        store,
         where,
         {"prefix": path},
         order,
-        key,
         LISTING,
         offset,
         counted=counted,
         kind="folder",
-        reverse=top != "concepts",
         review=now,
     )
     return {"page": path, **reply}
 
 
 def memories(
-    stores: list[Store], parts: tuple[str, ...], now: datetime | None = None, *, offset: int = 0, counted: bool = True
+    store: Store, parts: tuple[str, ...], now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object]:
     """Sources with their coverage, or one source's coverage with its records: all of them, those in a period, the
     undated ones or one record file's."""
@@ -1074,39 +844,27 @@ def memories(
     if len(parts) == 1:
         if offset:
             raise InputError("offset applies to a source's records; read memories/SOURCE", "offset")
-
-        def overview(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:
+        with _open(store) as (_name, connection, extra):
             counts = index.sources(connection)
             health = source_health(store, counts, now=now)
-            return {
-                "sources": [
-                    {"source": name, "page": f"memories/{name}", **counts.get(name, {"records": 0}), **value}
-                    for name, value in health.items()
-                ]
-            }
-
-        found, extra = brains(stores, overview, counted=counted, kind="memories")
-        return {"page": "memories", "sources": _gather(found, "sources"), **extra}
+            if counted:
+                usage.note(store, "read", 1, kind="memories")
+        return {
+            "page": "memories",
+            "sources": [
+                {"source": name, "page": f"memories/{name}", **counts.get(name, {"records": 0}), **value}
+                for name, value in health.items()
+            ],
+            **extra,
+        }
     source = parts[1]
     if not re.fullmatch(NAME, source) or len(parts) > 3:
         raise NotFoundError(_MISSING)
-    # Every answering brain's sources: a source none of them holds names the close ones.
-    known: set[str] = set()
-
-    def coverage(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object] | None:
-        """The source's coverage in a brain that indexes or configures it: without it, an empty day would read as
-        absence."""
-        counts = sources(store, connection)
-        known.update(counts)
-        if (count := counts.get(source)) is None:
-            return None
-        return {"sources": [{"source": source, **count, **source_health(store, {source: count}, now=now)[source]}]}
-
     window = None
     if len(parts) == 2:
         # A record's time is its stored instant: ordering by the column walks items_kind_source_time.
         where, params = "i.kind='record' AND i.source=:source", {"source": source}
-        order, key, budget, kind = "i.time DESC,i.ref DESC", _time_key, SECTION, "source"
+        order, budget, kind = "i.time DESC,i.ref DESC", SECTION, "source"
     else:
         name = parts[2]
         window = None if name.endswith(".json") else period(name, now)
@@ -1120,17 +878,22 @@ def memories(
         else:
             raise NotFoundError(_MISSING)
         order = f"({index.PERIOD_TIME}) DESC,i.ref DESC" if window else "i.time DESC,i.ref DESC"
-        key, budget = (_period_key if window else _time_key), PAGE
+        budget = PAGE
         kind = "source-period" if window or name == "undated" else "record"
-    reply, found = _listing(
-        stores, where, params, order, key, budget, offset, counted=counted, kind=kind, summary=coverage
-    )
-    if not found:
-        # An unknown source is a missing page, never an empty answer.
-        raise absent(reply, _MISSING + suggest(source, known, prefix="memories/"))
+    with _open(store) as (_name, connection, extra):
+        counts = sources(store, connection)
+        if (count := counts.get(source)) is None:
+            # An unknown source is a missing page, never an empty answer.
+            raise absent(extra, _MISSING + suggest(source, set(counts), prefix="memories/"))
+        coverage = [{"source": source, **count, **source_health(store, {source: count}, now=now)[source]}]
+        rows, total = index.listing(connection, where, params, order, budget, offset)
+        items = list(rows)
+        if counted:
+            usage.note(store, "read", 1, kind=kind)
+    reply = _paged(items, total, offset, extra, reserved={"sources": coverage})
     return {
         "page": "/".join(parts),
-        "sources": _gather(found, "sources"),
+        "sources": coverage,
         **reply,
         **(
             {"previous": f"memories/{source}/{window.previous}", "next": f"memories/{source}/{window.next}"}
@@ -1140,12 +903,11 @@ def memories(
     }
 
 
-def tasks(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict[str, object]:
+def tasks(store: Store, *, offset: int = 0, counted: bool = True) -> dict[str, object]:
     """Open checkboxes in current entry notes, with source lines and complete aggregate counts."""
     # Working attachments can quote source checkboxes: only authored entry notes join the task queue.
     eligible = f"{index.ENTRY} AND i.status!='deprecated'"
-
-    def build(_store: Store, name: str, connection: sqlite3.Connection, skip: int, count: int) -> dict[str, object]:
+    with _open(store) as (_name, connection, extra):
         summary = connection.execute(
             "SELECT coalesce(sum(t.done=0),0),coalesce(sum(t.done=1),0),count(DISTINCT t.item) "  # noqa: S608 - fixed SQL
             f"FROM tasks t JOIN items i ON i.id=t.item WHERE {eligible}"
@@ -1153,57 +915,40 @@ def tasks(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict
         rows = connection.execute(
             "SELECT i.ref,i.title,t.line,t.fragment,t.text FROM tasks t JOIN items i ON i.id=t.item "  # noqa: S608 - fixed SQL
             f"WHERE t.done=0 AND {eligible} ORDER BY i.ref,t.line LIMIT ? OFFSET ?",
-            (count, skip),
-        )
-
-        def items() -> Iterator[dict[str, object]]:
-            for ref, title, line, fragment, text in rows:
-                yield label(
-                    name,
-                    {
-                        "ref": ref + ("#" + fragment if fragment else ""),
-                        "note": ref,
-                        "title": preview(title, index.TITLE),
-                        "line": line,
-                        "text": text,
-                    },
-                )
-
-        counts = dict(zip(("open", "done", "notes"), summary, strict=True))
-        return {"rows": items(), "total": counts["open"], "summary": counts}
-
-    reply, parts = _paged(
-        stores,
-        build,
-        lambda item: (str(item["note"]), int(cast("int", item["line"])), str(item["brain"])),
-        PAGE,
-        offset,
-        counted=counted,
-        kind="tasks",
-    )
-    summary = {
-        key: sum(cast("dict[str, int]", part["summary"])[key] for _, part in parts) for key in ("open", "done", "notes")
+            (PAGE, offset),
+        ).fetchall()
+        if counted:
+            usage.note(store, "read", 1, kind="tasks")
+    items = [
+        {
+            "ref": ref + ("#" + fragment if fragment else ""),
+            "note": ref,
+            "title": preview(title, index.TITLE),
+            "line": line,
+            "text": text,
+        }
+        for ref, title, line, fragment, text in rows
+    ]
+    counts = dict(zip(("open", "done", "notes"), summary, strict=True))
+    return {
+        "page": "tasks",
+        **_paged(items, counts["open"], offset, extra, reserved={"summary": counts}),
+        "summary": counts,
     }
-    return {"page": "tasks", **reply, "summary": summary}
 
 
-def tags(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict[str, object]:
-    """Enumerate local tag identities, with exact note counts and bounded cross-brain pagination."""
-
-    def build(_store: Store, name: str, connection: sqlite3.Connection, skip: int, count: int) -> dict[str, object]:
+def tags(store: Store, *, offset: int = 0, counted: bool = True) -> dict[str, object]:
+    """Enumerate local tag identities, with exact note counts and bounded pagination."""
+    with _open(store) as (_name, connection, extra):
         rows = connection.execute(
-            "SELECT target,count(*) AS total FROM tags GROUP BY target ORDER BY target LIMIT ? OFFSET ?", (count, skip)
-        )
-
-        def items() -> Iterator[dict[str, object]]:
-            for target, total in rows:
-                yield {"brain": name, "tag": links.tag(target), "ref": target, "uri": target, "total": total}
-
-        total = connection.execute("SELECT count(DISTINCT target) FROM tags").fetchone()[0]
-        return {"rows": items(), "total": total}
-
-    reply, _ = _paged(stores, build, lambda item: (str(item["uri"]),), LISTING, offset, counted=counted, kind="tags")
-    return {"page": "tags", **reply}
+            "SELECT target,count(*) AS total FROM tags GROUP BY target ORDER BY target LIMIT ? OFFSET ?",
+            (LISTING, offset),
+        ).fetchall()
+        total = int(connection.execute("SELECT count(DISTINCT target) FROM tags").fetchone()[0])
+        if counted:
+            usage.note(store, "read", 1, kind="tags")
+    items = [{"tag": links.tag(target), "ref": target, "total": count} for target, count in rows]
+    return {"page": "tags", **_paged(items, total, offset, extra)}
 
 
 def _label(name: str) -> None:
@@ -1214,37 +959,34 @@ def _label(name: str) -> None:
         raise Error("invalid tag label; read the tags page and use one of its refs") from error
 
 
-def tagged(stores: list[Store], name: str, *, offset: int = 0, counted: bool = True) -> dict[str, object]:
+def tagged(store: Store, name: str, *, offset: int = 0, counted: bool = True) -> dict[str, object]:
     """List only explicit frontmatter membership, not prose, aliases or ordinary links to a tag."""
     _label(name)
-    targets = []
-    for store in stores:
-        with suppress(Error, OSError, UnicodeError):
-            targets.append(links.address(load(store).name, f"tags/{name}"))
-    reply, _ = _listing(
-        stores,
-        "i.id IN (SELECT item FROM tags WHERE target IN (SELECT value FROM json_each(:targets)))",
-        {"targets": json.dumps(targets)},
-        "time DESC,i.ref DESC",
-        _time_key,
-        LISTING,
-        offset,
-        counted=counted,
-        kind="tag",
-    )
-    return {"page": f"tags/{name}", **reply}
+    with _open(store) as (brain, connection, extra):
+        target = links.address(brain, f"tags/{name}")
+        rows, total = index.listing(
+            connection,
+            "i.id IN (SELECT item FROM tags WHERE target=:target)",
+            {"target": target},
+            "time DESC,i.ref DESC",
+            LISTING,
+            offset,
+        )
+        items = list(rows)
+        if counted:
+            usage.note(store, "read", 1, kind="tag")
+    return {"page": f"tags/{name}", **_paged(items, total, offset, extra)}
 
 
 def page(
-    stores: list[Store],
+    store: Store,
     path: str,
     now: datetime | None = None,
     *,
     offset: int = 0,
     counted: bool = True,
-    single: bool = False,
 ) -> dict[str, object] | None:
-    """The page a ref names, or None when it names a note, a record or an identity; `single` as for `home`.
+    """The page a ref names, or None when it names a note, a record or an identity.
 
     An offset on a page that is never paged is invalid input, decided by the ref alone.
     """
@@ -1253,27 +995,27 @@ def page(
             raise InputError(
                 "offset applies to listing pages; follow a home page's projects, actions or period link", "offset"
             )
-        return home(stores, now, counted=counted, single=single)
+        return home(store, now, counted=counted)
     target = route(path, now)
     match target.kind:
         case "period":
-            return timeline(stores, target.name, cast("Period", target.window), offset=offset, counted=counted)
+            return timeline(store, target.name, cast("Period", target.window), offset=offset, counted=counted)
         case "review":
-            return review_page(stores, now, offset=offset, counted=counted, single=single)
+            return review_page(store, now, offset=offset, counted=counted)
         case "tasks":
-            return tasks(stores, offset=offset, counted=counted)
+            return tasks(store, offset=offset, counted=counted)
         case "tags":
-            return tags(stores, offset=offset, counted=counted)
+            return tags(store, offset=offset, counted=counted)
         case "tag":
-            return tagged(stores, target.name.removeprefix("tags/"), offset=offset, counted=counted)
+            return tagged(store, target.name.removeprefix("tags/"), offset=offset, counted=counted)
         case "memories":
-            return memories(stores, relative(target.name), now, offset=offset, counted=counted)
-    if name := folder_page(stores, path):
-        return folder(stores, name, now, offset=offset, counted=counted)
+            return memories(store, relative(target.name), now, offset=offset, counted=counted)
+    if name := folder_page(store, path):
+        return folder(store, name, now, offset=offset, counted=counted)
     return None
 
 
-def folder_page(stores: list[Store], path: str) -> str | None:
+def folder_page(store: Store, path: str) -> str | None:
     """The folder page an authored path names: a root, or an existing folder below one other than an action's,
     which reads as its ACTION.md. Notes and their sections (`path#heading`) are items, not folders; a symlink or
     special file where the folder would be, or above it, fails, naming it."""
@@ -1284,19 +1026,10 @@ def folder_page(stores: list[Store], path: str) -> str | None:
     if name in AUTHORED:
         return name
     # Entity names such as projects/archive are logical: only an existing folder is a page.
-    kinds: set[int] = set()
-    linked: Error | None = None
-    for store in stores:
-        try:
-            kinds.add(_kind(store, name))
-        except Error as error:
-            linked = error
-    if stat.S_IFDIR in kinds:
+    kind = _kind(store, name)
+    if kind == stat.S_IFDIR:
         return name
-    if linked is not None:
-        # A folder below a link is skipped and reported like the link itself: not found would claim it absent.
-        raise linked
-    if kinds - {0, stat.S_IFREG}:
+    if kind not in {0, stat.S_IFREG}:
         # Skipped and reported like a path below it: not found would claim the folder absent.
         raise Error(f"{name}: expected a directory; symlinks and special files are not followed")
     return None
@@ -1310,7 +1043,7 @@ def readable(ref: str, rel: str = "") -> str:
     """Check a read's syntax without a brain, as `page` and `retrieve.read` apply it; a failure is invalid input.
 
     A malformed ref, or a relation page of a page or a #section, fails here; a well-formed ref can still name
-    nothing in the selected brains.
+    nothing in the brain.
     """
     try:
         path, section = _syntax(ref)
@@ -1371,7 +1104,7 @@ def _syntax(ref: str) -> tuple[str, bool]:
 
 
 # A backlink preview names an item; its relation page and exact read hold the rest.
-_PREVIEWED = ("brain", "ref", "uri", "title", "time", "date", "kind", "source", "status", "type", "fields", "excerpt")
+_PREVIEWED = ("ref", "title", "time", "date", "kind", "source", "status", "type", "@type", "excerpt")
 # A backlink preview's excerpt: enough to see what each linking item says without reading it.
 GLIMPSE = 160
 
@@ -1383,83 +1116,71 @@ def _glimpse(item: dict[str, object]) -> dict[str, object]:
     return item
 
 
-def _backlinks(
-    connection: sqlite3.Connection, brain: str, targets: set[str], exclude: str = ""
-) -> list[dict[str, object]]:
+def _backlinks(connection: sqlite3.Connection, targets: set[str], exclude: str = "") -> list[dict[str, object]]:
     groups = index.incoming(connection, targets, exclude=exclude, limit=PREVIEW)
     for group in groups:
         group["items"] = [
             _glimpse({key: item[key] for key in _PREVIEWED if key in item})
-            for item in (label(brain, row) for row in cast("list[dict[str, object]]", group["items"]))
+            for item in cast("list[dict[str, object]]", group["items"])
         ]
     return groups
 
 
-def _merge(parts: Parts) -> list[dict[str, object]]:
-    """Combine each brain's relation groups: declared relations by name, then untyped links, newest items first."""
-    merged: dict[str, dict[str, object]] = {}
-    for _, part in parts:
-        for group in cast("list[dict[str, object]]", part["backlinks"]):
-            relation = str(group["relation"])
-            into = merged.setdefault(relation, {"relation": relation, "total": 0, "items": []})
-            into["total"] = cast("int", into["total"]) + cast("int", group["total"])
-            into["items"] = [*cast("list", into["items"]), *cast("list", group["items"])]
-    return [
-        {**merged[relation], "items": _newest(cast("list[dict[str, object]]", merged[relation]["items"]), PREVIEW)}
-        for relation in sorted(merged, key=lambda value: (value == LINKS, value))
-    ]
-
-
 def relation_page(
-    stores: list[Store],
+    store: Store,
     targets: set[str],
     relation: str,
     *,
-    owner: Store | None = None,
     ref: str = "",
     offset: int = 0,
     counted: bool = True,
 ) -> dict[str, object]:
     """Every item linking to the expanded targets through one relation, newest first, 50 per page.
 
-    `relation` is a declared relation, CITES or LINKS; the owning item is not its own backlink. Each brain also lists
-    the links of its relations declaring this one `broader`; an item carries its `relation` only when it differs
-    from the requested one.
+    `relation` is a RelationName, CITES or LINKS; the owning item is not its own backlink. Also lists the links of
+    relations declaring this one `broader`; an item carries its `relation` only when it differs from the requested one.
     """
-
-    def build(store: Store, name: str, connection: sqlite3.Connection, skip: int, count: int) -> dict[str, object]:
-        exclude = ref if owner is not None and store.root == owner.root else ""
+    with _open(store) as (name, connection, extra):
         relations = [relation, *load(store).narrower(relation)]
         local = graph.local_refs(connection, targets, name)
-        rows, total = index.linking(connection, local, relations, exclude=exclude, limit=count, offset=skip)
-        items = (label(name, row) for row in rows)
-        return {
-            "rows": ({k: v for k, v in item.items() if (k, v) != ("relation", relation)} for item in items),
-            "total": total,
-        }
-
-    reply, _ = _paged(stores, build, _time_key, PAGE, offset, counted=counted, reverse=True, kind="relation")
-    return {"page": "relation", "relation": relation, **reply}
+        rows, total = index.linking(connection, local, relations, exclude=ref, limit=PAGE, offset=offset)
+        items = [{k: v for k, v in row.items() if (k, v) != ("relation", relation)} for row in rows]
+        if counted:
+            usage.note(store, "read", 1, kind="relation")
+    return {"page": "relation", "relation": relation, **_paged(items, total, offset, extra)}
 
 
-def _graph(targets: set[str], owner: Store | None = None, ref: str = "", now: datetime | None = None) -> Build:
-    """Each brain's backlinks and typed claims about the expanded targets; the owning item is not its own backlink.
+def _graph(
+    store: Store,
+    targets: set[str],
+    ref: str = "",
+    now: datetime | None = None,
+    *,
+    counted: bool = False,
+    kind: str = "",
+) -> dict[str, object]:
+    """Backlinks and typed claims about the expanded targets; the owning item is not its own backlink.
 
-    With `now`, the owning brain also gives the whole note's reminders.
+    With `now`, also gives the whole note's reminders.
     """
-
-    def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
-        local = graph.local_refs(connection, targets, name)
-        claims, truncated = graph.outgoing(connection, local)
-        owned = owner is not None and store.root == owner.root
-        return {
-            "backlinks": _backlinks(connection, name, local, ref if owned else ""),
-            "claims": [{"brain": name, **claim} for claim in claims],
-            "claims_truncated": truncated,
-            **({"reminders": _reminders(connection, ref, now)} if owned and now else {}),
-        }
-
-    return build
+    try:
+        with _open(store) as (name, connection, extra):
+            local = graph.local_refs(connection, targets, name)
+            claims, truncated = graph.outgoing(connection, local)
+            groups = _backlinks(connection, local, ref)
+            reminders = _reminders(connection, ref, now) if now else {}
+            if counted:
+                usage.note(store, "read", 1, kind=kind)
+    except (Error, OSError, UnicodeError) as error:
+        return {"problems": [graph.problem(store, error)]}
+    return {
+        "backlinks": groups[: index.GROUPS],
+        **({"backlinks_omitted": len(groups) - index.GROUPS} if len(groups) > index.GROUPS else {}),
+        **({"claims": claims} if claims else {}),
+        **({"claims_truncated": True} if truncated else {}),
+        **reminders,
+        **extra,
+    }
 
 
 # What a whole read adds from the note's listing entry when the note gets reminders.
@@ -1492,23 +1213,13 @@ def _summary(reply: Mapping[str, object]) -> dict[str, object]:
     return {key: value for key, value in values.items() if value}
 
 
-def _related(parts: Parts) -> dict[str, object]:
-    claims = [claim for _, part in parts for claim in cast("list[dict[str, object]]", part["claims"])]
-    groups = _merge(parts)
-    return {
-        "backlinks": groups[: index.GROUPS],
-        **({"backlinks_omitted": len(groups) - index.GROUPS} if len(groups) > index.GROUPS else {}),
-        **({"claims": claims} if claims else {}),
-        **({"claims_truncated": True} if any(part["claims_truncated"] for _, part in parts) else {}),
-    }
-
-
-def context(stores: list[Store], owner: Store, brain: str, reply: dict[str, object]) -> dict[str, object]:
-    """Backlinks of a whole note or record and typed claims about it across the selected brains.
+def context(store: Store, reply: dict[str, object]) -> dict[str, object]:
+    """Backlinks of a whole note or record and typed claims about it.
 
     A whole note that gets reminders adds its tasks and review signals, and an action's ACTION.md the action's files
     and the projects it links to. A section names its note's title, type, status and date instead.
     """
+    brain = str(reply["brain"])
     ref = str(reply["ref"])
     record = "record" in reply
     path, fragment = ("", "") if record else split_ref(ref)
@@ -1516,37 +1227,28 @@ def context(stores: list[Store], owner: Store, brain: str, reply: dict[str, obje
         return _summary(reply)
     if not record and not addressable(path):
         # Record ids are bounded to fit a BF address; a note path is not, but the note itself still reads.
-        return {"problems": [{"brain": brain, "error": "backlinks are unavailable for a path this long; shorten it"}]}
+        return {"problems": [{"error": "backlinks are unavailable for a path this long; shorten it"}]}
     try:
-        targets, problems = graph.expand(stores, links.address(brain, ref if record else path))
+        targets, problems = graph.expand(store, links.address(brain, ref if record else path))
     except Error:
         # Only an invalid address raises, such as a note path with a control character; the note itself reads.
-        return {
-            "problems": [{"brain": brain, "file": path, "error": "backlinks are unavailable for this path; rename it"}]
-        }
+        return {"problems": [{"file": path, "error": "backlinks are unavailable for this path; rename it"}]}
     reminded = None if record else datetime.now(UTC)
-    parts, extra = brains(stores, _graph(targets, owner, ref, reminded), strict=False, counted=False)
-    result = _related(parts)
-    for _, part in parts:
-        result.update(cast("dict[str, object]", part.get("reminders", {})))
-    issues: list[dict[str, object]] = [*problems, *cast("list[dict[str, object]]", extra.get("problems", []))]
+    result = _graph(store, targets, ref, reminded)
+    issues: list[dict[str, object]] = [*problems, *cast("list[dict[str, object]]", result.pop("problems", []))]
     if not record and action_note(path):
         skipped: dict[str, tuple[int, int, int, int]] = {}
         try:
-            result.update(_action(owner, brain, path, str(reply["text"]), skipped))
+            result.update(_action(store, brain, path, str(reply["text"]), skipped))
         except Error, OSError, sqlite3.DatabaseError:
-            issues.append({"brain": brain, "error": "the action's files or projects are unavailable; run bf status"})
+            issues.append({"error": "the action's files or projects are unavailable; run bf status"})
         # Never followed, so never offered as the action's files; the owner can replace or rename them. The cache
         # names each entry it scanned with its cause: only those it did not report, such as past its 200, are added,
         # with the cause bf validate names.
-        reported = {(problem.get("brain"), problem.get("file")) for problem in issues}
-        unlisted = sorted(name for name in skipped if not editor_lock(name) and (brain, name) not in reported)
-        issues.extend({"brain": brain, "file": name, "error": unread(owner, name)} for name in unlisted[:LISTING])
-    return {
-        **result,
-        **({"stale": extra["stale"]} if "stale" in extra else {}),
-        **({"problems": unique(issues)} if issues else {}),
-    }
+        reported = {problem.get("file") for problem in issues}
+        unlisted = sorted(name for name in skipped if not editor_lock(name) and name not in reported)
+        issues.extend({"file": name, "error": unread(store, name)} for name in unlisted[:LISTING])
+    return {**result, **({"problems": unique(issues)} if issues else {})}
 
 
 def _action(
@@ -1580,25 +1282,19 @@ def _action(
             "i.ref",
             SECTION,
         )
-    return {"files": files, "projects": [label(brain, item) for item in linked]}
+    return {"files": files, "projects": linked}
 
 
-def identity(stores: list[Store], value: str, *, counted: bool = True) -> dict[str, object] | None:
+def identity(store: Store, value: str, *, counted: bool = True) -> dict[str, object] | None:
     """Everything that links to an identity without an owning note, and the claims made about it."""
     if not (index.identity(value) or value.lower().startswith("bf:")):
         return None
     value = links.identity(value)
-    targets, problems = graph.expand(stores, value)
-    parts, extra = brains(stores, _graph(targets), strict=False, counted=counted, kind="identity")
-    result = _related(parts)
-    issues: list[dict[str, object]] = [*problems, *cast("list[dict[str, object]]", extra.get("problems", []))]
-    if not result["backlinks"] and "claims" not in result:
-        if issues or extra.get("stale"):
+    targets, problems = graph.expand(store, value)
+    result = _graph(store, targets, counted=counted, kind="identity")
+    issues: list[dict[str, object]] = [*problems, *cast("list[dict[str, object]]", result.pop("problems", []))]
+    if not result.get("backlinks") and "claims" not in result:
+        if issues or result.get("stale"):
             raise Error("identity read is incomplete; run bf status before concluding it is absent")
         return None
-    return {
-        "page": value,
-        **result,
-        **({"stale": extra["stale"]} if "stale" in extra else {}),
-        **({"problems": unique(issues)} if issues else {}),
-    }
+    return {"page": value, **result, **({"problems": unique(issues)} if issues else {})}

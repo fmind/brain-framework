@@ -369,7 +369,7 @@ def test_weekly_review_keeps_another_brains_routine_of_its_name(provider: Provid
     # `weekly-review` entry, hiding a failure in the other brain, and wrote nothing when that was all to review.
     own = {"brain": "main", "kind": "routine", "name": "weekly-review", "freshness": "never"}
     other = {"brain": "team", "kind": "routine", "name": "weekly-review", "freshness": "never", "failed": True}
-    named = {"brains": [{"brain": "main", "path": "/brains/main"}], "healthy": True}
+    named = {"brain": "main", "healthy": True}
     pages(provider, {"page": "", "projects": [], "attention": [own, other]}, {"page": "7d", "total": 0}, status=named)
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
@@ -380,8 +380,8 @@ def test_weekly_review_keeps_another_brains_routine_of_its_name(provider: Provid
     pages(provider, {"page": "", "projects": [], "attention": [own]}, {"page": "7d", "total": 0}, status=named)
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert (result.returncode, result.stdout) == (0, "")
-    # Without its own brain's name, the review cannot tell its run from another brain's: it writes nothing.
-    for unnamed in ({"brains": []}, {"brains": [{"path": "/brains/main"}]}, []):
+    # Without its own brain's name, the review cannot tell its run from another entry's: it fails closed.
+    for unnamed in ({}, {"brain": ""}, []):
         pages(provider, {"page": "", "projects": [], "attention": [own]}, {"page": "7d", "total": 0}, status=unnamed)
         result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
         assert (result.returncode, result.stdout) == (1, "")
@@ -480,7 +480,7 @@ def test_bf_helper_formats_safe_yaml_frontmatter_and_rejects_symlinked_state(
             "updated": "2026-09-25",
             "summary": "true",
             "tags": ["alpha, beta", "123", "- item"],
-            "fields": {"kind": "yes", "count": 3, "active": True},
+            "attributes": {"kind": "yes", "count": 3, "active": True},
         },
         ["# Safe YAML", "", "Body."],
     )
@@ -488,9 +488,9 @@ def test_bf_helper_formats_safe_yaml_frontmatter_and_rejects_symlinked_state(
     front = yaml.safe_load(rendered.split("---\n")[1])
     assert front["summary"] == "true"
     assert front["tags"] == ["alpha, beta", "123", "- item"]
-    assert front["fields"] == {"kind": "yes", "count": 3, "active": True}
+    assert front["attributes"] == {"kind": "yes", "count": 3, "active": True}
     with pytest.raises(_bf.BfError, match="non-JSON"):
-        _bf.format_action({"status": "draft", "fields": {"bad": float("nan")}}, ["# Bad"])
+        _bf.format_action({"status": "draft", "attributes": {"bad": float("nan")}}, ["# Bad"])
 
     state = tmp_path / "state"
     state.mkdir()

@@ -18,14 +18,14 @@ bf://brain/projects/new-website.md?rel=depends-on#decision
 | `bf://`                    | Offline Brain Framework URI scheme.                              |
 | `brain`                    | Stable `name` in `bf.yaml` (shared across clones).               |
 | `/projects/new-website.md` | Note path, logical entity (`people/alice`), page or `SOURCE:ID`. |
-| `?rel=depends-on`          | Optional declared relation (or `cites`), before `#fragment`.     |
+| `?rel=depends-on`          | Optional relation (or `cites`), before `#fragment`.              |
 | `#decision`                | Optional heading anchor on a note or entity target.              |
 
 A first path segment containing `:` always addresses a `SOURCE:ID` record (`bf://brain/local-documents:website-demo/brief.txt`). Logical entity paths (`entity: bf://brain/people/alice` with `aliases: [person:email/alice@example.test]` in `concepts/alice.md`) resolve to their owning OKF note without requiring a `people/` folder.
 
 ### Identity rules
 
-`bf validate` enforces these rules on OKF `entity`, `aliases` and URI `resource` fields, record `aliases`, and `type: identity` field values:
+`bf validate` enforces these rules on OKF `entity`, `aliases`, URI `resource` fields, note `relations` and record `aliases`/`relations`:
 
 | Rule          | Requirement                                                                                                                                                                                                                                                                                                       |
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -51,19 +51,19 @@ Duplicate identity claims across notes or records fail `bf validate` and fail `b
 
 ## Relation links
 
-Write typed links as `[Alice](bf://brain/people/alice?rel=owner)` or in OKF frontmatter `fields:` / `sources:`. Each graph claim records `(subject, relation, target, origin)`:
+Write typed links as `[Alice](bf://brain/people/alice?rel=owner)` or in OKF frontmatter `relations:` / `sources:`. Each graph claim records `(subject, relation, target, origin)`:
 
 - `subject` is the note's `entity` if declared, else its file URI (or record URI). Links inside OKF footnotes (`[^1]: ...`, including indented continuations) attribute `origin` to the section that first cites `[^1]`.
 - `rel` is the only allowed query parameter on `bf://` links (`?rel=` on non-`bf://` URLs is reported by `bf validate`).
-- Undeclared `?rel=` values keep the note searchable as an untyped link while failing `bf validate` (`link relation X is undeclared...`, `field X is not a relation...`, `remove ?rel=links`, or `tagged-with is reserved`).
+- Invalid `?rel=` values or targets fail validation (`invalid relation ...`, `remove ?rel=links`, `tagged-with is reserved`, or `identity outside the declared targets`), while any valid relation name works without `bf.yaml` declaration.
 - Built-in relations (reserved, never declared in `bf.yaml`): `cites` (link-shaped `sources[].resource` entries), `tagged-with` (note `tags`) and `links` (untyped backlinks).
 
-## Across brains
+## Single-brain scope {#across-brains}
 
-Retrieval spans the selected brains and their direct `brains:` references (one hop, never recursive):
+BF searches, reads and validates one brain at a time:
 
-- `bf://NAME/...` resolves only in brain `NAME` and never grants access to unselected brains; explicit aliases and bare `SOURCE:ID` backlinks gather across selected brains when unambiguous.
-- `bf validate` checks its own brain offline and lists cross-brain targets under `unresolved` without failing validation.
+- `bf://NAME/...` validates against the selected brain's own `name` and never grants access to other brains.
+- `bf validate` checks every target offline (`unresolved` notes cross-brain `bf://` references or missing `actions/<slug>` folders without failing validation, unless a broken `#section` targets an existing action).
 
 ## Tag rules
 

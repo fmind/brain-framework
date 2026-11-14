@@ -111,7 +111,7 @@
       "type": "array"
     },
     "version": {
-      "const": 8,
+      "const": 9,
       "description": "Brain format, shared with bf.yaml; independent of the package version.",
       "title": "Version",
       "type": "integer"

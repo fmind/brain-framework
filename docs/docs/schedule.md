@@ -72,7 +72,7 @@ Unknown names fail up front; selectors never force disabled or manual programs t
 
 ## Run watch as a service
 
-Run `bf watch --json` under your OS service manager so collection and assistant streams stay up without an open terminal. Set explicit `PATH` (including `bf` and provider CLIs), forward custom `XDG_CONFIG_HOME` / `XDG_STATE_HOME` if used, keep [credentials](sensors.md#credentials) in CLI logins or mode-`600` files, and keep service files out of shared Git history.
+Run `bf watch --json` under your OS service manager so collection and assistant streams stay up without an open terminal. Set explicit `PATH` (including `bf` and provider CLIs), forward custom `XDG_CONFIG_HOME` if used, keep [credentials](sensors.md#credentials) in CLI logins or mode-`600` files, and keep service files out of shared Git history.
 
 On Linux, save `~/.config/systemd/user/bf-watch.service`:
 

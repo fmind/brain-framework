@@ -16,8 +16,9 @@ sys.stdout.write(
                 "title": "Retention decision",
                 "text": "Keep original evidence because upstream content can disappear.",
                 "time": start.isoformat(),
-                # A purpose-built attribute that bf.yaml maps to the typed `repository` relation.
-                "attributes": {"repository_refs": ["repo:example/project"]},
+                "@type": "Decision",
+                "relations": {"repository": ["repo:example/project"]},
+                "attributes": {"kind": "event"},
             }
         ]
     )

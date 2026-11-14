@@ -248,22 +248,6 @@
       "title": "AssistantSchedule",
       "type": "object"
     },
-    "BrainReference": {
-      "additionalProperties": false,
-      "description": "A directly related brain, located relative to the declaring brain.",
-      "properties": {
-        "path": {
-          "description": "Relative to the declaring brain; absolute and home-relative paths also work.",
-          "maxLength": 4096,
-          "minLength": 1,
-          "title": "Path",
-          "type": "string"
-        }
-      },
-      "required": ["path"],
-      "title": "BrainReference",
-      "type": "object"
-    },
     "Channel": {
       "additionalProperties": false,
       "anyOf": [
@@ -370,34 +354,6 @@
       },
       "required": ["command"],
       "title": "Gate",
-      "type": "object"
-    },
-    "JsonValue": {},
-    "Mapping": {
-      "additionalProperties": false,
-      "description": "One JSON Pointer into sensor output, or one literal value; never executable expressions.",
-      "oneOf": [
-        { "not": { "required": ["value"] }, "properties": { "path": { "type": "string" } }, "required": ["path"] },
-        {
-          "not": { "required": ["path"] },
-          "properties": { "value": { "not": { "type": "null" } } },
-          "required": ["value"]
-        }
-      ],
-      "properties": {
-        "path": {
-          "anyOf": [{ "maxLength": 4096, "pattern": "^/(?:[^~]|~[01])*$", "type": "string" }, { "type": "null" }],
-          "default": null,
-          "description": "JSON Pointer into sensor output; escape / as ~1 and ~ as ~0. Use instead of value.",
-          "title": "Path"
-        },
-        "value": {
-          "$ref": "#/$defs/JsonValue",
-          "default": null,
-          "description": "Non-null constant checked against the shared field. Use instead of path."
-        }
-      },
-      "title": "Mapping",
       "type": "object"
     },
     "ReadInput": {
@@ -571,64 +527,29 @@
     },
     "SchemaField": {
       "additionalProperties": false,
-      "allOf": [
-        {
-          "if": { "properties": { "relation": { "const": true } }, "required": ["relation"] },
-          "then": { "properties": { "type": { "const": "identity" } } }
-        },
-        {
-          "if": {
-            "anyOf": [
-              { "properties": { "broader": { "type": "string" } }, "required": ["broader"] },
-              { "properties": { "targets": { "type": "array" } }, "required": ["targets"] }
-            ]
-          },
-          "then": { "properties": { "relation": { "const": true } }, "required": ["relation"] }
-        }
-      ],
-      "description": "A shared meaning; its type and cardinality check sensor mappings, stored records and note fields.",
+      "description": "Optional relation metadata and target constraints declared in bf.yaml `fields:`.",
       "properties": {
         "broader": {
           "anyOf": [
-            { "not": { "pattern": "[^a-z0-9-]" }, "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "not": { "pattern": "[^a-zA-Z0-9-]" },
+              "pattern": "^[a-z][a-zA-Z0-9]*(?:-[a-z0-9]+)*$",
+              "type": "string"
+            },
             { "type": "null" }
           ],
           "default": null,
           "description": "A declared relation, without its own broader, whose relation page also lists this relation's links.",
           "title": "Broader"
         },
-        "cardinality": {
-          "default": "optional",
-          "description": "Required scalar, optional scalar, or up to 1000 scalars, for sensor mappings and note fields; only collection requires a one value.",
-          "enum": ["one", "optional", "many"],
-          "title": "Cardinality",
-          "type": "string"
-        },
         "description": {
-          "description": "What a value of this field means, such as the account explicitly credited as the author.",
+          "default": "",
+          "description": "What this relation means.",
           "maxLength": 4096,
-          "minLength": 1,
           "title": "Description",
           "type": "string"
-        },
-        "examples": {
-          "description": "Complete field values checked against type and cardinality; never defaults.",
-          "items": { "$ref": "#/$defs/JsonValue" },
-          "maxItems": 20,
-          "title": "Examples",
-          "type": "array"
-        },
-        "path": {
-          "anyOf": [{ "maxLength": 4096, "pattern": "^/(?:[^~]|~[01])*$", "type": "string" }, { "type": "null" }],
-          "default": null,
-          "description": "Optional default JSON Pointer into sensor output when a sensor does not specify its own mapping.",
-          "title": "Path"
-        },
-        "relation": {
-          "default": false,
-          "description": "Create directed graph claims; requires type: identity.",
-          "title": "Relation",
-          "type": "boolean"
         },
         "targets": {
           "anyOf": [
@@ -646,17 +567,10 @@
             { "type": "null" }
           ],
           "default": null,
-          "description": "Allowed identity prefixes, such as person:email/; collection rejects other mapped values.",
+          "description": "Allowed identity prefixes, such as person:email/; rejects targets outside them.",
           "title": "Targets"
-        },
-        "type": {
-          "description": "Strict value type; a relation requires identity.",
-          "enum": ["string", "integer", "number", "boolean", "timestamp", "identity"],
-          "title": "Type",
-          "type": "string"
         }
       },
-      "required": ["description", "type"],
       "title": "SchemaField",
       "type": "object"
     },
@@ -708,7 +622,7 @@
     },
     "Sensor": {
       "additionalProperties": false,
-      "description": "Execution and explicit mapping of sensor output into the declared fields.",
+      "description": "Execution settings of a brain sensor.",
       "if": { "properties": { "reconcile": { "type": "object" } }, "required": ["reconcile"] },
       "properties": {
         "command": {
@@ -736,19 +650,6 @@
           "default": null,
           "description": "Seconds after which a record's event time (or, without one, when it was last observed) makes collection remove it and skip it when printed again; unset keeps records.",
           "title": "Expire After"
-        },
-        "fields": {
-          "anyOf": [
-            {
-              "additionalProperties": false,
-              "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Mapping" } },
-              "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
-              "type": "object"
-            },
-            { "type": "null" }
-          ],
-          "description": "Map declared shared fields to output paths or constants; unmapped fields do not apply.",
-          "title": "Fields"
         },
         "lookback": {
           "default": 86400,
@@ -1041,7 +942,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "One brain: its name, related brains, declared fields, and the sensors, routines and assistants it may run.",
+  "description": "One brain: its name, optional relation declarations, and the sensors, routines and assistants it may run.",
   "properties": {
     "assistants": {
       "anyOf": [
@@ -1056,20 +957,6 @@
       ],
       "description": "Agent runs: a harness command fed a prompt file, run when due or with bf run, each run recorded in memories/NAME/; names must differ from sensors and routines.",
       "title": "Assistants"
-    },
-    "brains": {
-      "anyOf": [
-        {
-          "additionalProperties": false,
-          "maxProperties": 32,
-          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/BrainReference" } },
-          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
-          "type": "object"
-        },
-        { "type": "null" }
-      ],
-      "description": "Direct references keyed by the target name; retrieval only, without recursion or execution.",
-      "title": "Brains"
     },
     "channels": {
       "anyOf": [
@@ -1089,17 +976,17 @@
       "anyOf": [
         {
           "additionalProperties": false,
-          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/SchemaField" } },
-          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+          "patternProperties": { "^[a-z][a-zA-Z0-9]*(?:-[a-z0-9]+)*$": { "$ref": "#/$defs/SchemaField" } },
+          "propertyNames": { "maxLength": 64, "minLength": 1, "not": { "pattern": "[^a-zA-Z0-9-]" } },
           "type": "object"
         },
         { "type": "null" }
       ],
-      "description": "Declared shared fields and relations that sensors map, records store and notes set.",
+      "description": "Optional relation metadata and target prefix constraints for documentation, hierarchy and validation.",
       "title": "Fields"
     },
     "name": {
-      "description": "Stable namespace in bf:// addresses; unique among selected brains.",
+      "description": "Stable namespace in bf:// addresses; used as default identity prefix.",
       "not": { "pattern": "[^a-z0-9-]" },
       "pattern": "^[a-z][a-z0-9-]{0,63}$",
       "title": "Name",
@@ -1136,7 +1023,7 @@
       "description": "Optional declarative note and OKF validation rules enforced by bf validate."
     },
     "version": {
-      "const": 8,
+      "const": 9,
       "description": "Brain format of bf.yaml, evaluation suites, the memories/<source>/<sha256>.json layout and the record envelope; independent of the package version.",
       "title": "Version",
       "type": "integer"

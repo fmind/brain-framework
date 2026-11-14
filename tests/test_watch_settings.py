@@ -21,7 +21,7 @@ from bf.watch_settings import Notifications, desktop, settings
 def write_watch(brain: Store, data: bytes) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nwatch:\n" + b"\n".join(b"  " + line for line in data.splitlines()) + b"\n",
+        b"version: 9\nname: fixture\nwatch:\n" + b"\n".join(b"  " + line for line in data.splitlines()) + b"\n",
     )
 
 
@@ -230,7 +230,7 @@ def test_native_delivery_never_runs_a_tool_found_through_a_relative_path_entry(
 
 
 # A 30-second sensor, which a watcher checking every 300 seconds or more would run late.
-FAST = b"version: 8\nname: fixture\nsensors:\n  calendar:\n    command: [echo]\n    refresh: 30\n"
+FAST = b"version: 9\nname: fixture\nsensors:\n  calendar:\n    command: [echo]\n    refresh: 30\n"
 
 
 def test_second_watcher_observes_without_running(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:

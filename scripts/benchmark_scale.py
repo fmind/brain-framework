@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import statistics
 import sys
 import tempfile
@@ -18,8 +17,8 @@ from pathlib import Path
 from typing import cast
 
 from bf import records
-from bf.index import CACHE, refresh
-from bf.models import MAX_FILES, Query, Record
+from bf.index import refresh
+from bf.models import CACHE, MAX_FILES, Query, Record
 from bf.retrieve import read, search
 from bf.storage import Store, writer, xdg
 from bf.validate import validate
@@ -52,9 +51,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="bf-benchmark-", dir=args.dir) as temporary:
         root = Path(temporary)
         (root / "brain").mkdir()
-        os.environ["XDG_STATE_HOME"] = str(root / "state")
         store = Store(root / "brain")
-        store.write("bf.yaml", b"version: 8\nname: benchmark\n")
+        store.write("bf.yaml", b"version: 9\nname: benchmark\n")
         background = ("Routine project background. " * args.body_chars)[: args.body_chars]
         items = [
             Record(
@@ -98,7 +96,7 @@ def main() -> None:
                 "concepts/0.md",
                 f"---\ntype: concept\n---\n# Edited revision{note_revision}\n\nZirconium note.\n".encode(),
             )
-            return search([store], Query(text=f"revision{note_revision}"))
+            return search(store, Query(text=f"revision{note_revision}"))
 
         def check_result(name: str, result: dict[str, object]) -> None:
             # Refresh results count skipped files; retrieval results name problems and stale evidence.
@@ -161,17 +159,17 @@ def main() -> None:
         for name, operation in [
             ("build", lambda: refresh(store, full=True)),
             ("note_edit", change_note),
-            ("selective", lambda: search([store], Query(text="zirconium"))),
-            ("common", lambda: search([store], Query(text="evidence"))),
+            ("selective", lambda: search(store, Query(text="zirconium"))),
+            ("common", lambda: search(store, Query(text="evidence"))),
             # Several common terms: each is also counted per passage and checked for a match on its own.
-            ("question", lambda: search([store], Query(text="Why retain the decision evidence?"))),
+            ("question", lambda: search(store, Query(text="Why retain the decision evidence?"))),
             # A misspelled word: the stem it suggests is in every passage, which must not all be sorted.
-            ("typo", lambda: search([store], Query(text="evidnce"))),
+            ("typo", lambda: search(store, Query(text="evidnce"))),
             # A prefix longer than the stem of the words it begins, `evid`: it matches through the indexed spellings.
-            ("prefix", lambda: search([store], Query(text="evidenc*"))),
-            ("timeline", lambda: read([store], "2026-06")),
-            ("home", lambda: read([store])),
-            ("exact_read", lambda: read([store], "decision:0")),
+            ("prefix", lambda: search(store, Query(text="evidenc*"))),
+            ("timeline", lambda: read(store, "2026-06")),
+            ("home", lambda: read(store)),
+            ("exact_read", lambda: read(store, "decision:0")),
             ("changed_record", change_record),
             ("unchanged_record", unchanged_record),
             ("upsert_add", lambda: write_batch("upsert_add")),

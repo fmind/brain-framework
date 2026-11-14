@@ -35,10 +35,10 @@ Each collection reports `"records":1`. Reading `project:new-website` opens the p
   "relation": "project",
   "total": 4,
   "items": [
-    { "ref": "gcloud:deployment", "fields": { "kind": "deployment", "status": "healthy" } },
-    { "ref": "github:implementation", "fields": { "kind": "pull-request", "status": "merged" } },
-    { "ref": "jira:review", "fields": { "kind": "issue", "status": "In review" } },
-    { "ref": "workspace:brief", "fields": { "kind": "brief", "status": "approved" } }
+    { "ref": "gcloud:deployment", "@type": "Deployment" },
+    { "ref": "github:implementation", "@type": "PullRequest" },
+    { "ref": "jira:review", "@type": "Issue" },
+    { "ref": "workspace:brief", "@type": "Brief" }
   ]
 }
 ```
@@ -55,31 +55,25 @@ bf eval
 
 ## How the four tools share one project
 
-Each tool names its project and status differently, and `bf.yaml` maps them once at collection ([field mappings](schema.md#shared-fields-and-sensor-mappings)):
+Each tool names its project and status differently, and `sensors/demo.py` normalizes them into `@type`, `relations.project` and `attributes`, while `bf.yaml` declares optional ontology constraints ([ontology rules](schema.md#shared-fields-and-sensor-mappings)):
 
-| Tool      | Project pointer                 | Status pointer      | Mapped `fields`                           |
-| --------- | ------------------------------- | ------------------- | ----------------------------------------- |
-| Workspace | `attributes.project`            | `attributes.state`  | `project`, `status`, `kind: brief`        |
-| Jira      | `attributes.workstream`         | `attributes.status` | `project`, `status`, `kind: issue`        |
-| GitHub    | `attributes.repository_project` | `attributes.state`  | `project`, `status`, `kind: pull-request` |
-| Gcloud    | `attributes.service_project`    | `attributes.health` | `project`, `status`, `kind: deployment`   |
+| Tool      | Project pointer                 | Status pointer      | Normalized `@type` & `attributes`   |
+| --------- | ------------------------------- | ------------------- | ----------------------------------- |
+| Workspace | `attributes.project`            | `attributes.state`  | `Brief`, `kind: brief`, `status`    |
+| Jira      | `attributes.workstream`         | `attributes.status` | `Issue`, `kind: issue`, `status`    |
+| GitHub    | `attributes.repository_project` | `attributes.state`  | `PullRequest`, `kind: pull-request` |
+| Gcloud    | `attributes.service_project`    | `attributes.health` | `Deployment`, `kind: deployment`    |
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schema/
 fields:
   project:
     description: Project explicitly identified by the source.
-    type: identity
-    cardinality: one
-    relation: true
+    targets: ["project:"]
 sensors:
   jira:
     command: [sensors/demo.py, jira, "{{end}}"]
     mode: snapshot
-    fields:
-      project: { path: /attributes/workstream }
-      kind: { value: issue }
-      status: { path: /attributes/status }
 ```
 
 ## Record the conclusion
@@ -175,4 +169,4 @@ rm -rf -- "$context_demo"
 
 ## Use it on your work
 
-Pick one cross-tool question, author its project note and connect only the sources it needs: [GitHub history](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) (`gh`), [Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py) / [Gmail](https://github.com/fmind/brain-framework/blob/main/examples/sensors/gmail-headers.py) / [Drive](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py) (`gws`), Jira (`acli`) or Gcloud (`gcloud`), then add an assistant schedule with `when:` or [`records-gate.py`](https://github.com/fmind/brain-framework/blob/main/examples/routines/README.md#react-to-new-records). See [sensors](sensors.md) and [team pilots](team.md#evaluate-a-pilot).
+Pick one cross-tool question, author its project note and connect only the sources it needs: [GitHub history](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) (`gh`), [Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py) / [Gmail](https://github.com/fmind/brain-framework/blob/main/examples/sensors/gmail-headers.py) / [Drive](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py) (`gws`), Jira (`acli`) or Gcloud (`gcloud`), then add an assistant schedule with `when:` or [`records-gate.py`](https://github.com/fmind/brain-framework/blob/main/examples/routines/README.md#react-to-new-records). See [sensors](sensors.md).

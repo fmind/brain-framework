@@ -5,11 +5,11 @@ description: Reply fields and rules for search, read, pages, relation pages, con
 
 # Retrieval reference
 
-Exact reply contracts shared by the CLI and MCP (`bf schema --kind search-reply|read-reply`). When multiple brains are selected, list entries include `brain` and portable `uri`, and cross-item refs (`newer`, `also`, `sections`, `outline`, `target_ref`) use `bf://` addresses.
+Exact reply contracts shared by the CLI and MCP (`bf schema --kind search-reply|read-reply`). Entry refs and cross-item refs (`newer`, `also`, `sections`, `outline`, `target_ref`) include portable `bf://` URIs.
 
 ## Pages
 
-Computed views across selected brains (`bf read bf://brain/projects` restricts to one brain):
+Computed views across the selected brain (`bf read bf://brain/projects` names the brain explicitly):
 
 | Ref for `bf read`                                                        | Returns                                                                                                                                                                                                                                                                                                                   |
 | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -80,18 +80,18 @@ Search replies include `sources` (sources of returned records plus any `failed`,
 
 ## Notes, records and identities
 
-| Exact read | Returned fields                                                                                                                                                                                                |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Note       | `brain`, `ref`, `text`, `sha256`, `modified`, `backlinks`, optional `claims`, `tasks`/`next`/review signals, and `files`/`projects` on `ACTION.md`.                                                            |
-| Section    | `brain`, `ref#section`, section `text`, whole-file `sha256` & `modified`, note `title`, `type`, optional `status` & `date`.                                                                                    |
-| Record     | `brain`, `ref`, `path`, `record` (`id`, `title`, `text`, `time`, `url`, `links`, `aliases`, `attributes`, `fields`), `collection`, `sha256`, `modified`, `backlinks`, optional `claims` & `"generated": true`. |
-| Identity   | Owning note/record, or backlinks page when unowned (`ambiguous identity` fails).                                                                                                                               |
+| Exact read | Returned fields                                                                                                                                                                                                            |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Note       | `brain`, `ref`, `text`, `sha256`, `modified`, `backlinks`, optional `claims`, `tasks`/`next`/review signals, and `files`/`projects` on `ACTION.md`.                                                                        |
+| Section    | `brain`, `ref#section`, section `text`, whole-file `sha256` & `modified`, note `title`, `type`, optional `status` & `date`.                                                                                                |
+| Record     | `brain`, `ref`, `path`, `record` (`id`, `title`, `text`, `time`, `url`, `links`, `aliases`, `@type`, `relations`, `attributes`), `collection`, `sha256`, `modified`, `backlinks`, optional `claims` & `"generated": true`. |
+| Identity   | Owning note/record, or backlinks page when unowned (`ambiguous identity` fails).                                                                                                                                           |
 
 Every reply carries `notice` (untrusted-evidence reminder) plus optional `problems` and `stale`. `backlinks` previews up to 64 relation groups (5 newest items each; `backlinks_omitted` counts extra groups); `claims` lists up to 20 per relation and 50 total (`claims_truncated`).
 
 ## Relation pages
 
-`bf read REF --rel RELATION [--offset N]` (or MCP `read` with `rel`) lists incoming items for `links`, `cites` or a declared relation (including narrower relations declaring `broader: RELATION`), newest first, 50 per page (<= 32 KiB). `REF` must be a whole note, action folder, record or identity (pages and `#sections` exit 2).
+`bf read REF --rel RELATION [--offset N]` (or MCP `read` with `rel`) lists incoming items for `links`, `cites` or any relation (including narrower relations declaring `broader: RELATION`), newest first, 50 per page (<= 32 KiB). `REF` must be a whole note, action folder, record or identity (pages and `#sections` exit 2).
 
 ## Continuations
 
@@ -103,7 +103,7 @@ Exact reads exceeding 32 KiB paginate `text` (or `record.text`) by character off
 
 ## Incomplete answers and freshness
 
-Always inspect `problems` (skipped files/brains), `stale` (writer held lock past 2s cache / 3s record wait) and `sources` coverage: an empty reply with `problems`, `stale` or unhealthy sources never proves absence.
+Always inspect `problems` (skipped files), `stale` (writer held lock past 2s cache / 3s record wait) and `sources` coverage: an empty reply with `problems`, `stale` or unhealthy sources never proves absence.
 
 ### Cache freshness
 
@@ -126,4 +126,4 @@ Local **stdio** server (`bf mcp`; [setup](mcp.md)) publishing `outputSchema` on 
 - **`search`**: required `query`; optional `scope=""`, `limit=10` (1–50), `offset=0`.
 - **`read`**: optional `ref=""`, `rel=""`, `offset=0`.
 
-Selection resolves at startup and on every call (`--brain`, `BF_BRAIN`, enclosing brain, else all registered brains). Errors escape control/format characters and redact brain/registry/home prefixes as `<brain>`, `<registry>` and `~`.
+Selection resolves at startup and on every call (`--brain`, `BF_BRAIN`, enclosing brain, else registry `default`). Errors escape control/format characters and redact brain/registry/home prefixes as `<brain>`, `<registry>` and `~`.

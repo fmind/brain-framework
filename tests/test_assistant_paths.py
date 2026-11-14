@@ -29,7 +29,7 @@ from bf.runtime import Queue
 from bf.storage import Store
 
 NAMES = {"personal"}
-CONFIG = b"""version: 8
+CONFIG = b"""version: 9
 name: paths
 sensors:
   calendar:
@@ -391,7 +391,7 @@ def test_stopping_watch_kills_a_running_harness_and_leaves_its_job_uncertain(tmp
     store = Store(root)
     store.write(
         "bf.yaml",
-        b"""version: 8
+        b"""version: 9
 name: stop
 assistants:
   review:

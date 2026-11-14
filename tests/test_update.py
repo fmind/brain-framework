@@ -16,7 +16,7 @@ from bf.models import Command, Error, Program
 from bf.storage import Store, collecting
 from bf.update import update
 
-CONFIG = b"""version: 8
+CONFIG = b"""version: 9
 name: fixture
 sensors:
   mail:
@@ -148,7 +148,7 @@ def test_routine_when_gate_skips_cleanly_when_cache_is_contended(
 
     selected.write(
         "bf.yaml",
-        b"version: 8\nname: fixture\nroutines:\n  triage:\n    command: [echo]\n    refresh: 3600\n"
+        b"version: 9\nname: fixture\nroutines:\n  triage:\n    command: [echo]\n    refresh: 3600\n"
         b"    when: {actions: true}\n",
     )
     monkeypatch.setattr(

@@ -146,9 +146,27 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             brain = home / "brain"
             run(bf, "watch", "--help", cwd=home, env=env)
             run(bf, "--version", cwd=home, env=env)
+            guide_index = run(bf, "guide", cwd=home, env=env, capture=True)
+            guide_gs = run(bf, "guide", "getting-started", cwd=home, env=env, capture=True)
+            if "getting-started" not in guide_index or not guide_gs.startswith("# "):
+                raise SystemExit(f"{artifact.name}: packaged guides did not load via bf guide")
             run(bf, "init", str(brain), cwd=home, env=env)
             if (home / "config/bf/config.yaml").exists():
                 raise SystemExit("init unexpectedly registered the smoke-test brain")
+            starter_yaml = (brain / "bf.yaml").read_text()
+            if "version: 9" not in starter_yaml or "fields:" in starter_yaml:
+                raise SystemExit(f"{artifact.name}: unexpected starter bf.yaml: {starter_yaml}")
+            skill_install = json.loads(
+                run(bf, "skill", "install", "--brain", str(brain), cwd=home, env=env, capture=True)
+            )
+            skill_check = json.loads(
+                run(bf, "skill", "install", "--brain", str(brain), "--check", cwd=home, env=env, capture=True)
+            )
+            if not (skill_install.get("ok") and skill_check.get("ok")):
+                raise SystemExit(f"{artifact.name}: bf skill install failed on smoke-test brain")
+            reg_reply = json.loads(run(bf, "register", str(brain), "--default", cwd=home, env=env, capture=True))
+            if reg_reply.get("brain") != "brain" or reg_reply.get("default") is not True:
+                raise SystemExit(f"{artifact.name}: unexpected bf register reply: {reg_reply}")
             (brain / "projects/package.md").write_text(
                 "---\ntype: project\nstatus: draft\nreview_after: 7\n---\n# Package check\n\n"
                 "## Next\n\n- [ ] Inspect the installed task page.\n"
@@ -189,11 +207,15 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                     and item.get("text") == "Inspect the installed task page."
                     for item in replies[("read", "tasks")].get("items", [])
                 ),
-                "health": replies[("status", "--check")].get("healthy") is True,
+                "health": replies[("status", "--check")].get("healthy") is True
+                and replies[("status", "--check")].get("registered") is True,
                 "evaluation": replies[("eval",)].get("passed") is True and bool(replies[("eval",)].get("cases")),
             }
             if failed := [name for name, passed in checks.items() if not passed]:
                 raise SystemExit(f"{artifact.name}: incorrect package smoke results: {', '.join(failed)}")
+            unreg_reply = json.loads(run(bf, "unregister", "brain", cwd=home, env=env, capture=True))
+            if unreg_reply.get("brain") != "brain":
+                raise SystemExit(f"{artifact.name}: unexpected bf unregister reply: {unreg_reply}")
             # Callers supply the installed bf and a local brain path; no shell is used.
             missing = subprocess.run(  # noqa: S603
                 [bf, "mcp", "--brain", str(brain)],

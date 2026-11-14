@@ -39,10 +39,9 @@ nav = [
       { "Channels" = "docs/channels.md" },
       { "Watch and schedule updates" = "docs/schedule.md" },
     ] },
-    { "Agents and teams" = [
+    { "Agents and tools" = [
       { "Agent workflows" = "docs/agents.md" },
       { "Connect an agent with MCP" = "docs/mcp.md" },
-      { "Team setup" = "docs/team.md" },
     ] },
   ] },
   { "Reference" = [
@@ -153,7 +152,7 @@ pymdownx.superfences = {}
 
 [project.plugins.redirects]
 # Preserve published URLs: the repository root leads to the overview, and merged pages lead to their new home.
-redirect_maps = { "index.md" = "docs/index.md", "docs/glossary.md" = "docs/concepts.md#glossary", "docs/highlights.md" = "docs/sensors.md#selected-highlights", "docs/pilot.md" = "docs/team.md#evaluate-a-pilot" }
+redirect_maps = { "index.md" = "docs/index.md", "docs/glossary.md" = "docs/concepts.md#glossary", "docs/highlights.md" = "docs/sensors.md#selected-highlights", "docs/pilot.md" = "docs/configuration.md", "docs/team.md" = "docs/configuration.md" }
 
 # Client-side and offline: the index ships with the site and queries never leave the browser.
 [project.plugins.search]
@@ -174,7 +173,7 @@ markdown_description = "Brain Framework (`bf`) keeps a brain in plain files: col
 Guides = [
   { "docs/brain.md" = "Write project notes, reusable concepts and resumable actions with complete Markdown examples." },
   { "docs/search.md" = "Find saved evidence, read exact sources and check whether results are complete." },
-  { "docs/links.md" = "Connect notes and records with citations, typed fields, explicit identities and declared relations." },
+  { "docs/links.md" = "Connect notes and records with citations, explicit identities, typed relations and attributes." },
   { "docs/checks.md" = "Validate saved files and test that recurring questions still retrieve the expected evidence." },
   { "docs/sensors.md" = "Collect a selected local document or highlight, configure sensors and understand update and replacement rules." },
   { "docs/routines.md" = "Run deterministic brain programs now, on a schedule or from Git hooks, and turn their output into logs or review actions." },
@@ -183,11 +182,10 @@ Guides = [
   { "docs/schedule.md" = "Run or observe due sensors, routines and assistants, set watch preferences and keep watch running as a service." },
   { "docs/agents.md" = "Use the CLI, the packaged skills and optional hooks to find evidence and keep agent work resumable." },
   { "docs/mcp.md" = "Connect an agent through local MCP search and read tools, then verify access to a saved decision." },
-  { "docs/team.md" = "Set up a private team brain, share reviewed evidence, coordinate collection and evaluate a pilot." },
 ]
 Reference = [
   { "docs/commands.md" = "Look up Brain Framework commands, previews, graph exports, replies, errors and exit codes." },
-  { "docs/configuration.md" = "Configure a brain, choose which brains a command uses, declare related brains and locate local state." },
+  { "docs/configuration.md" = "Configure a brain, choose which brain a command uses, register brains and locate local state." },
   { "docs/schema.md" = "Exact formats of bf.yaml, notes, records, shared fields and sensor mappings, with editor validation." },
   { "docs/link-reference.md" = "Exact rules for BF addresses, section anchors, identities, relation links and tags." },
   { "docs/retrieval.md" = "Reply fields and rules for search, read, pages, relation pages, continuations and MCP clients." },

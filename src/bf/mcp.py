@@ -61,23 +61,22 @@ _COMMANDS = re.compile(r"\bbf (search|read)\b")
 _Integral = BeforeValidator(lambda value: int(value) if isinstance(value, float) and value.is_integer() else value)
 
 
-def server(stores: list[Store] | Callable[[], list[Store]]) -> MCPServer:
-    """The two tools over `stores`, or over a selection resolved again for each call.
+def server(store: Store | Callable[[], Store]) -> MCPServer:
+    """The two tools over `store`, or over a brain resolved again for each call.
 
-    Resolving per call sees registry changes and newly available brains without a restart; the selection must
-    resolve now, so a server that could not answer fails to start.
+    Resolving per call sees registry changes without a restart; the brain must resolve now, so a server that could
+    not answer fails to start.
     """
     annotations = ToolAnnotations(
         read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
     )
-    selection = (lambda: stores) if isinstance(stores, list) else stores
-    # Every root selected so far: errors hide each one, even after the selection changed. Tools run in worker
-    # threads: each update adds a whole list at once.
+    selection = (lambda: store) if isinstance(store, Store) else store
+    # Every root selected so far: errors hide each one, even after the selection changed.
     roots: set[str] = set()
 
-    def selected() -> list[Store]:
+    def selected() -> Store:
         chosen = selection()
-        roots.update([str(store.root) for store in chosen])
+        roots.add(str(chosen.root))
         return chosen
 
     def private(message: str) -> str:
@@ -143,7 +142,7 @@ def server(stores: list[Store] | Callable[[], list[Store]]) -> MCPServer:
         stale before treating an empty answer as absence."""
 
         def run() -> dict[str, object]:
-            # Like the CLI, check the arguments before selecting brains.
+            # Like the CLI, check the arguments before selecting the brain.
             request = pages.query(query, scope, limit=limit, offset=offset)
             return search(selected(), request)
 
@@ -156,7 +155,7 @@ def server(stores: list[Store] | Callable[[], list[Store]]) -> MCPServer:
                 max_length=8192,
                 description="Empty for the home page; a page (review, projects, concepts, actions, tasks, memories, "
                 "memories/SOURCE, tags, tags/LABEL, today, 7d, 2026-09, 2026-09-21..2026-09-25); a note path, "
-                "path#section, source:id record, identity, or a bf://NAME/... address to choose one brain.",
+                "path#section, source:id record, identity, or a bf://NAME/... address for this brain.",
             ),
         ] = "",
         rel: Annotated[
@@ -164,7 +163,7 @@ def server(stores: list[Store] | Callable[[], list[Store]]) -> MCPServer:
             Field(
                 max_length=64,
                 description="Optional relation: list every item linking to a note, record or identity through "
-                "this declared relation (a broader relation also lists its narrower ones), cites for OKF sources, "
+                "this relation (a broader relation also lists its narrower ones), cites for OKF sources, "
                 "or links for untyped links.",
             ),
         ] = "",

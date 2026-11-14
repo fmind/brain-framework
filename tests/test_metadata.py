@@ -58,11 +58,11 @@ def test_replies_localize_instants_but_return_stored_provider_values() -> None:
 
         stored = "2026-09-26T09:00:00.000000Z"
         record = {"time": stored, "attributes": {"date": "2026-09-26", "time": "14:00", "start": stored}}
-        reply = present({"ref": "mail:1", "record": {**record, "fields": {"start": stored}}, "date": "2026-09-26"})
+        reply = present({"ref": "mail:1", "record": {**record, "relations": {"start": stored}}, "date": "2026-09-26"})
         assert reply["record"]["time"] == "2026-09-26T11:00:00+02:00"
-        # Provider attributes and declared field values are evidence: returned exactly as the record stores them.
+        # Provider attributes and relations are evidence: returned exactly as the record stores them.
         assert reply["record"]["attributes"] == record["attributes"]
-        assert reply["record"]["fields"] == {"start": stored}
+        assert reply["record"]["relations"] == {"start": stored}
         # A note's date replaces the instant that ordered it.
         assert "time" not in present({"date": "2026-09-26", "time": stored})
         # Status maps key entries by program name: sensors named date, time or fields stay listed and localized.
@@ -114,10 +114,10 @@ def test_source_coverage_states_its_newest_change_like_its_latest_event(brain: S
     )
     expected = {"latest": "2026-09-26T08:00:00+00:00", "changed": "2026-09-26T09:00:00+00:00"}
     for ref in ("memories", "memories/papers"):
-        page = cast("dict", present(read([brain], ref, counted=False)))
+        page = cast("dict", present(read(brain, ref, counted=False)))
         coverage = next(entry for entry in page["sources"] if entry["source"] == "papers")
         assert {key: coverage[key] for key in expected} == expected
-    status = cast("dict", present(report([brain])))["brains"][0]["sources"]["papers"]
+    status = cast("dict", present(report(brain)))["sources"]["papers"]
     assert {key: status[key] for key in expected} == expected
 
 
@@ -173,10 +173,10 @@ def test_note_dates_follow_local_days_without_rebuilding_the_cache(brain: Store)
 
             root, day, expected = sys.argv[1:]
             store = Store(Path(root))
-            reply = search([store], Query(text="localday", **scope(day)), counted=False)
+            reply = search(store, Query(text="localday", **scope(day)), counted=False)
             assert [item["ref"] for item in reply["items"]] == [f"projects/{day}.md"]
             assert reply["items"][0]["time"] == expected
-            page = read([store], day, counted=False)
+            page = read(store, day, counted=False)
             assert [item["ref"] for item in page["items"]] == [f"projects/{day}.md"]
             assert page["since"] == expected
             """,

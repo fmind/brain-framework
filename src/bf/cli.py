@@ -56,7 +56,6 @@ from bf.models import (
 )
 
 if TYPE_CHECKING:
-    from bf.models import SchemaField
     from bf.storage import Store
 
 
@@ -145,24 +144,17 @@ app = typer.Typer(
 BrainOption = Annotated[
     str,
     typer.Option(
-        "--brain", help="Brain name or path; otherwise BF_BRAIN, the enclosing brain, or every registered brain."
+        "--brain", help="Brain name or path; otherwise BF_BRAIN, the enclosing brain, or the default registered brain."
     ),
 ]
-# build, eval and validate check one root: several registered brains need a choice.
-OneBrainOption = Annotated[
-    str,
-    typer.Option(
-        "--brain",
-        help="Brain name or path; otherwise BF_BRAIN, the enclosing brain, or the only registered brain present.",
-    ),
-]
+OneBrainOption = BrainOption
 # Registration selects brains for retrieval only: programs run in one explicitly or enclosingly selected brain.
 RunOption = Annotated[
     str,
     typer.Option(
         "--brain",
         help="Registered or enclosing brain name, or a path; otherwise BF_BRAIN or the enclosing brain, "
-        "never all registered brains.",
+        "never the default registered brain.",
     ),
 ]
 SensorOption = Annotated[
@@ -181,7 +173,7 @@ AssistantOption = Annotated[
 FOLDERS = ("projects", "actions")
 OPTIONAL = ("memories", "assets", "sensors", "routines", "skills")
 # The files every new brain starts with, packaged as plain files: AGENTS.md, loaded by every agent session, stays
-# short, since procedures live in the separately installed skills. The ignore file is stored without its dot.
+# short, since procedures live in `bf guide` and the packaged `bf` skill. The ignore file is stored without its dot.
 STARTER = {
     "AGENTS.md": "AGENTS.md",
     ".gitignore": "gitignore",
@@ -232,7 +224,14 @@ def _option[T](name: str, parse: Callable[[str], T], value: str) -> T:
 
 
 # Service argument names as the commands spell them, for invalid input a service rejects.
-_ARGUMENTS = {"query": "QUERY", "ref": "REF", "rel": "--rel", "scope": "--scope", "offset": "--offset"}
+_ARGUMENTS = {
+    "query": "QUERY",
+    "ref": "REF",
+    "rel": "--rel",
+    "scope": "--scope",
+    "offset": "--offset",
+    "topic": "TOPIC",
+}
 
 
 def _finite(value: float | None) -> float | None:
@@ -278,103 +277,16 @@ def _derived(directory: str) -> str:
     return name
 
 
-def _vacant(directory: Path) -> None:
-    """Refuse a directory holding anything but the Git metadata of a fresh clone of an empty repository."""
-    if any(entry.name != ".git" for entry in directory.iterdir()):
+def _vacant(directory: Path, *, locked: bool = False) -> None:
+    """Refuse a directory holding anything besides Git metadata (and `.bf` created by `writer(store)` when locked)."""
+    allowed = {".git", ".bf"} if locked else {".git"}
+    if any(entry.name not in allowed for entry in directory.iterdir()):
         raise Error("initialization requires a new, empty or freshly cloned directory")
 
 
 # This release's published schemas, for editor modelines: the strict schema on main may already belong to the next
 # major, which can reject keys this release accepts. Editors fetch them; BF itself stays offline.
 SCHEMAS = f"https://raw.githubusercontent.com/fmind/brain-framework/v{__version__}/docs/"
-# The standard vocabulary (docs/docs/schema.md#standard-vocabulary): sensors that print these attributes plug into a
-# new brain without mappings, and notes link with the relations at the end.
-_PEOPLE = {
-    "author": "Account explicitly credited as author; authorship is not ownership.",
-    "owner": "Account or organization the provider declares responsible for the item.",
-    "assignee": "Account assigned responsibility for the item.",
-    "participant": "Any account in a message, event or meeting; its narrower relations, such as sender, list here too.",
-}
-_ROLES = {
-    "sender": "Account that sent the message.",
-    "recipient": "Direct recipients; excludes copy recipients.",
-    "cc": "Accounts explicitly copied on a message.",
-    "organizer": "Organizer declared by the calendar provider.",
-    "attendee": "Accounts listed as attendees; not proof of attendance.",
-}
-
-
-def _standard_fields() -> dict[str, SchemaField]:
-    from bf.models import SchemaField
-
-    return {
-        **{
-            name: SchemaField(
-                description=description,
-                type="identity",
-                cardinality="many",
-                relation=True,
-                path=f"/attributes/{name}_refs",
-            )
-            for name, description in _PEOPLE.items()
-        },
-        **{
-            name: SchemaField(
-                description=description,
-                type="identity",
-                cardinality="many",
-                relation=True,
-                broader="participant",
-                path=f"/attributes/{name}_refs",
-            )
-            for name, description in _ROLES.items()
-        },
-        "repository": SchemaField(
-            description="Repository the item belongs to.",
-            type="identity",
-            cardinality="many",
-            relation=True,
-            path="/attributes/repository_refs",
-        ),
-        "project": SchemaField(
-            description="Project the source names for the item.",
-            type="identity",
-            cardinality="many",
-            relation=True,
-            path="/attributes/project_refs",
-        ),
-        "part-of": SchemaField(
-            description="Containing thread, folder, list, epic, project or other parent item.",
-            type="identity",
-            cardinality="many",
-            relation=True,
-            path="/attributes/parent_refs",
-        ),
-        "label": SchemaField(
-            description="Label the provider attaches to the item.",
-            type="identity",
-            cardinality="many",
-            relation=True,
-            path="/attributes/label_refs",
-        ),
-        "kind": SchemaField(
-            description="Provider-declared kind of item within a source that mixes several kinds.",
-            type="string",
-            cardinality="one",
-            path="/attributes/kind",
-        ),
-        "status": SchemaField(
-            description="The item's state in its own tool.", type="string", cardinality="one", path="/attributes/status"
-        ),
-        **{
-            name: SchemaField(description=description, type="identity", cardinality="many", relation=True)
-            for name, description in {
-                "depends-on": "The subject requires the target to operate or remain valid.",
-                "related-to": "An explicit association without a more specific known relation.",
-                "supersedes": "The subject replaces the target, which remains historical evidence.",
-            }.items()
-        },
-    }
 
 
 @app.command("init", rich_help_panel="Set up")
@@ -397,20 +309,21 @@ def initialize(
     """Create a brain at PATH (recommended: ~/brain); no global registration is needed."""
     import yaml
 
-    from bf.models import Config
+    from bf.models import starter_config
     from bf.storage import Store, expand, writer
 
     path = expand(path)
     # Only an omitted --name derives one: an empty or blank value is invalid, never the directory's name.
     name = _derived(path.resolve().name) if name is None else _name(name)
-    config = Config(version=FORMAT, name=name, fields=_standard_fields())
+    config = starter_config(name)
     if path.exists():
         _vacant(path)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     store = Store(path)
     with writer(store):
-        # Again under the lock: of two runs on one empty directory, the second never replaces the first's files.
-        _vacant(store.root)
+        # Again under the lock: of two runs on one empty directory, the second never replaces the first's files;
+        # `writer(store)` creates `.bf/locks` on first entry, while the pre-lock check already rejected pre-existing `.bf`.
+        _vacant(store.root, locked=True)
         store.write(
             "bf.yaml",
             (
@@ -437,17 +350,39 @@ def enroll(
             metavar="PATH", show_default=False, help="Existing brain directory; defaults to the current directory."
         ),
     ] = Path(),
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help="Registry alias; defaults to bf.yaml's brain name."),
+    ] = None,
+    default: Annotated[
+        bool,
+        typer.Option("--default", help="Select this brain by default outside any brain directory."),
+    ] = False,
 ) -> None:
     """Register an existing brain to select it by name outside its folder; never runs its programs."""
     from bf.config import register
     from bf.storage import Store, expand
 
+    alias = "" if name is None else _name(name)
     path = expand(path)
     if not path.is_dir():
         raise Error("PATH is not an existing directory; pass the brain's directory")
     if not (path / "bf.yaml").is_file():
         raise Error("PATH has no bf.yaml; run bf init PATH first, or pass the brain's root directory")
-    emit(register(Store(path)))
+    emit(register(Store(path), name=alias, default=default))
+
+
+@app.command("unregister", rich_help_panel="Set up")
+def unenroll(
+    target: Annotated[
+        str,
+        typer.Argument(metavar="TARGET", help="Registered brain name or path to remove from ~/.config/bf/config.yaml."),
+    ],
+) -> None:
+    """Remove a brain registration from the user registry; changes no files inside the brain."""
+    from bf.config import unregister
+
+    emit(unregister(target))
 
 
 @app.command("mcp", rich_help_panel="Set up")
@@ -482,40 +417,59 @@ def serve(brain: BrainOption = "") -> None:
     tools.run()
 
 
-@app.command("skills", rich_help_panel="Set up")
-def install(
-    destination: Annotated[
-        Path,
-        typer.Argument(
-            file_okay=False,
-            metavar="DIR",
-            help="A host's skills directory, such as ~/.agents/skills or ~/.claude/skills.",
-        ),
-    ],
+skill_app = typer.Typer(
+    cls=_Group,
+    no_args_is_help=True,
+    add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+    pretty_exceptions_show_locals=False,
+    help="Install and verify the packaged bf skill.",
+)
+app.add_typer(skill_app, name="skill", rich_help_panel="Set up")
+
+
+@skill_app.command("install")
+def skill_install(
+    brain: BrainOption = "",
+    global_: Annotated[
+        bool,
+        typer.Option("--global", help="Install into ~/.agents/skills/bf (and link ~/.claude/skills/bf when present)."),
+    ] = False,
     check: Annotated[
         bool,
         typer.Option(
             "--check",
-            help="Report each skill as current, outdated, modified, unmanaged, newer or missing; write nothing.",
+            help="Report current, installed, outdated, modified, unmanaged, stale or missing; write nothing.",
         ),
     ] = False,
     force: Annotated[
         bool,
-        typer.Option("--force", help="Replace edited, foreign or newer skill folders with the packaged copies."),
-    ] = False,
-    link: Annotated[
-        bool,
-        typer.Option(
-            "--link",
-            help="When DIR sits inside a brain, link <brain>/.agents/skills/bf-* and <brain>/.claude/skills/bf-* to it.",
-        ),
+        typer.Option("--force", help="Replace edited, foreign or newer bf skill files with the packaged copy."),
     ] = False,
 ) -> None:
-    """Install or update this version's bf-use, bf-action, bf-setup and bf-maintain skills; never overwrites edits."""
-    from bf.install import skills
+    """Install the packaged bf skill into one brain (and link .agents/.claude) or globally with --global."""
+    from bf.config import one
+    from bf.install import install as install_skill
 
-    result = skills(destination, check=check, force=force, link=link)
+    if global_ and brain:
+        raise typer.BadParameter("cannot be combined with --global", param_hint="--brain")
+    store = None if global_ else one(brain)
+    result = install_skill(store, global_=global_, check=check, force=force)
     _finish(result, failed=not result["ok"])
+
+
+@app.command("guide", rich_help_panel="Set up")
+def guide_command(
+    topic: Annotated[
+        str | None,
+        typer.Argument(metavar="[TOPIC]", show_default=False, help="Guide topic to read; omit to list all topics."),
+    ] = None,
+) -> None:
+    """Print a Brain Framework guide or the guide topic directory as Markdown."""
+    from bf.guide import read_guide, render_index
+
+    text = render_index() if topic is None else read_guide(topic)
+    _write(text.encode("utf-8"))
 
 
 @app.command("schema", rich_help_panel="Set up")
@@ -583,8 +537,7 @@ def exact(
     from bf.config import select
     from bf.retrieve import read
 
-    # A malformed ref, or a relation page of a page or a section, fails before any brain is read; an undeclared
-    # relation fails once the selected brains name the declared ones.
+    # A malformed ref, or a relation page of a page or a section, fails before any brain is read.
     pages.readable(ref, rel)
     emit(read(select(brain), ref, rel=rel, offset=offset))
 
@@ -595,7 +548,7 @@ def export(
         Literal["edges", "identities", "items"],
         typer.Option(
             help="edges: one claim per line; identities: each note or record that answers to more than its own "
-            "address, with every name; items: each note and record with its metadata, fields and text."
+            "address, with every name; items: each note and record with its metadata, relations, attributes and text."
         ),
     ] = "edges",
     brain: BrainOption = "",
@@ -615,7 +568,7 @@ def export(
         ),
     ] = "",
 ) -> None:
-    """Print the graph of the selected brains as JSON Lines from their caches; exit 1 when evidence was skipped."""
+    """Print the graph of the selected brain as JSON Lines from its cache; exit 1 when evidence was skipped."""
     from bf import pages
     from bf.config import select
     from bf.retrieve import edges, identities, items
@@ -1406,8 +1359,8 @@ _GIVEN = {
     "--since": "give a start time; an empty value names none",
     "--summary": "give a summary; an empty value names none",
     "--title": "give a title; an empty value names none",
-    "DIR": "give a directory; an empty value would name the working directory",
     "PATH": "give a directory; an empty value would name the working directory",
+    "TARGET": "give a registered brain name or path",
     "SENSOR": "give a sensor name from bf.yaml",
     "SLUG": "give an action slug or path",
     "CHANNEL": "give a channel name from bf.yaml",
@@ -1528,5 +1481,5 @@ def main() -> None:
 
 # Last in the module, so every command declared here gets _Command's checks: repeated or empty values, and invalid
 # input a service finds.
-for _command in (*app.registered_commands, *action_app.registered_commands):
+for _command in (*app.registered_commands, *action_app.registered_commands, *skill_app.registered_commands):
     _command.cls = _Command

@@ -27,15 +27,20 @@ def _open(value: object) -> object:
 
 def document(kind: Kind = "brain") -> dict[str, object]:
     """Describe structural constraints; semantic validation remains with the owning command."""
-    from bf.evaluate import Suite
-    from bf.replies import ASSISTANT, READ, SEARCH, STATUS
-
     if kind == "assistant-reply":
+        from bf.replies import ASSISTANT
+
         # Strict on purpose: a harness's structured-output mode needs every property declared and no extra ones.
         return {"$schema": "https://json-schema.org/draft/2020-12/schema", **ASSISTANT}
     if kind in ("search-reply", "read-reply", "status-reply"):
+        from bf.replies import READ, SEARCH, STATUS
+
         # Replies are plain dictionaries: their schemas are declared, and tests validate real replies against them.
         reply = {"search-reply": SEARCH, "read-reply": READ, "status-reply": STATUS}[kind]
         return {"$schema": "https://json-schema.org/draft/2020-12/schema", **cast("dict[str, object]", _open(reply))}
-    model = {"brain": Config, "registry": UserConfig, "eval": Suite}[kind]
+    if kind == "eval":
+        from bf.evaluate import Suite
+
+        return {"$schema": "https://json-schema.org/draft/2020-12/schema", **Suite.model_json_schema()}
+    model = {"brain": Config, "registry": UserConfig}[kind]
     return {"$schema": "https://json-schema.org/draft/2020-12/schema", **model.model_json_schema()}
