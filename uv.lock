@@ -35,7 +35,7 @@ wheels = [
 
 [[package]]
 name = "brain-framework"
-version = "26.0.0"
+version = "26.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "durationpy" },

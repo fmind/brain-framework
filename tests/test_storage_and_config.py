@@ -248,10 +248,10 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
         with pytest.raises(Error, match=match):
             config.yaml_object(payload, "test.yaml")
 
-    monkeypatch.setattr(yaml, "CSafeLoader", None)
-    with pytest.raises(Error, match="libyaml"):
-        config.yaml_object(b"a: 1\n")
-    monkeypatch.undo()
+    with monkeypatch.context() as mp:
+        mp.setattr(yaml, "CSafeLoader", None)
+        with pytest.raises(Error, match="libyaml"):
+            config.yaml_object(b"a: 1\n")
 
     # Brain selection precedence: --brain -> BF_BRAIN -> nearest enclosing bf.yaml -> Error.
     with pytest.raises(Error, match="no brain selected"):

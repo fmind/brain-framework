@@ -356,6 +356,119 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
     assert "bf: watch: transient lock busy" in capsys.readouterr().err
 
 
+def test_proxy_env_thread_reply_forwarding_and_reactive_schedule_anchors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "hybrid"
+    engine.init_brain(root, name="hybrid")
+    store = Store(root)
+    for sub in ("routines", "channels"):
+        (root / sub).mkdir(exist_ok=True)
+    (root / "routines" / "echo_ctx.py").write_text(
+        "import json, os, pathlib, sys\n"
+        "ctx = json.loads(pathlib.Path(sys.argv[1]).read_text())\n"
+        "px = os.environ.get('HTTPS_PROXY', '') + '|' + os.environ.get('no_proxy', '')\n"
+        "print(f\"{ctx['kind']}:{ctx['start']}:{px}\")\n"
+    )
+    (root / "channels" / "rec_send.py").write_text(
+        "import json, pathlib, sys\n"
+        "msg = json.loads(sys.stdin.read())\n"
+        "p = pathlib.Path(f'channels/{sys.argv[1]}.jsonl')\n"
+        "p.write_text((p.read_text() if p.exists() else '') + json.dumps(msg) + '\\n')\n"
+        "print(json.dumps({'id': 'out-1'}))\n"
+    )
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: hybrid\ndefaults:\n  timezone: UTC\njobs:\n"
+        "  bot:\n"
+        f"    run: [{sys.executable!r}, routines/echo_ctx.py, '{{{{context}}}}']\n"
+        "    at: '08:00'\n"
+        "    events:\n"
+        "      - kind: channel.message\n"
+        "    channel: chat\n"
+        "  cross-alert:\n"
+        f"    run: [{sys.executable!r}, routines/echo_ctx.py, '{{{{context}}}}']\n"
+        "    events:\n"
+        "      - kind: channel.message\n"
+        "        source: chat\n"
+        "    channel: alerts\n"
+        "  hook-every:\n"
+        f"    run: [{sys.executable!r}, routines/echo_ctx.py, '{{{{context}}}}']\n"
+        "    every: 1h\n"
+        "    hook: pre-commit\n"
+        "    channel: alerts\n"
+        "channels:\n"
+        f"  chat:\n    send: [{sys.executable!r}, channels/rec_send.py, chat]\n"
+        f"  alerts:\n    send: [{sys.executable!r}, channels/rec_send.py, alerts]\n".encode(),
+    )
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.test:8080")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+
+    # 1. Reactive `channel.message` at 08:01 runs `event` first, forwards `conversation` + `reply_to` only on same channel,
+    #    and preserves the unscheduled anchor so `at: '08:00'` still runs on the next tick!
+    t_ev = datetime(2026, 11, 16, 8, 1, tzinfo=UTC)
+    records.append_event(
+        store, "channel.message", "chat", {"id": "in-42", "conversation": "room-1/t-9", "text": "hello"}, now=t_ev
+    )
+    r1 = jobs.run_jobs(store, due_only=True, now=t_ev)
+    assert r1["ok"]
+    assert [r["job"] for r in r1["results"]] == ["bot", "cross-alert", "hook-every"]
+    chat_msgs = [json.loads(ln) for ln in (root / "channels" / "chat.jsonl").read_text().splitlines()]
+    alert_msgs = [json.loads(ln) for ln in (root / "channels" / "alerts.jsonl").read_text().splitlines()]
+    assert chat_msgs[0]["conversation"] == "room-1/t-9"
+    assert chat_msgs[0]["reply_to"] == "in-42"
+    assert "http://proxy.example.test:8080|localhost,127.0.0.1" in chat_msgs[0]["text"]
+    assert "conversation" not in alert_msgs[0]
+    assert "reply_to" not in alert_msgs[0]
+
+    # Manual `bf run cross-alert` on an unscheduled event job uses `last_success` (`08:01`), not full `lookback`!
+    man_res = jobs.run_jobs(store, ("cross-alert",), now=t_ev + timedelta(minutes=30))
+    assert man_res["ok"]
+    alert_msgs = [json.loads(ln) for ln in (root / "channels" / "alerts.jsonl").read_text().splitlines()]
+    assert alert_msgs[-1]["text"].startswith("manual:2026-11-16T08:01:00Z:")
+
+    # 2. Next tick at 08:02: `bot`'s daily `08:00` schedule still fires because `08:01` was an `event` run!
+    r2 = jobs.run_jobs(store, due_only=True, now=t_ev + timedelta(minutes=1))
+    assert r2["ok"]
+    assert [r["job"] for r in r2["results"]] == ["bot"]
+    chat_msgs = [json.loads(ln) for ln in (root / "channels" / "chat.jsonl").read_text().splitlines()]
+    assert chat_msgs[1]["text"].startswith("schedule:")
+    assert "conversation" not in chat_msgs[1]
+
+    # 3. Non-scalar/control `thread`/`reply_to` metadata degrades cleanly, and multi-event batches omit reply threading!
+    assert jobs.run_jobs(store, due_only=True, now=t_ev + timedelta(minutes=2))["results"] == []
+    records.append_event(
+        store,
+        "channel.message",
+        "chat",
+        {"conversation": "   ", "thread": {"nested": True}, "reply_to": "bad\nid", "id": 99},
+        now=t_ev,
+    )
+    assert [r["job"] for r in jobs.run_jobs(store, due_only=True, now=t_ev + timedelta(minutes=4))["results"]] == [
+        "bot",
+        "cross-alert",
+    ]
+    chat_msgs = [json.loads(ln) for ln in (root / "channels" / "chat.jsonl").read_text().splitlines()]
+    assert "conversation" not in chat_msgs[2]
+    assert chat_msgs[2]["reply_to"] == "99"
+
+    records.append_event(store, "channel.message", "chat", {"id": "in-44", "thread": "room-1/t-10"}, now=t_ev)
+    records.append_event(store, "channel.message", "chat", {"id": "in-45", "thread": "room-1/t-11"}, now=t_ev)
+    assert [r["job"] for r in jobs.run_jobs(store, due_only=True, now=t_ev + timedelta(minutes=5))["results"]] == [
+        "bot",
+        "cross-alert",
+    ]
+    chat_msgs = [json.loads(ln) for ln in (root / "channels" / "chat.jsonl").read_text().splitlines()]
+    assert "conversation" not in chat_msgs[3]
+    assert "reply_to" not in chat_msgs[3]
+
+    # 4. `hook: pre-commit` at 08:31 preserves `hook-every`'s `08:01` `every: 1h` schedule anchor so it fires at 09:01!
+    assert jobs.run_jobs(store, hook="pre-commit", now=t_ev + timedelta(minutes=30))["ok"]
+    assert jobs.run_jobs(store, due_only=True, now=t_ev + timedelta(minutes=55))["results"] == []
+    due_1h = jobs.run_jobs(store, due_only=True, now=t_ev + timedelta(minutes=60))
+    assert [r["job"] for r in due_1h["results"]] == ["hook-every"]
+
+
 def test_watch_supervises_mcp_daemon_server_and_input_jobs(tmp_path: Path) -> None:
     root = tmp_path / "mcp-watch"
     engine.init_brain(root, name="mcp-watch")

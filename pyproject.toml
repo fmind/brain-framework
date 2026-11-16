@@ -1,7 +1,7 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "26.0.0"
+version = "26.0.1"
 description = "Brain Framework is a local-first brain for you and your AI agents. It compiles OKF Markdown notes into JSON records, validates notes, records, logs, and evals against JSON Schemas, orchestrates jobs and MCP servers, and queries offline with rg, jq, and DuckDB."
 readme = "README.md"
 requires-python = ">=3.14"

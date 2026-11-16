@@ -22,12 +22,11 @@ from bf.schemas import LOGS_SCHEMA, load_validator, validate_instance
 from bf.storage import Store, private_dir, relative, writer
 
 _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-_ENV_BASE = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "SHELL", "TERM", "TZ", "SSH_AUTH_SOCK")
-_ENV_XDG = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_CONFIG_HOME", "XDG_CACHE_HOME")
-_ENV_XDG2 = ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
-_ENV_AUTH = ("GH_TOKEN", "GITHUB_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_CONFIG")
-_ENV_TLS = ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
-_ENV_ALLOWLIST = (*_ENV_BASE, *_ENV_XDG, *_ENV_XDG2, *_ENV_AUTH, *_ENV_TLS)
+_ENV_1 = "PATH HOME USER LOGNAME TMPDIR SHELL TERM TZ SSH_AUTH_SOCK DISPLAY WAYLAND_DISPLAY XDG_CONFIG_HOME"
+_ENV_2 = "XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS GH_TOKEN GITHUB_TOKEN"
+_ENV_3 = "GOOGLE_APPLICATION_CREDENTIALS CLOUDSDK_CONFIG SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE"
+_ENV_4 = "HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY http_proxy https_proxy no_proxy all_proxy"
+_ENV_ALLOWLIST: tuple[str, ...] = tuple(f"{_ENV_1} {_ENV_2} {_ENV_3} {_ENV_4}".split())
 _GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
 _GIT_HOOK_ENV = (*_GIT_ENV, "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_QUARANTINE_PATH")
 
@@ -74,6 +73,23 @@ def save_cursor_seq(state_store: Store, name: str, seq: int) -> None:
     state_store.write(f"{name}.cursor.json", encode({"seq": seq}))
 
 
+def _schedule_anchor(state_store: Store, name: str, log_doc: Mapping[str, Any]) -> str:
+    path = f"{name}.schedule.json"
+    with suppress(FileNotFoundError):
+        parsed = decode(state_store.read(path, 65536), path)
+        if isinstance(parsed, dict) and isinstance(parsed.get("last_success"), str):
+            return str(parsed["last_success"])
+    return str(log_doc.get("last_success") or "")
+
+
+def _ev_meta(ev_d: Mapping[str, Any], *keys: str) -> str:
+    for k in keys:
+        if isinstance(v := ev_d.get(k), str) or type(v) is int:
+            with suppress(Error):
+                return clean(str(v).strip(), k)
+    return ""
+
+
 def _match_event(event: dict[str, Any], rule: EventMatch) -> bool:
     if (rule.kind and event.get("kind") != rule.kind) or (rule.source and event.get("source") != rule.source):
         return False
@@ -115,11 +131,11 @@ def _in_backoff(log_doc: Mapping[str, Any], cap: int, now: datetime) -> bool:
     return False
 
 
-def is_schedule_due(job: JobSpec, log_doc: dict[str, Any], now: datetime) -> bool:
+def is_schedule_due(job: JobSpec, log_doc: dict[str, Any], now: datetime, *, last_scheduled: str | None = None) -> bool:
     """Whether `job`'s `every` or `at` schedule is due at `now`, respecting failure backoff."""
     if _in_backoff(log_doc, job.every or 3600, now):
         return False
-    raw_last = str(log_doc.get("last_success") or "")
+    raw_last = str(log_doc.get("last_success") or "") if last_scheduled is None else last_scheduled
     last_dt = datetime.fromisoformat(raw_last) if raw_last else None
     if job.every is not None and (last_dt is None or (now - last_dt).total_seconds() >= job.every):
         return True
@@ -282,6 +298,7 @@ def record_run(
     keep: int = 50,
     cursor_seq: int | None = None,
     emit_job_event: bool = False,
+    trigger: str = "",
 ) -> None:
     """Persist run outcome in `logs/<name>.json`, advance cursor on success, and optionally emit `job.*`."""
     ended_iso, ok = now_utc(ended), code == 0
@@ -321,8 +338,18 @@ def record_run(
         if latest.get("cursor"):
             new_doc["cursor"] = str(latest["cursor"])
         save_run_log(store, new_doc, keep=keep, locked=True)
-        if ok and cursor_seq is not None:
-            save_cursor_seq(private_dir(store, ".bf", "state"), name, cursor_seq)
+        if ok:
+            state_store = private_dir(store, ".bf", "state")
+            if cursor_seq is not None:
+                save_cursor_seq(state_store, name, cursor_seq)
+            if kind == "job":
+                if trigger in {"event", "hook"}:
+                    state_store.write(
+                        f"{name}.schedule.json", encode({"last_success": _schedule_anchor(state_store, name, latest)})
+                    )
+                else:
+                    with suppress(FileNotFoundError):
+                        state_store.delete(f"{name}.schedule.json")
         if emit_job_event:
             ev_data = {"run": run_id, "exit_code": code, "duration_ms": dur_ms}
             records.append_event(store, "job.succeeded" if ok else "job.failed", name, ev_data, locked=True, now=ended)
@@ -346,6 +373,8 @@ def execute_one_job(
     run_id = f"{job.name}-{int(instant.timestamp())}-{os.urandom(3).hex()}"
     log_doc = load_run_log(store, job.name, kind="job")
     last_ok = str(log_doc.get("last_success") or "")
+    if trigger == "schedule":
+        last_ok = _schedule_anchor(private_dir(store, ".bf", "state"), job.name, log_doc)
     base_dt = datetime.fromisoformat(last_ok) if last_ok else instant
     win_start = base_dt - timedelta(seconds=job.overlap if last_ok else job.lookback)
     if missing := check_requires(job.requires, f"jobs.{job.name}"):
@@ -399,7 +428,19 @@ def execute_one_job(
                     summary = {"events": ev_count}
                 txt = out_bytes.decode("utf-8", "replace").strip()
                 if not job.ingest and job.emit != "events" and job.channel and txt and txt != "NO_REPLY":
-                    post_message(store, txt, to=job.channel, run_id=run_id, now=now)
+                    ev_d = (
+                        events[0]["data"]
+                        if len(events) == 1
+                        and events[0].get("kind") == "channel.message"
+                        and events[0].get("source") == job.channel
+                        and isinstance(events[0].get("data"), dict)
+                        else {}
+                    )
+                    ev_thread = _ev_meta(ev_d, "conversation", "thread")
+                    ev_reply = _ev_meta(ev_d, "reply_to", "id")
+                    post_message(
+                        store, txt, to=job.channel, thread=ev_thread, reply_to=ev_reply, run_id=run_id, now=now
+                    )
             except Error as error:
                 code, err_msg = 1, str(error)
 
@@ -420,6 +461,7 @@ def execute_one_job(
         keep=50 if job.emit == "action" else job.keep,
         cursor_seq=cursor_target_seq,
         emit_job_event=True,
+        trigger=trigger,
     )
     out_res: dict[str, Any] = {
         "job": job.name,
@@ -457,6 +499,7 @@ def run_jobs(
 
     selected: list[tuple[JobSpec, str, list[dict[str, Any]], int | None]] = []
     advance_cursors: list[tuple[str, int]] = []
+    state_root = private_dir(store, ".bf", "state") if due_only else None
     for name, job in cfg.jobs.items():
         if (names and name not in names) or (not names and not job.enabled):
             continue
@@ -466,7 +509,7 @@ def run_jobs(
             continue
         if not names and job.hooks and not (job.every or job.at or job.events):
             continue
-        if due_only:
+        if due_only and state_root is not None:
             log_doc = load_run_log(store, name, kind="job")
             if _in_backoff(log_doc, job.every or 3600, sched_now):
                 continue
@@ -474,7 +517,7 @@ def run_jobs(
             target_seq = latest_seq if job.events and latest_seq else None
             if matched_evs:
                 selected.append((job, "event", matched_evs, target_seq))
-            elif is_schedule_due(job, log_doc, sched_now):
+            elif is_schedule_due(job, log_doc, sched_now, last_scheduled=_schedule_anchor(state_root, name, log_doc)):
                 selected.append((job, "schedule", [], target_seq))
             elif target_seq is not None:
                 advance_cursors.append((name, target_seq))

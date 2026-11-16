@@ -9,7 +9,7 @@ bf review
 bf status
 ```
 
-- `bf review` reports `stale` active notes (`newer_evidence` when cited records or backlinks changed after `updated`, `due` when `stale_after` elapsed, `future_updated`), open `draft` `actions`, and `tasks_open`.
+- `bf review` reports `stale` active notes (`newer_evidence` when cited records or backlinks to the note, `entity`, or `aliases` changed after `updated` or `sources[].retrieved`, `due` when `stale_after` elapsed, `future_updated`), open `draft` `actions`, and `tasks_open`.
 - `bf status` reports `"inside_brain"`, `events_seq`, and the health of configured `jobs`, `channels`, and `servers` in `logs/*.json`.
 
 ## 2. Resolve `bf://` URLs, sections, and `jq` fragments (`bf read`)

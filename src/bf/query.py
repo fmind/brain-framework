@@ -76,6 +76,18 @@ def _scope_paths(store: Store, scope: str) -> tuple[list[str], str]:
     return [p for p in store.files(sub) if p.endswith(".json")], sub
 
 
+def _rg_snippet(data: dict[str, Any], width: int = 240) -> str:
+    raw = str(l_obj.get("text", "")) if isinstance(l_obj := data.get("lines"), dict) else ""
+    text, subs = raw.strip(), data.get("submatches")
+    b0 = subs[0].get("start") if isinstance(subs, list) and subs and isinstance(subs[0], dict) else 0
+    if len(text) > width and type(b0) is int and b0 > 0:
+        pos = max(0, len(raw.encode("utf-8")[:b0].decode("utf-8", "ignore")) - (len(raw) - len(raw.lstrip())))
+        if pos > width // 3:
+            start = min(pos - width // 3, len(text) - width)
+            return text[start : start + width]
+    return text[:width]
+
+
 def search_rg(store: Store, pattern: str, *, scope: str = "", limit: int = 20) -> dict[str, Any]:
     """Run lexical search over pure JSON memories via `rg --json --no-config --no-ignore`."""
     cfg = config.load(store)
@@ -117,8 +129,7 @@ def search_rg(store: Store, pattern: str, *, scope: str = "", limit: int = 20) -
             continue
         if rel_path in allowed_set and rel_path not in snippets:
             matched_paths.append(rel_path)
-            l_obj = data.get("lines")
-            snippets[rel_path] = (str(l_obj.get("text", "")).strip() if isinstance(l_obj, dict) else "")[:240]
+            snippets[rel_path] = _rg_snippet(data)
             if len(matched_paths) >= limit:
                 break
 

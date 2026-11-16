@@ -139,6 +139,21 @@ def test_query_rg_jq_and_duckdb_sandboxing(tmp_path: Path, brain: Store, monkeyp
     assert rg_hits["engine"] == "rg"
     assert len(rg_hits["items"]) == 1
 
+    # Match-centered `rg` snippets on compact single-line JSON records (> 240 chars, UTF-8 safe)!
+    long_body = ("Café — " * 50) + "deep-centered-needle" + (" omega" * 50)
+    records.ingest(brain, "docs", json.dumps([{"id": "d-long", "title": "EarlyHead", "text": long_body}]).encode())
+    deep_hit = query.search_rg(brain, "deep-centered-needle", scope="docs")
+    assert deep_hit["count"] == 1
+    assert "deep-centered-needle" in deep_hit["items"][0]["snippet"]
+    assert len(deep_hit["items"][0]["snippet"]) == 240
+    head_hit = query.search_rg(brain, "d-long", scope="docs")
+    assert head_hit["count"] == 1
+    assert head_hit["items"][0]["snippet"].startswith('{"id":"d-long"')
+    assert len(head_hit["items"][0]["snippet"]) == 240
+    tail_hit = query.search_rg(brain, "EarlyHead", scope="docs")
+    assert tail_hit["count"] == 1
+    assert "EarlyHead" in tail_hit["items"][0]["snippet"]
+
     # Scope resolution: OKF note path, explicit memories/*.json path, subfolder, and empty scope!
     assert query.search_rg(brain, "durable", scope="projects/offline.md")["count"] == 1
     assert query.query_jq(brain, ".ref", scope="memories/projects/offline.json")["items"] == ["projects/offline.md"]

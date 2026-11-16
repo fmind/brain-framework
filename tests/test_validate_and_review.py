@@ -285,7 +285,8 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
 
     brain.write(
         "concepts/newer-note.md",
-        b"---\ntype: guide\nstatus: stable\nupdated: 2026-11-14\n---\n\n# Newer\n\nSee [overdue](../projects/overdue.md).\n",
+        b"---\ntype: guide\nstatus: stable\nupdated: 2026-11-14\n---\n\n# Newer {#top}\n\n"
+        b"See [overdue](../projects/overdue.md), [self](#top), and [repo](https://example.com/acme/web#readme).\n",
     )
     brain.write("memories/broken/b.json", b"{bad\n")
     brain.write("memories/notes/ignored.json", b"{}\n")
@@ -293,6 +294,36 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
     brain.write(
         "memories/rawlinks/r1.json",
         b'{"id":"r1","title":"R","updated":"2026-11-13","relations":[{"target":"bf:///projects/overdue.md#top"}]}\n',
+    )
+
+    brain.write(
+        "projects/aliased.md",
+        b"---\ntype: project\nstatus: stable\nupdated: 2026-11-09\n"
+        b"aliases: [repo:acme/web, https://example.com/acme/web]\n---\n\n# Aliased\n\n"
+        b"Self reference to <https://example.com/acme/web>.\n",
+    )
+    brain.write(
+        "concepts/retrieved-only.md",
+        b"---\ntype: guide\nstatus: stable\nstale_after: 30d\nsources:\n"
+        b"  - resource: https://example.com/unretrieved\n"
+        b"  - resource: https://example.com/old\n    retrieved: '2026-11-08'\n"
+        b"  - resource: https://example.com/spec\n    retrieved: '2026-11-10T12:00:00+02:00'\n"
+        b"  - resource: https://example.com/draft\n    retrieved: unknown\n---\n\n# Retrieved Only\n",
+    )
+    records.ingest(
+        brain,
+        "github",
+        json.dumps(
+            [
+                {
+                    "id": "pr-7",
+                    "title": "Alias PR",
+                    "updated": "2026-11-10T11:00:00Z",
+                    "relations": {"repo": "repo:acme/web", "topic": "bf:///concepts/retrieved-only.md"},
+                }
+            ]
+        ).encode(),
+        now=now,
     )
 
     rep = engine.review(brain, now=now)
@@ -324,4 +355,16 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
         "title": "Offline retrieval",
         "reasons": ["newer_evidence"],
         "newer": ["jira:WEB-9"],
+    }
+    assert stale_by_ref["projects/aliased.md"] == {
+        "ref": "projects/aliased.md",
+        "title": "Aliased",
+        "reasons": ["newer_evidence"],
+        "newer": ["concepts/newer-note.md", "github:pr-7"],
+    }
+    assert stale_by_ref["concepts/retrieved-only.md"] == {
+        "ref": "concepts/retrieved-only.md",
+        "title": "Retrieved Only",
+        "reasons": ["newer_evidence"],
+        "newer": ["github:pr-7"],
     }

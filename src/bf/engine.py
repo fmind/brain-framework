@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from importlib import resources
 from pathlib import Path
@@ -336,6 +337,18 @@ def validate(store: Store) -> dict[str, Any]:
     }
 
 
+def _note_updated(note: dict[str, Any]) -> str:
+    if isinstance(u := note.get("updated"), str) and u:
+        return u
+    retrieved: list[str] = []
+    for s in src if isinstance(src := note.get("sources"), list) else ():
+        if isinstance(s, dict) and isinstance(r := s.get("retrieved"), str) and r:
+            with suppress(Error):
+                norm = models.normalize_date(r, "retrieved") if len(r) == 10 else models.normalize_time(r, "retrieved")
+                retrieved.append(norm)
+    return max(retrieved, key=lambda v: f"{v}T23:59:59Z" if len(v) == 10 else v, default="")
+
+
 def review(store: Store, *, now: datetime | None = None) -> dict[str, Any]:
     """Read-only staleness, `newer_evidence`, open `draft` actions, and open task summary."""
     cfg = config.load(store)
@@ -389,15 +402,11 @@ def review(store: Store, *, now: datetime | None = None) -> dict[str, Any]:
         if isinstance(proj := rec.get("project"), str) and proj:
             add_in(proj, rec_ref)
 
-    note_times = {
-        r: f"{u}T23:59:59Z" if len(u) == 10 else u
-        for r, n in notes.items()
-        if isinstance(u := n.get("updated"), str) and u
-    }
+    note_times = {r: f"{u}T23:59:59Z" if len(u) == 10 else u for r, n in notes.items() if (u := _note_updated(n))}
     for ref, note in notes.items():
         for link in note["links"]:
-            if link["kind"] == "note" and link["to"] != ref:
-                incoming.setdefault(str(link["to"]), set()).add(ref)
+            if link["to"] != ref:
+                add_in(str(link["to"]), ref)
 
     stale: list[dict[str, Any]] = []
     actions_list: list[dict[str, Any]] = []
@@ -415,14 +424,14 @@ def review(store: Store, *, now: datetime | None = None) -> dict[str, Any]:
 
         reasons: list[str] = []
         newer: list[str] = []
-        upd = note.get("updated")
-        if isinstance(upd, str) and ((len(upd) == 10 and upd > today_iso) or (len(upd) > 10 and upd > now_iso)):
+        upd = _note_updated(note)
+        if upd and ((len(upd) == 10 and upd > today_iso) or (len(upd) > 10 and upd > now_iso)):
             reasons.append("future_updated")
 
         sa = note.get("stale_after")
         if type(sa) is int:
             try:
-                if not isinstance(upd, str) or (today - date.fromisoformat(upd[:10])).days >= sa:
+                if not upd or (today - date.fromisoformat(upd[:10])).days >= sa:
                     reasons.append("due")
             except ValueError:
                 reasons.append("due")
@@ -430,7 +439,7 @@ def review(store: Store, *, now: datetime | None = None) -> dict[str, Any]:
             try:
                 if models.DURATION_RE.fullmatch(sa):
                     dur_s = models.parse_duration_seconds(sa)
-                    base_iso = f"{upd}T00:00:00+00:00" if isinstance(upd, str) and len(upd) == 10 else str(upd or "")
+                    base_iso = f"{upd}T00:00:00+00:00" if len(upd) == 10 else upd
                     cutoff = (datetime.fromisoformat(base_iso).astimezone(UTC) if base_iso else instant) + timedelta(
                         seconds=dur_s
                     )
@@ -442,7 +451,7 @@ def review(store: Store, *, now: datetime | None = None) -> dict[str, Any]:
                 if now_iso >= sa:
                     reasons.append("due")
 
-        if isinstance(upd, str) and ref in note_times:
+        if ref in note_times:
             note_cutoff = note_times[ref]
             out_refs = {
                 mem_to_ref.get(str(lk["to"]), str(lk["to"]))
@@ -450,8 +459,11 @@ def review(store: Store, *, now: datetime | None = None) -> dict[str, Any]:
                 if lk["kind"] in {"note", "record"} and str(lk["to"]) != ref
             }
             linked_refs = out_refs | incoming.get(ref, set())
-            if isinstance(ent := note.get("entity"), str) and ent:
-                linked_refs |= incoming.get(norm_tgt(ent), set())
+            aliases = note.get("aliases")
+            for raw_id in (note.get("entity"), *(aliases if isinstance(aliases, list) else ())):
+                if isinstance(raw_id, str) and raw_id:
+                    linked_refs |= incoming.get(norm_tgt(raw_id), set())
+            linked_refs.discard(ref)
             newer = [t for t in sorted(linked_refs) if (record_times.get(t) or note_times.get(t) or "") > note_cutoff]
             if newer:
                 reasons.append("newer_evidence")

@@ -4,6 +4,16 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v26.0.1](https://github.com/fmind/brain-framework/releases/tag/v26.0.1) - 2026-11-16
+
+A patch release. The brain format (`version: 12`), `bf.yaml`, and the published JSON Schemas (`schemas/{record,concepts,logs,evals}.json`) are unchanged; upgrade `brain-framework` with no brain migration steps needed.
+
+### Fixed
+
+- **`bf review` matches note `aliases` and `sources[].retrieved` dates.** `bf review` now checks incoming record and note links targeting any URI in `note.aliases` alongside `note.entity`, and falls back to the latest `sources[].retrieved` date when top-level `updated` is omitted on OKF concept notes.
+- **`bf query` centers `rg` snippets around the matched span.** Lexical searches over single-line JSON files in `memories/**/*.json` now return a 240-character UTF-8 window around the first match instead of clipping the file's leading JSON keys.
+- **Jobs preserve schedule anchors across reactive runs, forward channel thread metadata, and pass proxy variables.** Reactive `event` and `hook` executions no longer advance `every`/`at` schedule anchors (stored privately in `.bf/state/<job>.schedule.json`), `jobs.<name>.channel` forwards `conversation`/`thread` and `reply_to`/`id` from single same-channel `channel.message` triggers, and subprocess environments allowlist `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, and `ALL_PROXY` (upper- and lowercase).
+
 ## [v26.0.0](https://github.com/fmind/brain-framework/releases/tag/v26.0.0) - 2026-11-16
 
 A major architectural simplification aligning Brain Framework around three formats (**YAML for config**, **pure JSON for records**, **Markdown for humans**), flat brain folders, user-owned JSON Schemas (`schemas/{record,concepts,logs,evals}.json` + `schemas/<source>.json`), Python-Markdown (`attr_list`, `extra`, `toc`, `admonition`, `sane_lists`), two clean link conventions (relative paths in Markdown prose and RFC 3986 `bf://` URLs in note frontmatter), humanized durations (`durationpy`), standard CLI retrieval (`rg`, `jq`, sandboxed `duckdb`), declarative `bf.yaml` orchestration (`defaults`, `jobs`, `channels`, `servers`, `watch` + optional `.env`), read-only `bf mcp`, and `DEFAULT_BRAIN_PATH` (zero global config). Update `bf.yaml` and `evals/*.yaml` to `version: 12`, seed `schemas/{record,concepts,logs,evals}.json` and `docs/index.md` from a fresh `bf init`, run `bf build && bf validate && bf eval`, and refresh installed `/bf` skills (`skills/bf/SKILL.md`); see the breaking changes below.
