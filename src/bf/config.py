@@ -1,4 +1,4 @@
-"""Strict YAML, one brain configuration, and the user's brain registry."""
+"""Strict YAML 1.2 loader, bf.yaml validation, brain discovery, and cross-brain resolution."""
 
 from __future__ import annotations
 
@@ -6,28 +6,26 @@ import os
 import re
 import stat
 from contextlib import suppress
+from dataclasses import dataclass, field
 from functools import cache
-from itertools import takewhile
 from pathlib import Path
-from typing import cast
+from typing import Any, Literal, cast
+from urllib.parse import unquote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 import yaml.constructor
 import yaml.resolver
-from pydantic import ValidationError
 
-from bf.models import NAME, Config, Error, InputError, Registration, UserConfig, check_version, digest, explain, suggest
-from bf.storage import Store, expand, writer, xdg
+from bf import models
+from bf.models import Error
+from bf.schemas import BRAIN_SCHEMA, compile_schema, validate_instance
+from bf.storage import Store, expand, relative
 
-_HEADER = "# https://fmind.github.io/brain-framework/docs/reference/\n"
-# libyaml parses (~9x faster than pure Python); BF requires CSafeLoader so YAML loads identically everywhere.
 LIBYAML = (
-    "reading YAML needs PyYAML built with libyaml, which this installation lacks; reinstall bf with a PyYAML wheel "
-    "that bundles it: uv tool install --reinstall --python 3.14 brain-framework, or 'brain-framework[mcp]' with MCP"
+    "reading YAML needs PyYAML built with libyaml; reinstall bf with a wheel that bundles it: "
+    "uv tool install --reinstall --python 3.14 brain-framework"
 )
-_LOADED: dict[str, Config] = {}
-ABSENT = "registered brain directory is absent on this machine; restore it, run bf register at its new place, or remove its registry entry"
-# YAML 1.2 core schema: `on`/`no`/`off` stay strings, `017` is decimal, `1:30` is text.
 _FLOAT_RE = r"^(?:[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$"
 _CORE = (
     ("null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]),
@@ -35,10 +33,86 @@ _CORE = (
     ("int", r"^(?:[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+)$", list("-+0123456789")),
     ("float", _FLOAT_RE, list("-+.0123456789")),
 )
+_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_PROTECTED_ENV = frozenset({"BF_BRAIN", "BF_STATE_DIR", "BF_START", "BF_END", "BF_TRIGGER", "LC_ALL", "LANG"})
+
+
+@dataclass(frozen=True)
+class EventMatch:
+    kind: str = ""
+    source: str = ""
+    filter: str = ""
+
+
+@dataclass(frozen=True)
+class JobSpec:
+    name: str
+    run: tuple[str, ...] = ()
+    builtin: str = ""
+    input: str = ""
+    ingest: str = ""
+    mode: Literal["upsert", "snapshot"] = "upsert"
+    allow_removal: bool = False
+    every: int | None = None
+    at: str = ""
+    days: tuple[str, ...] = ()
+    timezone: str = "UTC"
+    events: tuple[EventMatch, ...] = ()
+    hooks: tuple[str, ...] = ()
+    lookback: int = 86400
+    overlap: int = 0
+    timeout: int = 300
+    enabled: bool = True
+    channel: str = ""
+    emit: str = "none"
+    keep: int = 50
+    requires: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ChannelSpec:
+    name: str
+    listen: tuple[str, ...] = ()
+    send: tuple[str, ...] = ()
+    timeout: int = 60
+    enabled: bool = True
+    requires: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ServerSpec:
+    name: str
+    run: tuple[str, ...] = ()
+    emit: str = "none"
+    enabled: bool = True
+    requires: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WatchSpec:
+    interval: float = 5.0
+    debounce_ms: int = 300
+
+
+@dataclass(frozen=True)
+class Config:
+    name: str
+    brains: dict[str, str] = field(default_factory=dict)
+    timezone: str = "UTC"
+    env: dict[str, str] = field(default_factory=dict)
+    jobs: dict[str, JobSpec] = field(default_factory=dict)
+    channels: dict[str, ChannelSpec] = field(default_factory=dict)
+    servers: dict[str, ServerSpec] = field(default_factory=dict)
+    watch: WatchSpec = WatchSpec()
+
+
+_LOADED: dict[str, Config] = {}
 
 
 def _integer(loader: yaml.constructor.SafeConstructor, node: yaml.ScalarNode) -> int:
-    """YAML 1.2 decimal/octal/hex integer preserving Python's decimal digit limit."""
     value = str(loader.construct_scalar(node))
     base = {"0o": 8, "0x": 16}.get(value[:2])
     try:
@@ -50,7 +124,7 @@ def _integer(loader: yaml.constructor.SafeConstructor, node: yaml.ScalarNode) ->
 
 
 class _KeyError(yaml.constructor.ConstructorError):
-    """A duplicate or non-string mapping key, reported without quoting its text."""
+    """Duplicate or non-string mapping key."""
 
 
 def _mapping(loader: yaml.constructor.SafeConstructor, node: yaml.MappingNode) -> dict[str, object]:
@@ -65,7 +139,6 @@ def _mapping(loader: yaml.constructor.SafeConstructor, node: yaml.MappingNode) -
 
 @cache
 def _strict(base: type[yaml.CSafeLoader]) -> type[yaml.CSafeLoader]:
-    """libyaml's safe loader restricted to YAML 1.2 scalars and unique string mapping keys."""
     loader = cast("type[yaml.CSafeLoader]", type("StrictLoader", (base,), {}))
     loader.yaml_implicit_resolvers = {}
     for tag, pattern, first in _CORE:
@@ -77,7 +150,7 @@ def _strict(base: type[yaml.CSafeLoader]) -> type[yaml.CSafeLoader]:
 
 
 def yaml_object(data: bytes, name: str = "", *, line: int = 1) -> dict[str, object]:
-    """Parse one UTF-8 YAML mapping without anchors, aliases, duplicate keys or deep nesting."""
+    """Parse one UTF-8 YAML 1.2 mapping without anchors, aliases, duplicate keys, or deep nesting."""
     try:
         if (base := getattr(yaml, "CSafeLoader", None)) is None:
             raise Error(LIBYAML)
@@ -102,297 +175,284 @@ def _yaml_object(
         for count, event in enumerate(yaml.parse(data, Loader=scanner), 1):
             if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
                 raise Error("YAML anchors and aliases are not supported")
-            starts = isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent))
-            depth += starts - isinstance(event, (yaml.MappingEndEvent, yaml.SequenceEndEvent))
+            depth += isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)) - isinstance(
+                event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)
+            )
             if depth > 32 or count > 20_000:
                 raise Error("YAML structure exceeds its limit")
         value = yaml.load(data, Loader=loader)  # noqa: S506 - restricted CSafeLoader subclass
+    except Error:
+        raise
     except (yaml.YAMLError, ValueError, OverflowError, LookupError, TypeError) as error:
         mark = getattr(error, "problem_mark", None)
         reason = "YAML mapping keys must be unique strings" if isinstance(error, _KeyError) else "invalid YAML"
-        loc = f" at line {mark.line + line}, column {mark.column + 1}" if mark else ""
-        raise Error(f"{reason}{loc}") from error
+        raise Error(f"{reason}{f' at line {mark.line + line}, column {mark.column + 1}' if mark else ''}") from error
     if value is None:
         return {}
     if not isinstance(value, dict):
         raise Error("YAML must contain one mapping")
-    return cast(dict[str, object], value)
+    return cast("dict[str, object]", value)
+
+
+@cache
+def _brain_validator():
+    return compile_schema(BRAIN_SCHEMA, "bf.schema.json")
+
+
+def _check_tz(tz: str, label: str) -> str:
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError) as error:
+        raise Error(f"{label}: unknown IANA timezone {tz!r}") from error
+    return tz
+
+
+def _parse_events(raw: object) -> tuple[EventMatch, ...]:
+    if not isinstance(raw, list):
+        return ()
+    return tuple(
+        EventMatch(str(x.get("kind", "")), str(x.get("source", "")), str(x.get("filter", "")))
+        for x in raw
+        if isinstance(x, dict)
+    )
+
+
+def _str_tuple(raw: object) -> tuple[str, ...]:
+    return tuple(str(x) for x in raw) if isinstance(raw, list) else ()
+
+
+def _parse_env_map(raw: object, label: str) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise Error(f"{label} must be a KEY: value mapping")
+    out: dict[str, str] = {}
+    for raw_k, raw_v in raw.items():
+        key = str(raw_k)
+        if not _ENV_KEY_RE.fullmatch(key):
+            raise Error(f"{label}: invalid environment variable name {key!r}")
+        if key in _PROTECTED_ENV:
+            raise Error(f"{label}.{key}: cannot override reserved environment variable")
+        if not isinstance(raw_v, str):
+            raise Error(f"{label}.{key}: environment value must be a string")
+        out[key] = models.clean_env(raw_v, f"{label}.{key}")
+    return out
+
+
+def load_dotenv(store: Store) -> dict[str, str]:
+    """Load optional gitignored `.env` from brain root without shell or variable interpolation."""
+    try:
+        raw = store.read(".env", 65536).decode("utf-8")
+    except FileNotFoundError:
+        return {}
+    except UnicodeDecodeError:
+        raise Error(".env: file is not valid UTF-8") from None
+    out: dict[str, str] = {}
+    for idx, raw_ln in enumerate(raw.splitlines(), 1):
+        ln = re.sub(r"^export[ \t]+", "", raw_ln.strip())
+        if not ln or ln.startswith("#"):
+            continue
+        key, sep, rhs = ln.partition("=")
+        key, rhs = key.strip(), rhs.strip()
+        if not sep or not _ENV_KEY_RE.fullmatch(key):
+            raise Error(f".env:{idx}: invalid environment assignment")
+        if key in _PROTECTED_ENV:
+            raise Error(f".env:{idx}: {key} cannot override reserved environment variable")
+        if rhs.startswith("'"):
+            if not (m := re.fullmatch(r"'([^']*)'(?:[ \t]+#.*)?", rhs)):
+                raise Error(f".env:{idx}: unclosed quote in {key}")
+            val = m[1]
+        elif rhs.startswith('"'):
+            if not (m := re.fullmatch(r'"((?:[^"\\]|\\.)*)"(?:[ \t]+#.*)?', rhs)):
+                raise Error(f".env:{idx}: unclosed quote in {key}")
+            val = re.sub(r'\\(["\\])', r"\1", m[1])
+        else:
+            val = re.split(r"[ \t]+#", rhs, maxsplit=1)[0].strip()
+        out[key] = models.clean_env(val, f".env:{idx} ({key})")
+    return out
+
+
+def _parse_watch(raw: dict[str, object]) -> WatchSpec:
+    iv = models.parse_duration_seconds(raw.get("interval", 5.0), "bf.yaml watch.interval")
+    if not 0.5 <= iv <= 3600.0:
+        raise Error("bf.yaml watch.interval must be between 500ms and 1h")
+    deb_sec = models.parse_duration_seconds(raw.get("debounce", 0.3), "bf.yaml watch.debounce")
+    deb_ms = round(deb_sec * 1000)
+    if not 50 <= deb_ms <= 60_000:
+        raise Error("bf.yaml watch.debounce must be between 50ms and 60s")
+    return WatchSpec(iv, deb_ms)
+
+
+def _parse_job(name: str, raw: dict[str, object], defs: dict[str, Any]) -> JobSpec:
+    run, builtin, inp = _str_tuple(raw.get("run")), str(raw.get("builtin", "")), str(raw.get("input", ""))
+    if bool(run) == bool(builtin):
+        raise Error(f"bf.yaml jobs.{name}: specify exactly one of run or builtin")
+    if inp:
+        if builtin:
+            raise Error(f"bf.yaml jobs.{name}: builtin job cannot specify input")
+        relative(inp)
+    raw_ing = raw.get("ingest")
+    mode: Literal["upsert", "snapshot"] = "upsert"
+    if isinstance(raw_ing, dict):
+        ingest = str(raw_ing["source"])
+        if raw_ing.get("mode") == "snapshot":
+            mode = "snapshot"
+        allow_removal = bool(raw_ing.get("allow_removal", False))
+    else:
+        ingest, allow_removal = str(raw_ing or ""), False
+    if ingest in models.RESERVED_SOURCES:
+        raise Error(f"bf.yaml jobs.{name}.ingest: source {ingest!r} is reserved")
+    emit = str(raw.get("emit", "none"))
+    if ingest and emit != "none":
+        raise Error(f"bf.yaml jobs.{name}: cannot combine ingest and emit")
+    return JobSpec(
+        name=name,
+        run=run,
+        builtin=builtin,
+        input=inp,
+        ingest=ingest,
+        mode=mode,
+        allow_removal=allow_removal,
+        every=models.parse_duration(raw["every"], f"bf.yaml jobs.{name}.every") if "every" in raw else None,
+        at=str(raw.get("at", "")),
+        days=_str_tuple(raw.get("days")),
+        timezone=_check_tz(str(raw.get("timezone") or defs["tz"]), f"bf.yaml jobs.{name}.timezone"),
+        events=_parse_events(raw.get("events")),
+        hooks=(str(raw["hook"]),) if isinstance(raw.get("hook"), str) else _str_tuple(raw.get("hook")),
+        lookback=models.parse_duration(raw.get("lookback", 86400), f"bf.yaml jobs.{name}.lookback"),
+        overlap=models.parse_duration(raw.get("overlap", 0), f"bf.yaml jobs.{name}.overlap", allow_zero=True),
+        timeout=models.parse_duration(raw.get("timeout", 300), f"bf.yaml jobs.{name}.timeout", maximum=86_400),
+        enabled=bool(raw.get("enabled", True)),
+        channel=str(raw.get("channel") or ""),
+        emit=emit,
+        keep=int(cast("int", raw.get("keep", 50))),
+        requires=_str_tuple(raw.get("requires")),
+        env={**defs["env"], **_parse_env_map(raw.get("env"), f"bf.yaml jobs.{name}.env")},
+    )
+
+
+def _parse_channel(name: str, raw: dict[str, object], defs: dict[str, Any]) -> ChannelSpec:
+    listen, send = _str_tuple(raw.get("listen")), _str_tuple(raw.get("send"))
+    if not (listen or send):
+        raise Error(f"bf.yaml channels.{name}: specify listen, send, or both")
+    timeout = models.parse_duration(raw.get("timeout", 60), f"bf.yaml channels.{name}.timeout", maximum=86_400)
+    env = {**defs["env"], **_parse_env_map(raw.get("env"), f"bf.yaml channels.{name}.env")}
+    return ChannelSpec(
+        name, listen, send, timeout, bool(raw.get("enabled", True)), _str_tuple(raw.get("requires")), env
+    )
+
+
+def _parse_server(name: str, raw: dict[str, object], defs: dict[str, Any]) -> ServerSpec:
+    if not (run := _str_tuple(raw.get("run"))):
+        raise Error(f"bf.yaml servers.{name}: run is required")
+    env = {**defs["env"], **_parse_env_map(raw.get("env"), f"bf.yaml servers.{name}.env")}
+    return ServerSpec(
+        name, run, str(raw.get("emit", "none")), bool(raw.get("enabled", True)), _str_tuple(raw.get("requires")), env
+    )
 
 
 def load(store: Store) -> Config:
-    """Validate and cache `bf.yaml` per content digest; callers must treat nested dicts as read-only."""
+    """Read and validate `bf.yaml` in `store`."""
     try:
         data = store.read("bf.yaml", 1 << 20)
     except FileNotFoundError:
-        raise Error("bf.yaml is missing; restore it, or select the brain's root directory") from None
-    if (config := _LOADED.get(key := digest(data))) is None:
-        value = yaml_object(data, "bf.yaml")
-        check_version(value, "bf.yaml")
-        try:
-            config = Config.model_validate(value)
-        except ValidationError as error:
-            raise Error("invalid bf.yaml: " + explain(error)) from error
-        if len(_LOADED) >= 64:
-            _LOADED.clear()
-        _LOADED[key] = config
-    return config
+        raise Error("bf.yaml is missing; pass --brain PATH, set BF_BRAIN, or run bf init") from None
+    if (cached := _LOADED.get(key := models.digest(data))) is not None:
+        return cached
+    raw = yaml_object(data, "bf.yaml")
+    models.check_version(raw, "bf.yaml")
+    if problems := validate_instance(_brain_validator(), raw, "bf.yaml"):
+        raise Error("; ".join(problems))
+    brains = {str(a): str(t) for a, t in rb.items()} if isinstance(rb := raw.get("brains"), dict) else {}
+    defaults = cast("dict[str, object]", rd) if isinstance(rd := raw.get("defaults"), dict) else {}
+    tz = _check_tz(str(defaults.get("timezone") or "UTC"), "bf.yaml defaults.timezone")
+    defs = {"tz": tz, "env": _parse_env_map(defaults.get("env"), "bf.yaml defaults.env")}
+    rj = cast("dict[str, object]", raw["jobs"]) if isinstance(raw.get("jobs"), dict) else {}
+    rc = cast("dict[str, object]", raw["channels"]) if isinstance(raw.get("channels"), dict) else {}
+    rs = cast("dict[str, object]", raw["servers"]) if isinstance(raw.get("servers"), dict) else {}
+    jobs = {str(k): _parse_job(str(k), cast("dict[str, object]", v), defs) for k, v in rj.items()}
+    channels = {str(k): _parse_channel(str(k), cast("dict[str, object]", v), defs) for k, v in rc.items()}
+    servers = {str(k): _parse_server(str(k), cast("dict[str, object]", v), defs) for k, v in rs.items()}
+    all_names = (*jobs, *channels, *servers)
+    if len(set(all_names)) != len(all_names):
+        dup = next(u for i, u in enumerate(all_names) if u in all_names[:i])
+        raise Error(f"bf.yaml: unit name {dup!r} is declared in multiple sections")
+    for job in jobs.values():
+        if job.channel and (job.channel not in channels or not channels[job.channel].send):
+            raise Error(f"bf.yaml jobs.{job.name}.channel: channel {job.channel!r} has no send command")
+    w_spec = _parse_watch(cast("dict[str, object]", rw) if isinstance(rw := raw.get("watch"), dict) else {})
+    if len(_LOADED) >= 64:
+        _LOADED.clear()
+    _LOADED[key] = cfg = Config(str(raw["name"]), brains, tz, defs["env"], jobs, channels, servers, w_spec)
+    return cfg
 
 
-def user_path() -> Path:
-    return xdg("XDG_CONFIG_HOME", ".config") / "bf" / "config.yaml"
-
-
-def _registry() -> tuple[UserConfig, str]:
-    path = user_path()
-    try:
-        if not path.parent.exists():
-            return UserConfig(), ""
-        data = Store(path.parent).read(path.name, 1 << 20)
-    except FileNotFoundError:
-        return UserConfig(), ""
-    try:
-        registry = UserConfig.model_validate(yaml_object(data, str(path)))
-    except ValidationError as error:
-        raise Error(f"invalid {path}: " + explain(error)) from error
-    block = list(takewhile(lambda ln: ln.startswith("#") or not ln.strip(), data.decode().splitlines(keepends=True)))
-    while block and not block[-1].startswith("#"):
-        block.pop()
-    header = "".join(block)
-    return registry, header if not header or header.endswith("\n") else header + "\n"
-
-
-def user_config() -> UserConfig:
-    return _registry()[0]
-
-
-def _identity(entry: Registration) -> str | None:
-    try:
-        return Store(Path(entry.path).expanduser()).identity
-    except Error:
-        return None
-
-
-def _location(entry: Registration) -> Path:
-    if not entry.path.startswith("~"):
-        return Path(entry.path)
-    head, *rest = Path(entry.path).parts
-    home = Path(head).expanduser()
-    try:
-        return home.resolve(strict=True).joinpath(*rest)
-    except OSError, RuntimeError:
-        return home.joinpath(*rest)
-
-
-def _write_registry(registry_store: Store, path: Path, header: str, registry: UserConfig) -> None:
-    doc = {
-        **({"default": registry.default} if registry.default is not None else {}),
-        "brains": {k: v.model_dump() for k, v in sorted(registry.brains.items())},
-    }
-    registry_store.write(path.name, ((header or _HEADER) + yaml.safe_dump(doc, sort_keys=False)).encode())
-
-
-def _match_registered(brains: dict[str, Registration], target: str | Store, path: Path) -> str:
-    if isinstance(target, Store):
-        identity, root, missing = target.identity, target.root, f"this brain is not registered in {path}"
-    elif "/" in target or target in {".", "..", "~"}:
-        expanded = expand(Path(target))
-        identity, root, missing = None, expanded, f"{target} is not registered in {path}"
-        with suppress(Error):
-            identity = Store(expanded).identity
-    elif target not in brains:
-        raise Error(f"brain {target} is not registered{suggest(target, brains)}")
-    else:
-        return target
-    for name, entry in sorted(brains.items()):
-        if (identity is not None and _identity(entry) == identity) or _location(entry) == root:
-            return name
-    raise Error(missing)
-
-
-def register(store: Store, *, name: str = "", default: bool = False) -> dict[str, object]:
-    """Add or update this brain in the user registry, optionally under an alias and/or as default."""
-    alias = name or load(store).name
-    if name and not re.fullmatch(NAME, alias):
-        raise InputError(
-            "brain name must start with a lowercase letter and use only lowercase letters, digits and hyphens", "name"
-        )
-    path = user_path()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    busy = "another bf register is updating the registry; retry after it finishes"
-    with writer(Store(path.parent), wait=30, busy=busy):
-        registry, header = _registry()
-        for other, entry in registry.brains.items():
-            if other != alias and _identity(entry) == store.identity:
-                raise Error(
-                    f"this brain is already registered as {other}; unregister {other} from {path}, then run bf register again"
-                )
-        replaced = ""
-        if (existing := registry.brains.get(alias)) and _location(existing) != store.root:
-            try:
-                if (reg := _registered(existing)) is not None:
-                    reg.mode("bf.yaml")
-            except FileNotFoundError:
-                reg = None
-            except (Error, OSError) as error:
-                raise Error(
-                    f"cannot reach the brain registered as {alias} at {existing.path}; restore access to it, or remove that entry from {path}"
-                ) from error
-            if reg is not None and reg.identity != store.identity:
-                raise Error(
-                    f"another brain is already registered as {alias} at {existing.path}; remove that entry from {path}, or pass a different --name"
-                )
-            replaced = existing.path
-        if existing is None or replaced or (default and registry.default != alias):
-            if existing is None or replaced:
-                registry.brains[alias] = Registration(path=str(store.root))
-            if default:
-                registry.default = alias
-            _write_registry(Store(path.parent), path, header, registry)
-    out: dict[str, object] = {"brain": alias, "path": str(store.root), "config": str(path)}
-    if registry.default == alias:
-        out["default"] = True
-    if replaced:
-        out["replaced"] = replaced
-    return out
-
-
-def unregister(target: str | Store) -> dict[str, object]:
-    """Remove a registered brain by name, path or Store, clearing `default` when removing the default brain."""
-    path = user_path()
-    missing = "this brain is not registered" if isinstance(target, Store) else f"brain {target} is not registered"
-    try:
-        if not path.parent.exists():
-            raise FileNotFoundError
-        (registry_store := Store(path.parent)).mode(path.name)
-    except FileNotFoundError:
-        raise Error(missing) from None
-    busy = "another bf unregister is updating the registry; retry after it finishes"
-    with writer(registry_store, wait=30, busy=busy):
-        registry, header = _registry()
-        matched = _match_registered(registry.brains, target, path)
-        removed = registry.brains.pop(matched)
-        if cleared := (registry.default == matched):
-            registry.default = None
-        _write_registry(registry_store, path, header, registry)
-    out: dict[str, object] = {"brain": matched, "path": removed.path, "config": str(path)}
-    if cleared:
-        out["cleared_default"] = True
-    return out
-
-
-def registration(store: Store) -> tuple[str, Registration] | None:
-    """This brain's `(name, Registration)` entry in the user registry by physical identity, or None."""
-    try:
-        return next(((n, e) for n, e in sorted(user_config().brains.items()) if _identity(e) == store.identity), None)
-    except Error, OSError, RuntimeError, UnicodeError:
-        return None
-
-
-def is_registered(store: Store) -> bool:
-    return registration(store) is not None
-
-
-def _registered(entry: Registration) -> Store | None:
-    try:
-        return Store(Path(entry.path).expanduser())
-    except Error as error:
-        cause = error.__cause__
-        if isinstance(cause, OSError) and not isinstance(cause, FileNotFoundError | NotADirectoryError):
-            raise Error("registered brain directory exists but cannot be reached; restore access to it") from cause
-        return None
-
-
-def _open_registered(entry: Registration, unreachable_label: str, label: str) -> Store:
-    try:
-        store = _registered(entry)
-    except Error:
-        raise Error(f"cannot reach {unreachable_label}; restore access to its directory") from None
-    if store is None:
-        raise Error(f"{label}: {ABSENT}")
-    return _configured(store, label)
-
-
-def _located(value: str, *, execute: bool = False) -> Store:
-    if "/" in value or value in {".", "..", "~"}:
-        return _configured(Store(expand(Path(value))), value)
-    brains = user_config().brains
-    try:
-        near = _nearest(required=False)
-        enclosing = (near, load(near)) if near is not None else None
-    except Error, OSError, UnicodeError:
-        if value not in brains:
-            raise
-        enclosing = None
-    if (entry := brains.get(value)) is not None:
-        store = _open_registered(entry, f"the brain registered as {value}", f"registered brain {value}")
-        if enclosing and enclosing[1].name == value and enclosing[0].identity != store.identity:
-            raise Error(
-                f"ambiguous brain name {value}: the registry and the enclosing brain name different directories; pass --brain PATH"
-            )
-        return store
-    if enclosing and enclosing[1].name == value:
-        return enclosing[0]
-    names = {*brains, *({enclosing[1].name} if enclosing else ())}
-    if execute:
-        raise Error(
-            f"brain {value} is neither registered nor the enclosing brain; pass --brain PATH{suggest(value, names)}"
-        )
-    if not (path := expand(Path(value))).exists():
-        raise Error(f"brain directory does not exist; pass an existing --brain or BF_BRAIN{suggest(value, names)}")
-    return _configured(Store(path), value)
-
-
-def _configured(store: Store, given: str) -> Store:
-    try:
-        store.mode("bf.yaml")
-    except FileNotFoundError:
-        raise Error(
-            f"{given} has no bf.yaml; pass the brain's root directory, or create a brain with bf init"
-        ) from None
-    return store
-
-
-def _nearest(*, required: bool = True) -> Store | None:
-    here, owner = Path.cwd(), os.geteuid()
+def inside_brain(start: Path | None = None) -> Store | None:
+    """Return the nearest enclosing user-owned brain directory, or `None` outside any brain."""
+    here, owner = (start or Path.cwd()), os.geteuid()
     for up, candidate in enumerate((here, *here.parents)):
         try:
             info = (candidate / "bf.yaml").lstat()
         except FileNotFoundError, NotADirectoryError:
             continue
         if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or candidate.stat().st_uid != owner:
-            if not required:
-                return None
-            raise Error(
-                f"{'../' * up or './'}bf.yaml is not a regular file owned by you; pass --brain PATH to select a brain"
-            )
+            rel_y = f"{'../' * up or './'}bf.yaml"
+            raise Error(f"{rel_y} is not a regular file owned by you; pass --brain PATH to select a brain")
         return Store(candidate)
     return None
 
 
-def select(value: str = "", *, execute: bool = False) -> Store:
-    """Single-brain selection: --brain NAME|PATH, then BF_BRAIN, then the enclosing brain, then default."""
-    if chosen := value or os.environ.get("BF_BRAIN", ""):
-        return _located(chosen, execute=execute)
-    if nearest := _nearest():
+def _open_brain(chosen: str) -> Store:
+    store = Store(expand(Path(chosen)))
+    try:
+        info = store.mode("bf.yaml")
+    except FileNotFoundError:
+        raise Error(f"{chosen} has no bf.yaml; pass the brain's root directory or run bf init") from None
+    if not stat.S_ISREG(info):
+        raise Error(f"{chosen}/bf.yaml must be a regular file")
+    return store
+
+
+def select(value: str = "") -> Store:
+    """Resolve `--brain PATH` -> `BF_BRAIN` -> enclosing `bf.yaml` -> `DEFAULT_BRAIN_PATH`."""
+    if chosen := (value or os.environ.get("BF_BRAIN", "")).strip():
+        return _open_brain(chosen)
+    if nearest := inside_brain():
         return nearest
-    registry = user_config()
-    if registry.default is None:
-        hint = (
-            "no default brain configured; pass --brain NAME" if registry.brains else "no brain selected; pass --brain"
-        )
-        raise Error(f"{hint}, run inside a brain, or register one with --default")
-    label = f"default brain {registry.default}"
-    return _open_registered(registry.brains[registry.default], label, label)
+    if fallback := os.environ.get("DEFAULT_BRAIN_PATH", "").strip():
+        return _open_brain(fallback)
+    raise Error("no brain selected; pass --brain PATH, set BF_BRAIN or DEFAULT_BRAIN_PATH, or run inside a brain")
 
 
-def brain_name(store: Store) -> str:
-    """How to name a brain whose bf.yaml cannot load: its registered name, else its directory name."""
-    return match[0] if (match := registration(store)) else store.root.name
-
-
-def execution(value: str = "") -> Store:
-    return select(value, execute=True)
-
-
-def one(value: str = "") -> Store:
-    return select(value)
+def resolve_brain(current: Store, cfg: Config, host: str) -> Store:
+    """Resolve a `bf://<host>/...` brain target confined to user-owned brain directories."""
+    if host in {"", cfg.name}:
+        return current
+    owner = os.geteuid()
+    candidates: list[Path] = []
+    if host in cfg.brains:
+        raw_target = expand(Path(cfg.brains[host]))
+        candidates.append(raw_target if raw_target.is_absolute() else (current.root / raw_target))
+    elif models.NAME_RE.fullmatch(host):
+        candidates.append(current.root.parent / host)
+        with suppress(RuntimeError):
+            candidates.append(Path.home() / host)
+    else:
+        decoded = unquote(host, errors="strict")
+        if "\x00" not in decoded and "\\" not in decoded:
+            raw_path = expand(Path(decoded))
+            candidates.extend(
+                (raw_path,) if raw_path.is_absolute() else (current.root / raw_path, current.root.parent / raw_path)
+            )
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+            dir_stat, yaml_stat = resolved.stat(), (resolved / "bf.yaml").lstat()
+        except OSError:
+            continue
+        ok_dir = stat.S_ISDIR(dir_stat.st_mode) and dir_stat.st_uid == owner
+        if ok_dir and stat.S_ISREG(yaml_stat.st_mode) and yaml_stat.st_uid == owner:
+            target_store = Store(resolved)
+            load(target_store)
+            return target_store
+    raise Error(f"unknown brain {host!r}; declare it under brains: in bf.yaml")

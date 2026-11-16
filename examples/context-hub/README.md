@@ -1,189 +1,108 @@
 # Four-tool walkthrough
 
-Answer one question across Google Workspace, Jira, GitHub, and Google Cloud fixtures: **"Can the New website launch, what remains, and why did we choose one page?"** Only the initial `git clone` uses the network; no credentials or LLM are required.
+Answer one question across Google Workspace, Jira, GitHub, and Google Cloud fixtures: **"Can the New website launch, what remains, and why did we choose one page?"** Everything runs offline from local JSON fixtures.
 
-`tests/test_context_hub.py` executes these walkthrough commands on a disposable copy of this folder.
+| Path                      | Purpose                                                                                              |
+| ------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `bf.yaml`                 | YAML configuration (`version: 12`, `name: context-demo`).                                            |
+| `schemas/jira.json`       | Per-source JSON Schema enforcing `type`, `status`, and `project` on `memories/jira/*.json`.          |
+| `fixtures/*.json`         | Offline JSON fixtures for `workspace`, `jira`, `github`, `gcloud`, plus `jira-done.json`.            |
+| `projects/new-website.md` | Authoritative Markdown project note with `attr_list` metadata on headings, links, blocks, and tasks. |
+| `sensors/demo.py`         | Normalizes `fixtures/TOOL.json` into unified JSON records piped into `bf ingest`.                    |
 
-| Path                      | Purpose                                                                                                     |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `bf.yaml`                 | Declares the `project:` relation target constraint (`project:`) and four `snapshot` jobs (`emit: records`). |
-| `evals/retrieval.yaml`    | Ten retrieval cases: `bf eval` reports `"score":"10/10"`.                                                   |
-| `fixtures/*.json`         | Offline JSON fixtures for `workspace`, `jira`, `github`, `gcloud`, plus `jira-done.json`.                   |
-| `projects/new-website.md` | Starter project note tracking the launch decision.                                                          |
-| `prompts/watcher.md`      | Watcher assistant prompt; the walkthrough copies [records-gate.py](../routines/records-gate.py) here.       |
-| `sensors/demo.py`         | Normalizes `fixtures/TOOL.json` into BF records (`@type`, `relations`, `attributes`) without network calls. |
+## Run on a disposable copy
 
-## Get the example
+From a repository checkout after `uv sync --locked`:
 
 ```bash
+bf_checkout=$PWD
 context_demo=$(mktemp -d)
-git clone --quiet --depth 1 --branch "v$(bf --version)" https://github.com/fmind/brain-framework.git "$context_demo/source"
-cp -R "$context_demo/source/examples/context-hub" "$context_demo/brain"
+cp -R examples/context-hub "$context_demo/brain"
 cd "$context_demo/brain"
+bf() { uv run --project "$bf_checkout" bf "$@"; }
 ```
 
-Review `bf.yaml` and `sensors/demo.py` before running.
-
-## Collect four tools
+## 1. Ingest four tools and compile Markdown to JSON
 
 ```bash
-bf collect workspace
-bf collect jira
-bf collect github
-bf collect gcloud
-bf read project:new-website
-```
-
-Each collection reports `"records":1`. Reading `project:new-website` opens the project note and groups all four normalized records under the `project` backlink relation:
-
-```json
-{
-  "relation": "project",
-  "total": 4,
-  "items": [
-    { "ref": "gcloud:deployment", "kind": "record", "@type": "Deployment" },
-    { "ref": "github:implementation", "kind": "record", "@type": "PullRequest" },
-    { "ref": "jira:review", "kind": "record", "@type": "Issue" },
-    { "ref": "workspace:brief", "kind": "record", "@type": "Brief" }
-  ]
-}
-```
-
-Read the blocking issue and verify the brain:
-
-```bash
-bf read jira:review
+for tool in workspace jira github gcloud; do
+  python3 sensors/demo.py "$tool" 2026-09-26T12:00:00Z | bf ingest "$tool" --mode snapshot
+done
+bf build
 bf validate
 bf eval
 ```
 
-`bf read jira:review` shows keyboard navigation still blocks launch; validation reports `"valid":true` and evaluation `"score":"10/10"`.
+`bf validate` reports `"valid":true` with `1` note and `4` records. Both the compiled Markdown project (`memories/projects/new-website.json`) and the four sensor folders (`memories/{workspace,jira,github,gcloud}/*.json`) live as individual JSON files under `memories/`.
 
-## How the four tools share one project
-
-Each tool names its project and status differently. `sensors/demo.py` maps them into shared `@type`, `relations.project`, and `attributes` (`kind`, `status`), while `bf.yaml` restricts `fields.project.targets` to `project:` ([reference](../../docs/docs/reference.md)):
-
-| Tool      | Project pointer                 | Status pointer      | Normalized `@type` and `attributes.kind`      |
-| --------- | ------------------------------- | ------------------- | --------------------------------------------- |
-| Workspace | `attributes.project`            | `attributes.state`  | `Brief`, `kind: brief`, `status`              |
-| Jira      | `attributes.workstream`         | `attributes.status` | `Issue`, `kind: issue`, `status`              |
-| GitHub    | `attributes.repository_project` | `attributes.state`  | `PullRequest`, `kind: pull-request`, `status` |
-| Gcloud    | `attributes.service_project`    | `attributes.health` | `Deployment`, `kind: deployment`, `status`    |
-
-```yaml
-# https://fmind.github.io/brain-framework/docs/reference/
-version: 11
-name: context-demo
-fields:
-  project:
-    description: Project explicitly identified by the source.
-    targets: ["project:"]
-jobs:
-  jira:
-    run: [sensors/demo.py, jira, "{{end}}"]
-    emit: records
-    mode: snapshot
-```
-
-When writing custom jobs against raw CLI JSON output (`gh`, `gws`, `acli`, `gcloud`), declarative `map:` in `bf.yaml` can extract those pointers without a Python script ([jobs](../../docs/docs/jobs.md)).
-
-## Record the conclusion
-
-Save the verified state in `projects/new-website.md`, dated today:
+## 2. Query pure JSON records (`bf query`, `jq`, `rg`, `duckdb`)
 
 ```bash
-cat > projects/new-website.md <<EOF
+# Every record linked to projects/new-website.md across all four tools
+bf query --jq 'select(.kind == "memory" and any(.links[]; .to == "projects/new-website.md")) | {ref, title}'
+
+# Inspect the blocking Jira review via bf read
+bf read "jira:review"
+
+# Summarize all sources with sandboxed DuckDB
+bf query --sql "SELECT source, kind, ref, title FROM records ORDER BY source"
+```
+
+`jira:review` shows `"status":"In review"` because the keyboard navigation check is still open, even though `github:implementation` is `"merged"` and `gcloud:deployment` is `"healthy"`.
+
+## 3. Record the launch hold decision
+
+Update `projects/new-website.md` dated `2026-09-27` citing all four records with `attr_list` metadata, rebuild `memories/projects/new-website.json`, and check `bf review`:
+
+```bash
+cat > projects/new-website.md <<'EOF'
 ---
 type: project
 status: draft
-updated: $(date +%F)
-aliases: [project:new-website]
+updated: 2026-09-27
+tags: [launch, web]
 summary: Launch a product website that explains the product before signup.
 ---
 
 # New website
 
-## Decision
+## Decision {#decision owner=product}
 
-Start with a single product page: visitors need a clear explanation before signing up. Evidence: [Workspace brief](workspace:brief).
+Start with a single product page: visitors need a clear explanation before signing up. Evidence: [Workspace brief](../memories/workspace/29a8825bd242f14386ee528d76e0e8f1e38f3c8c4047d7b2d6df7493368a17d0.json){rel=cites}.
+{: #single-page confidence=high}
 
-## Launch review
+## Launch review {#launch-review gate=accessibility}
 
-Hold public launch. The [implementation](github:implementation) is merged and the [preview](gcloud:deployment) is healthy, but the [launch review](jira:review) still blocks launch on the keyboard navigation check.
+Hold public launch. The [implementation](../memories/github/da31012c40330e7e21538e7dd57503b16e8a0839159e96137090cccc9910b171.json){rel=implements} is merged and the [preview](../memories/gcloud/aee50b18a03c89e4883a5acadf5c8614dd7fd2f111c3b616e1a8d6427edc3e3f.json){rel=verifies} is healthy, but the [launch review](../memories/jira/c97ace4c8fef2cee8fa0f3c9f52aab18dbd4f42438afe362ffb8f75ce4c04b84.json){rel=blocks} still blocks launch on keyboard navigation.
 
 ## Next actions
 
 - [ ] Run the keyboard navigation check.
+  {: #task-a11y priority=p1}
 EOF
-bf read
-```
-
-Home lists the project with its `next` task and no `review` flag (`changed` stays empty because projects report under `projects`).
-
-## Hear of each change once
-
-A prompt job can watch record changes offline with `on: { event: { kind: record, source: jira } }` (`record` expands to `record.added`, `record.changed`, and `record.removed`), or use a custom `gate:` script ([records-gate.py](../routines/records-gate.py)) when filtering attributes with `--where` ([assist](../../docs/docs/assist.md)):
-
-```bash
-mkdir -p routines
-cp "$context_demo/source/examples/routines/records-gate.py" routines/
-cat >> bf.yaml <<'EOF'
-  watcher:
-    prompt: prompts/watcher.md
-    harness:
-      [
-        printf,
-        "%s",
-        "---\ntype: action\nstatus: draft\nupdated: 2026-09-27\nsummary: Re-check website launch review after Jira change.\n---\n\n# Launch review check\n\n## Decision\n\nReview [Jira issue](jira:review) against the launch decision.\n",
-      ]
-    emit: action
-    on:
-      every: 1s
-    gate:
-      [python3, routines/records-gate.py, jira, --since, "{{start}}", --until, "{{end}}", --state, "{{state}}"]
-EOF
+bf build
 bf validate
-bf update --job watcher
-sleep 1
-bf update --job watcher
+bf review
 ```
 
-`printf` stands in for an agent harness and `emit: action` writes a `draft` `ACTION.md`. Validation stays `"valid":true`; the first update finds `jira:review`, runs the watcher (`"status":"ran"`, returning an `"action"` path), while the second finds nothing new and skips starting a harness (`"status":"gated"`).
+Because `updated: 2026-09-27` is newer than the `2026-09-21..26` evidence timestamps, `bf review` reports `"stale":[]` and `"tasks_open":1`.
 
-## Follow a change
+## 4. Detect upstream evidence changes with `bf review`
 
-Move the Jira fixture to `Done` (`attributes.updated` advances while event `time` stays fixed; [jobs](../../docs/docs/jobs.md)):
+Advance the Jira fixture to `Done` at `2026-09-28T10:00:00Z` and re-ingest `jira`:
 
 ```bash
 cp fixtures/jira-done.json fixtures/jira.json
-bf collect jira
-bf read
-bf read jira:review
-sleep 1
-bf update --job watcher
-bf read actions
+python3 sensors/demo.py jira 2026-09-28T10:00:00Z | bf ingest jira --mode snapshot
+bf review
 ```
 
-Collection updates `jira:review`, Home flags the project with `newer_evidence`, and the watcher writes a second draft action (`actions` lists both drafts):
+`bf review` immediately flags `projects/new-website.md` with `"reasons":["newer_evidence"]` and `"newer":["jira:review"]`.
 
-```json
-{
-  "ref": "projects/new-website.md",
-  "review": true,
-  "review_reasons": ["newer_evidence"],
-  "new_links": 1,
-  "newer": ["jira:review"],
-  "next": "Run the keyboard navigation check."
-}
-```
-
-Clean up the demo directory when finished:
+Clean up the temporary directory when finished:
 
 ```bash
-cd
+cd "$bf_checkout"
+unset -f bf
 rm -rf -- "$context_demo"
 ```
-
-## Use it on your work
-
-Pick one cross-tool question, author its project note, and connect only the sources it needs: [GitHub history](../sensors/github-history.md) (`gh`), [Calendar](../sensors/google-calendar.py) / [Gmail](../sensors/gmail-headers.py) / [Drive](../sensors/google-drive-folders.py) (`gws`), Jira (`acli`), or Gcloud (`gcloud`), then add an assistant trigger (`on: { event: { kind: record, source: ... } }`) or [`records-gate.py`](../routines/README.md#react-to-new-records). See [Jobs](../../docs/docs/jobs.md) and [Assist](../../docs/docs/assist.md).

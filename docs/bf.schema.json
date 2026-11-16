@@ -1,669 +1,220 @@
 {
   "$defs": {
-    "Defaults": {
+    "Argv": {
+      "items": { "maxLength": 4096, "minLength": 1, "type": "string" },
+      "maxItems": 64,
+      "minItems": 1,
+      "title": "Argv",
+      "type": "array"
+    },
+    "Channel": {
       "additionalProperties": false,
-      "description": "Brain-wide defaults shared by configured jobs.",
+      "anyOf": [{ "required": ["listen"] }, { "required": ["send"] }],
       "properties": {
-        "harness": {
-          "items": { "type": "string" },
-          "maxItems": 128,
-          "prefixItems": [
-            {
-              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
-              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
-              "type": "string"
-            }
-          ],
-          "title": "Harness",
-          "type": "array"
+        "enabled": { "type": "boolean" },
+        "env": {
+          "additionalProperties": { "maxLength": 4096, "type": "string" },
+          "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]*$" },
+          "type": "object"
         },
-        "post": {
+        "listen": { "$ref": "#/$defs/Argv" },
+        "requires": {
+          "items": { "maxLength": 256, "minLength": 1, "type": "string" },
+          "maxItems": 32,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "send": { "$ref": "#/$defs/Argv" },
+        "timeout": {
           "anyOf": [
-            { "not": { "pattern": "[^a-z0-9-]" }, "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Post"
-        },
-        "timezone": {
-          "anyOf": [{ "maxLength": 128, "minLength": 1, "type": "string" }, { "type": "null" }],
-          "default": null,
-          "title": "Timezone"
+            { "maximum": 86400, "minimum": 1, "type": "integer" },
+            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
+          ]
         }
       },
-      "title": "Defaults",
+      "title": "Channel",
       "type": "object"
     },
-    "EventSpec": {
+    "EventMatch": {
       "additionalProperties": false,
-      "description": "Runtime event subscription trigger.",
       "properties": {
-        "cooldown": {
-          "anyOf": [
-            { "maximum": 31536000, "minimum": 0, "type": "integer" },
-            { "pattern": "^[0-9]{1,10}[smhdw]$", "type": "string" }
-          ],
-          "default": 0,
-          "title": "Cooldown"
-        },
-        "expires": { "default": "", "title": "Expires", "type": "string" },
-        "kind": {
-          "anyOf": [
-            {
-              "enum": [
-                "record",
-                "record.added",
-                "record.changed",
-                "record.removed",
-                "note.changed",
-                "message.received",
-                "job.failed"
-              ],
-              "type": "string"
-            },
-            {
-              "items": {
-                "enum": [
-                  "record",
-                  "record.added",
-                  "record.changed",
-                  "record.removed",
-                  "note.changed",
-                  "message.received",
-                  "job.failed"
-                ],
-                "type": "string"
-              },
-              "maxItems": 16,
-              "minItems": 1,
-              "type": "array"
-            }
-          ],
-          "title": "Kind"
-        },
-        "match": { "default": "", "maxLength": 1024, "title": "Match", "type": "string" },
-        "max": {
-          "anyOf": [{ "maximum": 10000, "minimum": 1, "type": "integer" }, { "type": "null" }],
-          "default": null,
-          "title": "Max"
-        },
-        "source": {
-          "anyOf": [
-            { "not": { "pattern": "[^a-z0-9-]" }, "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
-            {
-              "items": { "not": { "pattern": "[^a-z0-9-]" }, "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
-              "maxItems": 32,
-              "minItems": 1,
-              "type": "array"
-            },
-            { "const": "", "type": "string" }
-          ],
-          "default": "",
-          "title": "Source"
-        }
+        "filter": { "maxLength": 2048, "minLength": 1, "type": "string" },
+        "kind": { "maxLength": 128, "minLength": 1, "type": "string" },
+        "source": { "maxLength": 128, "minLength": 1, "type": "string" }
       },
-      "required": ["kind"],
-      "title": "EventSpec",
+      "title": "EventMatch",
+      "type": "object"
+    },
+    "Ingest": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_removal": { "type": "boolean" },
+        "mode": { "enum": ["upsert", "snapshot"], "type": "string" },
+        "source": { "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" }
+      },
+      "required": ["source"],
+      "title": "Ingest",
       "type": "object"
     },
     "Job": {
       "additionalProperties": false,
-      "description": "One unified job in `bf.yaml` (`jobs:`), replacing sensors, routines, channels and assistants.",
+      "oneOf": [{ "required": ["run"] }, { "required": ["builtin"] }],
       "properties": {
-        "cwd": { "default": "", "maxLength": 256, "title": "Cwd", "type": "string" },
-        "emit": {
-          "default": "log",
-          "enum": ["records", "messages", "message", "action", "log"],
-          "title": "Emit",
-          "type": "string"
+        "at": { "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$", "type": "string" },
+        "builtin": { "enum": ["build", "validate", "review", "eval"], "type": "string" },
+        "channel": { "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
+        "days": {
+          "items": { "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "type": "string" },
+          "maxItems": 7,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
         },
-        "enabled": { "default": true, "title": "Enabled", "type": "boolean" },
-        "expire_after": {
+        "emit": { "enum": ["none", "action", "events"], "type": "string" },
+        "enabled": { "type": "boolean" },
+        "env": {
+          "additionalProperties": { "maxLength": 4096, "type": "string" },
+          "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]*$" },
+          "type": "object"
+        },
+        "events": { "items": { "$ref": "#/$defs/EventMatch" }, "maxItems": 32, "minItems": 1, "type": "array" },
+        "every": {
           "anyOf": [
-            { "maximum": 3153600000, "minimum": 3600, "type": "integer" },
-            { "pattern": "^[0-9]{1,10}[smhdw]$", "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Expire After"
+            { "maximum": 315576000, "minimum": 1, "type": "integer" },
+            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
+          ]
         },
-        "extract": {
-          "default": "",
-          "maxLength": 512,
-          "pattern": "^(?:/(?:[^~\\x00]|~[01])*)?$",
-          "title": "Extract",
-          "type": "string"
-        },
-        "gate": {
-          "items": { "type": "string" },
-          "maxItems": 128,
-          "prefixItems": [
+        "hook": {
+          "anyOf": [
+            { "enum": ["pre-commit", "pre-push"], "type": "string" },
             {
-              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
-              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
-              "type": "string"
+              "items": { "enum": ["pre-commit", "pre-push"], "type": "string" },
+              "maxItems": 2,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
             }
-          ],
-          "title": "Gate",
-          "type": "array"
+          ]
         },
-        "harness": {
-          "items": { "type": "string" },
-          "maxItems": 128,
-          "prefixItems": [
-            {
-              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
-              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
-              "type": "string"
-            }
-          ],
-          "title": "Harness",
-          "type": "array"
+        "ingest": {
+          "anyOf": [{ "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" }, { "$ref": "#/$defs/Ingest" }]
         },
-        "idempotent": { "default": false, "title": "Idempotent", "type": "boolean" },
-        "keep": {
-          "anyOf": [{ "maximum": 50000, "minimum": 1, "type": "integer" }, { "type": "null" }],
-          "default": null,
-          "title": "Keep"
-        },
+        "input": { "maxLength": 1024, "minLength": 1, "type": "string" },
+        "keep": { "maximum": 1000, "minimum": 1, "type": "integer" },
         "lookback": {
           "anyOf": [
-            { "maximum": 31536000, "minimum": 1, "type": "integer" },
-            { "pattern": "^[0-9]{1,10}[smhdw]$", "type": "string" }
-          ],
-          "default": 86400,
-          "title": "Lookback"
-        },
-        "map": { "anyOf": [{ "$ref": "#/$defs/MapSpec" }, { "type": "null" }], "default": null },
-        "max_bytes": {
-          "default": 67108864,
-          "maximum": 268435456,
-          "minimum": 1,
-          "title": "Max Bytes",
-          "type": "integer"
-        },
-        "max_text_bytes": {
-          "anyOf": [{ "maximum": 4194304, "minimum": 1, "type": "integer" }, { "type": "null" }],
-          "default": null,
-          "title": "Max Text Bytes"
-        },
-        "mode": {
-          "anyOf": [{ "enum": ["window", "cursor", "snapshot"], "type": "string" }, { "type": "null" }],
-          "default": null,
-          "title": "Mode"
-        },
-        "on": {
-          "anyOf": [
-            { "$ref": "#/$defs/OnSpec" },
-            { "items": { "$ref": "#/$defs/OnSpec" }, "maxItems": 32, "minItems": 1, "type": "array" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "On"
+            { "maximum": 315576000, "minimum": 1, "type": "integer" },
+            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
+          ]
         },
         "overlap": {
           "anyOf": [
-            { "maximum": 31536000, "minimum": 0, "type": "integer" },
-            { "pattern": "^[0-9]{1,10}[smhdw]$", "type": "string" }
-          ],
-          "default": 300,
-          "title": "Overlap"
+            { "maximum": 315576000, "minimum": 0, "type": "integer" },
+            { "maxLength": 32, "pattern": "^(?:0|(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+)$", "type": "string" }
+          ]
         },
-        "post": {
-          "anyOf": [
-            { "not": { "pattern": "[^a-z0-9-]" }, "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Post"
+        "requires": {
+          "items": { "maxLength": 256, "minLength": 1, "type": "string" },
+          "maxItems": 32,
+          "type": "array",
+          "uniqueItems": true
         },
-        "priority": {
-          "anyOf": [{ "enum": ["normal", "low"], "type": "string" }, { "type": "null" }],
-          "default": null,
-          "title": "Priority"
-        },
-        "prompt": { "default": "", "maxLength": 4096, "title": "Prompt", "type": "string" },
-        "reconcile": {
-          "anyOf": [
-            { "$ref": "#/$defs/ReconcileSpec" },
-            { "maximum": 31536000, "minimum": 1, "type": "integer" },
-            { "pattern": "^[0-9]{1,10}[smhdw]$", "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Reconcile"
-        },
-        "requires": { "$ref": "#/$defs/Requires" },
-        "retries": { "default": 0, "maximum": 20, "minimum": 0, "title": "Retries", "type": "integer" },
-        "run": {
-          "items": { "type": "string" },
-          "maxItems": 128,
-          "prefixItems": [
-            {
-              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
-              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
-              "type": "string"
-            }
-          ],
-          "title": "Run",
-          "type": "array"
-        },
-        "send": {
-          "items": { "type": "string" },
-          "maxItems": 128,
-          "prefixItems": [
-            {
-              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
-              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
-              "type": "string"
-            }
-          ],
-          "title": "Send",
-          "type": "array"
-        },
-        "silent_after": {
-          "anyOf": [
-            { "maximum": 31536000, "minimum": 1, "type": "integer" },
-            { "pattern": "^[0-9]{1,10}[smhdw]$", "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Silent After"
-        },
-        "source": {
-          "anyOf": [
-            { "not": { "pattern": "[^a-z0-9-]" }, "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Source"
-        },
+        "run": { "$ref": "#/$defs/Argv" },
         "timeout": {
           "anyOf": [
-            { "maximum": 3600, "minimum": 1, "type": "integer" },
-            { "pattern": "^[0-9]{1,10}[smhdw]$", "type": "string" }
-          ],
-          "default": 300,
-          "title": "Timeout"
-        }
+            { "maximum": 86400, "minimum": 1, "type": "integer" },
+            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
+          ]
+        },
+        "timezone": { "maxLength": 128, "minLength": 1, "type": "string" }
       },
       "title": "Job",
       "type": "object"
     },
-    "MapSpec": {
+    "Server": {
       "additionalProperties": false,
-      "description": "Declarative JSON-to-record extraction mapping for `map:` jobs.",
       "properties": {
-        "@type": { "default": "", "maxLength": 512, "title": "@Type", "type": "string" },
-        "attributes": {
-          "patternProperties": {
-            "^[a-zA-Z_][a-zA-Z0-9_-]*$": {
-              "anyOf": [
-                { "maxLength": 512, "minLength": 1, "pattern": "^/(?:[^~\\x00]|~[01])*$", "type": "string" },
-                { "$ref": "#/$defs/TransformSpec" }
-              ]
-            }
-          },
-          "propertyNames": { "maxLength": 64, "not": { "pattern": "[^a-zA-Z0-9_-]" } },
-          "title": "Attributes",
-          "type": "object"
-        },
-        "created": {
-          "default": "",
-          "maxLength": 512,
-          "pattern": "^(?:/(?:[^~\\x00]|~[01])*)?$",
-          "title": "Created",
-          "type": "string"
-        },
-        "cursor": {
-          "default": "",
-          "maxLength": 512,
-          "pattern": "^(?:/(?:[^~\\x00]|~[01])*)?$",
-          "title": "Cursor",
-          "type": "string"
-        },
-        "id": {
-          "anyOf": [
-            { "maxLength": 512, "minLength": 1, "pattern": "^/(?:[^~\\x00]|~[01])*$", "type": "string" },
-            { "$ref": "#/$defs/TransformSpec" }
-          ],
-          "default": "/id",
-          "title": "Id"
-        },
-        "items": {
-          "default": "",
-          "maxLength": 512,
-          "pattern": "^(?:/(?:[^~\\x00]|~[01])*)?$",
-          "title": "Items",
-          "type": "string"
-        },
-        "relations": {
-          "patternProperties": {
-            "^[a-z][a-zA-Z0-9]*(?:-[a-z0-9]+)*$": {
-              "anyOf": [
-                { "maxLength": 512, "minLength": 1, "pattern": "^/(?:[^~\\x00]|~[01])*$", "type": "string" },
-                { "$ref": "#/$defs/TransformSpec" },
-                {
-                  "items": {
-                    "anyOf": [
-                      { "maxLength": 512, "minLength": 1, "pattern": "^/(?:[^~\\x00]|~[01])*$", "type": "string" },
-                      { "$ref": "#/$defs/TransformSpec" }
-                    ]
-                  },
-                  "maxItems": 64,
-                  "minItems": 1,
-                  "type": "array"
-                }
-              ]
-            }
-          },
-          "propertyNames": { "maxLength": 64, "not": { "pattern": "[^a-zA-Z0-9-]" } },
-          "title": "Relations",
-          "type": "object"
-        },
-        "text": {
-          "default": "",
-          "maxLength": 512,
-          "pattern": "^(?:/(?:[^~\\x00]|~[01])*)?$",
-          "title": "Text",
-          "type": "string"
-        },
-        "title": {
-          "default": "",
-          "maxLength": 512,
-          "pattern": "^(?:/(?:[^~\\x00]|~[01])*)?$",
-          "title": "Title",
-          "type": "string"
-        },
-        "updated": {
-          "default": "",
-          "maxLength": 512,
-          "pattern": "^(?:/(?:[^~\\x00]|~[01])*)?$",
-          "title": "Updated",
-          "type": "string"
-        },
-        "url": {
-          "default": "",
-          "maxLength": 512,
-          "pattern": "^(?:/(?:[^~\\x00]|~[01])*)?$",
-          "title": "Url",
-          "type": "string"
-        }
-      },
-      "title": "MapSpec",
-      "type": "object"
-    },
-    "OnSpec": {
-      "additionalProperties": false,
-      "description": "Trigger rule on a job: interval, wall-clock slot, Git/CLI hook, daemon stream, or event.",
-      "properties": {
-        "at": {
-          "anyOf": [{ "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$", "type": "string" }, { "type": "null" }],
-          "default": null,
-          "title": "At"
-        },
-        "daemon": { "default": false, "title": "Daemon", "type": "boolean" },
-        "days": {
-          "anyOf": [
-            {
-              "items": { "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "type": "string" },
-              "maxItems": 7,
-              "minItems": 1,
-              "type": "array",
-              "uniqueItems": true
-            },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Days"
-        },
-        "event": { "anyOf": [{ "$ref": "#/$defs/EventSpec" }, { "type": "null" }], "default": null },
-        "every": {
-          "anyOf": [
-            { "maximum": 31536000, "minimum": 1, "type": "integer" },
-            { "pattern": "^[0-9]{1,10}[smhdw]$", "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Every"
-        },
-        "hook": {
-          "anyOf": [
-            {
-              "maxLength": 64,
-              "not": { "pattern": "[^a-z0-9-]" },
-              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
-              "type": "string"
-            },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Hook"
-        },
-        "timezone": {
-          "anyOf": [{ "maxLength": 128, "minLength": 1, "type": "string" }, { "type": "null" }],
-          "default": null,
-          "title": "Timezone"
-        }
-      },
-      "title": "OnSpec",
-      "type": "object"
-    },
-    "ReconcileSpec": {
-      "additionalProperties": false,
-      "description": "Periodic older-evidence backfill on a `window` record source.",
-      "properties": {
-        "every": {
-          "anyOf": [
-            { "maximum": 31536000, "minimum": 1, "type": "integer" },
-            { "pattern": "^[0-9]{1,10}[smhdw]$", "type": "string" }
-          ],
-          "title": "Every"
-        },
-        "lookback": {
-          "anyOf": [
-            { "maximum": 31536000, "minimum": 1, "type": "integer" },
-            { "pattern": "^[0-9]{1,10}[smhdw]$", "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Lookback"
-        }
-      },
-      "required": ["every"],
-      "title": "ReconcileSpec",
-      "type": "object"
-    },
-    "Requires": {
-      "additionalProperties": false,
-      "description": "Host binaries and environment variables checked by `bf doctor` before running a job.",
-      "properties": {
-        "bins": {
-          "items": { "maxLength": 256, "minLength": 1, "type": "string" },
-          "maxItems": 64,
-          "title": "Bins",
-          "type": "array"
-        },
+        "emit": { "enum": ["none", "events"], "type": "string" },
+        "enabled": { "type": "boolean" },
         "env": {
-          "items": { "maxLength": 128, "minLength": 1, "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "type": "string" },
-          "maxItems": 64,
-          "title": "Env",
-          "type": "array"
-        }
+          "additionalProperties": { "maxLength": 4096, "type": "string" },
+          "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]*$" },
+          "type": "object"
+        },
+        "requires": {
+          "items": { "maxLength": 256, "minLength": 1, "type": "string" },
+          "maxItems": 32,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "run": { "$ref": "#/$defs/Argv" }
       },
-      "title": "Requires",
-      "type": "object"
-    },
-    "SchemaField": {
-      "additionalProperties": false,
-      "description": "Optional relation metadata and target constraints declared in bf.yaml `fields:`.",
-      "properties": {
-        "broader": {
-          "anyOf": [
-            {
-              "maxLength": 64,
-              "not": { "pattern": "[^a-zA-Z0-9-]" },
-              "pattern": "^[a-z][a-zA-Z0-9]*(?:-[a-z0-9]+)*$",
-              "type": "string"
-            },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Broader"
-        },
-        "description": { "default": "", "maxLength": 4096, "title": "Description", "type": "string" },
-        "targets": {
-          "anyOf": [
-            {
-              "items": {
-                "maxLength": 1024,
-                "not": { "pattern": "\\s" },
-                "pattern": "^[a-z][a-z0-9+.-]*:\\S*$",
-                "type": "string"
-              },
-              "maxItems": 64,
-              "minItems": 1,
-              "type": "array"
-            },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Targets"
-        }
-      },
-      "title": "SchemaField",
-      "type": "object"
-    },
-    "TransformSpec": {
-      "additionalProperties": false,
-      "description": "JSON Pointer value extraction with optional string normalization.",
-      "properties": {
-        "lower": { "default": false, "title": "Lower", "type": "boolean" },
-        "path": {
-          "maxLength": 512,
-          "minLength": 1,
-          "pattern": "^/(?:[^~\\x00]|~[01])*$",
-          "title": "Path",
-          "type": "string"
-        },
-        "prefix": { "default": "", "maxLength": 256, "title": "Prefix", "type": "string" }
-      },
-      "required": ["path"],
-      "title": "TransformSpec",
-      "type": "object"
-    },
-    "ValidateSettings": {
-      "additionalProperties": false,
-      "description": "Optional declarative validation policies enforced by `bf validate`.",
-      "properties": {
-        "forbid_patterns": {
-          "items": { "maxLength": 1024, "minLength": 1, "type": "string" },
-          "maxItems": 64,
-          "title": "Forbid Patterns",
-          "type": "array"
-        },
-        "index_note": {
-          "anyOf": [{ "maxLength": 4096, "minLength": 1, "type": "string" }, { "type": "null" }],
-          "default": null,
-          "title": "Index Note"
-        },
-        "max_stale_days": {
-          "anyOf": [{ "maximum": 36500, "minimum": 1, "type": "integer" }, { "type": "null" }],
-          "default": null,
-          "title": "Max Stale Days"
-        },
-        "required_status": {
-          "anyOf": [
-            {
-              "items": { "enum": ["draft", "stable", "deprecated"], "type": "string" },
-              "maxItems": 3,
-              "minItems": 1,
-              "type": "array",
-              "uniqueItems": true
-            },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Required Status"
-        },
-        "warn_stale_days": {
-          "anyOf": [{ "maximum": 36500, "minimum": 0, "type": "integer" }, { "type": "null" }],
-          "default": null,
-          "title": "Warn Stale Days"
-        }
-      },
-      "title": "ValidateSettings",
-      "type": "object"
-    },
-    "WatchSettings": {
-      "additionalProperties": false,
-      "description": "Optional watch preferences; CLI values override bf.yaml, then defaults apply.",
-      "properties": {
-        "interval": { "default": 60, "maximum": 86400, "minimum": 5, "title": "Interval", "type": "integer" },
-        "notification_cooldown": {
-          "default": 300,
-          "maximum": 86400,
-          "minimum": 0,
-          "title": "Notification Cooldown",
-          "type": "integer"
-        },
-        "notifications": {
-          "default": "failure",
-          "enum": ["off", "failure", "success", "all"],
-          "title": "Notifications",
-          "type": "string"
-        },
-        "poll_interval": { "default": 2, "maximum": 60, "minimum": 0.2, "title": "Poll Interval", "type": "number" }
-      },
-      "title": "WatchSettings",
+      "required": ["run"],
+      "title": "Server",
       "type": "object"
     }
   },
+  "$id": "https://fmind.github.io/brain-framework/bf.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "One brain: its name, optional relation declarations, defaults and configured jobs.",
+  "description": "Brain Framework configuration and orchestration (bf.yaml).",
   "properties": {
-    "defaults": { "anyOf": [{ "$ref": "#/$defs/Defaults" }, { "type": "null" }] },
-    "fields": {
-      "anyOf": [
-        {
-          "additionalProperties": false,
-          "patternProperties": { "^[a-z][a-zA-Z0-9]*(?:-[a-z0-9]+)*$": { "$ref": "#/$defs/SchemaField" } },
-          "propertyNames": { "maxLength": 64, "not": { "pattern": "[^a-zA-Z0-9-]" } },
+    "brains": {
+      "additionalProperties": { "maxLength": 4096, "minLength": 1, "type": "string" },
+      "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+      "type": ["object", "null"]
+    },
+    "channels": {
+      "additionalProperties": { "$ref": "#/$defs/Channel" },
+      "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+      "type": ["object", "null"]
+    },
+    "defaults": {
+      "additionalProperties": false,
+      "properties": {
+        "env": {
+          "additionalProperties": { "maxLength": 4096, "type": "string" },
+          "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]*$" },
           "type": "object"
         },
-        { "type": "null" }
-      ],
-      "title": "Fields"
+        "timezone": { "maxLength": 128, "minLength": 1, "type": "string" }
+      },
+      "type": ["object", "null"]
     },
     "jobs": {
-      "anyOf": [
-        {
-          "additionalProperties": false,
-          "maxProperties": 128,
-          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Job" } },
-          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
-          "type": "object"
-        },
-        { "type": "null" }
-      ],
-      "title": "Jobs"
+      "additionalProperties": { "$ref": "#/$defs/Job" },
+      "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+      "type": ["object", "null"]
     },
     "name": {
-      "description": "Stable namespace in bf:// addresses; used as default identity prefix.",
-      "not": { "pattern": "[^a-z0-9-]" },
+      "description": "Stable lowercase identifier for this brain.",
       "pattern": "^[a-z][a-z0-9-]{0,63}$",
-      "title": "Name",
       "type": "string"
     },
-    "validate": { "anyOf": [{ "$ref": "#/$defs/ValidateSettings" }, { "type": "null" }] },
-    "version": {
-      "const": 11,
-      "description": "Brain format of bf.yaml, eval suites and stored records.",
-      "title": "Version",
-      "type": "integer"
+    "servers": {
+      "additionalProperties": { "$ref": "#/$defs/Server" },
+      "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+      "type": ["object", "null"]
     },
-    "watch": { "anyOf": [{ "$ref": "#/$defs/WatchSettings" }, { "type": "null" }] }
+    "version": { "const": 12, "description": "Brain configuration format version.", "type": "integer" },
+    "watch": {
+      "additionalProperties": false,
+      "properties": {
+        "debounce": {
+          "anyOf": [
+            { "maximum": 60, "minimum": 0.05, "type": "number" },
+            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
+          ]
+        },
+        "interval": {
+          "anyOf": [
+            { "maximum": 3600, "minimum": 0.5, "type": "number" },
+            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
+          ]
+        }
+      },
+      "type": ["object", "null"]
+    }
   },
   "required": ["version", "name"],
   "title": "Config",

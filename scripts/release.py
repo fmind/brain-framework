@@ -252,7 +252,7 @@ def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major:
         ) from error
     if not is_major:
         return []
-    for skill in sorted(clone.glob("src/bf/skills/*/SKILL.md")):
+    for skill in sorted([*clone.glob("src/bf/skills/*/SKILL.md"), *clone.glob("examples/*/skills/*/SKILL.md")]):
         text, count = COMPATIBILITY.subn(rf"\g<1>{new_major}", skill.read_text())
         if count != 1:
             raise ReleaseError(f"{skill.relative_to(clone)} must hold one `compatibility: Requires Brain Framework N`")
@@ -275,7 +275,12 @@ def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major:
         "src/bf/guides",
         "src/bf/skills",
         "examples",
-        "docs/docs",
+        "docs/index.md",
+        "docs/getting-started.md",
+        "docs/authoring.md",
+        "docs/retrieval.md",
+        "docs/operations.md",
+        "docs/reference.md",
         "README.md",
         cwd=clone,
         strip=False,

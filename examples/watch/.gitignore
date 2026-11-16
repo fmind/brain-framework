@@ -1,4 +1,0 @@
-# Local cache, program logs and collected demo records stay out of Git, as `bf init` ignores them.
-/.bf/
-/logs/
-/memories/

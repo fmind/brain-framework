@@ -38,6 +38,7 @@ def test_nav_lists_every_page_once_and_only_site_pages() -> None:
 def test_llms_index_lists_every_guide_in_nav_order_with_its_description() -> None:
     sections = PROJECT["plugins"]["llmstxt"]["sections"]
     listed = [entry for entries in sections.values() for entry in entries]
-    guides = [page for page in pages(PROJECT["nav"]) if page.startswith("docs/")]
+    non_guides = {"changelog.md", "third-party-notices.md", "license.md"}
+    guides = [page for page in pages(PROJECT["nav"]) if page not in non_guides]
     assert [next(iter(entry)) for entry in listed] == guides
     assert [next(iter(entry.values())) for entry in listed] == [description(page) for page in guides]

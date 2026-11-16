@@ -1,315 +1,316 @@
-"""Markdown projection: heading slugs and anchors, claim footnotes, leads and located link errors."""
+"""Tests for Python-Markdown compilation, keyed attr_list metadata, bf:// URLs, and OKF rules."""
 
 from __future__ import annotations
 
 import pytest
 
-from bf.markdown import LEAD, note, parse, section
-from bf.models import Error
-from conftest import assert_linear_time
+from bf import markdown
+from bf.models import MAX_NOTE, Error
 
 
-def slugs(data: bytes) -> list[str]:
-    return [heading.slug for heading in parse("concepts/x.md", data).headings]
+def test_okf_roles_and_editor_locks() -> None:
+    assert markdown.editor_lock("projects/.#roadmap.md")
+    assert markdown.okf_role("projects/.#roadmap.md") is None
+    assert markdown.okf_role("projects/roadmap.txt") is None
+    assert markdown.okf_role("projects/sub/roadmap.md") == ("projects", "project")
+    assert markdown.okf_role("concepts/aaif.md") == ("concepts", "concept")
+    assert markdown.okf_role("actions/2026-11-15_ship/ACTION.md") == ("actions", "action")
+    assert markdown.okf_role("actions/2026-11-15_ship/outputs/decision.md") is None
+    assert markdown.okf_role("notes/other.md") is None
 
 
-def test_repeated_headings_take_the_next_free_suffix_around_explicit_anchors() -> None:
-    # A transcript repeats its headings: each repeat continues from the last suffix its slug took.
-    transcript = "".join(f"## User\n\nQ{n}\n\n## Assistant\n\nA{n}\n\n" for n in range(3)).encode()
-    assert slugs(transcript) == ["user", "assistant", "user-1", "assistant-1", "user-2", "assistant-2"]
-    # Generated suffixes skip an explicit anchor wherever it is: an anchor after the heading it collides with no
-    # longer fails the note, and both orders give each heading the same slug.
-    assert slugs(b"## User\n## User\n## Bot {#user-1}\n## User\n") == ["user", "user-2", "user-1", "user-3"]
-    assert slugs(b"## Bot {#user-1}\n## User\n## User\n## User\n") == ["user-1", "user", "user-2", "user-3"]
-    assert slugs(b"## User 1\n## User\n## User\n") == ["user-1", "user", "user-2"]
-    # A title whose own slug another heading anchors, in either order, is as ambiguous as two equal anchors.
-    for data in (b"# Same\n# B {#same}\n", b"# B {#same}\n# Same\n", b"# A {#same}\n# B {#same}\n"):
-        with pytest.raises(Error, match="duplicate explicit heading anchor"):
-            parse("concepts/x.md", data)
-    # `note.md#part.md` would read as a file name.
-    with pytest.raises(Error, match=r"anchors cannot end in \.md"):
-        parse("concepts/x.md", b"## Part {#part.md}\n")
+def test_compile_note_extracts_frontmatter_headings_keyed_attrs_and_unescapes_html() -> None:
+    raw = (
+        b"---\n"
+        b"type: architecture\n"
+        b"status: stable\n"
+        b"updated: 2026-11-15\n"
+        b"stale_after: 30d\n"
+        b"owner: platform\n"
+        b"tags: [mcp, ai, 2026, mcp]\n"
+        b"links:\n"
+        b"  - bf:///projects/launch.md\n"
+        b"  - bf:///projects/launch.md\n"
+        b"sources:\n"
+        b"  - resource: bf:///memories/jira/6e727f27acc6af6f2cd2f6f2bc2eb801d4b22cfe3d43e5eb35404d0f6ac70fe4.json\n"
+        b"relations:\n"
+        b"  - target: bf:///memories/github/0359a07b64f9a310ea420eca77e5b713b6b10ee3cdc9be5e6ad0ea1323889879.json\n"
+        b"    type: implements\n"
+        b"---\n\n"
+        b"# Agent Protocol\n\n"
+        b"Lead claim for R&D (`a < b && c > d`) with a footnote[^1], "
+        b"[inline link](aaif.md?date=2026#mcp){rel=depends-on}, "
+        b"and [duplicate](../concepts/aaif.md?date=2026#mcp){rel=depends-on}.\n"
+        b"{: #lead confidence=high .featured}\n\n"
+        b"<div>Raw HTML block with A &amp; B</div>\n\n"
+        b"## [MCP](https://modelcontextprotocol.io) {#mcp .protocol update-date=2026-11-15 creator=Anthropic}\n\n"
+        b"Term\n"
+        b":   Definition body\n"
+        b"    {: #def-mcp scope=local}\n\n"
+        b'!!! warning custom "Quota"\n'
+        b"    {: #quota-box}\n"
+        b"    Watch rate limits.\n\n"
+        b"| Name | Value |\n"
+        b"| :--- | ----: |\n"
+        b"| Cap  | 100   |\n\n"
+        b"```python\n"
+        b"# {#not-an-error?inside=fence}\n"
+        b"<<<<<<< also ignored inside fence\n"
+        b"x = 1 & 2\n"
+        b"```\n\n"
+        b"- [ ] Open task\n"
+        b"  {: #t1 due=2026-12-01}\n"
+        b"- [x] Finished task\n\n"
+        b"> - [ ] Quoted checkbox is not a note task\n\n"
+        b"[^1]: Footnote citing [evidence](../memories/demo/e8bd59a71e7e467bb66d5c98314e26f78547a7dd6aba8980cf2e4edd046a4851.json){rel=cites}.\n"
+    )
+    compiled = markdown.compile_note("concepts/protocol.md", raw, brain_name="demo-brain")
+    assert compiled["id"] == "concepts/protocol.md"
+    assert compiled["ref"] == "concepts/protocol.md"
+    assert compiled["source"] == "concepts"
+    assert compiled["kind"] == "concept"
+    assert compiled["title"] == "Agent Protocol"
+    assert compiled["owner"] == "platform"
+    assert compiled["tags"] == ["mcp", "ai", "2026"]
+    assert "a < b && c > d" in compiled["text"]
+    assert "Raw HTML block with A & B" in compiled["text"]
+    assert "&amp;" not in compiled["text"]
+    assert "x = 1 & 2" in compiled["text"]
+    assert "↩" not in compiled["text"]
 
+    headings = {h["id"]: h for h in compiled["headings"]}
+    assert headings["agent-protocol"]["level"] == 1
+    assert headings["mcp"] == {
+        "id": "mcp",
+        "title": "MCP",
+        "level": 2,
+        "meta": {"class": "protocol", "update-date": "2026-11-15", "creator": "Anthropic"},
+    }
 
-def test_copied_documents_keep_conflicting_anchors_searchable() -> None:
-    # A copied document, such as an MkDocs page among an action's inputs, is ordinary Markdown: a conflict that
-    # fails an OKF note gives the later heading a generated slug instead of making the document unsearchable.
-    path = "actions/2026-09-27_x/inputs/guide.md"
-    data = b"# Guide\n## Configuration {#config}\n### Config\n## Again {#config}\n## Part {#part.md}\n"
-    assert [heading.slug for heading in parse(path, data).headings] == [
-        "guide",
-        "config",
-        "config-1",
-        "again",
-        "part-partmd",
+    # Keyed attr_list map (`attrs`) contains headings, blocks, definitions, and tasks by #id!
+    assert compiled["attrs"]["mcp"] == {"class": "protocol", "update-date": "2026-11-15", "creator": "Anthropic"}
+    assert compiled["attrs"]["lead"] == {"confidence": "high", "class": "featured"}
+    assert compiled["attrs"]["def-mcp"] == {"scope": "local"}
+    assert compiled["attrs"]["t1"] == {"due": "2026-12-01"}
+
+    links = {(lnk["to"], lnk["anchor"]): lnk for lnk in compiled["links"]}
+    assert links[("projects/launch.md", "")]["kind"] == "note"
+    assert (
+        links[("memories/jira/6e727f27acc6af6f2cd2f6f2bc2eb801d4b22cfe3d43e5eb35404d0f6ac70fe4.json", "")]["kind"]
+        == "record"
+    )
+    assert links[("memories/github/0359a07b64f9a310ea420eca77e5b713b6b10ee3cdc9be5e6ad0ea1323889879.json", "")][
+        "meta"
+    ] == {"rel": "implements"}
+    assert links[("concepts/aaif.md", "mcp")] == {
+        "to": "concepts/aaif.md",
+        "kind": "note",
+        "anchor": "mcp",
+        "meta": {"date": "2026", "rel": "depends-on"},
+        "section": "agent-protocol",
+    }
+    assert links[("memories/demo/e8bd59a71e7e467bb66d5c98314e26f78547a7dd6aba8980cf2e4edd046a4851.json", "")] == {
+        "to": "memories/demo/e8bd59a71e7e467bb66d5c98314e26f78547a7dd6aba8980cf2e4edd046a4851.json",
+        "kind": "record",
+        "anchor": "",
+        "meta": {"rel": "cites"},
+        "section": "agent-protocol",
+    }
+
+    elem_by_tag = {el["tag"]: el for el in compiled["elements"]}
+    assert elem_by_tag["p"]["id"] == "lead"
+    assert elem_by_tag["p"]["meta"] == {"confidence": "high", "class": "featured"}
+    assert elem_by_tag["dd"]["id"] == "def-mcp"
+    assert elem_by_tag["admonition"]["meta"]["type"] == "warning"
+
+    assert compiled["tasks"] == [
+        {"id": "t1", "text": "Open task", "done": False, "section": "mcp", "meta": {"due": "2026-12-01"}},
+        {"text": "Finished task", "done": True, "section": "mcp", "meta": {}},
     ]
+
+
+def test_compile_note_supports_dprint_single_line_block_attrs_and_link_ids() -> None:
+    # dprint (`textWrap: "never"`) collapses `{: #id ...}` onto the end of paragraphs, definitions, and tasks!
+    raw = (
+        b"---\n"
+        b"type: guide\n"
+        b"status: stable\n"
+        b"relations:\n"
+        b"  supersedes: [bf:///concepts/prior.md]\n"
+        b"---\n\n"
+        b"# Single Line Attrs\n\n"
+        b"Paragraph formatted on one line. {: #para-1 role=principle}\n\n"
+        b"See [evidence](../memories/demo/e8bd59a71e7e467bb66d5c98314e26f78547a7dd6aba8980cf2e4edd046a4851.json){#lnk-1 rel=cites}.\n\n"
+        b"- [ ] Ship release. {: #task-ship priority=p0}\n"
+    )
+    compiled = markdown.compile_note("concepts/dprint.md", raw, brain_name="b")
+    assert "{: #para-1" not in compiled["text"]
+    assert "{: #task-ship" not in compiled["text"]
+    assert compiled["attrs"]["para-1"] == {"role": "principle"}
+    assert compiled["attrs"]["lnk-1"] == {"rel": "cites"}
+    assert compiled["attrs"]["task-ship"] == {"priority": "p0"}
+    assert compiled["tasks"] == [
+        {
+            "id": "task-ship",
+            "text": "Ship release.",
+            "done": False,
+            "section": "single-line-attrs",
+            "meta": {"priority": "p0"},
+        }
+    ]
+    assert compiled["links"] == [
+        {"to": "concepts/prior.md", "kind": "note", "anchor": "", "meta": {"rel": "supersedes"}, "section": ""},
+        {
+            "to": "memories/demo/e8bd59a71e7e467bb66d5c98314e26f78547a7dd6aba8980cf2e4edd046a4851.json",
+            "kind": "record",
+            "anchor": "",
+            "meta": {"rel": "cites"},
+            "section": "single-line-attrs",
+        },
+    ]
+    assert markdown.anchor_ids("concepts/dprint.md", raw) >= {"single-line-attrs", "para-1", "lnk-1", "task-ship"}
+
+
+def test_compile_note_fallbacks_and_custom_user_metadata() -> None:
+    note_date = markdown.compile_note(
+        "actions/2026-11-15_audit-trail/ACTION.md",
+        b"---\nstale_after: 2026-12-01\ncustom_field: 42\n---\n\nPlain body without headings.\n",
+        brain_name="b",
+    )
+    assert note_date["title"] == "2026 11 15_audit trail"
+    assert note_date["stale_after"] == "2026-12-01"
+    assert note_date["custom_field"] == 42
+
+    note_ts = markdown.compile_note(
+        "projects/alpha.md",
+        b"---\ntitle: Explicit Title\nstale_after: 2026-12-01T09:00:00+01:00\n---\n\n# Ignored H1\n",
+        brain_name="b",
+    )
+    assert note_ts["title"] == "Explicit Title"
 
 
 @pytest.mark.parametrize(
-    ("source", "slug", "title"),
+    ("path", "payload", "match"),
     [
-        ("## *Stable* name {#stable}", "stable", "Stable name"),
-        # Braces in a code span, escaped or written as an entity are words, not an anchor.
-        ("## Write anchors as `{#id}`", "write-anchors-as-id", "Write anchors as {#id}"),
-        ("## Foo \\{#bar\\}", "foo-bar", "Foo {#bar}"),
-        ("## Foo &#123;#bar}", "foo-bar", "Foo {#bar}"),
-        # A setext title's lines join with a space, as they render.
-        ("Title line one\nline two\n===", "title-line-one-line-two", "Title line one line two"),
-        ("Setext title\n{#setext}\n---", "setext", "Setext title"),
+        ("notes/bad.md", b"# Hi\n", "not an OKF note path"),
+        ("concepts/big.md", b"x" * (MAX_NOTE + 1), "exceeds"),
+        ("concepts/utf.md", b"\xff\xfe", "not UTF-8"),
+        ("concepts/unclosed.md", b"---\ntype: guide\n# Missing end\n", "unclosed YAML frontmatter"),
+        ("concepts/reserved.md", b"---\nid: custom\n---\n# Hi\n", "cannot override computed field id"),
+        ("concepts/conflict.md", b"# Hi\n<<<<<<< HEAD\n", "merge conflict marker"),
+        ("concepts/badattr.md", b"## MCP {#mcp?license=mit}\n", "invalid attr_list syntax"),
+        ("concepts/badtitle.md", b"---\ntitle: 123\n---\n# Hi\n", "title must be a string"),
+        ("concepts/badtags.md", b"---\ntags: not-a-list\n---\n# Hi\n", "tags must be a list"),
+        ("concepts/badtagval.md", b"---\ntags: ['has/slash']\n---\n# Hi\n", "without spaces or slashes"),
+        ("concepts/badlinks.md", b"---\nlinks: [123]\n---\n# Hi\n", "frontmatter links must be a list"),
+        ("concepts/relfm.md", b"---\nlinks: [projects/launch.md]\n---\n# Hi\n", "frontmatter links must use bf://"),
+        ("concepts/badrel.md", b"---\nrelations: 123\n---\n# Hi\n", "relations must be a list or mapping"),
+        ("concepts/badrelv.md", b"---\nrelations:\n  uses: 123\n---\n# Hi\n", "must be a list of URI strings"),
+        ("concepts/legacylnk.md", b"# Hi\n\nSee [ev](demo:ev-1).\n", "unsupported link scheme demo:"),
+        (
+            "concepts/prosebf.md",
+            b"# Hi\n\nSee [same](bf:///concepts/aaif.md).\n",
+            "use a relative path in Markdown prose",
+        ),
+        ("concepts/duphid.md", b"## A {#dup}\n\n## B {#dup}\n", "duplicate anchor #dup"),
     ],
 )
-def test_explicit_anchors_are_read_from_the_heading_source(source: str, slug: str, title: str) -> None:
-    [heading] = parse("concepts/x.md", f"{source}\n".encode()).headings
-    assert (heading.slug, heading.title) == (slug, title)
+def test_compile_note_rejects_invalid_inputs(path: str, payload: bytes, match: str) -> None:
+    with pytest.raises(Error, match=match):
+        markdown.compile_note(path, payload, brain_name="demo")
 
 
-def test_claim_footnotes_support_the_section_that_cites_them() -> None:
-    data = (
-        b"---\ntype: project\n---\n# Web\n\nCite evidence as `[^1]`.\n\n"
-        b"## Decision\n\nWe chose a static site.[^1] Hosting stays cheap.[^cost]\n\n"
-        b"## Risks\n\nHosting costs could grow.\n\n"
-        b"[^1]: [Meeting](bf://fixture/mail:m1?rel=depends-on)\n"
-        b"[^cost]: [Quote](mail:m2) and\n  [estimate](mail:m3)\n"
-        b"[^unused]: [Old](mail:m4)\n"
+def test_parse_link_variants_and_rejections() -> None:
+    same = markdown.parse_link("projects/web.md", "#plan", "my-brain")
+    assert (same["to"], same["kind"], same["anchor"]) == ("projects/web.md", "note", "plan")
+
+    act = markdown.parse_link("projects/web.md", "../actions/2026-11-15_go", "my-brain")
+    assert act["to"] == "actions/2026-11-15_go/ACTION.md"
+
+    # Standard RFC 3986 triple-slash bf:///concepts/aaif.md succeeds; 2-slash bf://concepts/... is rejected!
+    bf_concept = markdown.parse_link("projects/web.md", "bf:///concepts/aaif.md?rel=uses#mcp", "my-brain")
+    assert bf_concept == {
+        "to": "concepts/aaif.md",
+        "kind": "note",
+        "anchor": "mcp",
+        "meta": {"rel": "uses"},
+        "section": "",
+    }
+    with pytest.raises(Error, match="bf:///concepts/"):
+        markdown.parse_link("projects/web.md", "bf://concepts/aaif.md", "my-brain")
+    with pytest.raises(Error, match="bf:///memories/"):
+        markdown.parse_link("projects/web.md", "bf://memories/jira/abc.json", "my-brain")
+
+    # Extensionless note target (`concepts/aaif` -> `concepts/aaif.md`) and `#<jq_filter>` fragment:
+    extless = markdown.parse_link("projects/web.md", "bf:///concepts/aaif#mcp", "my-brain")
+    assert (extless["to"], extless["kind"], extless["anchor"]) == ("concepts/aaif.md", "note", "mcp")
+
+    jq_frag = markdown.parse_link(
+        "projects/web.md", 'bf:///memories/concepts/aaif.json#select(.status=="stable")', "my-brain"
     )
-    # Definitions usually close the note: before, every claim they hold took the last section as its origin. A
-    # citation in a code span is an example, not the first citation. Each link keeps its own line.
-    assert note("projects/web.md", data).contexts == [
-        ("bf://fixture/mail:m1?rel=depends-on", "decision", 16),
-        ("mail:m2", "decision", 17),
-        ("mail:m3", "decision", 18),
-        # A footnote nothing cites supports the section holding its definition.
-        ("mail:m4", "risks", 19),
-    ]
+    assert jq_frag["anchor"] == 'select(.status=="stable")'
 
+    with pytest.raises(Error, match="legacy record reference in bf:// URI"):
+        markdown.parse_link("projects/web.md", "bf://my-brain/jira:WEB-1", "my-brain")
+    bf_self_rec = markdown.parse_link("projects/web.md", "bf://my-brain/jira:WEB-1", "my-brain", allow_record_ref=True)
+    assert (bf_self_rec["to"], bf_self_rec["kind"]) == ("jira:WEB-1", "record")
 
-@pytest.mark.parametrize("label", ["```", "~~~", "<pre>", "<!--"])
-def test_a_footnote_label_never_changes_the_note_structure(label: str) -> None:
-    # The label could open a fence, an HTML block or an autolink that swallowed the sections after it.
-    data = f"# Web\n\nClaim.[^{label}]\n\n[^{label}]: [Review](mail:m1)\n\n## Later\n\n[Plan](mail:m2)\n".encode()
-    parsed = note("projects/web.md", data)
-    assert parsed.slugs == {"web", "later"}
-    assert parsed.contexts == [("mail:m1", "web", 5), ("mail:m2", "later", 9)]
+    bf_other = markdown.parse_link("projects/web.md", "bf://team-brain/actions/2026-11-15_sync#done", "my-brain")
+    assert bf_other["to"] == "bf://team-brain/actions/2026-11-15_sync/ACTION.md"
+    assert (bf_other["kind"], bf_other["anchor"]) == ("brain", "done")
 
+    urn_url = markdown.parse_link("projects/web.md", "urn:ietf:rfc:3986", "my-brain", require_uri=True)
+    assert urn_url["kind"] == "url"
 
-@pytest.mark.parametrize("fence", ["```", "~~~~"])
-def test_a_footnote_example_inside_a_code_fence_defines_nothing(fence: str) -> None:
-    # Its indented lines used to lose their indentation as a footnote's continuation: the inner fence then closed
-    # the outer one early, and every later section disappeared.
-    data = (
-        f"# Guide\n\n{fence}markdown\n[^1]: A footnote\n    ```python\n    print(1)\n    ```\n{fence}\n\n"
-        "## After\n\nSee [Plan](mail:m1).\n"
-    ).encode()
-    parsed = note("projects/guide.md", data)
-    assert parsed.slugs == {"guide", "after"}
-    assert parsed.contexts == [("mail:m1", "after", 12)]
-
-
-def test_footnote_continuations_and_labels_follow_github() -> None:
-    # An indented paragraph continues its footnote, and labels match regardless of case, as GitHub renders them.
-    data = (
-        b"# Web\n\n## Decision\n\nStatic site.[^Cost]\n\n## Risks\n\n"
-        b"[^cost]: Estimate.\n\n    [Quote](mail:m1)\n\n\t[Invoice](mail:m2)\n\nAfter [Plan](mail:m3).\n\n    [Code](mail:m4)\n"
+    ext_url = markdown.parse_link(
+        "projects/web.md", "https://example.com/docs?x=1", "my-brain", attr_meta={"rel": "ref"}, require_uri=True
     )
-    assert note("projects/web.md", data).contexts == [
-        ("mail:m1", "decision", 11),
-        ("mail:m2", "decision", 13),
-        ("mail:m3", "risks", 15),
-    ]
-    # Four columns continue a definition indented by up to three spaces, and an example definition inside a
-    # continuation's fence keeps that footnote's indentation, so the fence still closes.
-    indented = b"# Web\n\n## Decision\n\nClaim.[^r]\n\n## Risks\n\n   [^r]: [Review](mail:m1)\n\n    [Quote](mail:m2)\n"
-    assert note("projects/web.md", indented).contexts == [("mail:m1", "decision", 9), ("mail:m2", "decision", 11)]
-    fenced = (
-        b"# Web\n\nClaim.[^1]\n\n[^1]: Example:\n\n    ```\n    [^2]: y\n    ```\n\n## After\n\nSee [Plan](mail:m1).\n"
-    )
-    parsed = note("projects/web.md", fenced)
-    assert (parsed.slugs, parsed.contexts) == ({"web", "after"}, [("mail:m1", "after", 13)])
+    assert (ext_url["kind"], ext_url["meta"]) == ("url", {"rel": "ref"})
+
+    http_rec = markdown.parse_link("projects/web.md", "doc:https://example.com/spec", "my-brain", allow_record_ref=True)
+    assert (http_rec["to"], http_rec["kind"]) == ("doc:https://example.com/spec", "record")
+
+    rec_meta = markdown.parse_link("projects/web.md", "jira:WEB-1?role=blocker#top", "my-brain", allow_record_ref=True)
+    assert (rec_meta["to"], rec_meta["anchor"], rec_meta["meta"]) == ("jira:WEB-1", "top", {"role": "blocker"})
+
+    for bad_target, match in (
+        ("https://example.com/" + "a" * 8200, "exceeds 8192"),
+        ("concepts/bi\u202edi.md", "invisible"),
+        ("bf://my-brain/concepts/%E2%80%AE.md", "invisible"),
+        ("javascript:alert(1)", "unsupported link scheme"),
+        ("bf:concepts/x.md", "invalid bf:// URI"),
+        ("bf://my-brain/concepts/x.md#", "empty # fragment"),
+        ("bf://my-brain/concepts/../secret.md", "invalid path in bf://"),
+        ("BAD+SCHEME:123", "invalid record reference"),
+        ("jira: has space", "invalid record reference"),
+        ("jira:WEB-1#", "invalid record reference"),
+        ("jira:?a=1", "record id must be nonempty"),
+        ("concepts/has space.md", "invalid Markdown link target"),
+        ("concepts/x.md#", "trailing #"),
+        ("concepts/%FF.md", "invalid UTF-8 percent-encoding"),
+        ("?rel=x", "empty link target"),
+        ("/etc/passwd", "invalid relative or brain-root link path"),
+        ("concepts//x.md", "invalid relative or brain-root link path"),
+        ("concepts/../x.md", "must not contain . or .."),
+        ("../../escape.md", "leaves the brain"),
+        ("concepts/x.md?badquery", "invalid link query"),
+        ("concepts/x.md?a=1&a=2", "unique identifiers"),
+    ):
+        with pytest.raises(Error, match=match):
+            markdown.parse_link("projects/web.md", bad_target, "my-brain", allow_record_ref=True)
+
+    with pytest.raises(Error, match="conflicting link metadata"):
+        markdown.parse_link("projects/web.md", "concepts/x.md?rel=a", "my-brain", attr_meta={"rel": "b"})
+    with pytest.raises(Error, match="invalid link attribute"):
+        markdown.parse_link("projects/web.md", "concepts/x.md", "my-brain", attr_meta={"1bad": "v"})
+    with pytest.raises(Error, match="fragment-only link"):
+        markdown.parse_link("projects/web.md", "#only-frag", "my-brain", relative_base=False)
 
 
-def test_a_footnote_definition_never_turns_code_or_a_rule_into_sections() -> None:
-    # A definition in an indented code block took the next code line as its continuation: that line left the block
-    # as a heading and a link that failed validation. A line right below a definition underlined it as a heading.
-    code = b"# Guide\n\nExample:\n\n    [^1]: A footnote\n    ## Not a heading\n    [Code](absent.md)\n\n## After\n"
-    parsed = note("projects/guide.md", code)
-    assert (parsed.slugs, parsed.contexts) == ({"guide", "after"}, [])
-    defined = b"# Web\n\nClaim.[^1]\n\n[^1]: [Review](mail:m1)\n"
-    for underline in (b"---\n---\n", b"===\n"):
-        assert note("projects/web.md", defined + underline).slugs == {"web"}
-    # So does one in a block quote, whose underline repeats its markers: `> ===` made the definition the note's title.
-    for quote, underline in ((b"> ", b">---\n"), (b"> ", b"> ===\n"), (b"> > ", b"> >    ---\n")):
-        quoted = note("projects/web.md", b"# Web\n\nClaim.[^1]\n\n" + quote + b"[^1]: [Review](mail:m1)\n" + underline)
-        assert (quoted.title, quoted.slugs, quoted.contexts) == ("Web", {"web"}, [("mail:m1", "web", 5)])
-    assert note("projects/web.md", b"# Web\n\n> Quoted\n> ---\n").slugs == {"web", "quoted"}
-    # As on GitHub, `---` is a rule ending the footnote: an indented line below it is code.
-    assert note("projects/web.md", defined + b"---\n    [Quote](mail:m2)\n").contexts == [("mail:m1", "web", 5)]
-    # A real setext heading after the definition keeps its section, and so does a paragraph whose text holds a
-    # definition indented like code.
-    assert note("projects/web.md", defined + b"## H\nText\n---\n").slugs == {"web", "h", "text"}
-    lazy = parse("projects/web.md", b"# Web\n\nClaim.[^1]\n    [^1]: text\n---\n")
-    assert [(h.level, h.line) for h in lazy.headings] == [(1, 0), (2, 2)]
-
-
-def test_a_run_of_footnote_openers_parses_in_linear_time() -> None:
-    # A citation id holds no `[`, so each scan stops at the next one: before, every `[^` of this 100 KB run scanned to
-    # its end, about 20 seconds per parse, and the citation took `[^a` as its id.
-    def parse_run(size: int) -> None:
-        data = b"# Web\n\n## Decision\n\nShip it.[^[^a] " + b"[^" * size + b"\n\n## Risks\n\n[^a]: [Review](mail:m1)\n"
-        assert note("projects/web.md", data).contexts == [("mail:m1", "decision", 9)]
-
-    assert_linear_time(parse_run, 50_000)
-
-
-def test_a_long_line_dense_in_punctuation_parses_in_linear_time() -> None:
-    # markdown-it copied a line's pending text at each punctuation mark: a note holding pasted minified JSON took
-    # minutes to index, validate or read.
-    def parse_line(size: int) -> None:
-        note("projects/web.md", b"# Line\n\n" + b'{"k":1},' * size + b"\n")
-
-    assert_linear_time(parse_line, 100_000)
-    # The trailing spaces of a long line still make a hard break, which no slug keeps.
-    assert slugs(b"Title " + b"word " * 300 + b"end  \nline two\n---\n")[0].endswith("word-end-line-two")
-
-
-def test_links_to_any_source_name_are_links() -> None:
-    # markdown-it's HTML filter dropped links to the schemes file, data, javascript and vbscript, which a sensor may
-    # be named; BF renders no HTML. An inline data image still names no target.
-    assert note("projects/web.md", b"# Web\n\n[Notes](file:notes.txt) [Report](data:q3)\n").targets == [
-        "data:q3",
-        "file:notes.txt",
-    ]
-    assert note("projects/web.md", b"# Web\n\n![i](data:image/svg+xml;base64,AA)\n").targets == []
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        b"# Web\n\n- [ ] Ship the site after the review.[^r]\n\n  [^r]: [Review](mail:m1)\n",
-        b"# Web\n\n> Quoted claim.[^r]\n>\n> [^r]: [Review](mail:m1)\n",
-        b"# Web\n\nClaim.[^r]\n\n   [^r]: [Review](mail:m1)\n",
-    ],
-    ids=["list-item", "quote", "indented"],
-)
-def test_indented_footnote_definitions_keep_their_links(data: bytes) -> None:
-    # CommonMark would read each definition as a link reference definition, its whole text as one target.
-    assert note("projects/web.md", data).targets == ["mail:m1"]
-
-
-def test_note_projection_sections_and_titles() -> None:
-    projection = note(
-        "projects/p.md",
-        b"---\nsummary: Short summary.\ntags: [x]\n---\n# Title\n\nIntro [link](other.md).\n\n## Same\n\nA\n\n### Same\n\nB\n\n## Last\n\nC\n",
-    )
-    assert projection.title == "Title"
-    assert projection.knowledge.type == "project"
-    assert projection.lead == "Short summary."
-    assert [p.fragment for p in projection.passages] == ["", "same", "same-1", "last"]
-    assert projection.links == ["projects/other.md"]
-    assert note("concepts/some-name.md", b"No heading at all.\n").title == "some name"
-    footnoted = note(
-        "concepts/f.md", b"---\ntags: [2026, x]\n---\n# F\n\nClaim.[^a]\n\n[^a]: [Source](other.md#part).\n"
-    )
-    assert footnoted.targets == ["other.md#part"]
-    assert footnoted.knowledge.tags == ["2026", "x"]
-    assert note("actions/t/ACTION.md", b"# T\n\n## Only\n\nFirst section text.\n").lead == "First section text."
-    data = "# T\r\n\r\n## A\r\n\r\nx\u2028y\r\n\r\n## B\r\n".encode()
-    assert section("concepts/t.md", data, "a") == "## A\r\n\r\nx\u2028y\r\n\r\n"
-    for bad in [b"---\ntitle: x\n", b"\xff", b"---\ntags: x\n---\n", f"# {'x' * 4097}\n".encode()]:
-        with pytest.raises(Error):
-            note("concepts/x.md", bad)
-
-
-@pytest.mark.parametrize("frontmatter", ["", "---\ntype: concept\n---\n"])
-def test_a_rule_below_the_title_is_not_frontmatter(frontmatter: str) -> None:
-    data = f"{frontmatter}# Title\n---\nIntro text.\n\n---\n\n## Next\n\nBody\n".encode()
-    projection = note("concepts/x.md", data)
-    assert projection.title == "Title"
-    assert projection.lead == "Intro text."
-    assert [p.fragment for p in projection.passages] == ["", "next"]
-
-
-def test_indented_conflict_markers_are_literal_examples() -> None:
-    example = b"# Git\n\n```text\n <<<<<<< HEAD\n ours\n =======\n theirs\n >>>>>>> feature\n```\n"
-    assert note("concepts/git.md", example).title == "Git"
-    with pytest.raises(Error, match=r"line 4: unresolved merge conflict marker; .* indent a literal example"):
-        note("concepts/git.md", example.replace(b" <<<", b"<<<"))
-
-
-@pytest.mark.parametrize(
-    ("prefix", "unit", "suffix", "size"),
-    [
-        (b"# Links\n\n", b"[", b"]\n", 100_000),
-        (b"# Links\n\n- [ ] ", b"[](", b"\n", 30_000),
-        (b"# Heading\n\n## a", b" ", b"b\n", 100_000),
-    ],
-    ids=["brackets", "links", "heading"],
-)
-def test_adversarial_markdown_parses_in_linear_time(prefix: bytes, unit: bytes, suffix: bytes, size: int) -> None:
-    # Measure each former backtracking case separately: a slow linear case must not mask a quadratic one.
-    assert_linear_time(lambda n: note("concepts/adversarial.md", prefix + unit * n + suffix), size)
-
-
-def test_leads_and_tasks_drop_emphasis_but_keep_identifiers_and_code() -> None:
-    data = (
-        b"# Config\n\nSet `MAX_FILE_SIZE` in config_loader.py, edit `__init__.py` and compute 2*3*4: **all** _done_.\n\n"
-        b"## Next\n\n- [ ] Rename *snake_case_name* to `__all__` in [the loader](config_loader.md).\n"
-        b"- [ ] Review [*the* brief](https://docs.example.test/d/1Xy_/edit) and [x](https://example.test/_next/x.js).\n"
-        b"- [ ] Read [drafts](_drafts/plan.md), [cfg](config_.md) and [notes](my%20notes_.md).\n"
-        b"- [ ] Fix [init](https://example.test/src/pkg/__init__.py).\n"
-    )
-    projection = note("projects/config.md", data)
-    # Before, every `_` and `*` went: "Set MAXFILESIZE in configloader.py, edit init.py and compute 234".
-    assert projection.lead == "Set MAX_FILE_SIZE in config_loader.py, edit __init__.py and compute 2*3*4: all done."
-    # A label loses its emphasis, a ref none of its characters: before, a document ID lost its last `_`, `_next` became
-    # `next` and `__init__.py` became `init.py`.
-    assert [task.text for task in projection.tasks] == [
-        "Rename snake_case_name to __all__ in [the loader](projects/config_loader.md).",
-        "Review [the brief](https://docs.example.test/d/1Xy_/edit) and [x](https://example.test/_next/x.js).",
-        "Read [drafts](projects/_drafts/plan.md), [cfg](projects/config_.md) and [notes](projects/my notes_.md).",
-        "Fix [init](https://example.test/src/pkg/__init__.py).",
-    ]
-
-
-def test_a_lead_cut_short_ends_with_an_ellipsis() -> None:
-    # Listings and relation pages show the lead as an excerpt: cut mid-word without a mark, it read as complete.
-    words = "Evidence " * 60
-    assert note("projects/web.md", f"# Web\n\n{words}\n".encode()).lead == ("Evidence " * 35).rstrip() + "…"
-    assert note("projects/web.md", b"# Web\n\nShort.\n").lead == "Short."
-    # The lead reads a bounded prefix: a note continuing beyond it is cut short too, even when the prefix's words fit.
-    listed = " ".join(f"[link{n}](https://example.test/{'x' * 100})" for n in range(30))
-    lead = note("projects/web.md", f"# Web\n\n{listed}\n".encode()).lead
-    assert (lead[:12], lead[-1], len(lead) <= LEAD) == ("link0 link1 ", "…", True)
-
-
-def test_link_errors_name_their_line_or_frontmatter_key() -> None:
-    # The line is the link's own, inside a paragraph spanning several.
-    data = b"---\ntype: project\n---\n# Web\n\nA paragraph\nwhose second line [links](http://[your-host]:8080/admin).\n"
-    with pytest.raises(Error, match=r"^projects/web\.md: line 7: invalid link$"):
-        note("projects/web.md", data)
-    with pytest.raises(Error, match=r"^projects/web\.md: line 4: invalid BF link; "):
-        note("projects/web.md", b"# Web\n\nSee\n[the plan](bf://fixture/projects/100%.md).\n")
-    with pytest.raises(Error, match=r"^projects/web\.md: links: invalid link$"):
-        note("projects/web.md", b'---\nlinks: ["https://["]\n---\n# Web\n')
-    with pytest.raises(Error, match=r"^projects/web\.md: sources: invalid link$"):
-        note("projects/web.md", b'---\ntype: project\nsources:\n  - resource: "http://[x/y"\n---\n# Web\n')
-    with pytest.raises(Error, match=r"^projects/web\.md: aliases: invalid BF link; "):
-        note("projects/web.md", b'---\naliases: ["bf://fixture/people/100%"]\n---\n# Web\n')
-    with pytest.raises(Error, match=r"^projects/web\.md: resource: invalid BF link; "):
-        note("projects/web.md", b'---\nresource: "bf://fixture/docs/100%-done"\n---\n# Web\n')
-    # A resource with spaces describes a population and names nothing, as OKF allows.
-    assert not note("projects/web.md", b'---\nresource: "bf: every 100% record"\n---\n# Web\n').knowledge.names
-    with pytest.raises(Error, match=r"^projects/web\.md: entity: identity must not contain a link relation$"):
-        note("projects/web.md", b'---\nentity: "bf://fixture/people/alice?rel=owner"\n---\n# Web\n')
-
-
-def test_ordinary_markdown_drops_urls_it_cannot_parse() -> None:
-    # A document copied from another tool stays searchable: Python rejects a bracketed host that is no IP address.
-    vendor = "actions/2026-09-27_import/inputs/vendor.md"
-    data = (
-        b"# Vendor\n\nOpen [the console](http://[your-host]:8080/admin), <http://[fe80::1%eth0/x>, [guide](guide.md).\n"
-    )
-    projection = note(vendor, data)
-    assert (projection.targets, projection.contexts) == (["guide.md"], [("guide.md", "vendor", 3)])
-    # A malformed BF address, which only BF writers use, is still an error.
-    with pytest.raises(Error, match=r"^actions/2026-09-27_import/inputs/vendor\.md: line 3: invalid BF link; "):
-        note(vendor, b"# Vendor\n\n[c](bf://fixture/projects/100%.md)\n")
+def test_anchor_ids_handles_frontmatter_and_rejects_bad_files() -> None:
+    raw = b"\xef\xbb\xbf---\ntitle: Attachment\n---\n\n# Overview\n\n## Details {#custom-id}\n\nBody.\n{: #blk-1}\n"
+    assert markdown.anchor_ids("actions/a/outputs/out.md", raw) == {"overview", "custom-id", "blk-1"}
+    with pytest.raises(Error, match="exceeds"):
+        markdown.anchor_ids("out.md", b"x" * (MAX_NOTE + 1))
+    with pytest.raises(Error, match="not UTF-8"):
+        markdown.anchor_ids("out.md", b"\xff")

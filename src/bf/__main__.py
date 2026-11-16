@@ -1,5 +1,6 @@
-"""Allow python -m bf."""
+"""Module entrypoint for `python -m bf`."""
 
 from bf import main
 
-main()
+if __name__ == "__main__":
+    main()

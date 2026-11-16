@@ -1,4 +1,6 @@
+/.agents/
 /.bf/
+/.env
 /logs/
 /memories/
 /originals/

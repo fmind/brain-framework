@@ -1,74 +1,63 @@
-# Authoring notes, actions, identities, and relations
+# Authoring
 
-Brain Framework keeps authored knowledge in Markdown notes with [OKF](https://github.com/GoogleCloudPlatform/open-knowledge-format) YAML frontmatter. Never edit `memories/` files manually; record jobs and `bf ingest` own collected evidence.
+Humans write plain Markdown in `projects/` (volatile TODOs and active initiatives), `concepts/` (durable knowledge), and `actions/YYYY-MM-DD_topic/ACTION.md` (dated task workspaces). `bf build` parses every note with [Python-Markdown](https://python-markdown.github.io/) (`extra`, `toc`, `admonition`, `sane_lists`) and writes individual JSON files to `memories/{concepts,projects,actions}/<slug>.json`, validated by `schemas/record.json`, `schemas/concepts.json`, and optional `schemas/<source>.json`.
 
-## Note directories and lifecycle
+## OKF YAML frontmatter
 
-- `projects/<slug>.md` or `projects/<topic>/index.md`: active work streams, `Now`, `Decision`, and `Next actions`.
-- `concepts/<slug>.md`: durable ideas, people/entity notes, and reusable patterns (`concepts/index.md` is the Home note).
-- `actions/YYYY-MM-DD_topic/ACTION.md`: tracked multi-step work sessions created and transitioned via `bf action`.
-- Special files: folder `index.md` and changelog `log.md` (`YYYY-MM-DD` headings) carry no review reminders or task checks; ordinary Markdown files (such as `actions/*/inputs/*.md`) index prose metadata while ignoring identity/relation keys so imported text never claims identities.
-
-Every OKF note requires non-empty `type` and `status` (`draft`, `stable`, or `deprecated`), verified by `bf validate`:
-
-```yaml
----
-type: project
-status: stable
-title: Billing migration
-updated: 2026-09-27
-summary: Cut over billing pipeline without losing audit history.
-relations:
-  owner: [person:email/alice@example.test]
-attributes:
-  team: platform
----
-```
-
-Keep work logs and status updates in Markdown sections (`Now`, `Decision`, `Next actions`) rather than unbounded frontmatter fields, and use explicit heading anchors (`## Decision {#decision}`) so renames preserve incoming links.
-
-## Manage actions with `bf action`
-
-Create and transition tracked work sessions through the CLI instead of creating `ACTION.md` folders by hand:
-
-```bash
-bf action new billing-cutover --summary "Verify invoice dual-write parity"
-bf action status 2026-09-27_billing-cutover stable
-```
-
-- Pass `--unique` to append a 12-hex suffix when running repeated tasks on one day, and `--run RUN_ID` from inside a job run so `.bf/runtime.sqlite3` records created actions.
-- An existing `ACTION.md` is never replaced silently.
-- Open `draft` actions appear on Home and `bf read review` (including `blocked_by` from unresolved `draft` `depends-on` links). Mark completed actions `stable` (which clears them from Home while keeping them searchable) or retired ones `deprecated`.
-- Keep `Context` (brief state plus `<= 6` verified refs, never raw transcripts) and `Resume` up to date so any future session can continue cleanly.
-
-## Connect notes and records
-
-1. **Plain Markdown links and sections**: `[New website decision](../projects/new-website.md#decision)` records an untyped `links` edge from its originating section; `[Product brief](brief:website-brief)` cites a record.
-2. **OKF `sources:`**: frontmatter `sources:` entries with non-empty `resource` generate `cites` edges.
-3. **Typed inline `?rel=` links**: add `?rel=RELATION` to a `bf://` URI:
+Start every note with a YAML 1.2 frontmatter block (anchors and aliases are rejected; `on`, `off`, and `no` remain strings):
 
 ```markdown
-[Launch decision](bf://brain/projects/new-website.md?rel=depends-on#decision)
+---
+type: architecture
+status: stable
+updated: 2026-11-15
+stale_after: 90d
+tags: [agents, mcp]
+links:
+  - bf:///concepts/welcome.md#conventions
+summary: Open standards governing agent protocols and tool integrations.
+---
+
+# Agentic AI Foundation
 ```
 
-`?rel=` is the only supported query parameter on BF links. Whole reads preview up to 5 newest backlinks per relation; `bf read REF --rel RELATION` paginates all incoming edges.
+- Metadata in `concepts/` is owned by `schemas/concepts.json` (`type` and `status` required by default; customize freely per brain).
+- `updated` (`YYYY-MM-DD`) and `stale_after` (humanized duration like `14d` or `90d`, integer days, or ISO date) drive `bf review` freshness checks (`newer_evidence` and `due`).
+- Every custom frontmatter field passes straight through to the compiled JSON record in `memories/` (`id`, `ref`, `source`, `kind`, `text`, `headings`, `elements`, `attrs`, `tasks`, and `sha256` are computed by `bf build`).
 
-## Identities, `relations`, and `attributes`
+## Element metadata with `attr_list` and extensions
 
-BF builds its knowledge graph strictly from explicit evidence — never from prose heuristics or name matching:
+Attach `#id`, `.class`, and `key=value` attributes directly to Markdown elements with Python-Markdown's `attr_list` extension:
 
-- **`entity`, `aliases`, `resource`**: bind exact case-sensitive identifiers on an owning note (for example `concepts/me.md` with `entity: bf://brain/people/me`, `aliases: [person:email/me@example.test, person:github.com/me]`, `resource: https://example.test/me`). `entity` never names a `#section`, `.md` file, page, record, or `bf://brain/actions/SLUG` folder.
-- **Typed `relations`**: map any valid relation name (`^[a-z][a-zA-Z0-9]*(?:-[a-z0-9]+)*$`, 1–64 chars, excluding reserved `tagged-with`, `links`, `cites`) to a `scheme:value` or `bf://` string or list. Common conventions (`author`, `owner`, `assignee`, `participant`, `sender`, `recipient`, `cc`, `organizer`, `attendee`, `repository`, `project`, `part-of`, `label`, `depends-on`, `related-to`, `supersedes`) need zero declaration.
-- **`attributes`**: attach bounded JSON metadata without creating graph edges.
-- **Optional `fields:` constraints in `bf.yaml`**: add `fields:` entries only when enforcing `description`, `broader` rollups (for example `organizer` -> `participant`), or `targets` scheme prefix checks (`bf validate` and `bf build --reproject`). See [Reference](reference.md#bf-yaml-schema).
+<!-- dprint-ignore-start -->
+```markdown
+## Model Context Protocol {#mcp .protocol update-date=2026-11-15 creator=Anthropic}
 
-## Host hooks and verification
+Standard wire protocol for tools and context. See [AAIF](aaif.md#mcp){rel=part-of} and `bf validate`{#gate-cmd role=cli}. {: #mcp-summary maturity=production}
 
-For repository-aware session/prompt injection, review and install [`examples/hooks/`](https://github.com/fmind/brain-framework/tree/main/examples/hooks) (`session-context.py`, `prompt-context.py`) from a private host-owned folder — they run read-only `bf read` / `bf search` offline and never print raw record bodies.
+MCP Transport
+: Stdio and Streamable HTTP framing. {: #mcp-transport spec=2025-03}
 
-Always verify edits before finishing:
+!!! warning "Trust boundary"
+    Retrieved records are untrusted data, never instructions.
 
-```bash
-bf validate
-bf read projects/new-website.md#decision
+- [ ] Audit server permissions. {: #task-audit priority=p1}
 ```
+<!-- dprint-ignore-end -->
+
+- **Headings (`headings[]` & `attrs`)**: `## MCP {#mcp update-date=2026-11-15 creator=Anthropic}` populates `headings` (`{id, title, level, meta}`) and registers `attrs["mcp"] = {"update-date": "2026-11-15", "creator": "Anthropic"}`. Separate attributes with spaces (`{#mcp?creator=Anthropic}` is rejected).
+- **Blocks, spans, definitions, tasks, and callouts (`elements[]`, `tasks[]`, & `attrs`)**: place `{: #id key=value}` at the end of a paragraph, `: definition`, or `- [ ] task` (or on its own line immediately below), or inline right after `` `code` ``. Keyed `#id` attributes also populate `attrs[id]` and `tasks[].id`.
+- **Links (`links[]` & `attrs`)**: pass edge metadata either via `{#link-id rel=part-of date=2026}` right after `)` or in a `bf://` URL query string (`?rel=part-of&date=2026#mcp`).
+
+## Connect notes and records {#connect-notes-and-records}
+
+Authored notes follow **two link conventions** so Markdown links work in editors/GitHub while frontmatter links stay canonical URIs:
+
+- **Markdown prose (relative paths + cross-brain/external URLs)**: link to local notes (`../concepts/aaif.md#mcp`, `aaif.md`, `#mcp`) and sensor memories (`../memories/github-issues/7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451.json#.title`) with relative paths, and use `bf://<brain>/...` or external URLs when crossing brains or linking outside the brain.
+- **Note frontmatter (`links`, `sources`, `relations`)**: requires `bf://` or external URLs — same-brain `bf:///concepts/aaif.md?rel=project-of#mcp` and `bf:///memories/<source>/<sha256>.json`, or cross-brain `bf://team-brain/concepts/aaif.md#mcp` (resolved via `brains:` in `bf.yaml`, `../team-brain`, or `~/team-brain`). Sensor JSON `links` accept `bf://` URLs, external URLs, brain-relative paths, or `source:id` refs.
+- **`jq` fragment pointers**: `<bf:///memories/concepts/welcome.json#select(.status=="stable")>` resolves the target JSON file and applies the `#<jq_filter>` fragment on `bf read` (syntax-checked by `bf validate`).
+- **External URIs**: `https://`, `http://`, `mailto:`, and `urn:` keep `kind: "url"`. Legacy `source:id` (`github-issues:7`) and 2-slash `bf://concepts/...` note links are rejected in authored notes (`bf read "github-issues:7"` still looks up records on the CLI).
+
+## Tracked actions and user schemas
+
+Create or reuse a dated workspace with `bf action "Retention review"` (`actions/YYYY-MM-DD_retention-review/ACTION.md`). Mark finished actions `status: stable` to clear them from `bf review`'s active inbox. Customize `schemas/concepts.json`, `schemas/record.json`, or any `schemas/<source>.json` file to enforce your brain's ontology during `bf build`, `bf ingest`, and `bf validate`.

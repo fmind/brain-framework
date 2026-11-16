@@ -14,11 +14,11 @@ sys.stdout.write(
             {
                 "id": "retention",
                 "title": "Retention decision",
+                "type": "decision",
                 "text": "Keep original evidence because upstream content can disappear.",
                 "time": start.isoformat(),
-                "@type": "Decision",
-                "relations": {"repository": ["repo:example/project"]},
-                "attributes": {"kind": "event"},
+                "updated": start.isoformat(),
+                "links": ["projects/example.md"],
             }
         ]
     )

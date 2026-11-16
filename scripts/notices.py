@@ -15,12 +15,12 @@ SITE = ROOT / "docs/third-party-notices.md"
 SITE_FILES = ROOT / "docs/third-party"
 INTRODUCTION = """# Third-party notices
 
-Brain Framework depends on the following non-development Python distributions on its declared Linux and macOS platforms, including those its optional `mcp` extra installs. The inventory is the complete locked closure selected by `uv tree --no-dev`; build and test dependencies are intentionally excluded.
+Brain Framework depends on the following non-development Python distributions on its declared Linux and macOS platforms. The inventory is the complete locked closure selected by `uv tree --no-dev`; build and test dependencies are intentionally excluded.
 
 License expressions come from the installed distribution metadata. Legal text is copied from the corresponding installed wheel files and formatted only as Markdown text blocks. The Brain Framework project itself is licensed separately in `LICENSE`.
 """
 # Reviewed expressions for distributions whose metadata declares no SPDX expression; metadata wins once it does.
-LICENSES = {"markdown-it-py": "MIT", "mdurl": "MIT", "shellingham": "ISC"}
+LICENSES: dict[str, str] = {"markdown-it-py": "MIT", "mdurl": "MIT"}
 SOURCES = ("source", "source code", "repository", "github", "homepage", "home")
 # SPDX identifiers joined by operators, with optional parentheses; unbalanced parentheses are rejected separately.
 IDENTIFIER = r"[A-Za-z0-9.+-]+"
@@ -28,7 +28,7 @@ SPDX = re.compile(rf"\(*{IDENTIFIER}\)*(?: (?:AND|OR|WITH) \(*{IDENTIFIER}\)*)*"
 # Reviewed licenses for distributed dependencies; trivy skips .venv, so a new license fails here until reviewed.
 PERMITTED = {"Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT", "MIT-0", "PSF-2.0"}
 # Reviewed code vendored inside a distribution, keyed by its folder: the component it adapts and that license.
-VENDORED = {"typer/_click": ("Click", "BSD-3-Clause")}
+VENDORED: dict[str, tuple[str, str]] = {}
 LEGAL = re.compile(r"(?:LICEN[CS]E|COPYING|NOTICE)[^/]*")
 # Site copies of the licenses in the locked Zensical distributions, keyed by their published name: since Zensical 0.1,
 # its theme (templates, icons and the browser bundle) ships as the separate zensical-ui distribution.

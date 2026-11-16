@@ -1,0 +1,12 @@
+version: 12
+cases:
+  - name: welcome-rg
+    engine: rg
+    query: Conventions
+    expect_refs:
+      - concepts/welcome.md
+  - name: welcome-read
+    engine: read
+    query: bf:///concepts/welcome.md#conventions
+    expect_text:
+      - attr_list

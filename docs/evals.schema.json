@@ -1,0 +1,33 @@
+{
+  "$id": "https://fmind.github.io/brain-framework/evals.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Deterministic query evaluations in evals/ (schemas/evals.json).",
+  "properties": {
+    "cases": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": { "enum": ["rg", "jq", "sql", "read"], "type": "string" },
+          "expect_equals": {},
+          "expect_refs": { "items": { "maxLength": 4096, "minLength": 1, "type": "string" }, "type": "array" },
+          "expect_text": { "items": { "maxLength": 4096, "minLength": 1, "type": "string" }, "type": "array" },
+          "forbid_refs": { "items": { "maxLength": 4096, "minLength": 1, "type": "string" }, "type": "array" },
+          "max_count": { "minimum": 0, "type": "integer" },
+          "min_count": { "minimum": 0, "type": "integer" },
+          "name": { "maxLength": 256, "minLength": 1, "type": "string" },
+          "query": { "maxLength": 8192, "minLength": 1, "type": "string" },
+          "scope": { "maxLength": 1024, "type": "string" }
+        },
+        "required": ["name", "query"],
+        "type": "object"
+      },
+      "maxItems": 500,
+      "type": "array"
+    },
+    "version": { "const": 12, "type": "integer" }
+  },
+  "required": ["version", "cases"],
+  "title": "Eval",
+  "type": "object"
+}

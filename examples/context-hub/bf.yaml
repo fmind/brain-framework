@@ -1,24 +1,9 @@
-# https://fmind.github.io/brain-framework/docs/reference/
-version: 11
+# https://fmind.github.io/brain-framework/reference/
+version: 12
 name: context-demo
-fields:
-  project:
-    description: Project explicitly identified by the source.
-    targets: ["project:"]
 jobs:
-  workspace:
-    run: [sensors/demo.py, workspace, "{{end}}"]
-    emit: records
-    mode: snapshot
-  jira:
-    run: [sensors/demo.py, jira, "{{end}}"]
-    emit: records
-    mode: snapshot
-  github:
-    run: [sensors/demo.py, github, "{{end}}"]
-    emit: records
-    mode: snapshot
-  gcloud:
-    run: [sensors/demo.py, gcloud, "{{end}}"]
-    emit: records
-    mode: snapshot
+  build:
+    builtin: build
+  validate:
+    builtin: validate
+    hook: pre-commit

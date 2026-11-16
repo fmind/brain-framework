@@ -1,5 +1,4 @@
-"""Time record writes, cache builds, refreshes and searches over synthetic notes and records, and report the size of a
-full build; never contact providers.
+"""Time pure JSON record ingestion, note compilation, validation, and review over synthetic notes and records.
 
 The synthetic brain lives in a temporary folder under --dir, on disk by default: record writes fsync, and a RAM-backed
 /tmp would hide that cost while holding the whole corpus in memory.
@@ -14,191 +13,115 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import cast
 
-from bf import records
-from bf.index import refresh
-from bf.models import CACHE, MAX_FILES, Query, Record
-from bf.retrieve import read, search
-from bf.storage import Store, writer, xdg
-from bf.validate import validate
+from bf import engine, records
+from bf.models import FORMAT, MAX_FILES
+from bf.storage import Store, xdg
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--records", type=int, default=20_000)
+    parser.add_argument("--records", type=int, default=2_000)
     parser.add_argument("--body-chars", type=int, default=1024)
     parser.add_argument("--notes", type=int, default=100)
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--batch", type=int, default=200, help="Records added, updated and removed per write sample.")
-    # As for bf's own directories, an empty or relative XDG_CACHE_HOME is ignored.
+    parser.add_argument("--batch", type=int, default=100, help="Records added, updated, and removed per write sample.")
     cache = xdg("XDG_CACHE_HOME", ".cache")
     parser.add_argument("--dir", type=Path, default=cache / "bf-benchmark", help="Parent of the temporary brain.")
     args = parser.parse_args()
-    # One collection writes the corpus, and a collection changes fewer than MAX_FILES records.
     if not (
         1 <= args.records < MAX_FILES
         and 64 <= args.body_chars <= 4096
-        and 0 <= args.notes <= 1000
+        and 1 <= args.notes <= 1000
         and 1 <= args.repeats <= 20
         and 1 <= args.batch <= 10_000
     ):
         parser.error(
-            f"limits: records 1-{MAX_FILES - 1}, body-chars 64-4096, notes 0-1000, repeats 1-20, batch 1-10000"
+            f"limits: records 1-{MAX_FILES - 1}, body-chars 64-4096, notes 1-1000, repeats 1-20, batch 1-10000"
         )
     args.batch = min(args.batch, args.records)
     args.dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="bf-benchmark-", dir=args.dir) as temporary:
-        root = Path(temporary)
-        (root / "brain").mkdir()
-        store = Store(root / "brain")
-        store.write("bf.yaml", b"version: 11\nname: benchmark\n")
+        root = Path(temporary) / "brain"
+        engine.init_brain(root, name="benchmark")
+        store = Store(root)
+        store.write("bf.yaml", f"version: {FORMAT}\nname: benchmark\n".encode())
         background = ("Routine project background. " * args.body_chars)[: args.body_chars]
         items = [
-            Record(
-                id=str(n),
-                title=f"Decision {n}",
-                text=background + "\nRetain evidence. " + ("Zirconium decision." if n == 0 else ""),
-                time=f"2026-{n % 12 + 1:02d}-01T00:00:00Z",
-                aliases=[f"decision:{n}"],
-            )
+            {
+                "id": str(n),
+                "title": f"Decision {n}",
+                "text": background + "\nRetain evidence.",
+                "time": f"2026-{n % 12 + 1:02d}-01T00:00:00Z",
+                "updated": "2026-09-01T00:00:00Z",
+            }
             for n in range(args.records)
         ]
-        with writer(store):
-            records.upsert(store, "benchmark", items, snapshot=False)
+        records.ingest(store, "benchmark", json.dumps(items).encode(), mode="snapshot", allow_removal=True)
         for n in range(args.notes):
+            rec_rel = records.record_file("benchmark", str(n % args.records))
             store.write(
                 f"concepts/{n}.md",
-                f"---\ntype: concept\n---\n# Project {n}\n\n{background}\n\nKeep durable evidence.\n".encode(),
+                (
+                    f"---\ntype: concept\nstatus: stable\nupdated: 2026-09-10\ntags: [bench]\n---\n"
+                    f"# Concept {n}\n\n## Details {{#details idx={n}}}\n\n{background}\n\n"
+                    f"Evidence: [Decision](../{rec_rel}).\n"
+                ).encode(),
             )
-        measurements = {}
-        size = 0
-        revision = 0
-        note_revision = 0
-        # Each write sample uses its own source: add creates it, update rewrites it and remove empties it again.
-        churn = {"upsert_add": 0, "upsert_update": 0, "upsert_remove": 0}
 
-        def write_batch(name: str) -> dict[str, object]:
-            churn[name] += 1
-            source = f"churn{churn[name]}"
-            if name == "upsert_remove":
-                batch = []
-            else:
-                edit = "Revised decision." if name == "upsert_update" else "Retain evidence."
-                batch = [item.model_copy(update={"text": f"{background}\n{edit}"}) for item in items[: args.batch]]
-            with writer(store):
-                return {**records.upsert(store, source, batch, snapshot=name == "upsert_remove")}
+        churn = {"add": 0, "update": 0, "remove": 0}
+        measurements: dict[str, dict[str, float]] = {}
 
-        def change_note() -> dict[str, object]:
-            nonlocal note_revision
-            note_revision += 1
-            store.write(
-                "concepts/0.md",
-                f"---\ntype: concept\n---\n# Edited revision{note_revision}\n\nZirconium note.\n".encode(),
-            )
-            return search(store, Query(text=f"revision{note_revision}"))
+        def write_batch(kind: str) -> dict[str, object]:
+            churn[kind] += 1
+            source = f"churn-{churn[kind]}"
+            base_batch = items[: args.batch]
+            if kind == "add":
+                return records.ingest(store, source, json.dumps(base_batch).encode())
+            records.ingest(store, source, json.dumps(base_batch).encode())
+            if kind == "update":
+                edited = [{**rec, "text": background + "\nRevised decision."} for rec in base_batch]
+                return records.ingest(store, source, json.dumps(edited).encode())
+            return records.ingest(store, source, b"[]", mode="snapshot", allow_removal=True)
 
-        def check_result(name: str, result: dict[str, object]) -> None:
-            # Refresh results count skipped files; retrieval results name problems and stale evidence.
-            if result.get("problems") or result.get("stale") or result.get("skipped"):
-                raise RuntimeError(f"{name}: incomplete benchmark result")
-            found = cast("list[dict[str, object]]", result.get("items", []))
-            refs = {item["ref"] for item in found}
-            valid = True
-            if name == "note_edit":
-                valid = refs == {"concepts/0.md"} and found[0]["title"] == f"Edited revision{note_revision}"
-            elif name == "selective":
-                valid = refs == ({"benchmark:0", "concepts/0.md"} if args.notes else {"benchmark:0"})
-            elif name in {"common", "question", "prefix"}:
-                valid = len(found) == min(10, args.records + max(0, args.notes - 1))
-            elif name == "typo":
-                valid = not found and result.get("suggestions") == {"evidnce": ["evidence"]}
-            elif name == "timeline":
-                since, until = str(result.get("since", "")), str(result.get("until", ""))
-                expected = sum(since <= item.time < until for item in items)
-                sources = cast("list[dict[str, object]]", result.get("sources", []))
-                valid = (
-                    result.get("page") == "2026-06"
-                    and sum(cast("int", source["records"]) for source in sources) == expected
-                )
-            elif name == "home":
-                valid = result.get("page") == "" and "memories" in cast("list[str]", result.get("pages", []))
-            elif name == "exact_read":
-                valid = result.get("ref") == "benchmark:0" and result.get("record") == items[0].model_dump(
-                    exclude_defaults=True
-                )
-            elif name == "changed_record":
-                valid = result.get("changed") == 1
-            elif name == "unchanged_record":
-                valid = result == {"added": 0, "updated": 0, "unchanged": 1, "removed": 0}
-            elif name.startswith("upsert_"):
-                change = {"upsert_add": "added", "upsert_update": "updated", "upsert_remove": "removed"}[name]
-                valid = result == {"added": 0, "updated": 0, "unchanged": 0, "removed": 0, change: args.batch}
-            if not valid:
-                raise RuntimeError(f"{name}: unexpected benchmark result")
+        operations = [
+            ("build", lambda: engine.build(store)),
+            ("validate", lambda: engine.validate(store)),
+            ("review", lambda: engine.review(store)),
+            ("unchanged_record", lambda: records.ingest(store, "benchmark", json.dumps([items[0]]).encode())),
+            ("upsert_add", lambda: write_batch("add")),
+            ("upsert_update", lambda: write_batch("update")),
+            ("snapshot_remove", lambda: write_batch("remove")),
+        ]
 
-        def change_record() -> dict[str, object]:
-            nonlocal revision
-            revision += 1
-            with writer(store):
-                records.upsert(
-                    store,
-                    "benchmark",
-                    [items[0].model_copy(update={"title": f"Edited decision {revision}"})],
-                    snapshot=False,
-                )
-            return refresh(store)
-
-        def unchanged_record() -> dict[str, object]:
-            found = records.find(store, "benchmark", "0")
-            if found is None:
-                raise RuntimeError("benchmark fixture record is missing")
-            with writer(store):
-                return {**records.upsert(store, "benchmark", [found[1]], snapshot=False)}
-
-        for name, operation in [
-            ("build", lambda: refresh(store, full=True)),
-            ("note_edit", change_note),
-            ("selective", lambda: search(store, Query(text="zirconium"))),
-            ("common", lambda: search(store, Query(text="evidence"))),
-            # Several common terms: each is also counted per passage and checked for a match on its own.
-            ("question", lambda: search(store, Query(text="Why retain the decision evidence?"))),
-            # A misspelled word: the stem it suggests is in every passage, which must not all be sorted.
-            ("typo", lambda: search(store, Query(text="evidnce"))),
-            # A prefix longer than the stem of the words it begins, `evid`: it matches through the indexed spellings.
-            ("prefix", lambda: search(store, Query(text="evidenc*"))),
-            ("timeline", lambda: read(store, "2026-06")),
-            ("home", lambda: read(store)),
-            ("exact_read", lambda: read(store, "decision:0")),
-            ("changed_record", change_record),
-            ("unchanged_record", unchanged_record),
-            ("upsert_add", lambda: write_batch("upsert_add")),
-            ("upsert_update", lambda: write_batch("upsert_update")),
-            ("upsert_remove", lambda: write_batch("upsert_remove")),
-        ]:
-            if name == "note_edit" and not args.notes:
-                continue
-            timings = []
+        for name, op in operations:
+            timings: list[float] = []
             for _ in range(args.repeats):
                 start = time.perf_counter()
-                result = operation()
+                result = op()
                 timings.append(time.perf_counter() - start)
-                # Check every sample outside its timer; never publish timings for incorrect results.
-                check_result(name, result)
+                if result.get("problems") or (name == "validate" and not result.get("valid")):
+                    raise RuntimeError(f"{name}: failed benchmark validation: {result}")
             measurements[name] = {
-                "min": round(min(timings), 3),
-                "median": round(statistics.median(timings), 3),
-                "max": round(max(timings), 3),
+                "min": round(min(timings), 4),
+                "median": round(statistics.median(timings), 4),
+                "max": round(max(timings), 4),
             }
-            if name == "build":
-                # The size of a fresh full build, before the samples below change it in place.
-                size = (store.root / CACHE).stat().st_size
-        # Fixture validation is outside the timers and must pass before timings are published.
-        if not validate(store)["valid"]:
-            raise RuntimeError("benchmark fixture failed brain validation")
-        # The report omits the local directory so timings can be shared.
+
+        notes_bytes = sum(p.stat().st_size for p in (store.root / "memories/concepts").glob("*.json"))
+        memories_bytes = sum(p.stat().st_size for p in (store.root / "memories/benchmark").glob("*.json"))
         corpus = {key: value for key, value in vars(args).items() if key != "dir"}
-        sys.stdout.write(json.dumps({"corpus": corpus, "seconds": measurements, "cache_bytes": size}) + "\n")
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "corpus": corpus,
+                    "seconds": measurements,
+                    "notes_json_bytes": notes_bytes,
+                    "memories_json_bytes": memories_bytes,
+                }
+            )
+            + "\n"
+        )
 
 
 if __name__ == "__main__":

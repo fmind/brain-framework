@@ -2,7 +2,7 @@
 type: concept
 status: draft
 sources:
-  - resource: ../actions/2026-09-25_retention-review/outputs/decision.md
+  - resource: bf:///actions/2026-09-25_retention-review/outputs/decision.md
 ---
 
 # Selected evidence capture

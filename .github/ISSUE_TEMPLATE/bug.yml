@@ -7,13 +7,13 @@ body:
   - type: markdown
     attributes:
       value: |
-        A brain holds real activity. Review and redact every line before pasting: no credentials, personal data, customer names, record content, private repository names, or home paths. `bf status` does not print whole records or command stdout, but diagnostics can include source names, paths, record identifiers, and timestamps.
+        A brain holds real activity. Review and redact every line before pasting: no credentials, personal data, customer names, record content, private repository names, or home paths. Diagnostics can include source names, paths, record identifiers, and timestamps.
   - type: input
     id: command
     attributes:
       label: Command
       description: The command that misbehaved.
-      placeholder: bf search "retention decision" --brain example
+      placeholder: bf validate --brain /tmp/demo
     validations:
       required: true
   - type: textarea
@@ -28,14 +28,14 @@ body:
     attributes:
       label: Reproduction
       description: >-
-        The smallest safe sequence using a synthetic brain. For collection failures, include the redacted source configuration and error. `bf collect SENSOR --dry-run` runs the sensor and previews record samples; never paste private samples or logs.
+        The smallest safe sequence using a synthetic brain. For ingestion failures, include the redacted schema and error. `bf ingest SOURCE --input sample.json --dry-run` validates records without writing; never paste private samples or logs.
     validations:
       required: true
   - type: textarea
     id: status
     attributes:
-      label: Status output
-      description: Redacted output of `bf status`.
+      label: Review or validation output
+      description: Redacted output of `bf validate` or `bf review`.
       render: text
   - type: input
     id: version

@@ -1,21 +1,48 @@
-# https://fmind.github.io/brain-framework/docs/reference/
-version: 11
+# yaml-language-server: $schema=schemas/bf.schema.json
+# https://fmind.github.io/brain-framework/reference/
+version: 12
 name: example
+defaults:
+  timezone: UTC
+  env:
+    EXAMPLE_MODE: "local"
 jobs:
   demo:
-    run: [sensors/demo.py, "{{start}}", "{{end}}"]
-    emit: records
-    mode: window
-    on:
-      every: 3600
-fields:
-  depends-on:
-    description: This conclusion needs review when the target evidence changes.
-    broader: related-to
-  supersedes:
-    description: This authored decision explicitly replaces the target decision.
-  related-to:
-    description: An explicit association without a more specific known relation.
-  repository:
-    description: Repository explicitly discussed in the event.
-    targets: ["repo:"]
+    run: [python3, sensors/demo.py, "{{start}}", "{{end}}"]
+    ingest:
+      source: demo
+      mode: snapshot
+    every: 1h
+  build:
+    builtin: build
+    events:
+      - kind: records.ingested
+        source: demo
+  weekly-review:
+    run: [python3, routines/weekly-review.py]
+    emit: action
+    at: "08:00"
+    days: [sun]
+    keep: 4
+  assistant:
+    run: [claude, -p, "Context file: {{context}}"]
+    input: prompts/digest.md
+    events:
+      - kind: channel.message
+        source: local
+    channel: local
+    enabled: false
+  validate:
+    builtin: validate
+    hook: pre-commit
+channels:
+  local:
+    listen: [python3, channels/local.py, listen]
+    send: [python3, channels/local.py, send]
+servers:
+  mcp:
+    run: [bf, mcp, --transport, http, --port, "8765"]
+    enabled: false
+watch:
+  interval: 5s
+  debounce: 300ms

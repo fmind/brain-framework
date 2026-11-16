@@ -1,4 +1,4 @@
-"""Install both release artifacts with locked dependencies and exercise the public CLI, then add the mcp extra.
+"""Install both release artifacts with locked dependencies and exercise the public CLI.
 
 With --unlocked, resolve the newest dependencies the package allows, as `uv tool install` does for users; this needs
 network access and runs weekly in the security workflow.
@@ -7,7 +7,6 @@ network access and runs weekly in the security workflow.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -17,51 +16,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 UV = shutil.which("uv")
-# The installed `bf mcp` over stdio, with the mcp SDK its extra installs: the other public interface.
-MCP = """
-import asyncio, os, sys
-import bf
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
 
-async def check() -> None:
-    executable, brain = sys.argv[1:3]
-    parameters = StdioServerParameters(
-        command=executable,
-        args=["mcp", "--brain", brain],
-        env={key: os.environ[key] for key in ("HOME", "PATH", "XDG_STATE_HOME", "XDG_CONFIG_HOME")},
-    )
-    async with (
-        stdio_client(parameters) as (incoming, outgoing),
-        ClientSession(incoming, outgoing, read_timeout_seconds=30) as session,
-    ):
-        initialized = await session.initialize()
-        assert initialized.server_info.version == bf.__version__
-        listing = await session.list_tools()
-        assert {tool.name for tool in listing.tools} == {"search", "read"}
-        found = await session.call_tool("search", {"query": "welcome"})
-        assert not found.is_error
-        assert any(item["ref"] == "concepts/welcome.md" for item in found.structured_content["items"])
-        note = await session.call_tool("read", {"ref": "concepts/welcome.md"})
-        assert not note.is_error
-        assert note.structured_content["text"]
-        # The starter index links to the welcome note without a declared relation.
-        linked = await session.call_tool("read", {"ref": "concepts/welcome.md", "rel": "links"})
-        assert not linked.is_error
-        assert [item["ref"] for item in linked.structured_content["items"]] == ["concepts/index.md"]
-
-
-asyncio.run(check())
-"""
-# Only `bf mcp` needs the extra: without it, the command fails with this one line and no reply.
-MISSING = "bf: bf mcp needs the mcp extra; install it with uv tool install --python 3.14 'brain-framework[mcp]'\n"
-
-
-def run(*args: str, cwd: Path, env: dict[str, str], capture: bool = False, timeout: int = 180) -> str:
-    # Callers supply fixed CLI operations and local artifact paths; no shell is used.
+def run(
+    *args: str, cwd: Path, env: dict[str, str], capture: bool = False, input_text: str | None = None, timeout: int = 180
+) -> str:
     result = subprocess.run(  # noqa: S603
-        args, cwd=cwd, env=env, check=True, timeout=timeout, text=True, stdout=subprocess.PIPE if capture else None
+        args,
+        cwd=cwd,
+        env=env,
+        input=input_text,
+        check=True,
+        timeout=timeout,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
     )
     return result.stdout or ""
 
@@ -73,16 +41,12 @@ def main() -> None:
     args = parser.parse_args()
     if UV is None:
         raise SystemExit("uv is required")
-    # UV is the resolved toolchain executable, and both arguments are literal.
-    cache = subprocess.check_output(  # noqa: S603
-        [UV, "cache", "dir"], text=True, timeout=30
-    ).strip()
+    cache = subprocess.check_output([UV, "cache", "dir"], text=True, timeout=30).strip()  # noqa: S603
     artifacts = [
         list((ROOT / "dist").glob(pattern)) for pattern in ("brain_framework-*.whl", "brain_framework-*.tar.gz")
     ]
     if any(len(matches) != 1 for matches in artifacts):
         raise SystemExit("expected exactly one brain-framework wheel and one source distribution")
-    # A disk-backed cache, not /tmp: two virtual environments are large for a RAM-backed /tmp.
     scratch = Path(os.environ.get("XDG_CACHE_HOME", ""))
     if not scratch.is_absolute():
         scratch = Path.home() / ".cache"
@@ -102,16 +66,12 @@ def main() -> None:
                 "UV_LINK_MODE": "copy",
                 "UV_CACHE_DIR": cache,
             }
-            env.pop("BF_BRAIN", None)
-            env.pop("PYTHONPATH", None)
-            env.pop("UV_PROJECT_ENVIRONMENT", None)
+            for unset_key in ("BF_BRAIN", "DEFAULT_BRAIN_PATH", "PYTHONPATH", "UV_PROJECT_ENVIRONMENT"):
+                env.pop(unset_key, None)
             run(UV, "venv", "--python", args.python, str(venv), cwd=home, env=env)
             python = str(venv / "bin/python")
-            # The package alone first, as `uv tool install brain-framework` installs it, then with the mcp extra.
             locked = [UV, "sync", "--project", str(ROOT), "--locked", "--offline", "--no-dev", "--no-install-project"]
             if args.unlocked:
-                # A new Python can lack dependency wheels, such as PyYAML's on 3.15, as users would find: allow a
-                # source build, which the second artifact reuses from the cache, within the job's 15 minutes.
                 run(UV, "pip", "install", "--python", python, str(artifact), cwd=home, env=env, timeout=600)
             else:
                 run(*locked, "--active", cwd=home, env=env)
@@ -128,16 +88,16 @@ from importlib.metadata import distribution
 from pathlib import Path
 from typing import get_args
 import bf
-from bf.watch import Dashboard
 from bf.schemas import Kind, document
 
-assert Dashboard("package-smoke").render(80, 24)
-assert "assistant-reply" not in get_args(Kind)
-assert "doctor-reply" in get_args(Kind)
-doctor_props = document("doctor-reply").get("properties")
-assert isinstance(doctor_props, dict)
-assert {"healthy", "brain", "path", "jobs", "problems"} <= set(doctor_props)
-for kind, title in [("brain", "Config"), ("registry", "UserConfig"), ("eval", "Suite")]:
+assert get_args(Kind) == ("brain", "record", "concepts", "logs", "evals")
+for kind, title in [
+    ("brain", "Config"),
+    ("record", "Record"),
+    ("concepts", "Concept"),
+    ("logs", "Log"),
+    ("evals", "Eval"),
+]:
     assert document(kind)["title"] == title
 installed = distribution("brain-framework")
 assert installed.metadata["Name"] == "brain-framework"
@@ -150,101 +110,72 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             )
             bf = str(venv / "bin/bf")
             brain = home / "brain"
-            run(bf, "watch", "--help", cwd=home, env=env)
-            run(bf, "--version", cwd=home, env=env)
-            guide_index = run(bf, "guide", cwd=home, env=env, capture=True)
-            guide_gs = run(bf, "guide", "getting-started", cwd=home, env=env, capture=True)
-            if "getting-started" not in guide_index or not guide_gs.startswith("# "):
-                raise SystemExit(f"{artifact.name}: packaged guides did not load via bf guide")
-            run(bf, "init", str(brain), cwd=home, env=env)
-            if (home / "config/bf/config.yaml").exists():
-                raise SystemExit("init unexpectedly registered the smoke-test brain")
+            run(bf, "--help", cwd=home, env=env)
+            if (
+                run(bf, "--version", cwd=home, env=env, capture=True).strip()
+                != subprocess.check_output(  # noqa: S603
+                    [python, "-c", "import bf; print(bf.__version__)"], text=True
+                ).strip()
+            ):
+                raise SystemExit(f"{artifact.name}: bf --version mismatch")
+            init_reply = json.loads(run(bf, "init", str(brain), cwd=home, env=env, capture=True))
+            if init_reply.get("brain") != "brain":
+                raise SystemExit(f"{artifact.name}: unexpected bf init reply: {init_reply}")
             starter_yaml = (brain / "bf.yaml").read_text()
-            if "version: 11" not in starter_yaml or "fields:" in starter_yaml:
+            if "version: 12" not in starter_yaml:
                 raise SystemExit(f"{artifact.name}: unexpected starter bf.yaml: {starter_yaml}")
-            skill_install = json.loads(
-                run(bf, "skill", "install", "--brain", str(brain), cwd=home, env=env, capture=True)
-            )
-            skill_check = json.loads(
-                run(bf, "skill", "install", "--brain", str(brain), "--check", cwd=home, env=env, capture=True)
-            )
-            if not (skill_install.get("ok") and skill_check.get("ok")):
-                raise SystemExit(f"{artifact.name}: bf skill install failed on smoke-test brain")
-            reg_reply = json.loads(run(bf, "register", str(brain), "--default", cwd=home, env=env, capture=True))
-            if reg_reply.get("brain") != "brain" or reg_reply.get("default") is not True:
-                raise SystemExit(f"{artifact.name}: unexpected bf register reply: {reg_reply}")
-            (brain / "projects/package.md").write_text(
-                "---\ntype: project\nstatus: draft\nreview_after: 7\n---\n# Package check\n\n"
-                "## Next\n\n- [ ] Inspect the installed task page.\n"
-            )
-            replies = {
-                arguments: json.loads(run(bf, *arguments, cwd=brain, env=env, capture=True))
-                for arguments in [
-                    ("validate",),
-                    ("search", "welcome"),
-                    ("read", "concepts/welcome.md"),
-                    ("read", "projects"),
-                    ("read", "tasks"),
-                    ("status", "--check"),
-                    ("doctor",),
-                    ("eval",),
+            for schema_file in ("record.json", "concepts.json", "logs.json", "evals.json"):
+                if not (brain / "schemas" / schema_file).is_file():
+                    raise SystemExit(f"{artifact.name}: missing starter schemas/{schema_file}")
+
+            sample_records = json.dumps(
+                [
+                    {
+                        "id": "brief",
+                        "title": "Launch brief",
+                        "text": "Explain who the product helps before signup.",
+                        "time": "2026-09-20T09:00:00Z",
+                        "updated": "2026-09-20T09:00:00Z",
+                    }
                 ]
-            }
-            for arguments, reply in replies.items():
-                if not isinstance(reply, dict) or reply.get("problems") or reply.get("stale"):
-                    raise SystemExit(f"{artifact.name}: incomplete reply from {' '.join(arguments)}")
-            checks = {
-                "validation": replies[("validate",)].get("valid") is True,
-                "search": any(
-                    item.get("ref") == "concepts/welcome.md" for item in replies[("search", "welcome")].get("items", [])
-                ),
-                "exact read": (
-                    replies[("read", "concepts/welcome.md")].get("text"),
-                    replies[("read", "concepts/welcome.md")].get("sha256"),
-                )
-                == (
-                    (brain / "concepts/welcome.md").read_text(),
-                    hashlib.sha256((brain / "concepts/welcome.md").read_bytes()).hexdigest(),
-                ),
-                "projects": any(
-                    item.get("ref") == "projects/package.md" for item in replies[("read", "projects")].get("items", [])
-                ),
-                "tasks": any(
-                    item.get("ref") == "projects/package.md#next"
-                    and item.get("text") == "Inspect the installed task page."
-                    for item in replies[("read", "tasks")].get("items", [])
-                ),
-                "health": replies[("status", "--check")].get("healthy") is True
-                and replies[("status", "--check")].get("registered") is True,
-                "doctor": replies[("doctor",)].get("healthy") is True,
-                "evaluation": replies[("eval",)].get("passed") is True and bool(replies[("eval",)].get("cases")),
-            }
-            if failed := [name for name, passed in checks.items() if not passed]:
-                raise SystemExit(f"{artifact.name}: incorrect package smoke results: {', '.join(failed)}")
-            unreg_reply = json.loads(run(bf, "unregister", "brain", cwd=home, env=env, capture=True))
-            if unreg_reply.get("brain") != "brain":
-                raise SystemExit(f"{artifact.name}: unexpected bf unregister reply: {unreg_reply}")
-            # Callers supply the installed bf and a local brain path; no shell is used.
-            missing = subprocess.run(  # noqa: S603
-                [bf, "mcp", "--brain", str(brain)],
-                cwd=home,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
             )
-            if (missing.returncode, missing.stdout, missing.stderr) != (1, "", MISSING):
-                raise SystemExit(f"{artifact.name}: bf mcp without the mcp extra did not name the install")
-            if args.unlocked:
-                extra = f"brain-framework[mcp] @ {artifact.as_uri()}"
-                run(UV, "pip", "install", "--python", python, extra, cwd=home, env=env, timeout=600)
-            else:
-                # Inexact: keep the artifact installed above, which the lock's editable project is not.
-                run(*locked, "--extra", "mcp", "--inexact", "--active", cwd=home, env=env)
-            run(UV, "pip", "check", "--python", python, cwd=home, env=env)
-            run(python, "-I", "-c", MCP, bf, str(brain), cwd=home, env=env)
+            ingest_reply = json.loads(
+                run(bf, "ingest", "workspace", cwd=brain, env=env, capture=True, input_text=sample_records)
+            )
+            if ingest_reply.get("added") != 1 or ingest_reply.get("records") != 1:
+                raise SystemExit(f"{artifact.name}: unexpected bf ingest reply: {ingest_reply}")
+
+            (brain / "projects/package.md").write_text(
+                "---\ntype: project\nstatus: draft\nupdated: 2026-09-25\n---\n# Package check\n\n"
+                "## Next {#next owner=alice}\n\n"
+                "See [brief](../memories/workspace/29a8825bd242f14386ee528d76e0e8f1e38f3c8c4047d7b2d6df7493368a17d0.json){rel=cites} and [welcome](../concepts/welcome.md#conventions).\n"
+                "{: #decision-1 confidence=high}\n\n"
+                "- [ ] Inspect the compiled note record.\n"
+            )
+            build_reply = json.loads(run(bf, "build", cwd=brain, env=env, capture=True))
+            val_reply = json.loads(run(bf, "validate", cwd=brain, env=env, capture=True))
+            rev_reply = json.loads(run(bf, "review", cwd=brain, env=env, capture=True))
+            eval_reply = json.loads(run(bf, "eval", cwd=brain, env=env, capture=True))
+            read_reply = json.loads(run(bf, "read", "bf:///projects/package.md#next", cwd=brain, env=env, capture=True))
+            if (
+                build_reply.get("problems")
+                or not val_reply.get("valid")
+                or rev_reply.get("tasks_open") != 1
+                or not eval_reply.get("ok")
+                or "Inspect the compiled note record" not in read_reply.get("text", "")
+            ):
+                raise SystemExit(
+                    f"{artifact.name}: smoke check failed: {build_reply} / {val_reply} / {rev_reply} / {eval_reply}"
+                )
+            proj = json.loads((brain / "memories/projects/package.json").read_text())
+            if (
+                proj["headings"][1]["meta"] != {"owner": "alice"}
+                or proj["attrs"].get("next") != {"owner": "alice"}
+                or proj["attrs"].get("decision-1") != {"confidence": "high"}
+                or proj["links"][0]["meta"] != {"rel": "cites"}
+                or proj["elements"][0]["meta"] != {"confidence": "high"}
+            ):
+                raise SystemExit(f"{artifact.name}: compiled package.json missing attr_list metadata: {proj}")
 
 
 if __name__ == "__main__":

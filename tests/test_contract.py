@@ -243,7 +243,25 @@ def test_the_comparison_catches_breaking_changes() -> None:
 
 def test_reply_readers_keep_accepting_every_reply() -> None:
     # A client validating with its saved schema rejects a new freshness value, a reply without items or a null notice.
-    saved = document("search-reply")
+    saved: dict[str, object] = {
+        "type": "object",
+        "required": ["items", "notice"],
+        "properties": {
+            "items": {"type": "array", "items": {"$ref": "#/$defs/Item"}},
+            "notice": {"type": "string"},
+            "sources": {"type": "array", "items": {"$ref": "#/$defs/Coverage"}},
+        },
+        "$defs": {
+            "Coverage": {
+                "type": "object",
+                "properties": {"freshness": {"type": "string", "enum": ["fresh", "stale", "unknown"]}},
+            },
+            "Item": {
+                "type": "object",
+                "properties": {"newer": {"type": "array", "items": {"type": "string"}, "maxItems": 5}},
+            },
+        },
+    }
     minor = json.loads(json.dumps(saved))
     minor["$defs"]["Coverage"]["properties"]["freshness"]["enum"].append("paused")
     minor["required"].remove("items")

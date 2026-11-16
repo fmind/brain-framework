@@ -2,9 +2,6 @@
 """Collect one GitHub repository's issues updated in the window through the owner's gh CLI.
 
 Usage: github-issues.py OWNER/REPO START END
-
-Each issue sets `@type` to `"Issue"` and asserts `repository`, `author`, `assignee` and lowercase
-`label:github.com/OWNER/REPO/NAME` `label` edges directly under `relations`.
 """
 
 from __future__ import annotations
@@ -211,22 +208,20 @@ def make_record(
     relations: dict[str, list[str]],
     attributes: dict[str, object],
 ) -> dict[str, Any]:
+    _ = aliases, relations
     out: dict[str, Any] = {
         "id": identifier,
         "title": line(title, identifier),
-        "@type": item_type,
+        "type": item_type.lower(),
         "text": text,
         "time": iso_utc(time_value),
     }
+    if isinstance(attributes.get("status"), str) and attributes["status"]:
+        out["status"] = attributes["status"]
+    if isinstance(attributes.get("updated"), str) and attributes["updated"]:
+        out["updated"] = iso_utc(str(attributes["updated"]))
     if valid_url := reference(url):
         out["url"] = valid_url
-    valid_aliases = sorted({a for a in aliases if reference(a)})
-    if valid_aliases:
-        out["aliases"] = valid_aliases
-    cleaned = {k: list(dict.fromkeys(r for r in v if reference(r)))[:MAX_LINKS] for k, v in relations.items()}
-    nonempty = {k: v for k, v in cleaned.items() if v}
-    if nonempty:
-        out["relations"] = nonempty
     if attributes:
         out["attributes"] = attributes
     return out

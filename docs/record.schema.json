@@ -1,0 +1,125 @@
+{
+  "$defs": {
+    "Element": {
+      "additionalProperties": false,
+      "properties": {
+        "id": { "maxLength": 256, "type": "string" },
+        "meta": { "$ref": "#/$defs/Meta" },
+        "section": { "maxLength": 256, "type": "string" },
+        "tag": { "maxLength": 64, "minLength": 1, "type": "string" },
+        "text": { "maxLength": 16384, "type": "string" }
+      },
+      "required": ["tag", "id", "text", "section", "meta"],
+      "title": "Element",
+      "type": "object"
+    },
+    "Heading": {
+      "additionalProperties": false,
+      "properties": {
+        "id": { "maxLength": 256, "minLength": 1, "type": "string" },
+        "level": { "maximum": 6, "minimum": 1, "type": "integer" },
+        "meta": { "$ref": "#/$defs/Meta" },
+        "title": { "maxLength": 4096, "type": "string" }
+      },
+      "required": ["id", "title", "level", "meta"],
+      "title": "Heading",
+      "type": "object"
+    },
+    "Link": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor": { "maxLength": 2048, "type": "string" },
+        "kind": { "enum": ["note", "record", "brain", "url"], "type": "string" },
+        "meta": { "$ref": "#/$defs/Meta" },
+        "section": { "maxLength": 256, "type": "string" },
+        "to": { "maxLength": 8192, "minLength": 1, "type": "string" }
+      },
+      "required": ["to", "kind", "anchor", "meta", "section"],
+      "title": "Link",
+      "type": "object"
+    },
+    "Meta": {
+      "additionalProperties": { "maxLength": 4096, "type": "string" },
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$" },
+      "title": "Meta",
+      "type": "object"
+    },
+    "Task": {
+      "additionalProperties": false,
+      "properties": {
+        "done": { "type": "boolean" },
+        "id": { "maxLength": 256, "minLength": 1, "type": "string" },
+        "meta": { "$ref": "#/$defs/Meta" },
+        "section": { "maxLength": 256, "type": "string" },
+        "text": { "maxLength": 4096, "minLength": 1, "type": "string" }
+      },
+      "required": ["text", "done", "section", "meta"],
+      "title": "Task",
+      "type": "object"
+    }
+  },
+  "$id": "https://fmind.github.io/brain-framework/record.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "description": "Unified JSON record schema enforced on compiled Markdown notes and ingested sensor records in memories/.",
+  "properties": {
+    "aliases": { "items": { "maxLength": 1024, "minLength": 1, "type": "string" }, "maxItems": 200, "type": "array" },
+    "attributes": { "type": "object" },
+    "attrs": {
+      "additionalProperties": { "$ref": "#/$defs/Meta" },
+      "propertyNames": { "maxLength": 256, "minLength": 1, "type": "string" },
+      "type": "object"
+    },
+    "description": { "maxLength": 16384, "type": "string" },
+    "elements": { "items": { "$ref": "#/$defs/Element" }, "type": "array" },
+    "headings": { "items": { "$ref": "#/$defs/Heading" }, "type": "array" },
+    "id": { "maxLength": 4096, "minLength": 1, "type": "string" },
+    "kind": { "enum": ["project", "concept", "action", "memory"], "type": "string" },
+    "links": {
+      "items": { "anyOf": [{ "maxLength": 8192, "minLength": 1, "type": "string" }, { "$ref": "#/$defs/Link" }] },
+      "maxItems": 2000,
+      "type": "array"
+    },
+    "ref": { "maxLength": 4200, "minLength": 1, "type": "string" },
+    "relations": {
+      "anyOf": [{ "type": "object" }, { "items": { "type": "object" }, "maxItems": 2000, "type": "array" }]
+    },
+    "sha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+    "source": { "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
+    "stale_after": {
+      "anyOf": [
+        { "maximum": 36500, "minimum": 1, "type": "integer" },
+        { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" },
+        {
+          "minLength": 10,
+          "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$",
+          "type": "string"
+        }
+      ]
+    },
+    "status": { "maxLength": 128, "minLength": 1, "type": "string" },
+    "summary": { "maxLength": 16384, "type": "string" },
+    "tags": {
+      "items": { "maxLength": 128, "minLength": 1, "pattern": "^[^/\\\\\\s]+$", "type": "string" },
+      "maxItems": 200,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "tasks": { "items": { "$ref": "#/$defs/Task" }, "type": "array" },
+    "text": { "maxLength": 4194304, "type": "string" },
+    "time": {
+      "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
+      "type": "string"
+    },
+    "title": { "maxLength": 4096, "minLength": 1, "type": "string" },
+    "type": { "maxLength": 128, "minLength": 1, "type": "string" },
+    "updated": {
+      "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$",
+      "type": "string"
+    },
+    "url": { "maxLength": 8192, "type": "string" }
+  },
+  "required": ["id", "title"],
+  "title": "Record",
+  "type": "object"
+}

@@ -1,6 +1,6 @@
 # Security policy
 
-`bf` stores a concentrated local history of a person's work and can execute commands declared by a selected brain. Please report security defects privately.
+`bf` stores and validates a concentrated local history of a person's notes and activity records. Please report security defects privately.
 
 ## Supported versions
 
@@ -16,4 +16,4 @@ Include the affected version, operating system, impact, minimal reproduction, an
 
 The maintainer will acknowledge reports and coordinate validation, remediation, and disclosure on a best-effort basis. Please allow time for a fix before publishing details.
 
-The documented credential, execution, path, and storage boundaries are in [Privacy and security](https://fmind.github.io/brain-framework/docs/privacy/). Its [trust boundaries](https://fmind.github.io/brain-framework/docs/privacy/#trust-boundaries) separate what BF enforces from what channel adapters, agent harnesses and your reviews must enforce. A behavior documented in [Limits and safeguards](https://fmind.github.io/brain-framework/docs/limits/) may be a product constraint rather than a vulnerability, but private reports are still welcome when the impact is unclear.
+The documented credential, path, and storage boundaries are in [Operations](https://fmind.github.io/brain-framework/operations/), and file limits and validation contracts are in [Reference](https://fmind.github.io/brain-framework/reference/). Private reports are welcome whenever a boundary's security impact is unclear.

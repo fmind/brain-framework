@@ -1,107 +1,24 @@
-"""Hermetic state, a synthetic decision-recovery corpus, and fake provider executables for adapters."""
+"""Hermetic test environment, fake CLI provider harness, and starter brain fixture."""
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import best_match
-from pydantic import TypeAdapter
 
-from bf import health, replies, retrieve, schemas
-from bf.config import register
-from bf.models import MAX_REPLY, Record, encode
-from bf.records import path as record_path
+from bf import engine, records
 from bf.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
-# Host settings that change Rich and Typer output: width, color, forced terminal behavior and Typer's Rich switch.
-TERMINAL = (
-    "COLUMNS",
-    "LINES",
-    "FORCE_COLOR",
-    "NO_COLOR",
-    "PY_COLORS",
-    "TERMINAL_WIDTH",
-    "TTY_COMPATIBLE",
-    "TTY_INTERACTIVE",
-    "GITHUB_ACTIONS",
-    "TYPER_USE_RICH",
-    "_TYPER_FORCE_DISABLE_TERMINAL",
-)
-
-
-def assert_linear_time(operation: Callable[[int], object], size: int) -> None:
-    """Four times the input must cost less than eight times the CPU, versus sixteen for quadratic work."""
-    sizes = (size // 4, size)
-    operation(sizes[0])  # Warm imports, caches and the interpreter before either measurement.
-    samples: dict[int, list[float]] = {n: [] for n in sizes}
-    for _ in range(3):
-        for n in sizes:
-            # Repeat a fast operation until the CPU clock, coarse on some hosts, measures it reliably.
-            started, repeats = time.process_time(), 0
-            while not repeats or time.process_time() - started < 0.02:
-                operation(n)
-                repeats += 1
-            samples[n].append((time.process_time() - started) / repeats)
-    # CPU time excludes runner scheduling delays; minima discard GC and other transient overhead.
-    small, large = (min(samples[n]) for n in sizes)
-    assert large < 8 * small, f"4x input took {large / max(small, 1e-9):.2f}x CPU time ({small:.6f}s -> {large:.6f}s)"
-
-
-def pytest_configure() -> None:
-    """Run every test in UTC on any host; tests of local dates choose their own zone in a subprocess."""
-    # Typer reads TYPER_USE_RICH once, when test modules import bf.cli, before `isolated` could unset it. The other
-    # TERMINAL names stay for pytest's own report: `isolated` clears them in each test, where Typer and Rich read them.
-    os.environ.pop("TYPER_USE_RICH", None)
-    os.environ["TZ"] = "UTC"
-    if hasattr(time, "tzset"):
-        time.tzset()
-    elif datetime.now().astimezone().utcoffset():
-        # Some Intel macOS Python builds omit tzset, so TZ applies only from interpreter startup.
-        pytest.exit("run the tests with TZ=UTC: this Python cannot change its timezone at runtime", returncode=4)
-
-
-def plain(text: str) -> str:
-    """Terminal text without ANSI styles, which Typer and Rich emit when a terminal or CI forces colors."""
-    return re.sub(r"\x1b\[[0-9;]*m", "", text)
-
-
-# Walkthrough tests compare a page's documented replies with its commands' output.
-BLOCK = re.compile(r"^```(\w*)\n(.*?)^```$", re.MULTILINE | re.DOTALL)  # A fenced block's language and body.
-FRAGMENT = re.compile(r'`("[a-z_]+":[^`]+)`')  # An inline reply fragment such as `"score":"3/3"`.
-
-
-def within(actual: object, expected: object) -> bool:
-    """Whether every documented key and value is present; lists match item by item, so lists of scalars exactly."""
-    if isinstance(expected, dict):
-        return isinstance(actual, dict) and all(k in actual and within(actual[k], v) for k, v in expected.items())
-    if isinstance(expected, list):
-        return (
-            isinstance(actual, list)
-            and len(actual) == len(expected)
-            and all(within(a, e) for a, e in zip(actual, expected, strict=True))
-        )
-    return actual == expected
-
-
-def anywhere(actual: object, expected: object) -> bool:
-    """Whether the documented object matches the reply or one object nested in it, such as a search item."""
-    if within(actual, expected):
-        return True
-    children = actual.values() if isinstance(actual, dict) else actual if isinstance(actual, list) else []
-    return any(anywhere(child, expected) for child in children)
-
 
 _FAKE = '''#!{python}
 """Answer argv patterns from a JSON script once each unless repeated; record every call."""
@@ -125,6 +42,15 @@ sys.exit(97)
 '''
 
 
+def pytest_configure() -> None:
+    """Run every test in UTC on any host."""
+    os.environ["TZ"] = "UTC"
+    if hasattr(time, "tzset"):
+        time.tzset()
+    elif datetime.now().astimezone().utcoffset():
+        pytest.exit("run the tests with TZ=UTC: this Python cannot change its timezone at runtime", returncode=4)
+
+
 @dataclass
 class Provider:
     """Fake provider executables on a private PATH plus an adapter runner."""
@@ -133,7 +59,6 @@ class Provider:
     state: Path
 
     def install(self, name: str, responses: Sequence[Mapping[str, object]]) -> Path:
-        """Each response has `match` substrings (all must occur in argv) and optional stdout, stderr, code, repeat."""
         script, used, calls = (self.state / f"{name}.{suffix}" for suffix in ("responses.json", "used.json", "calls"))
         script.write_text(json.dumps(list(responses)))
         used.unlink(missing_ok=True)
@@ -161,10 +86,9 @@ class Provider:
             "HOME": str(home or self.state / "home"),
             "PYTHONDONTWRITEBYTECODE": "1",
             "LANG": "C.UTF-8",
-            # Adapters that derive local dates follow the suite's pinned timezone unless a test chooses one.
             "TZ": os.environ.get("TZ", "UTC"),
         }
-        return subprocess.run(  # noqa: S603 - the subject is the adapter's own process boundary
+        return subprocess.run(  # noqa: S603
             [sys.executable, str(ROOT / "examples" / folder / adapter), *arguments],
             env=env,
             input=stdin,
@@ -174,10 +98,10 @@ class Provider:
             check=False,
         )
 
-    def records(self, adapter: str, *arguments: str, home: Path | None = None) -> list[Record]:
+    def records(self, adapter: str, *arguments: str, home: Path | None = None) -> list[dict[str, Any]]:
         result = self.run(adapter, *arguments, home=home)
         assert result.returncode == 0, result.stderr
-        return TypeAdapter(list[Record]).validate_python(json.loads(result.stdout))
+        return records.parse_batch(result.stdout.encode())
 
 
 @pytest.fixture
@@ -188,54 +112,6 @@ def provider(tmp_path: Path) -> Provider:
     return Provider(tmp_path / "bin", state)
 
 
-# Every reply a test produces must match the strict declaration of its kind, which rejects undeclared fields, and
-# that kind's published schema a client validates against, as MCP clients do with `outputSchema`. The open search
-# schema alone would also accept many read pages.
-_REPLIES: dict[schemas.Kind, dict[str, object]] = {
-    "search-reply": replies.SEARCH,
-    "read-reply": replies.READ,
-    "status-reply": replies.STATUS,
-    "doctor-reply": replies.DOCTOR,
-}
-_STRICT = {kind: Draft202012Validator(schema) for kind, schema in _REPLIES.items()}
-_PUBLISHED = {kind: Draft202012Validator(schemas.document(kind)) for kind in _REPLIES}
-
-
-def _published(kind: schemas.Kind, result: dict[str, object]) -> None:
-    error = best_match(_STRICT[kind].iter_errors(result))
-    assert error is None, f"{list(error.absolute_path)}: {error.message[:300]}"
-    assert _PUBLISHED[kind].is_valid(result), f"the published {kind} schema rejects it"
-
-
-@pytest.fixture(autouse=True)
-def published_replies(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Search and read replies return through `bounded`, status/doctor replies from `health`: validate each one
-    against its kind's reply schemas. Tests call `health.report`/`health.doctor` through the module."""
-    bounded, report, doctor = retrieve.bounded, health.report, getattr(health, "doctor", None)
-
-    def checked(value: dict[str, object], limit: int = MAX_REPLY) -> dict[str, object]:
-        result = bounded(value, limit)
-        # Every read shape requires `page` or `sha256`, which the strict search declaration forbids.
-        _published("read-reply" if "page" in result or "sha256" in result else "search-reply", result)
-        return result
-
-    def status(store: Store, now: datetime | None = None) -> dict[str, object]:
-        result = report(store, now)
-        _published("status-reply", result)
-        return result
-
-    monkeypatch.setattr(retrieve, "bounded", checked)
-    monkeypatch.setattr(health, "report", status)
-    if doctor is not None:
-
-        def checked_doctor(store: Store, *args: object, **kwargs: object) -> dict[str, object]:
-            result = doctor(store, *args, **kwargs)
-            _published("doctor-reply", result)
-            return result
-
-        monkeypatch.setattr(health, "doctor", checked_doctor)
-
-
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     home = tmp_path / "home"
@@ -244,66 +120,52 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(home / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     monkeypatch.delenv("BF_BRAIN", raising=False)
+    monkeypatch.delenv("DEFAULT_BRAIN_PATH", raising=False)
     monkeypatch.chdir(tmp_path)
     for key in tuple(os.environ):
-        if key.startswith("GIT_") or key in TERMINAL:
+        if key.startswith("GIT_"):
             monkeypatch.delenv(key)
-
-
-PROJECT = b"""---
-type: project
-status: draft
-updated: 2026-09-01
-tags: [retention]
-aliases: ["repo:example/project"]
----
-
-# Offline retrieval
-
-Keep stored reads offline. Decided in [the meeting](meetings:decision-1).
-
-## Decision
-
-Provider retention cannot guarantee historical evidence, so the team keeps durable records.
-
-## Next actions
-
-- Publish the retention guide.
-"""
-
-
-def records_file(store: Store, source: str, records: list[Record]) -> None:
-    """Write each record to its own SHA-256-named file, as collection does."""
-    for record in records:
-        store.write(record_path(source, record.id), encode(record.model_dump(exclude_defaults=True)), durable=False)
 
 
 @pytest.fixture
 def brain(tmp_path: Path) -> Store:
-    """A registered brain with one project note, one concept and two records."""
+    """An initialized brain with one concept, one project note, and two sensor records."""
     root = tmp_path / "brain"
-    root.mkdir()
+    engine.init_brain(root, name="fixture")
     store = Store(root)
-    store.write("bf.yaml", b"version: 11\nname: fixture\njobs: {}\n")
-    store.write("projects/offline.md", PROJECT)
-    store.write(
-        "concepts/evidence.md",
-        b"---\ntype: concept\nstatus: stable\n---\n\n# Durable evidence\n\nOriginals outlive providers.\n",
-    )
-    records_file(
+    records.ingest(
         store,
         "meetings",
-        [
-            Record(
-                id="decision-1",
-                title="Preserve durable evidence",
-                text="The team chose offline retrieval.",
-                time="2026-08-31T12:00:00Z",
-                links=["repo:example/project"],
-                aliases=["meeting:decision-1"],
-            ),
-            Record(id="lunch", title="Lunch plans", text="Meet for lunch on Tuesday.", time="2026-08-30T12:00:00Z"),
-        ],
+        json.dumps(
+            [
+                {
+                    "id": "decision-1",
+                    "title": "Preserve durable evidence",
+                    "text": "The team chose offline JSONL retrieval.",
+                    "time": "2026-08-31T12:00:00Z",
+                    "updated": "2026-08-31T12:00:00Z",
+                    "links": ["projects/offline.md"],
+                },
+                {
+                    "id": "lunch",
+                    "title": "Lunch plans",
+                    "text": "Meet for lunch on Tuesday.",
+                    "time": "2026-08-30T12:00:00Z",
+                    "updated": "2026-08-30T12:00:00Z",
+                },
+            ]
+        ).encode(),
     )
-    register(store)
+    store.write(
+        "projects/offline.md",
+        b"---\ntype: project\nstatus: draft\nupdated: 2026-09-01\ntags: [retention]\n---\n\n"
+        b"# Offline retrieval\n\n"
+        b"Keep stored reads offline. Decided in [the meeting](../memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json){rel=cites}.\n"
+        b"{: #summary confidence=high}\n\n"
+        b"## Decision {#decision owner=alice}\n\n"
+        b"Provider retention cannot guarantee historical evidence, so the team keeps durable JSONL records.\n\n"
+        b"## Next actions\n\n"
+        b"- [ ] Publish the retention guide.\n",
+    )
+    engine.build(store)
     return store

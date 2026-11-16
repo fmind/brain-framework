@@ -1,8 +1,8 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "25.0.0"
-description = "Brain Framework is a local-first brain for you and your AI agents. It collects evidence from your tools into plain files you own, connects them through an ontology you declare, lets any agent harness search and read offline, and wakes your harness when declarative when: rules or reviewed gates spot new evidence."
+version = "26.0.0"
+description = "Brain Framework is a local-first brain for you and your AI agents. It compiles OKF Markdown notes into JSON records, validates notes, records, logs, and evals against JSON Schemas, orchestrates jobs and MCP servers, and queries offline with rg, jq, and DuckDB."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
@@ -15,12 +15,14 @@ keywords = [
   "agent-skills",
   "agents-md",
   "context-engineering",
+  "duckdb",
+  "json",
+  "json-schema",
   "knowledge-graph",
   "knowledge-management",
   "local-first",
   "mcp",
   "model-context-protocol",
-  "ontology",
   "personal-knowledge-management",
   "python",
   "second-brain",
@@ -38,16 +40,14 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "markdown-it-py>=4.2.0,<5",
-  "pydantic>=2.13.5,<3",
+  "durationpy>=0.11,<1",
+  "jsonschema>=4.26.0,<5",
+  "markdown>=3.11,<4",
+  "mcp>=2.1.1,<3",
   "pyyaml>=6.0.3,<7",
   "rich>=15.0.0,<16",
-  "typer>=0.27.2",
+  "watchfiles>=1.1.0,<2",
 ]
-
-[project.optional-dependencies]
-# `bf mcp` only: most people call the CLI, and the MCP SDK brings most of the runtime closure.
-mcp = ["mcp>=2.1.1,<3"]
 
 [project.urls]
 Changelog = "https://fmind.github.io/brain-framework/changelog/"
@@ -68,11 +68,6 @@ module-name = "bf"
 
 [dependency-groups]
 dev = [
-  # The checkout tests and documents `bf mcp`, so its environment always holds the optional MCP SDK.
-  "brain-framework[mcp]",
-  "jsonschema>=4.26.0,<5",
-  # Imported directly by tests/test_readme.py: Zensical slugs headings with Python-Markdown.
-  "markdown>=3.11",
   # Imported directly by scripts/notices.py to parse requirements and normalize names.
   "packaging>=26.3",
   "pytest-cov>=7.1.0",
@@ -136,24 +131,16 @@ select = [
   "W", # Enforce pycodestyle warnings.
 ]
 ignore = [
-  "ASYNC240", # Brain Framework performs bounded local filesystem work from async MCP handlers.
   "E501", # Long CLI help and schema descriptions are clearer as one string.
   "PLW0108", # Unnecessary-lambda is style outside Ruff's default set.
   "PLW2901", # Deliberate loop-variable rebinding is outside Ruff's default set.
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"examples/channels/**" = [
-  "S603", # Channel adapters invoke notifier CLIs with literal argv lists and no shell.
-]
-"examples/hooks/**" = [
-  "BLE001", # Silent hooks must exit 0 with no output on any unexpected error.
-  "S607", # Hooks resolve `git` by bare name on PATH with literal arguments.
-]
 "examples/sensors/**" = [
   "S603", # Adapters invoke provider CLIs with literal argv lists; no shell is involved.
-  "S607", # Provider CLIs are resolved by bare name on the PATH Brain Framework sanitizes.
-  "T201", # Adapters print exactly one JSON array to stdout.
+  "S607", # Provider CLIs are resolved by bare name on PATH.
+  "T201", # Adapters print JSON records to stdout.
 ]
 "tests/**" = [
   "BLE001", # Worker-thread test helpers record any exception so the test thread can assert on it.

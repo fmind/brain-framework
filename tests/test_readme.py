@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import html
 import re
-from itertools import pairwise
 from pathlib import Path
 
-from markdown.extensions.toc import slugify  # Zensical renders headings with Python-Markdown's toc extension
-from markdown_it import MarkdownIt
+import markdown
 
 ROOT = Path(__file__).parent.parent
-DOCS = "https://fmind.github.io/brain-framework/docs/"
+DOCS = "https://fmind.github.io/brain-framework/"
 HOME = "https://github.com/fmind/brain-framework"
 REPOSITORY = re.compile(r"https://github\.com/fmind/brain-framework/(?:blob|tree)/main/(?P<path>[^#)]+)")
 RAW = re.compile(r"https://raw\.githubusercontent\.com/fmind/brain-framework/main/(?P<path>[^?#]+)")
@@ -24,24 +23,21 @@ def github_slug(title: str) -> str:
 
 def anchors(path: Path, *, site: bool) -> set[str]:
     """HTML ids and heading anchors as the documentation site (Python-Markdown `toc`) or GitHub renders them."""
-    text = re.sub(r"\A---\n.*?\n---\n", "", path.read_text(), flags=re.DOTALL)  # front matter is no heading
+    text = re.sub(r"\A---\n.*?\n---\n", "", path.read_text(), flags=re.DOTALL)
     text = re.sub(
         r'^--8<--\s+"([^"]+)"\s*$',
         lambda match: (ROOT / match[1]).read_text(),
         text,
         flags=re.MULTILINE,
     )
+    if site:
+        rendered = markdown.Markdown(extensions=["extra", "toc"]).convert(text)
+        return set(re.findall(r'\bid="([^"]+)"', rendered))
     found = set(re.findall(r'\bid="([^"]+)"', text))
-    tokens = MarkdownIt().parse(text)
-    for token, inline in pairwise(tokens):
-        if token.type == "heading_open":
-            title = "".join(child.content for child in inline.children or [] if child.type in {"text", "code_inline"})
-            if not site:
-                found.add(github_slug(title))
-            elif explicit := re.search(r"\s*\{#([^}\s]+)\}\s*$", title):  # attr_list; GitHub shows it as text
-                found.add(explicit[1])
-            else:
-                found.add(slugify(title, "-"))
+    rendered = markdown.Markdown(extensions=["fenced_code", "tables"]).convert(text)
+    for heading_html in re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", rendered, flags=re.DOTALL):
+        plain = html.unescape(re.sub(r"<[^>]+>", "", heading_html)).strip()
+        found.add(github_slug(plain))
     return found
 
 
@@ -53,20 +49,8 @@ def test_anchor_rules_follow_each_renderer(tmp_path: Path) -> None:
 
 
 def test_readme_links_are_absolute_and_resolve_to_this_checkout() -> None:
-    tokens = MarkdownIt().parse((ROOT / "README.md").read_text())
-    links = [
-        str(child.attrGet("src" if child.type == "image" else "href"))
-        for token in tokens
-        for child in token.children or []
-        if child.type in {"link_open", "image"}
-    ]
-    # The logo and diagrams are HTML blocks, whose image and link targets the Markdown tokens do not expose.
-    links += [
-        link
-        for token in tokens
-        if token.type == "html_block"
-        for link in re.findall(r'\b(?:href|src)="([^"]+)"', token.content)
-    ]
+    rendered = markdown.Markdown(extensions=["extra"]).convert((ROOT / "README.md").read_text())
+    links = [html.unescape(url) for url in re.findall(r'<(?:a|img)\b[^>]*?\b(?:href|src)="([^"]+)"', rendered)]
     assert links
     for link in links:
         assert link.startswith("https://"), f"PyPI cannot resolve relative README link {link}"
@@ -79,7 +63,7 @@ def test_readme_links_are_absolute_and_resolve_to_this_checkout() -> None:
             assert (ROOT / ".github/workflows" / match["file"]).is_file(), link
         elif link.startswith(DOCS):
             page = address.removeprefix(DOCS).strip("/") or "index"
-            target = ROOT / "docs/docs" / f"{page}.md"
+            target = ROOT / "docs" / f"{page}.md"
             assert target.is_file(), link
         elif address == HOME:
             target = ROOT / "README.md"

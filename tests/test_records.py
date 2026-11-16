@@ -1,728 +1,246 @@
-"""Independent JSON record files preserve identity, revisions and transactional recovery."""
+"""Tests for JSON Schemas, pure JSON per-record ingestion, .forgotten, incomplete envelopes, and events."""
 
 from __future__ import annotations
 
-import errno
 import json
-import os
-import re
-import sqlite3
-import stat
-import subprocess
-import sys
-from collections.abc import Callable
-from pathlib import Path
-from typing import cast
+from datetime import UTC, datetime
 
 import pytest
-from pydantic import ValidationError
 
-from bf import index, records, retrieve, storage
-from bf.collect import collect, reproject
-from bf.config import register
-from bf.models import MAX_FIELDS, MAX_RECORD, Error, Query, Record, encode
-from bf.storage import Store, writer
-from bf.update import update
-from conftest import records_file
-
-DECISION = records.path("meetings", "decision-1")
-NEW = records.path("meetings", "new")
+from bf import records, schemas
+from bf.models import MAX_BATCH, Error, InputError, decode
+from bf.storage import Store
 
 
-def test_fields_beside_text_stay_within_a_readable_size() -> None:
-    # An exact read pages only a record's text, so every other field must fit its first page.
-    half = "x" * (MAX_FIELDS // 2)
-    assert Record(id="long", title="Long text", text=half * 4).text
-    with pytest.raises(ValidationError, match="fields other than text exceed 2 MiB"):
-        Record(id="bulky", title="Bulky", attributes={"a": half, "b": half})
-    with pytest.raises(ValidationError, match="fields other than text exceed 2 MiB"):
-        Record(id="linked", title="Linked", links=[f"repo:example/{n}-" + "y" * 4000 for n in range(600)])
-    # The reply limit counts bytes: 1.2 million characters of euro signs encode to 3.6 MB.
-    with pytest.raises(ValidationError, match="fields other than text exceed 2 MiB"):
-        Record(id="euros", title="Euros", links=[f"repo:example/{n}-" + "€" * 4000 for n in range(300)])
-    # A record file of up to 16 MiB could hold millions of invalid key names: one error names the whole map.
-    for key in ("attributes", "relations"):
-        with pytest.raises(ValidationError) as raised:
-            Record.model_validate({"id": "many", "title": "Many", key: {f"k{n}": "v" for n in range(100_000)}})
-        assert raised.value.error_count() == 1
-        assert f"{key} hold at most 1,000 names" in str(raised.value)
+def test_schemas_compile_and_describe_all_validation_rules(brain: Store) -> None:
+    for kind in ("brain", "record", "concepts", "logs", "evals"):
+        doc = schemas.document(kind)
+        assert doc["$schema"].endswith("2020-12/schema")
 
+    with pytest.raises(Error, match="must be a JSON object"):
+        schemas.compile_schema(["not", "an", "object"], "bad.json")
+    with pytest.raises(Error, match="invalid JSON Schema"):
+        schemas.compile_schema({"type": "not-a-json-schema-type"}, "bad.json")
 
-def test_window_upsert_adds_updates_moves_and_keeps_unchanged(brain: Store) -> None:
-    moved = Record(id="decision-1", title="Preserve durable evidence", time="2026-09-02T00:00:00Z")
-    new = Record(id="new", title="New item", time="2026-09-03T00:00:00Z")
-    same = Record(id="lunch", title="Lunch plans", text="Meet for lunch on Tuesday.", time="2026-08-30T12:00:00Z")
-    untouched = brain.fingerprint(records.path("meetings", "lunch"))
-    assert records.upsert(brain, "meetings", [moved, new, same], snapshot=False) == {
-        "added": 1,
-        "updated": 1,
-        "unchanged": 1,
-        "removed": 0,
-    }
-    assert brain.fingerprint(records.path("meetings", "lunch")) == untouched
-    assert records.load(brain, DECISION).id == "decision-1"
-    found = records.find(brain, "meetings", "decision-1")
-    assert found is not None
-    assert found[1].time.startswith("2026-09")
-    assert records.upsert(brain, "meetings", [same], snapshot=False)["unchanged"] == 1
-    assert records.upsert(brain, "meetings", [], snapshot=False)["added"] == 0
-    records.upsert(brain, "meetings", [Record(id="loose", title="No time")], snapshot=False)
-    assert records.load(brain, records.path("meetings", "loose")).id == "loose"
+    assert schemas.load_validator(brain, "schemas/nonexistent.json") is None
 
-
-def test_snapshot_replaces_the_complete_catalog(brain: Store) -> None:
-    folders = [Record(id="a", title="A"), Record(id="b", title="B")]
-    assert records.upsert(brain, "folders", folders, snapshot=True)["added"] == 2
-    counts = records.upsert(brain, "folders", [Record(id="b", title="B")], snapshot=True)
-    assert counts == {"added": 0, "updated": 0, "unchanged": 1, "removed": 1}
-    assert records.files(brain, "folders") == [records.path("folders", "b")]
-    assert records.upsert(brain, "folders", [], snapshot=True)["removed"] == 1
-    assert records.files(brain, "folders") == []
-    # Switching to snapshot mode retires records absent from the complete catalog.
-    records.upsert(brain, "meetings", [Record(id="only", title="Only")], snapshot=True)
-    assert records.files(brain, "meetings") == [records.path("meetings", "only")]
-
-
-def test_an_oversized_change_fails_like_other_collection_errors(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A first backfill beyond the journal's bound is a failed operation naming the fix, never invalid input. The
-    # bound leaves room for the manifest beside one backup per change in the scanned memories/.pending.
-    monkeypatch.setattr(records, "MAX_FILES", 3)
-    with pytest.raises(Error, match="at most 2 records; narrow the window or split the source"):
-        records.upsert(brain, "catalog", [Record(id=str(n), title=f"Item {n}") for n in range(3)], snapshot=True)
-    assert not (brain.root / "memories/catalog").exists()
-
-
-def test_collection_stops_below_the_scan_limit_of_its_source(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(records, "MAX_FILES", 4)
-    records.upsert(brain, "catalog", [Record(id=str(n), title=f"Item {n}") for n in range(3)], snapshot=False)
-    # Before 17 a window kept adding past the limit, and every search and read of the brain then failed.
-    with pytest.raises(Error, match="memories/catalog would exceed the 4-entry scan limit; split its sensor"):
-        records.upsert(brain, "catalog", [Record(id=str(n), title=f"Item {n}") for n in range(3, 5)], snapshot=False)
-    assert len(list((brain.root / "memories/catalog").iterdir())) == 3
-    # Replacing records in place, or adding up to the limit, still commits.
-    assert records.upsert(
-        brain, "catalog", [Record(id="0", title="Changed"), Record(id="3", title="Item 3")], snapshot=False
-    ) == {
-        "added": 1,
-        "updated": 1,
-        "unchanged": 0,
-        "removed": 0,
-    }
-
-
-def test_collection_parses_only_the_files_it_replaces_or_removes(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    records.upsert(brain, "catalog", [Record(id=str(n), title=f"Item {n}") for n in range(20)], snapshot=True)
-    loaded: list[str] = []
-    original = records.load
-
-    def counted(store: Store, name: str) -> Record:
-        loaded.append(name)
-        return original(store, name)
-
-    monkeypatch.setattr(records, "load", counted)
-    records.upsert(brain, "catalog", [Record(id="3", title="Changed")], snapshot=False)
-    assert loaded == [records.path("catalog", "3")]
-    loaded.clear()
-    kept = [Record(id=str(n), title=f"Item {n}") for n in range(18)]
-    assert records.upsert(brain, "catalog", kept, snapshot=True)["removed"] == 2
-    # A snapshot parses what it keeps and removes; unchanged files stay byte-identical.
-    assert sorted(loaded) == sorted(records.path("catalog", str(n)) for n in range(20))
-
-
-def test_absent_record_parses_the_source_unless_a_ready_cache_already_did(
-    brain: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    index.refresh(brain)
-    loaded: list[str] = []
-    original = brain.stamped
-
-    def counted(name: str, limit: int = MAX_RECORD) -> tuple[bytes, int]:
-        # The record files a lookup opens; other reads, such as bf.yaml, prove nothing about absence.
-        if name.startswith("memories/"):
-            loaded.append(name)
-        return original(name, limit)
-
-    monkeypatch.setattr(brain, "stamped", counted)
-    absent = records.path("meetings", "absent")
-    assert records.find(brain, "meetings", "absent") is None
-    assert loaded == [absent, DECISION, records.path("meetings", "lunch")]
-    loaded.clear()
-    assert records.find(brain, "meetings", "absent", complete=True) is None
-    assert loaded == [absent]
-    loaded.clear()
-    # Exact reads pass `complete` only from a ready cache that reported no problem in the source.
-    with pytest.raises(Error, match="not found"):
-        retrieve.read(brain, "meetings:absent")
-    assert loaded == [absent]
-    brain.write(records.path("meetings", "misnamed"), b'{"id":"elsewhere","title":"Misnamed"}\n')
-    with pytest.raises(Error, match="SHA-256 filename"):
-        retrieve.read(brain, "meetings:elsewhere")
-
-
-def test_find_reads_records_without_the_cache(brain: Store) -> None:
-    found = records.find(brain, "meetings", "decision-1")
-    assert found is not None
-    assert found[0] == DECISION
-    assert found[1].aliases == ["meeting:decision-1"]
-    assert records.find(brain, "meetings", "absent") is None
-    assert records.find(brain, "Bad Source", "x") is None
-
-
-def test_invalid_record_files_name_their_location(brain: Store) -> None:
-    target = records.path("bad", "x")
-    brain.write(target, b'{"id":"x","title":"ok"}\n{"id":"y"}\n')
-    with pytest.raises(Error, match="invalid JSON document"):
-        records.load(brain, target)
-    brain.write(target, b'{"id":"x","id":"y"}\n')
-    with pytest.raises(Error, match="JSON contains a duplicate key"):
-        records.load(brain, target)
-    brain.write("memories/bad/notes.txt", b"ignored")
-    assert records.files(brain, "bad") == [target]
-
-
-def test_invalid_record_keys_stay_out_of_diagnostics(brain: Store) -> None:
-    path = records.path("bad", "x")
-    brain.write(path, b'{"id":"x","title":"ok","private-provider-key":"private-value"}\n')
-    with pytest.raises(Error, match=r"invalid record: <key>") as failure:
-        records.load(brain, path)
-    assert "private" not in str(failure.value)
-    reply = retrieve.search(brain, Query(text="absent"))
-    assert "<key>" in str(reply["problems"])
-    assert "private" not in str(reply["problems"])
-
-
-def test_failed_record_write_preserves_exact_original_bytes(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    before = brain.read(DECISION)
-    original = Store.write
-
-    def fail_new_record(self: Store, target: str, data: bytes, *, durable: bool = True) -> None:
-        if target == NEW:
-            raise OSError(errno.ENOSPC, "synthetic disk full")
-        original(self, target, data, durable=durable)
-
-    monkeypatch.setattr(Store, "write", fail_new_record)
-    with pytest.raises(OSError, match="synthetic disk full"):
-        records.upsert(
-            brain,
-            "meetings",
-            [Record(id="decision-1", title="Moved", time="2026-09-01T00:00:00Z"), Record(id="new", title="New")],
-            snapshot=False,
-        )
-    assert brain.read(DECISION) == before
-    assert not (brain.root / NEW).exists()
-
-
-def test_record_size_is_checked_before_any_changes(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    records.upsert(brain, "bounded", [Record(id="one", title="First", text="x" * 100)], snapshot=False)
-    before = brain.read(records.path("bounded", "one"))
-    monkeypatch.setattr(records, "MAX_RECORD", 256)
-    with pytest.raises(Error, match=r"record.*limit"):
-        records.upsert(brain, "bounded", [Record(id="two", title="Second", text="x" * 300)], snapshot=False)
-    assert brain.read(records.path("bounded", "one")) == before
-
-
-def test_a_commit_syncs_each_directory_once(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    fsync = os.fsync
-    calls = 0
-
-    def counted(fd: int) -> None:
-        nonlocal calls
-        calls += 1
-        fsync(fd)
-
-    records.upsert(brain, "bulk", [Record(id=str(n), title="Old") for n in range(20)], snapshot=False)
-    monkeypatch.setattr(os, "fsync", counted)
-    records.upsert(brain, "bulk", [Record(id=str(n), title="New") for n in range(20)], snapshot=False)
-    # One sync per record file, plus a few directory and manifest syncs: backups link the replaced files.
-    assert calls <= 20 + 8
-    assert all(records.load(brain, records.path("bulk", str(n))).title == "New" for n in range(20))
-
-
-def test_a_rollback_syncs_each_directory_once(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    records.upsert(brain, "bulk", [Record(id=str(n), title="Old") for n in range(20)], snapshot=False)
-    before = {name: brain.read(name) for name in records.files(brain, "bulk")}
-    fsync, write = os.fsync, Store.write
-    failed, directories = False, 0
-
-    def counted(fd: int) -> None:
-        nonlocal directories
-        directories += failed and stat.S_ISDIR(os.fstat(fd).st_mode)
-        fsync(fd)
-
-    def exhausted(self: Store, name: str, data: bytes, *, durable: bool = True) -> None:
-        nonlocal failed
-        if name == records.path("bulk", "19") and not failed:
-            failed = True
-            raise OSError(errno.ENOSPC, "synthetic full disk")
-        write(self, name, data, durable=durable)
-
-    monkeypatch.setattr(os, "fsync", counted)
-    monkeypatch.setattr(Store, "write", exhausted)
-    with pytest.raises(OSError, match="synthetic full disk"):
-        records.upsert(brain, "bulk", [Record(id=str(n), title="New") for n in range(20)], snapshot=False)
-    # Restoring 19 replaced records syncs the source, the completed manifest and the removed journal once each.
-    assert directories == 3
-    assert {name: brain.read(name) for name in records.files(brain, "bulk")} == before
-    assert not (brain.root / "memories/.pending").exists()
-
-
-def test_update_recovers_an_interrupted_transaction_that_reads_refuse(brain: Store) -> None:
-    original = brain.read(DECISION)
-    brain.write("memories/.pending/0.before", original)
-    brain.write(DECISION, b'{"id":"decision-1","title":"Half committed"}\n')
-    brain.write(
-        "memories/.pending/manifest.json",
-        json.dumps({"source": "meetings", "changes": [{"name": DECISION.rsplit("/", 1)[1], "existed": True}]}).encode(),
-    )
-    orphan = "memories/meetings/.write-" + "a" * 32
-    brain.write(orphan, b"a write killed before its rename")
-    with pytest.raises(Error, match="run bf build or bf update"):
-        retrieve.search(brain, Query(text="durable evidence"))
-    assert brain.read(DECISION) != original
-    # Update holds the writer lock like build: it rolls the journal back before refreshing the cache.
-    report = update(brain)
-    assert report["ok"], report
-    assert brain.read(DECISION) == original
-    assert not (brain.root / "memories/.pending").exists()
-    assert not (brain.root / orphan).exists()
-    assert retrieve.search(brain, Query(text="durable evidence"))["items"]
-
-
-def test_temporary_files_of_killed_writes_are_swept_and_never_count_as_records(brain: Store, tmp_path: Path) -> None:
-    orphan, other = "memories/meetings/.write-" + "b" * 32, "memories/meetings/.write-notes"
-    brain.write(orphan, b"a write killed before its rename")
-    brain.write(other, b"not a name Store.write chooses")
-    assert records.files(brain, "meetings") == sorted([DECISION, records.path("meetings", "lunch")])
-    (brain.root / f"memories/meetings/.write-{'c' * 32}").symlink_to(tmp_path)
-    records.upsert(brain, "meetings", [], snapshot=False)
-    assert not (brain.root / orphan).exists()
-    assert brain.read(other) == b"not a name Store.write chooses"
-    assert (brain.root / f"memories/meetings/.write-{'c' * 32}").is_symlink()
-    # Absent or linked directories have nothing to sweep; their own reads name a link.
-    (brain.root / "memories/linked").symlink_to(tmp_path, target_is_directory=True)
-    brain.sweep("memories/linked")
-    brain.sweep("memories/absent")
-
-
-@pytest.mark.parametrize("completed", [False, True])
-def test_interrupted_transaction_recovers_from_durable_files(brain: Store, completed: bool) -> None:
-    original = brain.read(DECISION)
-    script = f"""
-import json, os, sys
-from pathlib import Path
-from bf import records
-from bf.models import Record
-from bf.storage import Store, writer
-store = Store(Path(sys.argv[1]))
-completed = sys.argv[2] == 'True'
-write = Store.write
-def interrupted(self, name, data, *, durable=True):
-    write(self, name, data, durable=durable)
-    if completed:
-        stop = name == 'memories/.pending/manifest.json' and json.loads(data)['complete']
-    else:
-        stop = name == {DECISION!r}
-    if stop:
-        os._exit(73)
-Store.write = interrupted
-with writer(store):
-    records.upsert(store, 'meetings', [Record(id='decision-1', title='Moved', time='2026-09-01T00:00:00Z')], snapshot=False)
-"""
-    child = subprocess.run(  # noqa: S603 - terminate only a synthetic transaction in its temporary brain
-        [sys.executable, "-c", script, str(brain.root), str(completed)],
-        env=os.environ.copy(),
-        capture_output=True,
-        check=False,
-        timeout=30,
-    )
-    assert child.returncode == 73, child.stderr.decode()
-    assert (brain.root / "memories/.pending/manifest.json").is_file()
-    interrupted = {name: brain.read(name) for name in brain.files("memories")}
-    if completed:
-        # A completed manifest leaves only cleanup: reads see the committed records while the journal waits.
-        found = records.find(brain, "meetings", "decision-1")
-        assert found is not None
-        assert found[1].title == "Moved"
-    else:
-        with pytest.raises(Error, match="run bf build"):
-            records.find(brain, "meetings", "decision-1")
-    assert {name: brain.read(name) for name in brain.files("memories")} == interrupted
-    index.refresh(brain, full=True)
-    found = records.find(brain, "meetings", "decision-1")
-    assert found is not None
-    assert found[1].title == ("Moved" if completed else "Preserve durable evidence")
-    assert not (brain.root / "memories/.pending").exists()
-    if not completed:
-        assert brain.read(DECISION) == original
-
-
-def test_pending_manifest_is_confined_and_incomplete_preparation_is_discarded(brain: Store) -> None:
-    brain.write("memories/.pending/0.before", b"uncommitted staging")
-    brain.write("memories/.pending/.write-" + "a" * 32, b"interrupted atomic staging write")
-    with pytest.raises(Error, match="run bf build"):
-        records.find(brain, "meetings", "decision-1")
-    index.refresh(brain, full=True)
-    assert records.find(brain, "meetings", "decision-1") is not None
-    assert not (brain.root / "memories/.pending").exists()
-
-
-def test_recovery_clears_a_full_journal_beside_a_killed_write(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A commit stages up to MAX_FILES - 1 backups beside its manifest: a write killed while marking it complete left
-    # one entry more than a scan lists, and every later recovery, so every collection, failed.
-    monkeypatch.setattr(storage, "MAX_FILES", 3)
-    changes = [{"name": f"{char * 64}.json", "existed": True} for char in "ab"]
-    manifest = {"version": 1, "source": "catalog", "complete": True, "changes": changes}
-    brain.write("memories/.pending/manifest.json", json.dumps(manifest).encode())
-    for number in range(2):
-        brain.write(f"memories/.pending/{number}.before", b"{}")
-    brain.write("memories/.pending/.write-" + "a" * 32, b"killed completion marker")
-    with storage.writer(brain):
-        records.recover(brain)
-    assert not (brain.root / "memories/.pending").exists()
-
-
-@pytest.mark.parametrize(
-    ("manifest", "problem"),
-    [
-        ({"source": "../escape", "changes": [{"name": DECISION.rsplit("/", 1)[1], "existed": True}]}, "invalid"),
-        ({"source": "meetings", "changes": [{"name": "undated.json", "existed": False}]}, "invalid"),
-        ({"source": "meetings", "changes": [{"name": "../../bf.yaml", "existed": False}]}, "invalid"),
-        (
-            {
-                "source": "meetings",
-                "changes": [{"name": DECISION.rsplit("/", 1)[1], "existed": flag} for flag in (True, False)],
+    strict = schemas.compile_schema(
+        {
+            "type": "object",
+            "required": ["a", "b"],
+            "additionalProperties": False,
+            "propertyNames": {"pattern": "^[a-z]+$"},
+            "properties": {
+                "a": {"const": 1},
+                "b": {"enum": ["x", "y"]},
+                "c": {"type": "integer", "minimum": 5},
+                "d": {"type": "string", "pattern": "^ok$"},
+                "e": {"type": "array", "uniqueItems": True},
+                "f": {"multipleOf": 3},
             },
-            "duplicate paths",
-        ),
-    ],
-    ids=["traversal-source", "invalid-name", "traversal-name", "duplicate-names"],
-)
-def test_untrusted_manifests_are_refused_without_changing_evidence(
-    brain: Store, manifest: dict[str, object], problem: str
-) -> None:
-    brain.write("memories/.pending/0.before", b'{"id":"decision-1","title":"Forged replacement"}\n')
-    brain.write("memories/.pending/manifest.json", json.dumps(manifest).encode())
-    before = {name: brain.read(name) for name in brain.files("memories")}
-    with pytest.raises(Error, match=problem):
-        index.refresh(brain, full=True)
-    assert {name: brain.read(name) for name in brain.files("memories")} == before
+        },
+        "strict.json",
+    )
+    errs = schemas.validate_instance(
+        strict,
+        {"a": 2, "c": 1, "d": "no", "e": [1, 1], "f": 4, "BAD": 1},
+        "rec",
+    )
+    assert len(errs) == 6
+    assert errs[-1].endswith("more schema errors")
+
+    assert any("expected type" in e for e in schemas.validate_instance(strict, "not-obj", "rec"))
+    assert any("must be one of" in e for e in schemas.validate_instance(strict, {"a": 1, "b": "z"}, "rec"))
 
 
-@pytest.mark.parametrize(
-    ("manifest", "problem"),
-    [
-        (b'{"source": "meetings", ', r"^invalid memories/\.pending manifest; preserve it"),
-        (
-            json.dumps(
-                {"source": "meetings", "changes": [{"name": DECISION.rsplit("/", 1)[1], "existed": True}]}
-            ).encode(),
-            r"^memories/\.pending/0\.before is missing; preserve memories/\.pending",
-        ),
-    ],
-    ids=["not-json", "missing-backup"],
-)
-def test_a_refused_journal_recovery_names_memories_pending(brain: Store, manifest: bytes, problem: str) -> None:
-    # Every read waits for this recovery: its refusal once read `invalid JSON document`, as a sensor's bad output
-    # does, or reported an inaccessible file, without naming the journal to repair.
-    brain.write("memories/.pending/manifest.json", manifest)
-    before = {name: brain.read(name) for name in brain.files("memories")}
-    with pytest.raises(Error, match=problem):
-        index.refresh(brain, full=True)
-    with pytest.raises(Error, match=problem), writer(brain):
-        records.upsert(brain, "meetings", [Record(id="new", title="New")], snapshot=False)
-    assert {name: brain.read(name) for name in brain.files("memories")} == before
+def test_parse_batch_supports_array_envelope_single_object_and_jsonl() -> None:
+    assert records.parse_batch(b"\xef\xbb\xbf  \n ") == []
+    arr = records.parse_batch(b'[{"id": "1", "title": "One"}]')
+    single = records.parse_batch(b'{"id": "solo", "title": "Solo"}')
+    env_items, incomplete = records.parse_batch_envelope(
+        b'{"records": [{"id": "e1", "title": "Env"}], "incomplete": {"missed": 2}}'
+    )
+    jsonl = records.parse_batch(b'\n{"id": "1", "title": "One"}\n\n{"id": "2", "title": "Two"}\n')
+    assert len(arr) == 1
+    assert single[0]["id"] == "solo"
+    assert (len(env_items), incomplete) == (1, True)
+    assert [r["id"] for r in jsonl] == ["1", "2"]
+
+    with pytest.raises(Error, match="exceeds"):
+        records.parse_batch(b"x" * (MAX_BATCH + 1))
+    with pytest.raises(Error, match="not valid UTF-8"):
+        records.parse_batch(b"\xff")
+    with pytest.raises(Error, match="JSON array of record objects"):
+        records.parse_batch(b"[1, 2]")
+    with pytest.raises(Error, match="expected a JSON array of record objects"):
+        records.parse_batch(b'{"records": "bad"}')
+    with pytest.raises(Error, match="line 1: expected a JSON object"):
+        records.parse_batch(b'"scalar"\n')
 
 
-def test_unexpected_pending_files_are_preserved_for_repair(brain: Store) -> None:
-    brain.write("memories/.pending/notes.txt", b"an operator's note")
-    # Named, so the owner knows which file to move out of the brain.
-    with pytest.raises(Error, match=r"^memories/\.pending/notes\.txt: unexpected file in memories/\.pending"):
-        index.refresh(brain, full=True)
-    assert brain.read("memories/.pending/notes.txt") == b"an operator's note"
-    assert brain.read(DECISION)
+def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store) -> None:
+    t1 = datetime(2026, 11, 15, 9, 0, tzinfo=UTC)
+    t2 = datetime(2026, 11, 15, 10, 0, tzinfo=UTC)
 
-
-def test_observing_an_unchanged_revision_does_not_rewrite_it(brain: Store) -> None:
-    first = Record(id="item", title="Same evidence", attributes={"observed": "2026-09-01T00:00:00Z"})
-    records.upsert(brain, "observations", [first], snapshot=True)
-    fingerprint = brain.fingerprint(records.path("observations", "item"))
-    repeated = first.model_copy(update={"attributes": {"observed": "2026-09-02T00:00:00.000000Z"}})
-    assert records.upsert(brain, "observations", [repeated], snapshot=True)["unchanged"] == 1
-    assert brain.fingerprint(records.path("observations", "item")) == fingerprint
-    found = records.find(brain, "observations", "item")
-    assert found is not None
-    assert found[1].observed == first.observed
-
-
-def test_failed_rollback_keeps_originals_for_explicit_build(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    before = brain.read(DECISION)
-    original = Store.write
-    changed = False
-
-    def exhausted(self: Store, name: str, data: bytes, *, durable: bool = True) -> None:
-        nonlocal changed
-        if name == NEW or (name == DECISION and changed):
-            raise OSError(errno.ENOSPC, "synthetic full disk during write and rollback")
-        original(self, name, data, durable=durable)
-        if name == DECISION:
-            changed = True
-
-    def unrestorable(self: Store, name: str, target: str) -> None:
-        if target == DECISION:
-            raise OSError(errno.ENOSPC, "synthetic full disk during rollback")
-        link(self, name, target)
-
-    link = Store.link
-    with monkeypatch.context() as patch:
-        patch.setattr(Store, "write", exhausted)
-        patch.setattr(Store, "link", unrestorable)
-        with pytest.raises(Error, match="needs recovery"):
-            records.upsert(
-                brain,
-                "meetings",
-                [Record(id="decision-1", title="Moved", time="2026-09-01T00:00:00Z"), Record(id="new", title="New")],
-                snapshot=False,
-            )
-    assert (brain.root / "memories/.pending/manifest.json").is_file()
-    assert brain.read("memories/.pending/0.before") == before
-    with pytest.raises(Error, match="run bf build"):
-        records.find(brain, "meetings", "decision-1")
-    index.refresh(brain, full=True)
-    found = records.find(brain, "meetings", "decision-1")
-    assert found is not None
-    assert found[1].title == "Preserve durable evidence"
-    assert brain.read(DECISION) == before
-    assert not (brain.root / "memories/.pending").exists()
-
-
-@pytest.mark.parametrize("cached", [False, True])
-@pytest.mark.parametrize("existed", [False, True])
-def test_untrusted_pending_journal_cannot_mutate_evidence_through_reads(
-    brain: Store, *, cached: bool, existed: bool
-) -> None:
-    register(brain)
-    if cached:
-        index.refresh(brain)
-        assert index.fresh(brain) == "ready"
-    brain.write("memories/.pending/0.before", b'{"id":"decision-1","title":"Forged replacement"}\n')
     brain.write(
-        "memories/.pending/manifest.json",
+        "schemas/jira.json",
         json.dumps(
-            {"source": "meetings", "changes": [{"name": DECISION.rsplit("/", 1)[1], "existed": existed}]}
+            {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "required": ["priority"],
+                "properties": {"priority": {"enum": ["P0", "P1", "P2"]}},
+            }
         ).encode(),
     )
-    before = {name: brain.read(name) for name in brain.files("memories")}
-    actions = (
-        lambda: records.find(brain, "meetings", "decision-1"),
-        lambda: retrieve.read(brain, "meetings:decision-1"),
-        lambda: retrieve.search(brain, Query(text="durable evidence")),
-        lambda: index.refresh(brain),
-    )
-    for action in actions:
-        with pytest.raises(Error, match="run bf build"):
-            action()
-        assert {name: brain.read(name) for name in brain.files("memories")} == before
+    with pytest.raises(Error, match="missing required 'priority'"):
+        records.ingest(brain, "jira", b'[{"id":"J-1","title":"Bug"}]', now=t1)
+    with pytest.raises(Error, match="must be one of"):
+        records.ingest(brain, "jira", b'[{"id":"J-1","title":"Bug","priority":"P9"}]', now=t1)
 
-
-@pytest.mark.parametrize("snapshot", [False, True])
-def test_older_upstream_revision_cannot_replace_newer_evidence(brain: Store, snapshot: bool) -> None:
-    current = Record(
-        id="item",
-        title="Current revision",
-        time="2026-09-01T00:00:00Z",
-        attributes={"updated": "2026-09-02T00:00:00Z"},
-    )
-    records.upsert(brain, "revisions", [current, Record(id="other", title="Other item")], snapshot=snapshot)
-    old = Record(
-        id="item",
-        title="Historical partial revision",
-        time="2026-08-01T00:00:00Z",
-        attributes={"updated": "2026-08-02T00:00:00Z"},
-    )
-    counts = records.upsert(brain, "revisions", [old], snapshot=snapshot)
-    assert counts["unchanged"] == 1
-    assert counts["updated"] == 0
-    found = records.find(brain, "revisions", "item")
-    assert found is not None
-    assert found[1] == current
-    assert found[0] == records.path("revisions", "item")
-    assert (records.find(brain, "revisions", "other") is None) == snapshot
-
-
-def test_a_revision_dated_after_its_observation_cannot_freeze_a_record(brain: Store) -> None:
-    # A file with a future mtime claims to be modified in 2030 although it was first seen in 2026.
-    future = Record(
-        id="doc",
-        title="v1",
-        attributes={"updated": "2030-01-01T00:00:00Z", "observed": "2026-09-01T00:00:00Z"},
-    )
-    records.upsert(brain, "documents", [future], snapshot=True)
-    edited = Record(
-        id="doc",
-        title="v2",
-        attributes={"updated": "2026-09-02T00:00:00Z", "observed": "2026-09-02T00:00:00Z"},
-    )
-    assert records.upsert(brain, "documents", [edited], snapshot=True)["updated"] == 1
-    found = records.find(brain, "documents", "doc")
-    assert found is not None
-    assert found[1].title == "v2"
-
-
-def test_aliases_and_absent_sources_do_not_wait_for_writers(brain: Store) -> None:
-    with writer(brain):
-        # Existing sources still wait for a consistent set of record files; an alias returns at once.
-        assert records.find(brain, "repo", "example/project") is None
-
-
-@pytest.mark.parametrize("incoming", ["same", "new"])
-def test_collection_never_replaces_or_removes_misnamed_evidence(brain: Store, incoming: str) -> None:
-    # A file named for one id holds another: collection cannot tell which evidence to keep.
-    misnamed = records.path("conflicts", "same")
-    brain.write(misnamed, records.serialize(Record(id="elsewhere", title="Conflicting evidence")))
-    before = brain.read(misnamed)
-    with pytest.raises(Error, match="SHA-256 filename"):
-        records.upsert(brain, "conflicts", [Record(id=incoming, title="Incoming")], snapshot=True)
-    assert records.files(brain, "conflicts") == [misnamed]
-    if incoming == "same":
-        with pytest.raises(Error, match="SHA-256 filename"):
-            records.upsert(brain, "conflicts", [Record(id=incoming, title="Incoming")], snapshot=False)
-    else:
-        # A window leaves unrelated files alone; bf validate still reports the misnamed one.
-        assert records.upsert(brain, "conflicts", [Record(id=incoming, title="Incoming")], snapshot=False)["added"]
-    assert brain.read(misnamed) == before
-    assert not (brain.root / "memories/.pending").exists()
-
-
-def test_collection_replaces_its_own_records_that_break_current_rules(brain: Store) -> None:
-    # A stored record that breaks the rules, such as with a display-name alias or an over-long title, holds its
-    # own id: the corrected sensor replaces it, and a snapshot that no longer returns it removes it.
-    kept, gone = records.path("legacy", "w-legacy"), records.path("legacy", "gone")
-    brain.write(kept, b'{"id":"w-legacy","title":"Old","aliases":["Alice Example"]}\n')
-    brain.write(gone, b'{"id":"gone","title":"' + b"G" * 4097 + b'"}\n')
-    corrected = [Record(id="w-legacy", title="New", aliases=["person:alice"])]
-    assert records.upsert(brain, "legacy", corrected, snapshot=False)["updated"] == 1
-    assert records.load(brain, kept).aliases == ["person:alice"]
-    assert records.upsert(brain, "legacy", corrected, snapshot=True)["removed"] == 1
-    assert records.files(brain, "legacy") == [kept]
-
-
-@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
-def test_pruning_passes_over_a_record_it_cannot_read(brain: Store) -> None:
-    # One unreadable run once stopped a prompt's keep from pruning anything, so its source grew with every run.
-    runs = [Record(id=f"run-{day}", title="Run", time=f"2026-09-2{day}T00:00:00Z") for day in range(1, 6)]
-    records_file(brain, "assistant", runs)
-    locked = brain.root / records.path("assistant", "run-2")
-    locked.chmod(0)
-    try:
-        with writer(brain):
-            assert records.prune(brain, "assistant", 2, re.compile(r"run-[0-9]")) == 2
-    finally:
-        locked.chmod(0o600)
-    left = sorted(records.load(brain, name).id for name in records.files(brain, "assistant"))
-    assert left == ["run-2", "run-4", "run-5"]
-
-
-ATTENDED = (
-    b"version: 11\nname: fixture\nfields:\n  attendee:\n    description: A person who attended.\n"
-    b"    targets: ['person:']\njobs:\n  meetings:\n    run: [sensors/meetings.py]\n    emit: records\n"
-)
-
-
-def test_reproject_normalizes_and_bounds_every_stored_record(brain: Store) -> None:
-    brain.write("bf.yaml", ATTENDED)
-    people = [f"person:email/{n}-{'x' * 1400}@example.test" for n in range(1000)]
-
-    def oversized_runner(*_args: object) -> bytes:
-        return encode(
-            [
-                {
-                    "id": "all-hands",
-                    "title": "All hands",
-                    "relations": {"attendee": people},
-                    "attributes": {"people": people},
-                }
-            ]
-        )
-
-    # Collection rejects records whose non-text fields exceed 2 MiB before mutating storage.
-    with pytest.raises(Error, match=r"0: fields other than text exceed 2 MiB"):
-        collect(brain, "meetings", start="2026-09-01T00:00:00Z", end="2026-09-02T00:00:00Z", runner=oversized_runner)
-    name = records.path("meetings", "all-hands")
-    assert not (brain.root / name).exists()
-    # Reprojection counts an oversized stored record as failed and keeps it untouched, while normalizing valid records.
-    brain.write(
-        name,
-        encode(
+    batch1 = json.dumps(
+        [
             {
-                "id": "all-hands",
-                "title": "All hands",
-                "relations": {"attendee": people},
-                "attributes": {"people": people},
+                "id": "J-1",
+                "title": "Fix login",
+                "text": "Details",
+                "priority": "P1",
+                "url": "",
+                "time": "",
+                "updated": "",
+                "tags": ["auth"],
+                "links": [
+                    "projects/offline.md",
+                    {"to": "projects/offline.md", "anchor": "decision", "meta": {"rel": "blocks"}},
+                ],
+                "relations": [{"target": "meetings:decision-1", "type": "cites"}],
             }
-        ),
-    )
-    uncanon = records.path("meetings", "lunch")
-    brain.write(
-        uncanon,
-        encode(
-            {
-                "id": "lunch",
-                "title": "Lunch plans",
-                "time": "2026-08-30T14:00:00+02:00",
-                "relations": {"attendee": "person:alice"},
-            }
-        ),
-    )
-    before = brain.read(name)
-    dry = reproject(brain, "meetings", dry_run=True)
-    assert (dry["records"], dry["changed"], dry["unchanged"], dry["failed"]) == (3, 0, 2, 1)
-    assert records.load(brain, uncanon).relations["attendee"] == "person:alice"
-    report = reproject(brain, "meetings")
-    assert (report["records"], report["changed"], report["unchanged"], report["failed"]) == (3, 0, 2, 1)
-    assert report["problems"] == [
-        {"file": name, "error": "invalid record: fields other than text exceed 2 MiB; keep bulky content in text"}
-    ]
-    assert brain.read(name) == before
-    assert records.load(brain, uncanon).time == "2026-08-30T12:00:00.000000Z"
+        ]
+    ).encode()
 
+    rec_path = records.record_file("jira", "J-1")
+    preview = records.ingest(brain, "jira", batch1, dry_run=True, now=t1)
+    assert (preview["added"], preview["dry_run"], brain.exists(rec_path)) == (1, True, False)
 
-def test_record_and_note_writes_never_open_runtime_queue_db(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    opened: list[str] = []
-    real_connect = cast("Callable[..., sqlite3.Connection]", sqlite3.connect)
+    res1 = records.ingest(brain, "jira", batch1, now=t1)
+    assert (res1["added"], res1["updated"], res1["unchanged"], brain.exists(rec_path)) == (1, 0, 0, True)
+    saved1 = records.load_source(brain, "jira")
+    assert saved1[0]["updated"] == "2026-11-15T09:00:00Z"
+    assert "url" not in saved1[0]
+    assert any(lnk["to"] == "meetings:decision-1" for lnk in saved1[0]["links"])
 
-    def guarded(
-        target: str | bytes | os.PathLike[str] | os.PathLike[bytes], *args: object, **kwargs: object
-    ) -> sqlite3.Connection:
-        opened.append(os.fsdecode(os.fspath(target)))
-        return real_connect(target, *args, **kwargs)
+    # Ingesting new records emits `records.ingested` in `logs/events.json`, and `append_event(..., dedupe=True)` is idempotent!
+    ev1 = records.append_event(brain, "channel.message", "chat", {"id": "msg-42", "text": "hi"}, dedupe=True, now=t1)
+    ev2 = records.append_event(brain, "channel.message", "chat", {"id": "msg-42", "text": "hi"}, dedupe=True, now=t2)
+    assert ev1 == ev2
+    ev_log = decode(brain.read("logs/events.json"), "logs/events.json")
+    assert isinstance(ev_log, dict)
+    assert sum(1 for e in ev_log["events"] if e["data"].get("id") == "msg-42") == 1
 
-    monkeypatch.setattr(sqlite3, "connect", guarded)
-    records.upsert(
+    # Re-ingesting identical payload without explicit `updated` preserves original `updated` timestamp!
+    res2 = records.ingest(brain, "jira", batch1, now=t2)
+    assert (res2["added"], res2["updated"], res2["unchanged"]) == (0, 0, 1)
+    assert records.load_source(brain, "jira")[0]["updated"] == "2026-11-15T09:00:00Z"
+
+    # Modifying title updates record and advances `updated` to t2.
+    batch2 = json.dumps([{"id": "J-1", "title": "Fix SSO login", "priority": "P0"}]).encode()
+    res3 = records.ingest(brain, "jira", batch2, now=t2)
+    assert (res3["added"], res3["updated"], res3["unchanged"]) == (0, 1, 0)
+    assert records.load_source(brain, "jira")[0]["updated"] == "2026-11-15T10:00:00Z"
+
+    # `.forgotten` skips new records and deletes already-saved forgotten records!
+    brain.write("memories/jira/.forgotten", b"# comment\nJ-1\nJ-2\n")
+    res_forg = records.ingest(
         brain,
-        "meetings",
-        [Record(id="note-free", title="No runtime lock", **{"@type": "Event"}, relations={"attendee": "person:alice"})],
-        snapshot=False,
+        "jira",
+        json.dumps([{"id": "J-2", "title": "Forgotten item", "priority": "P2"}]).encode(),
+        now=t2,
     )
-    brain.write("concepts/plain.md", b"---\ntype: concept\nrelations:\n  owner: person:alice\n---\n# Plain\n")
-    assert not any("runtime.sqlite3" in target for target in opened)
-    assert not (brain.root / storage.QUEUE).exists()
+    assert (res_forg["forgotten"], res_forg["removed"], brain.exists(rec_path)) == (1, 1, False)
+
+    # Removal guard on >= 10 records when > 50% would be removed, plus `incomplete` envelope skipping pruning!
+    ten = json.dumps([{"id": f"item-{i:02d}", "title": f"Item {i}"} for i in range(10)]).encode()
+    records.ingest(brain, "catalog", ten, mode="snapshot", now=t1)
+    inc_env = json.dumps({"records": [{"id": "item-00", "title": "Item 0"}], "incomplete": {"missed": 1}}).encode()
+    inc_res = records.ingest(brain, "catalog", inc_env, mode="snapshot", now=t2)
+    assert (inc_res["incomplete"], inc_res["removed"], inc_res["records"]) == (True, 0, 10)
+
+    four = json.dumps([{"id": f"item-{i:02d}", "title": f"Item {i}"} for i in range(4)]).encode()
+    with pytest.raises(Error, match="snapshot would remove 6 of 10 records"):
+        records.ingest(brain, "catalog", four, mode="snapshot", now=t2)
+
+    allowed = records.ingest(brain, "catalog", four, mode="snapshot", allow_removal=True, now=t2)
+    assert (allowed["records"], allowed["removed"]) == (4, 6)
+
+    with pytest.raises(Error, match="snapshot would remove 4 of 4 records"):
+        records.ingest(brain, "catalog", b"[]", mode="snapshot", now=t2)
+    emptied = records.ingest(brain, "catalog", b"[]", mode="snapshot", allow_removal=True, now=t2)
+    assert (emptied["records"], emptied["removed"], records.load_source(brain, "catalog")) == (0, 4, [])
 
 
-def test_a_commit_whose_completion_landed_succeeds_despite_a_late_sync_failure(
-    brain: Store, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("source", "mode", "payload", "exc", "match"),
+    [
+        ("BadUpper", "upsert", b"[]", InputError, "lowercase"),
+        ("notes", "upsert", b"[]", InputError, "reserved"),
+        ("concepts", "upsert", b"[]", InputError, "reserved"),
+        ("memories", "upsert", b"[]", InputError, "reserved"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","stale_after":"0s"}]', Error, "stale_after"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","stale_after":"999y"}]', Error, "stale_after"),
+        ("valid", "badmode", b"[]", InputError, "upsert or snapshot"),
+        ("valid", "upsert", b'[{"title":"no id"}]', Error, "missing required string 'id'"),
+        ("valid", "upsert", b'[{"id":"1"}]', Error, "missing required string 'title'"),
+        ("valid", "upsert", b'[{"id":"bad id","title":"t"}]', Error, "no whitespace"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","source":"other"}]', Error, "source must match"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","ref":"valid:2"}]', Error, "ref must match"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","kind":"concept"}]', Error, "kind must equal 'memory'"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","text":123}]', Error, "text must be a string"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","url":123}]', Error, "url must be a string"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","time":123}]', Error, "time must be an ISO"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","updated":123}]', Error, "updated must be an ISO"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","links":"bad"}]', Error, "links must be a list"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","links":[123]}]', Error, "target strings or link objects"),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"t","links":[{"to":"projects/offline.md","meta":{"k":1}}]}]',
+            Error,
+            "meta must map strings to strings",
+        ),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"a"},{"id":"1","title":"b"}]',
+            Error,
+            "duplicate record id",
+        ),
+    ],
+)
+def test_ingest_rejects_invalid_records_and_arguments(
+    brain: Store, source: str, mode: str, payload: bytes, exc: type[Exception], match: str
 ) -> None:
-    write = Store.write
+    with pytest.raises(exc, match=match):
+        records.ingest(brain, source, payload, mode=mode)  # ty: ignore[invalid-argument-type]
 
-    def unsynced(self: Store, name: str, data: bytes, *, durable: bool = True) -> None:
-        write(self, name, data, durable=durable)
-        if name == "memories/.pending/manifest.json" and json.loads(data)["complete"]:
-            # The marker is in place; only its directory sync fails.
-            raise OSError(errno.EIO, "sync failed")
 
-    monkeypatch.setattr(Store, "write", unsynced)
-    records.upsert(brain, "meetings", [Record(id="decision-1", title="Moved")], snapshot=False)
-    monkeypatch.undo()
-    found = records.find(brain, "meetings", "decision-1")
-    assert found is not None
-    assert found[1].title == "Moved"
-    assert not (brain.root / "memories/.pending").exists()
+def test_load_source_handles_missing_and_corrupt_files(brain: Store) -> None:
+    # Dict-form `relations` and `entity` identity on ingested records:
+    ing = records.ingest(
+        brain,
+        "mail",
+        b'[{"id":"m1","title":"Msg","entity":"msg:1","relations":{"sender":["person:email/a@example.com"]}}]',
+    )
+    assert ing["records"] == 1
+    stored_mail = records.load_source(brain, "mail")[0]
+    assert stored_mail["links"][0]["meta"] == {"rel": "sender"}
+
+    assert records.load_source(brain, "missing") == []
+    brain.write("memories/corrupt/bad.txt", b"text")
+    with pytest.raises(Error, match=r"expected a \.json record file"):
+        records.load_source(brain, "corrupt")
+    brain.write("memories/corrupt2/bad.json", b"\xff\xfe")
+    with pytest.raises(Error, match="invalid JSON"):
+        records.load_source(brain, "corrupt2")
+    brain.write("memories/scalar/s.json", b"123\n")
+    with pytest.raises(Error, match="expected a JSON object"):
+        records.load_source(brain, "scalar")

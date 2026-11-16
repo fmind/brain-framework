@@ -1,170 +1,61 @@
 # Runnable example brain
 
-A fictional project, OKF concepts, resumable actions, a decision review and a local sensor demonstrate the complete workflow without credentials or network access. Run this from the Brain Framework checkout after `uv sync --locked`:
+A fictional project, OKF concepts, resumable actions, `attr_list` metadata, user JSON Schemas (`schemas/*.json`), deterministic evals (`evals/smoke.yaml`), `/bf` skill (`skills/bf/SKILL.md`), and local `sensors/`, `routines/`, `channels/`, `prompts/`, `channels:`, and `servers:` entries demonstrate the end-to-end workflow without credentials or network access.
+
+Run on a disposable copy from the repository checkout after `uv sync --locked`:
 
 ```bash
 bf_checkout=$PWD
 bf_demo=$(mktemp -d)
-bf_demo=$(cd "$bf_demo" && pwd -P)
-bf_example="$bf_demo/brain"
-mkdir "$bf_example"
-cp -R examples/brain/. "$bf_example"
-cd "$bf_example"
-bf() {
-  env -u BF_BRAIN XDG_CONFIG_HOME="$bf_demo/config" \
-    uv run --project "$bf_checkout" bf "$@"
-}
-bf update --dry-run
-bf update
-bf read
-bf search retention
-bf read demo:retention
-bf read actions/2026-09-19_retention
+cp -R examples/brain "$bf_demo/brain"
+cd "$bf_demo/brain"
+bf() { uv run --project "$bf_checkout" bf "$@"; }
+
+python3 sensors/demo.py 2026-09-18T09:00:00Z 2026-09-18T10:00:00Z | bf ingest demo
+bf build
 bf validate
 bf eval
+bf review
+bf run weekly-review
+bf post "Retention review ready" --to local
 ```
 
-On this disposable copy, expect `bf validate` to return `"valid":true` and `bf eval` to return `"passed":true` with `"score":"16/16"`. Reading `demo:retention` gives the fictional evidence that upstream content can disappear; the action read lists `ACTION.md`, its input request and, under `backlinks`, the project that links to it.
+`bf validate` returns `"valid":true` (`6` OKF notes, `1` memory record), and `bf build` writes individual JSON files under `memories/{concepts,projects,actions}/*.json` alongside `memories/demo/<sha256>.json`.
 
-`update` runs the configured `sensors/demo.py` in this copy; the wrapper keeps the demo's configuration and state in its temporary directory. A second update within the hour runs nothing. The fake sensor emits one fictional event inside each requested window, always with the same id, so later collections update the same JSON record file in `memories/demo/`.
-
-`bf read` shows the example project with its first open task. Continue `actions/2026-09-19_retention` by writing its answer with the record ref, then find it again:
+## Query pure JSON records (`bf query`, `rg`, `jq`, `duckdb`)
 
 ```bash
-cat > actions/2026-09-19_retention/outputs/answer.md <<'EOF'
-# Answer
+# Full-text search across all JSON records via rg
+bf query "upstream content can disappear"
 
-Keep originals because upstream content can disappear. Evidence: [record](demo:retention).
-EOF
-bf search "keep originals" --scope actions
-bf validate
+# Query heading attr_list metadata (## Intention {#intention owner=maintainer state=waiting}) via jq
+bf query --jq '. as $r | .headings[]? | select(.meta.state == "waiting") | {ref: $r.ref, id, title, meta}'
+
+# Query keyed attr_list map directly
+bf query --jq 'select(.attrs.intention != null) | {ref, intention: .attrs.intention}'
+
+# Join note citations to demo:retention with sandboxed DuckDB
+bf query --sql "
+  SELECT n.ref AS from_note, l->'meta'->>'rel' AS rel, r.ref AS record, r.title
+  FROM records n, UNNEST(from_json(n.links, '[\"JSON\"]')) AS t(l)
+  JOIN records r ON (l->>'to') IN (r.ref, r.path)
+  WHERE r.ref = 'demo:retention'
+  ORDER BY from_note
+"
 ```
 
-Then tick the action's tasks in `ACTION.md`, fill its Outcome and record any next step in Resume. Use `status: stable` when the note is reviewed and ready to use; task completion and note maturity are separate. For real data, create your own brain with `bf init ~/brain` (or another chosen path) and copy the patterns you need. See the [brain layout](../../docs/docs/reference.md).
+## Share a draft concept with an isolated team brain
 
-## Follow an explicit link
+`actions/2026-09-25_retention-review/outputs/shared-procedure.md` is a self-contained draft concept without private source-brain citations. Copy it into a fresh brain and validate:
 
 ```bash
-bf read bf://example/concepts/retention.md
-bf read bf://example/projects/example
-bf read 'bf://example/projects/example.md#now'
+bf init "$bf_demo/team" --name example-team
+cp actions/2026-09-25_retention-review/outputs/shared-procedure.md "$bf_demo/team/concepts/selected-evidence.md"
+bf build --brain "$bf_demo/team"
+bf validate --brain "$bf_demo/team"
 ```
 
-Read the concept's `backlinks` to find the project under `related-to`. Read the project's `claims` to find the same link and its origin, `projects/example.md#now`. These are two views of one declared relation. `bf read repo:example/project` also groups the collected record under its `repository` relation; `bf.yaml` restricts that relation to `repo:` identities with `targets`, so a sensor passing any other value fails without saving. Use real identities when adapting the example.
-
-`bf.yaml` also declares `depends-on` with `broader: related-to`, so a `related-to` relation page lists dependencies too:
-
-```bash
-bf read bf://example/concepts/archive-policy.md --rel related-to
-```
-
-It returns `"total":1` with the decision `actions/2026-09-25_retention-review/outputs/decision.md`, whose item keeps its own `"relation":"depends-on"`. The policy's backlinks still group that link under `depends-on`.
-
-## Export the graph
-
-Print every claim as one JSON object per line, for tools such as DuckDB or networkx:
-
-```bash
-bf export | head -3
-```
-
-The first three lines are:
-
-```text
-{"brain":"example","origin":"bf://example/actions/2026-09-19_retention/ACTION.md","relation":"tagged-with","subject":"bf://example/actions/2026-09-19_retention/ACTION.md","target":"bf://example/tags/retention"}
-{"brain":"example","origin":"bf://example/actions/2026-09-19_retention/outputs/answer.md#answer","relation":"links","subject":"bf://example/actions/2026-09-19_retention/outputs/answer.md","target":"demo:retention"}
-{"brain":"example","date":"2026-09-25","origin":"bf://example/actions/2026-09-25_retention-review/ACTION.md#context","relation":"links","subject":"bf://example/actions/2026-09-25_retention-review/ACTION.md","target":"bf://example/actions/2026-09-25_retention-review/outputs/decision.md"}
-```
-
-Lines are sorted by subject, relation, target and origin. The second line is the answer you wrote above: its record link entered the graph, with the answer's section as its origin. The first action and that answer have no `updated` date, so their claims have no `date`; a note states its date as written, a record its `time` with the local offset. `head` closing the pipe early is expected. `bf export --kind identities` lists each note or record with every identity it answers to.
-
-A script that needs every record of one source exports it whole, without reading `memories/` files or following pages. `--scope` takes what `bf search --scope` takes:
-
-```bash
-bf export --kind items --scope memories/demo
-```
-
-It prints one line: the demo record with its `attributes`, its `time` and `observed` times, and `"ref":"demo:retention","relations":{"repository":["repo:example/project"]},"source":"demo","text":"Keep original evidence because upstream content can disappear."`. See [export the graph](../../docs/docs/retrieval.md).
-
-## Review a decision
-
-All dates, policies and outcomes in these notes are fictional; the draft procedure asserts no real-world verification. `bf.yaml` declares the `depends-on` and `supersedes` relations the notes link with.
-
-```bash
-bf read 'actions/2026-09-25_retention-review/ACTION.md#context'
-bf read 'actions/2026-09-25_retention-review/ACTION.md#resume'
-bf read 'bf://example/concepts/archive-policy.md#retention'
-bf read bf://example/concepts/archive-policy.md
-bf read actions/2026-09-25_retention-review/outputs/prior-decision.md
-bf read projects/example.md#intention
-bf read projects/example.md#unknown
-bf read concepts/selected-evidence.md
-```
-
-| Workflow        | Where it lives                                                  | What to notice                                                                                                |
-| --------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Working context | `actions/2026-09-25_retention-review/ACTION.md#context`         | The next step fits in a few sentences and three refs, within the Context budget of six, without a transcript. |
-| Dependency      | `concepts/archive-policy.md`, read whole                        | Its `depends-on` backlink names the decision to review when the policy changes.                               |
-| Supersession    | `actions/2026-09-25_retention-review/outputs/prior-decision.md` | The old decision keeps its failed prediction and a `supersedes` backlink from the new one.                    |
-| Intention       | `projects/example.md#intention`                                 | It waits for a policy change and names its owner, condition and expiry.                                       |
-| Unknown         | `projects/example.md#unknown`                                   | The storage-cost question names the observation that would resolve it.                                        |
-| Draft procedure | `concepts/selected-evidence.md`                                 | It stays draft until tried on a separate case.                                                                |
-
-These reads expose the evidence; an agent or person performs the review. The example project sets `stale_after: 2026-12-18T09:00:00+01:00`: from that instant, `bf read projects` marks it `"review":true` with `"review_source":"stale_after"`, whatever its file's modification time. `bf read tasks` lists the open project, concept and canonical-action checkboxes with their sections and counts; it excludes action attachments and deprecated notes.
-
-### Retain and compare the policy
-
-Retain the exact policy section locally without inserting its body into an agent message. This block runs in a subshell, writes only to the disposable example with owner-only permissions, refuses to replace an earlier capture and removes a capture that failed:
-
-```bash
-(
-  set -o pipefail -o noclobber
-  umask 077
-  policy='bf://example/concepts/archive-policy.md#retention'
-  capture=actions/2026-09-25_retention-review/inputs/policy-v1.json
-  mkdir -p "${capture%/*}"
-  exec 3> "$capture" || exit 1
-  bf read "$policy" >&3 || { rm -f -- "$capture"; exit 1; }
-  current=$(bf read "$policy") || exit 1
-  if [ "$current" = "$(cat "$capture")" ]; then echo '"state":"unchanged"'; else echo '"state":"changed"'; fi
-)
-```
-
-The comparison returns `"state":"unchanged"`. Edit the policy body in this disposable copy and compare again:
-
-```bash
-sed -i.bak 's/latest version/two latest versions/' concepts/archive-policy.md
-current=$(bf read 'bf://example/concepts/archive-policy.md#retention')
-if [ "$current" = "$(cat actions/2026-09-25_retention-review/inputs/policy-v1.json)" ]; then
-  echo '"state":"unchanged"'
-else
-  echo '"state":"changed"'
-fi
-```
-
-It returns `"state":"changed"`, while the capture retains the old body. It does not revise the dependent decision for you. Incomplete evidence never grants permission to dismiss an intention.
-
-### Share the procedure with a team brain
-
-The action's `outputs/shared-procedure.md` and `outputs/share-manifest.json` are a prepared transfer candidate: one draft concept, no source-brain references and no asserted verification. It differs from this brain's own `concepts/selected-evidence.md`, which cites the private action that motivated it. Try it in a fresh disposable team brain:
-
-```bash
-bf_team="$bf_demo/team"
-bf init "$bf_team" --name example-team
-cp actions/2026-09-25_retention-review/outputs/shared-procedure.md "$bf_team/concepts/selected-evidence.md"
-bf validate --brain "$bf_team"
-bf read concepts/selected-evidence.md --brain "$bf_team"
-```
-
-The integration test exercises this isolated destination with retrieval cases. It checks this prepared fixture, not automatic redaction of arbitrary notes; always review a complete transfer candidate for its audience before an authorized write or publication.
-
-## Try a brain-local skill
-
-`skills/weekly-review/SKILL.md` is a workflow skill kept with this brain. It reads the home, projects, tasks and recent-activity pages, then proposes note updates and writes only the ones you approve. To try it with an agent host and a `bf` on PATH, link it into this copy's host folder, as [Getting started](../../docs/docs/getting-started.md) shows for registering and installing `/bf` or linking workflow skills. Then start a session in the copy and ask “Run my weekly review.” Its answer depends on the model and these fictional notes; no outcome is asserted. `bf validate` and `bf eval` ignore `skills/`, so their results above stay the same.
-
-## Clean up
-
-Remove only this disposable copy and the shell wrapper:
+Clean up when finished:
 
 ```bash
 cd "$bf_checkout"

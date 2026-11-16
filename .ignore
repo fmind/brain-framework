@@ -4,7 +4,6 @@
 /mise.lock
 /uv.lock
 /THIRD_PARTY_NOTICES.md
-/docs/assets/watch.svg
 /docs/third-party/
 # The last major release's docs/*.schema.json, compared by tests/test_contract.py; the published copies stay searchable.
 /tests/contract/

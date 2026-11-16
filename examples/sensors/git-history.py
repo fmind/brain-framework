@@ -253,20 +253,14 @@ def make_record(
     relations: dict[str, list[str]],
     attributes: dict[str, object],
 ) -> dict[str, object]:
+    _ = aliases, relations
     out: dict[str, object] = {
         "id": identifier,
         "title": line(title, identifier),
-        "@type": item_type,
+        "type": item_type.lower(),
         "text": text,
         "time": iso_utc(time_value),
     }
-    valid_aliases = sorted({a for a in aliases if reference(a)})
-    if valid_aliases:
-        out["aliases"] = valid_aliases
-    cleaned = {k: list(dict.fromkeys(r for r in v if reference(r)))[:MAX_LINKS] for k, v in relations.items()}
-    nonempty = {k: v for k, v in cleaned.items() if v}
-    if nonempty:
-        out["relations"] = nonempty
     if attributes:
         out["attributes"] = attributes
     return out

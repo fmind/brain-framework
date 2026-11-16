@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Print one tool's normalized fictional record from fixtures/TOOL.json; never contact a provider.
-
-Usage: demo.py TOOL END. Like a real sensor, a fixture keeps its event `time` and dates an upstream change in
-`attributes.updated`; an `updated` of "now" changed at collection, so it takes END, the requested window's end:
-fixed fixtures cannot know when you run the demo.
-"""
+"""Normalize one tool's fictional record from fixtures/TOOL.json without network calls."""
 
 import argparse
 import json
@@ -12,31 +7,36 @@ import sys
 from pathlib import Path
 
 SCHEMAS = {
-    "workspace": ("Brief", "brief", "project", "state"),
-    "jira": ("Issue", "issue", "workstream", "status"),
-    "github": ("PullRequest", "pull-request", "repository_project", "state"),
-    "gcloud": ("Deployment", "deployment", "service_project", "health"),
+    "workspace": ("brief", "project", "state"),
+    "jira": ("issue", "workstream", "status"),
+    "github": ("pull-request", "repository_project", "state"),
+    "gcloud": ("deployment", "service_project", "health"),
 }
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("tool", choices=SCHEMAS)
-parser.add_argument("end", help="the requested window's end, from {{end}}")
+parser.add_argument("end", help="UTC collection timestamp (YYYY-MM-DDTHH:MM:SSZ)")
 args = parser.parse_args()
+
 raw = json.loads(Path("fixtures", f"{args.tool}.json").read_text(encoding="utf-8"))
 attrs = dict(raw.get("attributes", {}))
-if attrs.get("updated") == "now":
-    attrs["updated"] = args.end
-record_type, kind, project_key, status_key = SCHEMAS[args.tool]
-project = attrs.pop(project_key)
-status = attrs.pop(status_key)
+record_type, project_key, status_key = SCHEMAS[args.tool]
+raw_project = str(attrs.pop(project_key))
+project_note = f"projects/{raw_project.removeprefix('project:')}.md"
+status = str(attrs.pop(status_key))
+updated = args.end if attrs.get("updated") == "now" else raw["time"]
+
 record = {
     "id": raw["id"],
-    "@type": record_type,
     "title": raw["title"],
+    "type": record_type,
+    "status": status,
+    "project": project_note,
+    "links": [project_note],
     "text": raw["text"],
     "time": raw["time"],
+    "updated": updated,
     "url": raw["url"],
-    "relations": {"project": [project]},
-    "attributes": {"kind": kind, "status": status, **({"updated": attrs["updated"]} if "updated" in attrs else {})},
 }
 json.dump([record], sys.stdout)
+sys.stdout.write("\n")

@@ -73,7 +73,7 @@ uv tool install --quiet --no-config --no-cache --python 3.14 "${work}/assets/${w
   fail "could not install the verified ${wheel}"
 
 # The installed bf runs with its own configuration and state, never the caller's registered brains.
-unset BF_BRAIN
+unset BF_BRAIN DEFAULT_BRAIN_PATH
 export XDG_CONFIG_HOME="${work}/config" XDG_STATE_HOME="${work}/state"
 bf="${work}/bin/bf"
 brain="${work}/brain"
@@ -83,21 +83,23 @@ cat >"${brain}/projects/new-website.md" <<'EOF'
 ---
 type: project
 status: draft
+updated: 2026-09-25
 summary: Launch a product website that helps visitors understand the product.
 ---
 
 # New website
 
-## Decision
+## Decision {#decision owner=team}
 
-Start with a single product page because visitors need a clear explanation before signing up.
+Start with a single product page because visitors need a clear explanation before signing up. Evidence: [brief](../memories/workspace/29a8825bd242f14386ee528d76e0e8f1e38f3c8c4047d7b2d6df7493368a17d0.json).
 EOF
+printf '%s\n' '[{"id":"brief","title":"Website brief","text":"Single product page.","time":"2026-09-20T09:00:00Z"}]' |
+  "${bf}" ingest workspace --brain "${brain}" | grep -F '"added":1' > /dev/null ||
+  fail "bf ingest rejected the sample record"
+"${bf}" build --brain "${brain}" | grep -F '"problems":[]' > /dev/null || fail "bf build failed on the sample brain"
 # grep -F reads the whole reply: grep -q could exit first and fail bf's write under pipefail.
 "${bf}" validate --brain "${brain}" | grep -F '"valid":true' > /dev/null || fail "bf validate rejected the sample brain"
-"${bf}" search "visitors clear explanation" --brain "${brain}" |
-  grep -F '"ref":"projects/new-website.md#decision"' > /dev/null || fail "bf search did not find the sample decision"
-"${bf}" read "projects/new-website.md#decision" --brain "${brain}" | grep -F 'Start with a single product page' > /dev/null ||
-  fail "bf read did not return the sample decision"
+"${bf}" review --brain "${brain}" | grep -F '"problems":[]' > /dev/null || fail "bf review failed on the sample brain"
 
 echo "verify-release: ${tag} at ${commit} is published at ${url}; PyPI digests and build attestations match ${wheel}" \
-  "and ${sdist}, and the installed bf ${version} initialized, validated, searched and read a brain"
+  "and ${sdist}, and the installed bf ${version} initialized, ingested, built, validated and reviewed a brain"

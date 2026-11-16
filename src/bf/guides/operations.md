@@ -1,74 +1,76 @@
-# Operations — status, checks, cache, recovery, limits, and privacy
+# Operations
 
-Keep one brain healthy, verified, and fast without weakening safety boundaries or losing evidence.
+Orchestrate one-shot `jobs`, bidirectional `channels`, and constant `servers` declaratively in `bf.yaml` (`defaults`, `jobs`, `channels`, `servers`, `watch`), auto-load local `.env` overrides, validate schemas and Git hooks, and preserve strict filesystem and process boundaries.
 
-## Inspect health and prerequisites (`bf status`, `bf doctor`)
+## Ingest sensor records and orchestrate `jobs`, `channels`, and `servers` {#ingest-sensor-records}
 
-```bash
-bf status
-bf status --check
-bf doctor
+Sensors are standalone scripts (`examples/sensors/`: `git-history.py`, `github-issues.py`, `gmail-headers.py`, `local-documents.py`, and circular `agent-telemetry.py`) emitting a JSON array, `{"records": [...], "incomplete": {"missed": N}}` envelope, or JSON Lines. Pipe them into `bf ingest SOURCE` or declare them in `bf.yaml`:
+
+```yaml
+version: 12
+name: my-brain
+defaults:
+  timezone: UTC
+  env:
+    GOOGLE_WORKSPACE_CLI_CONFIG_DIR: "{{home}}/.config/gws"
+jobs:
+  github-issues:
+    run: [python3, sensors/github-issues.py, acme/demo, "{{start}}", "{{end}}"]
+    ingest:
+      source: github-issues
+      mode: upsert
+    every: 30m
+    lookback: 1d
+    overlap: 5m
+  build:
+    builtin: build
+    events:
+      - kind: records.ingested
+  morning-brief:
+    run: [claude, -p, "Context file: {{context}}"]
+    input: prompts/morning-brief.md
+    at: "08:00"
+    days: [mon, tue, wed, thu, fri]
+    channel: chat
+  assistant:
+    run: [claude, -p, "Context file: {{context}}"]
+    input: prompts/reactive.md
+    events:
+      - kind: channel.message
+        source: chat
+        filter: ".data.direct == true"
+    channel: chat
+  pre-commit-check:
+    builtin: validate
+    hook: pre-commit
+channels:
+  chat:
+    listen: [python3, channels/google-chat.py, listen]
+    send: [python3, channels/google-chat.py, send]
+    timeout: 1m
+servers:
+  mcp:
+    run: [bf, mcp, --transport, http, --port, "8765"]
+    enabled: false
+watch:
+  interval: 5s
+  debounce: 300ms
 ```
 
-- `bf status` and `bf doctor` run offline without starting configured jobs.
-- `bf status --check` exits `1` whenever `problems`, cache issues, attention entries (`failed`, `overdue`, `never` once due, `silent`, or 3 consecutive incomplete `degraded` runs), or unresolved `queue` failures/uncertain runs/active work exist.
-- `bf doctor` verifies executables in `run`/`harness`/`send`/`gate`, binaries in `requires.bins`, presence of env vars in `requires.env`, and `prompt:` files.
+- **Humanized durations**: `every`, `lookback`, `overlap`, `timeout`, `watch.interval`, `watch.debounce`, and note `stale_after` accept humanized strings (`300ms`, `30s`, `15m`, `1h30m`, `1d`, `1w`) or numeric seconds.
+- **Explicit `env:` map + `.env` overrides**: `defaults.env` and unit `env:` define non-secret `KEY: "value"` settings (expanding `{{brain}}`, `{{home}}`, and `{{state}}`), while an optional gitignored `.env` in the brain root supplies local secrets or overrides even when `bf` runs from another folder via `--brain PATH`.
+- **Generic `jobs` (`input:`, `ingest:`, `channel:`)**: `jobs` run any one-shot command on schedules, Git hooks, or `logs/events.json` triggers. `input: prompts/foo.md` feeds the file verbatim on `stdin` and exposes its path as `{{input}}` (and `"input"` in `{{context}}`); `ingest:` accepts shorthand `ingest: foo` or `{source: foo, mode: snapshot, allow_removal: false}`; `channel: chat` posts stdout via `channels.chat.send`.
+- **Bidirectional `channels` & constant `servers`**: `channels.<name>.listen` streams inbound `channel.message` events and `channels.<name>.send` delivers outbound messages (`bf post` auto-selects the channel when only one enabled channel defines `send`). `servers.<name>.run` supervises constant daemons (`bf watch`).
+- **Pure JSON storage & `.forgotten`**: `bf ingest` validates records against `schemas/record.json` + optional `schemas/<source>.json` and writes `memories/<source>/<sha256(id)>.json` atomically while honoring `memories/<source>/.forgotten`.
+- **Snapshot removal guard & incomplete batches**: `--mode snapshot` skips pruning when `incomplete.missed > 0` and refuses >50% drops on 10+ saved records unless `--allow-removal` (`allow_removal: true`) is set.
 
-## Validate notes and evaluate search (`bf validate`, `bf eval`)
+## Limits and safeguards {#limits-and-safeguards}
 
-```bash
-bf validate
-bf eval --baseline baseline.json
-```
+- **Confined `O_NOFOLLOW` access**: `bf` opens every brain file (including `.env`) through `O_NOFOLLOW` directory descriptors; symlinks inside managed folders are rejected.
+- **Bounded sizes**: `bf.yaml` and `schemas/*.json` cap at `1 MiB` (`.env` caps at `64 KiB`); OKF notes cap at `4 MiB`; `bf ingest` batches cap at `16 MiB`; scanned trees cap at `100,000` entries and `64` levels.
+- **Sandboxed DuckDB SQL**: `bf query --sql` rejects dot-commands, applies `SET memory_limit = '512MB';` before materializing `CREATE TEMP TABLE records` with explicit columns, and locks configuration with `SET enable_external_access = false; SET lock_configuration = true;` before running user SQL.
 
-- `bf validate` checks `bf.yaml` (`version: 11`), OKF frontmatter (`type`, `status`), Markdown links and conflict markers, identities, `relations`, and optional `validate:` rules (`max_stale_days`, `warn_stale_days`, `index_note`, `required_status`, `forbid_patterns`).
-- `bf eval` runs offline suites in `evals/*.yaml` (`version: 11`) checking `query`, `read`, `scope`, `limit`, `expect`, `forbid`, `text`, `empty`, MRR, and optional `--baseline` regression comparisons.
+## Privacy and security boundaries {#privacy-and-security-boundaries}
 
-## Cache, `.bf/runtime.sqlite3`, and `memories/` backup & recovery
-
-`.bf/cache.sqlite3` is a **disposable** index, whereas `memories/` (evidence) and `.bf/runtime.sqlite3` (durable runs, event cursors, wakes, deliveries, and failure incidents) are **authoritative/durable local state**:
-
-- **Rebuild disposable search cache (`bf build`)**: if `bf status` reports `"pending_transaction": true` or cache corruption, stop writers and run `bf build && bf validate && bf status --check`. On `memories/.pending/` manifest errors, move the corrupt stray file out of the brain, rebuild, and re-collect that source. Never edit `memories/` files manually without running `bf build`.
-- **Back up `memories/` + `.bf/runtime.sqlite3` cleanly**: stop active `bf watch` / updates first (or take a consistent SQLite backup before archiving `memories/` and `bf.yaml`):
-
-```bash
-mkdir -p ~/brain-backups/snapshot
-sqlite3 ~/brain/.bf/runtime.sqlite3 ".backup '$HOME/brain-backups/snapshot/runtime.sqlite3'"
-tar --exclude='.bf' -czf ~/brain-backups/snapshot/brain-files.tar.gz -C ~/brain .
-```
-
-- **Recover `.bf/runtime.sqlite3` (never delete on corruption)**:
-  - Keep `.bf/runtime.sqlite3` and `.bf/runtime.sqlite3-journal` paired and run `bf queue` to roll back an interrupted write.
-  - Restore `.bf/runtime.sqlite3` from your most recent consistent backup (with `bf watch` stopped) rather than deleting or recreating it empty.
-
-### Quoted queue and runtime diagnostics
-
-| Diagnostic                                                                                      | Recovery                                                                                                                             |
-| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `runtime queue has no unresolved-work slots; clear pending work first`                          | Inspect and `--retry` or `--cancel` unresolved items in `bf queue`.                                                                  |
-| `runtime queue reached its size limit; resolve or clear pending work`                           | Drain pending/failed deliveries (`MAX_PENDING` / 96 MiB reserve ceiling).                                                            |
-| `runtime queue holds unresolved work under a previous path or name; resolve via bf queue first` | Restore the prior brain path/name, resolve `bf queue`, then rename or move again.                                                    |
-| `runtime database predates this release; preserve it and follow upgrade steps in the changelog` | Preserve `.bf/runtime.sqlite3` and run manual steps in [CHANGELOG](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md). |
-| `unexpected runtime database schema; preserve it and repair it`                                 | Preserve `.bf/runtime.sqlite3` and inspect/restore with the matching BF release.                                                     |
-| `runtime database holds an interrupted write; run bf queue to recover it`                       | Keep `.bf/runtime.sqlite3` and `.bf/runtime.sqlite3-journal` together and run `bf queue`.                                            |
-
-## Limits and safeguards
-
-| Resource                         | Limit                                                                                                     |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `bf.yaml`, registry, eval suites | `1 MiB` each; YAML depth `<= 32`, `20,000` events                                                         |
-| Authored note                    | `4 MiB`; path `<= 7,988` percent-encoded chars; `aliases`/`links`/`tags` `<= 1,000` each                  |
-| Record file & `text`             | `16 MiB` file; metadata JSON `<= 2 MiB`; `text` `<= 4 MiB` (unless `max_text_bytes` cuts with `partial`)  |
-| Directory scan & problem caps    | `100,000` entries/folder (`bf status` warns at `80,000`); `200` skipped files/problems reported per reply |
-| Search & exact read pages        | Query `<= 4,096` chars / 32 terms; `limit` `1`–`50`; soft page cut `~32 KiB`, hard reply cap `4 MiB`      |
-| Jobs, triggers & `requires`      | `<= 128` jobs/brain; `<= 32` `on` rules/job; `<= 64` `bins` / `<= 64` `env`; `timeout` `1`–`3,600s`       |
-| Prompts, stdin, stdout & streams | Prompt `<= 120,000` bytes; `--stdin` `<= 1 MiB` in `10s`; stdout default `64 MiB` (max `256 MiB`)         |
-| Runtime DB, wakes & retention    | DB `256 MiB`; `10,000` pending cap (`96 MiB`); `<= 16` wakes, depth `<= 8`; completed state kept `35d`    |
-| Logs & usage telemetry           | `logs/NAME.log` `<= 1 MiB`; `.bf/usage.sqlite3` `<= 1 MiB` (30d daily aggregates, never queries/refs)     |
-
-## Privacy and security boundaries
-
-- **Local by default**: BF collects zero telemetry and runs no server. Connecting cloud model harnesses (`claude`, `codex`, etc.) sends prompt inputs to that provider.
-- **No symlink or shell escapes**: `storage.Store` uses `O_NOFOLLOW` to reject symlinks and special files inside brains and `.bf/` (mode `700`).
-- **Untrusted content & audience separation**: keep private and team brains in separate Git repos, authenticate inbound message senders, review pulled `bf.yaml` and script edits before running jobs, and keep raw `logs/` and `.bf/runtime.sqlite3` private. Use `uv run --locked bf` strictly on registered brains (`registered: true`).
-- **Reporting issues**: report bugs with synthetic reproductions at [GitHub issues](https://github.com/fmind/brain-framework/issues) and security issues privately via [SECURITY.md](https://github.com/fmind/brain-framework/blob/main/SECURITY.md).
+- **No built-in LLM or provider SDK**: `bf` never calls model APIs directly; `run`, `listen`, and `send` commands execute with literal `argv` (`shell=False`), clean allowlisted environments merged with `defaults.env`, unit `env:`, and brain-root `.env` (never overriding `BF_BRAIN`, `BF_STATE_DIR`, `BF_START`, `BF_END`, `BF_TRIGGER`, `LC_ALL`, or `LANG`), dedicated process groups, and `.bf/state/<name>.context.json` (`0600`).
+- **Private `.bf/` state & sanitized errors**: `.bf/` (`locks/`, `state/`) is enforced as `0700` owned by `geteuid()`, `bf mcp` redacts local filesystem roots, and diagnostics strip control/format characters and omit raw schema failure values.

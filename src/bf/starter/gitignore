@@ -1,7 +1,9 @@
-# Disposable state, program logs, session actions and collected evidence stay out of Git.
+# Disposable state, local secrets, compiled Markdown note records, runtime logs, and scratch workspaces stay out of Git.
+/.agents/skills
 /.bf/
-/memories/
+/.env
+/memories/concepts/
+/memories/projects/
+/memories/actions/
 /actions/
 /logs/
-/originals/
-/inputs/

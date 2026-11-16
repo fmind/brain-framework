@@ -34,6 +34,7 @@ from urllib.parse import quote
 FILE_BYTES = 16 << 20
 TEXT_BYTES = 64 << 10
 TOTAL_BYTES = 64 << 20
+MAX_BYTES = 16 << 20
 MAX_ENTRIES = 10000
 MAX_DEPTH = 20
 MAX_ID = 4096
@@ -137,7 +138,7 @@ def run(argv: Sequence[str], *, timeout: float, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
-def emit(records: list[dict[str, object]], *, max_bytes: int = TOTAL_BYTES) -> None:
+def emit(records: list[dict[str, object]], *, max_bytes: int = MAX_BYTES) -> None:
     payload = (json.dumps(records, ensure_ascii=False) + "\n").encode("utf-8")
     if len(payload) > max_bytes:
         raise InvalidError(f"output exceeds {max_bytes} bytes")
@@ -443,13 +444,13 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
                 url = (root / relative).as_uri()
                 record: dict[str, object] = {
                     "id": identifier,
+                    "type": "document",
                     "title": " ".join(relative.split()),
                     "text": content[:TEXT_BYTES].decode(errors="ignore"),
                     "time": when,
+                    "updated": when,
                     **({"url": url} if len(url) <= MAX_REF else {}),
-                    "aliases": [alias],
                     "attributes": {
-                        "updated": when,
                         "scope": label,
                         "path": relative,
                         "bytes": len(data),
@@ -457,8 +458,8 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
                     },
                 }
                 projected += len(json.dumps(record, ensure_ascii=False).encode()) + 2
-                if projected > TOTAL_BYTES:
-                    raise InvalidError("normalized document snapshot exceeds 64 MiB; narrow the root")
+                if projected > MAX_BYTES:
+                    raise InvalidError("normalized document snapshot exceeds 16 MiB; narrow the root")
                 records.append(record)
 
     # Walk root ancestors through descriptors too: checking is_symlink then reopening by path races.
@@ -495,7 +496,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     result, skipped = collect(args.label, args.root, args.exclude)
-    emit(result, max_bytes=TOTAL_BYTES)
+    emit(result, max_bytes=MAX_BYTES)
     if skipped:
         print(
             f"Local documents skipped {skipped} entries whose names are not UTF-8, contain control characters "

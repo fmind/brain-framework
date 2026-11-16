@@ -1,230 +1,88 @@
-# Getting started — install, initialize, search, collect, register, and connect
+# Getting started
 
-Create a brain, save your first project decision, search its reason, collect a local source, register the brain, install `/bf`, and connect read-only MCP on Linux or macOS (WSL2 on Windows).
+Create a brain, ingest one piece of evidence, author a Markdown decision with `attr_list` metadata and a `bf://` link, compile it to JSON, and query `memories/` with `bf query`, `bf read`, and `bf review`.
 
-## Install and create a brain
+## Prerequisites
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then install Brain Framework (Python 3.14+):
+- Linux or macOS
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (for Python 3.14 tool installation)
+- Standard CLI tools for retrieval: [`ripgrep` (`rg`)](https://github.com/BurntSushi/ripgrep), [`jq`](https://jqlang.org/), and [`duckdb`](https://duckdb.org/)
+
+## Install and initialize a brain
 
 ```bash
 uv tool install --python 3.14 brain-framework
-bf --version
-```
-
-Include optional MCP support when connecting IDE or desktop hosts (`uv tool install --python 3.14 'brain-framework[mcp]'`). If `bf` is missing from `PATH`, run `uv tool update-shell` and open a new shell.
-
-### Choose a location
-
-Create your brain in `~/brain` (`bf init` refuses non-empty folders; pass `--name NAME` if the directory name lacks an ASCII letter slug):
-
-```bash
 bf init ~/brain
 cd ~/brain
+bf validate
+bf eval
 ```
 
-`bf init` writes `bf.yaml` (with an editor schema modeline), `.gitignore`, `AGENTS.md`, `concepts/index.md`, `concepts/welcome.md`, `projects/`, `actions/`, and `evals/retrieval.yaml`.
+`bf init` creates a minimal flat layout (`projects/`, `concepts/`, `actions/`, `memories/`, `logs/`, `evals/`, `docs/`, `skills/bf/SKILL.md`, `schemas/{record,concepts,logs,evals}.json`, linking `.agents/skills/bf`, with operational folders like `sensors/`, `routines/`, `channels/`, `prompts/`, and `settings/` added as needed) and compiles `concepts/welcome.md` into `memories/concepts/welcome.json`. `bf validate` prints:
 
-## Save a decision
+```json
+{ "brain": "brain", "notes": 1, "problems": [], "records": 0, "valid": true }
+```
 
-Create `projects/new-website.md` in your editor:
+## Ingest evidence and author a Markdown note
 
-```markdown
+Pipe one sensor record into `memories/workspace/<sha256>.json`:
+
+```bash
+printf '%s\n' '[{"id":"brief","title":"Website brief","text":"Visitors need one clear product page before signup.","time":"2026-09-20T09:00:00Z"}]' | bf ingest workspace
+```
+
+Write `projects/new-website.md` using Python-Markdown `attr_list` metadata and relative Markdown links, then compile it into `memories/projects/new-website.json`:
+
+```bash
+cat > projects/new-website.md <<'EOF'
 ---
 type: project
 status: draft
-updated: 2026-09-27
-summary: Launch a product website that helps visitors understand the product.
+updated: 2026-09-25
+tags: [launch, web]
+summary: Launch a single-page product site.
 ---
 
 # New website
 
-## Decision
+## Decision {#decision owner=product}
 
-Start with a single product page because visitors need a clear explanation before signing up.
+Start with one product page so visitors understand who the product helps before signing up. Evidence: [Workspace brief](../memories/workspace/29a8825bd242f14386ee528d76e0e8f1e38f3c8c4047d7b2d6df7493368a17d0.json){rel=cites} and [Conventions](../concepts/welcome.md#conventions){rel=follows}.
+{: #launch-scope confidence=high}
 
 ## Next actions
 
-- [ ] Draft the product page.
-```
-
-`type: project` sets the note kind and `status: draft` marks review maturity; tasks stay in Markdown checkboxes ([Authoring](authoring.md)).
-
-## Find its reason
-
-```bash
-bf search "visitors clear explanation"
-```
-
-Search returns JSON matching the exact section:
-
-```json
-{
-  "ref": "projects/new-website.md#decision",
-  "title": "New website — Decision"
-}
-```
-
-Pass the exact `ref` to `read`:
-
-```bash
-bf read projects/new-website.md#decision
-```
-
-```json
-{
-  "ref": "projects/new-website.md#decision",
-  "text": "## Decision\n\nStart with a single product page because visitors need a clear explanation before signing up.\n\n"
-}
-```
-
-Always inspect exact refs plus `problems` or `stale` before relying on search excerpts ([Retrieval](retrieval.md)).
-
-## Check the brain
-
-```bash
-bf read projects
+- [ ] Draft the hero copy.
+  {: #task-hero assignee=alice}
+EOF
+bf build
 bf validate
-bf eval
 ```
 
-`bf read projects` lists `"next":"Draft the product page."`. Validation returns:
-
-```json
-{ "notes": 3, "problems": [], "records": 0, "valid": true }
-```
-
-`bf eval` runs `evals/retrieval.yaml` offline and reports `"score":"3/3"` and `"passed":true`.
-
-## Collect your first source
-
-<details markdown="1">
-<summary>Optional exercise: collect a local brief, link it to your decision, and notice when it changes</summary>
+## Query pure JSON records (`bf query`, `bf read`, `bf review`)
 
 ```bash
-mkdir -p inputs sensors
+# Lexical search across all compiled note and sensor JSON records (rg)
+bf query "product page"
+
+# Filter heading and keyed attr_list metadata (jq)
+bf query --jq 'select(.attrs.decision.owner == "product") | {ref, title, attrs}'
+
+# Run sandboxed analytical SQL over memories/**/*.json (duckdb)
+bf query --sql "SELECT source, kind, ref, title FROM records ORDER BY source"
+
+# Read an exact section or JSON filter via bf:// URL
+bf read "bf:///projects/new-website.md#decision"
+
+# Check stale notes, newer evidence, and open tasks
+bf review
 ```
 
-Save `inputs/brief.txt`:
+## Connect your coding agent
 
-```text
-Visitors need a clear product explanation before signing up.
-```
+There is zero global config file. `bf` resolves `--brain PATH` -> `BF_BRAIN` -> nearest enclosing `bf.yaml` -> `DEFAULT_BRAIN_PATH`. Inside a brain directory, agents automatically open or reuse an action workspace (`bf action "<topic>"`); outside a brain directory, set `export DEFAULT_BRAIN_PATH="$HOME/brain"`, copy `skills/bf` to `~/.agents/skills/bf`, and invoke `/bf` explicitly (or configure `bf mcp`).
 
-Save `sensors/brief.py`:
+## Upgrade and pinned runtimes {#upgrade-and-pinned-runtimes}
 
-```python
-import json
-from datetime import UTC, datetime
-from pathlib import Path
-
-brief = Path("inputs/brief.txt")
-record = {
-    "id": "website-brief",
-    "title": "Product brief",
-    "text": brief.read_text(encoding="utf-8"),
-    "attributes": {
-        "kind": "document",
-        "updated": datetime.fromtimestamp(brief.stat().st_mtime, UTC).isoformat(),
-    },
-}
-print(json.dumps([record]))
-```
-
-A new brain has no `jobs:` key. Add this one at the top level of `bf.yaml`:
-
-```yaml
-# https://fmind.github.io/brain-framework/docs/jobs/
-jobs:
-  brief:
-    run: [uv, run, --no-project, --python, "3.14", sensors/brief.py]
-    emit: records
-    mode: snapshot
-```
-
-```bash
-bf collect brief
-bf search "product explanation" --scope memories/brief
-bf read brief:website-brief
-```
-
-Collection reports `"records":1`, and reading `brief:website-brief` returns:
-
-```json
-{
-  "ref": "brief:website-brief",
-  "record": {
-    "id": "website-brief",
-    "text": "Visitors need a clear product explanation before signing up.\n",
-    "attributes": { "kind": "document" }
-  }
-}
-```
-
-Add a source link beneath the project's Decision section:
-
-```markdown
-Evidence: [Product brief](brief:website-brief).
-```
-
-```bash
-bf validate
-bf eval
-```
-
-Validation reports `"records":1` and `"valid":true`. Now revise `inputs/brief.txt` — Save `inputs/brief.txt`:
-
-```text
-Visitors need a clear product explanation and pricing before signing up.
-```
-
-```bash
-bf collect brief
-bf read projects
-```
-
-Collection reports `"updated":1`, and `bf read projects` flags `newer_evidence` (`bf read review` aggregates this across the brain):
-
-```json
-{
-  "ref": "projects/new-website.md",
-  "review": true,
-  "review_reasons": ["newer_evidence"],
-  "newer": ["brief:website-brief"]
-}
-```
-
-Continue in [Jobs](jobs.md#your-first-sensor) to replace this tutorial script with a reviewed sensor.
-
-</details>
-
-## Register, install `/bf`, and connect MCP
-
-Register a brain in `~/.config/bf/config.yaml` (never inside the brain repo) so commands can select it by name or default from any folder, install the packaged `/bf` skill, and connect read-only MCP:
-
-```text
-bf register ~/brain --name work --default
-bf unregister work
-bf skill install                   # local brain skills/bf linked to .agents/skills/bf and .claude/skills/bf
-bf skill install --global          # ~/.agents/skills/bf (links ~/.claude/skills/bf if present)
-bf skill install --check           # verify drift without writing
-bf mcp --brain ~/brain             # stdio server exposing offline search and read only
-```
-
-Configure MCP hosts to spawn `bf mcp --brain ~/brain` (requiring `'brain-framework[mcp]'`), then verify `search` for `"welcome"` and `read` on `concepts/welcome.md`.
-
-## Upgrade and pinned runtimes
-
-Upgrade globally with `uv tool upgrade brain-framework` (or `--reinstall --managed-python --python 3.14 'brain-framework[mcp]'`), then re-run `bf skill install --global`. Drain `bf queue` and follow any breaking steps in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md) before upgrading across majors.
-
-**Pinned runtime rule**: always run global `bf` on `PATH` by default. Run `uv run --locked bf ...` only when the brain carries `pyproject.toml`/`uv.lock` AND `bf status` shows it registered (`registered: true`); never run `uv run` on unregistered brains or downloaded clones.
-
-## Choose your next step
-
-| Goal                                 | Guide                                                     |
-| ------------------------------------ | --------------------------------------------------------- |
-| Understand the model and boundaries  | [Overview](index.md)                                      |
-| Author notes, actions, and relations | [Authoring](authoring.md)                                 |
-| Search, read pages, and export graph | [Retrieval](retrieval.md)                                 |
-| Add sensors, `bf ingest`, routines   | [Jobs](jobs.md)                                           |
-| Configure prompts, events, and watch | [Assist](assist.md)                                       |
-| Check health, recover, and inspect   | [Operations](operations.md) and [Reference](reference.md) |
+Upgrade the installed CLI with `uv tool upgrade brain-framework`, check the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md) for any manual `bf.yaml` or `schemas/` steps, and run `bf build && bf validate && bf eval` inside your brain.
