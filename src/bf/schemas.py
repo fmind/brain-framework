@@ -1,4 +1,4 @@
-"""Draft 2020-12 JSON Schemas for bf.yaml, unified JSON records, concepts, logs, and evals."""
+"""Draft 2020-12 JSON Schemas for bf.yaml, unified JSON records, concepts, and evals."""
 
 from __future__ import annotations
 
@@ -12,18 +12,14 @@ from jsonschema.protocols import Validator
 from bf.models import DURATION_PAT, DURATION_ZERO_PAT, FORMAT, MAX_SCHEMA, NAME, Error, decode
 from bf.storage import Store
 
-Kind = Literal["brain", "record", "concepts", "logs", "evals"]
+Kind = Literal["brain", "record", "concepts", "evals"]
 _DRAFT = "https://json-schema.org/draft/2020-12/schema"
 _BASE = "https://fmind.github.io/brain-framework"
-_ISO_TS = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
-_ISO_OPT = r"^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?$"
 _ISO_DT = (
     r"^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$"
 )
 _BOOL: dict[str, Any] = {"type": "boolean"}
 _NAME_REF: dict[str, Any] = {"type": "string", "pattern": NAME}
-_TS: dict[str, Any] = {"type": "string", "pattern": _ISO_TS}
-_OPT_TS: dict[str, Any] = {"type": "string", "pattern": _ISO_OPT}
 
 
 def _s(max_len: int = 4096, *, min_len: int = 0, pat: str = "") -> dict[str, Any]:
@@ -79,40 +75,48 @@ _HOOK_ENUM = _enum("pre-commit", "pre-push")
 _ARGV_REF = {"$ref": "#/$defs/Argv"}
 _META_REF = {"$ref": "#/$defs/Meta"}
 _WATCH_PROPS = {"interval": _WATCH_INTERVAL, "debounce": _DEBOUNCE}
-_DAYS = _arr(_enum("mon", "tue", "wed", "thu", "fri", "sat", "sun"), min_items=1, max_items=7, unique=True)
-_JOB_PROPS: dict[str, Any] = {"run": _ARGV_REF, "builtin": _enum("build", "validate", "review", "eval")}
-_JOB_PROPS.update({"input": _s(1024, min_len=1), "ingest": {"anyOf": [_NAME_REF, {"$ref": "#/$defs/Ingest"}]}})
-_JOB_PROPS.update({"every": _DURATION, "at": {"type": "string", "pattern": r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"}})
-_JOB_PROPS.update({"days": _DAYS, "timezone": _s(128, min_len=1)})
-_JOB_PROPS["events"] = _arr({"$ref": "#/$defs/EventMatch"}, min_items=1, max_items=32)
-_JOB_PROPS["hook"] = {"anyOf": [_HOOK_ENUM, _arr(_HOOK_ENUM, min_items=1, max_items=2, unique=True)]}
-_JOB_PROPS.update({"lookback": _DURATION, "overlap": _OVERLAP, "timeout": _TIMEOUT, "enabled": _BOOL})
-_JOB_PROPS.update({"channel": _NAME_REF, "emit": _enum("none", "action", "events"), "keep": _i(1, 1000)})
-_JOB_PROPS.update({"requires": _REQUIRES, "env": _ENV_MAP})
-
-_CHAN_PROPS = {"listen": _ARGV_REF, "send": _ARGV_REF, "timeout": _TIMEOUT, "enabled": _BOOL}
-_CHAN_PROPS.update({"requires": _REQUIRES, "env": _ENV_MAP})
-_SRV_PROPS = {"run": _ARGV_REF, "emit": _enum("none", "events"), "enabled": _BOOL}
-_SRV_PROPS.update({"requires": _REQUIRES, "env": _ENV_MAP})
+_SCHEDULE = {"anyOf": [_i(1, 315576000), _s(128, min_len=1)]}
+_UNIT_BASE = {"enabled": _BOOL, "requires": _REQUIRES, "env": _ENV_MAP}
+_JOB_PROPS: dict[str, Any] = {
+    "run": _ARGV_REF,
+    "input": _s(1024, min_len=1),
+    "ingest": {"anyOf": [_NAME_REF, {"$ref": "#/$defs/Ingest"}]},
+    "action": {"$ref": "#/$defs/Action"},
+    "channel": _NAME_REF,
+    "schedule": _SCHEDULE,
+    "events": _arr({"$ref": "#/$defs/EventMatch"}, min_items=1, max_items=32),
+    "hook": {"anyOf": [_HOOK_ENUM, _arr(_HOOK_ENUM, min_items=1, max_items=2, unique=True)]},
+    "lookback": _DURATION,
+    "overlap": _OVERLAP,
+    "timeout": _TIMEOUT,
+    **_UNIT_BASE,
+}
+_CHAN_PROPS = {"listen": _ARGV_REF, "send": _ARGV_REF, "timeout": _TIMEOUT, **_UNIT_BASE}
+_SVC_PROPS = {"run": _ARGV_REF, "emit": _enum("none", "events"), **_UNIT_BASE}
 _BRAIN_PROPS: dict[str, Any] = {
     "version": {"type": "integer", "const": FORMAT, "description": "Brain configuration format version."},
     "name": {**_NAME_REF, "description": "Stable lowercase identifier for this brain."},
+    "timezone": _s(128, min_len=1),
     "brains": _opt(_obj(extra=_s(4096, min_len=1), names=NAME)),
-    "defaults": _opt(_obj({"timezone": _s(128, min_len=1), "env": _ENV_MAP})),
+    "env": _opt(_ENV_MAP),
     "jobs": _opt(_obj(extra={"$ref": "#/$defs/Job"}, names=NAME)),
     "channels": _opt(_obj(extra={"$ref": "#/$defs/Channel"}, names=NAME)),
-    "servers": _opt(_obj(extra={"$ref": "#/$defs/Server"}, names=NAME)),
+    "services": _opt(_obj(extra={"$ref": "#/$defs/Service"}, names=NAME)),
     "watch": _opt(_obj(_WATCH_PROPS)),
 }
 _INGEST_PROPS = {"source": _NAME_REF, "mode": _enum("upsert", "snapshot"), "allow_removal": _BOOL}
 _EV_MATCH_PROPS = {"kind": _s(128, min_len=1), "source": _s(128, min_len=1), "filter": _s(2048, min_len=1)}
 _BRAIN_DEFS = {
+    "Action": _obj({"keep": _i(1, 1000)}, req=("keep",), title="Action"),
     "Argv": {"title": "Argv", **_arr(_s(4096, min_len=1), min_items=1, max_items=64)},
     "EventMatch": _obj(_EV_MATCH_PROPS, title="EventMatch"),
     "Ingest": _obj(_INGEST_PROPS, req=("source",), title="Ingest"),
-    "Job": {**_obj(_JOB_PROPS, title="Job"), "oneOf": [{"required": ["run"]}, {"required": ["builtin"]}]},
+    "Job": {
+        **_obj(_JOB_PROPS, req=("run",), title="Job"),
+        "allOf": [{"not": {"required": ["ingest", "action"]}}, {"not": {"required": ["ingest", "channel"]}}],
+    },
     "Channel": {**_obj(_CHAN_PROPS, title="Channel"), "anyOf": [{"required": ["listen"]}, {"required": ["send"]}]},
-    "Server": _obj(_SRV_PROPS, req=("run",), title="Server"),
+    "Service": _obj(_SVC_PROPS, req=("run",), title="Service"),
 }
 _BRAIN_BODY = {**_obj(_BRAIN_PROPS, req=("version", "name")), "$defs": _BRAIN_DEFS}
 BRAIN_SCHEMA = _doc("bf", "Config", "Brain Framework configuration and orchestration (bf.yaml).", _BRAIN_BODY)
@@ -121,12 +125,14 @@ _STALE_ANY = [_i(1, 36500), _s(32, pat=DURATION_PAT), {"type": "string", "minLen
 _REC_PROPS: dict[str, Any] = {"id": _s(4096, min_len=1), "ref": _s(4200, min_len=1), "source": _NAME_REF}
 _REC_PROPS.update({"kind": _enum("project", "concept", "action", "memory"), "title": _s(4096, min_len=1)})
 _REC_PROPS.update({"text": _s(4 << 20), "type": _s(128, min_len=1), "status": _s(128, min_len=1)})
-_REC_PROPS.update({"summary": _s(16384), "description": _s(16384), "url": _s(8192), "time": _OPT_TS})
+_OPT_TS = r"^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?$"
+_REC_PROPS.update({"summary": _s(16384), "description": _s(16384), "url": _s(8192)})
+_REC_PROPS["time"] = {"type": "string", "pattern": _OPT_TS}
 _REC_PROPS.update({"updated": {"type": "string", "pattern": _ISO_DT}, "stale_after": {"anyOf": _STALE_ANY}})
 _REC_PROPS.update({"tags": _TAG_ITEMS, "aliases": _arr(_s(1024, min_len=1), max_items=200)})
 _REC_PROPS.update({"attributes": {"type": "object"}, "headings": _arr({"$ref": "#/$defs/Heading"})})
 _REC_PROPS["relations"] = {"anyOf": [{"type": "object"}, _arr({"type": "object"}, max_items=2000)]}
-_REC_PROPS["links"] = _arr({"anyOf": [_s(8192, min_len=1), {"$ref": "#/$defs/Link"}]}, max_items=2000)
+_REC_PROPS["links"] = _arr({"$ref": "#/$defs/Link"}, max_items=2000)
 _REC_PROPS.update({"elements": _arr({"$ref": "#/$defs/Element"}), "tasks": _arr({"$ref": "#/$defs/Task"})})
 _REC_PROPS["attrs"] = {"type": "object", "propertyNames": _s(256, min_len=1), "additionalProperties": _META_REF}
 _REC_PROPS["sha256"] = {"type": "string", "pattern": r"^[0-9a-f]{64}$"}
@@ -145,9 +151,8 @@ _REC_DEFS = {
     "Task": _obj(_TASK_PROPS, req=("text", "done", "section", "meta"), title="Task"),
 }
 _REC_DESC = "Unified JSON record schema enforced on compiled Markdown notes and ingested sensor records in memories/."
-RECORD_SCHEMA = _doc(
-    "record", "Record", _REC_DESC, {**_obj(_REC_PROPS, req=("id", "title"), extra=True), "$defs": _REC_DEFS}
-)
+_REC_REQ = ("id", "ref", "source", "kind", "title")
+RECORD_SCHEMA = _doc("record", "Record", _REC_DESC, {**_obj(_REC_PROPS, req=_REC_REQ, extra=True), "$defs": _REC_DEFS})
 
 _CONCEPT_PROPS: dict[str, Any] = {"type": {"type": "string", "pattern": r"^[a-z][a-z0-9-]{0,63}$"}}
 _CONCEPT_PROPS.update({"status": _enum("draft", "stable", "deprecated"), "summary": _s(16384)})
@@ -156,44 +161,16 @@ _CONCEPT_PROPS["sources"] = _arr(_obj({"resource": _s(8192, min_len=1)}, req=("r
 _CONCEPT_DESC = "User-customizable schema enforced on concept records compiled from concepts/ (schemas/concepts.json)."
 CONCEPTS_SCHEMA = _doc("concepts", "Concept", _CONCEPT_DESC, _obj(_CONCEPT_PROPS, req=("type", "status"), extra=True))
 
-_HIST_PROPS: dict[str, Any] = {"run": _s(128, min_len=1), "status": _enum("ok", "failed"), "started": _TS, "ended": _TS}
-_HIST_PROPS.update({"duration_ms": _i(0), "exit_code": {"type": "integer"}, "error": _s(4096), "stderr": _s(8192)})
-_HIST_PROPS["summary"] = {"type": "object"}
-_RUN_LOG_PROPS: dict[str, Any] = {"kind": _enum("job", "channel", "server"), "name": _NAME_REF}
-_RUN_LOG_PROPS.update({"status": _enum("ok", "failed", "running", "idle", "stopped"), "updated": _TS})
-_RUN_LOG_PROPS.update({"last_start": _OPT_TS, "last_end": _OPT_TS, "last_success": _OPT_TS, "cursor": _s(4096)})
-_RUN_LOG_PROPS.update({"runs": _i(0), "failures": _i(0), "consecutive_failures": _i(0)})
-_HIST_REQ = ("run", "status", "started", "ended", "duration_ms", "exit_code")
-_RUN_LOG_PROPS["history"] = _arr(_obj(_HIST_PROPS, req=_HIST_REQ, extra=True), max_items=1000)
-_EV_PROPS = {"seq": _i(1), "id": _s(256, min_len=1), "time": _TS, "kind": _s(128, min_len=1)}
-_EV_PROPS.update({"source": _s(128, min_len=1), "data": {"type": "object"}})
-_EV_ITEMS = _arr(_obj(_EV_PROPS, req=("seq", "id", "time", "kind", "source", "data")), max_items=5000)
-_EV_LOG_PROPS = {"kind": {"type": "string", "const": "events"}, "seq": _i(0), "events": _EV_ITEMS}
-_EVENT_LOG_OBJ = _obj(_EV_LOG_PROPS, req=("kind", "seq", "events"), title="EventLog")
-_RUN_LOG_OBJ = _obj(_RUN_LOG_PROPS, req=("kind", "name", "status", "updated", "history"), title="RunLog")
-LOGS_SCHEMA = _doc(
-    "logs",
-    "Log",
-    "Execution and event logs stored as JSON in logs/ (schemas/logs.json).",
-    {"oneOf": [_RUN_LOG_OBJ, _EVENT_LOG_OBJ]},
-)
-
-_CASE_PROPS: dict[str, Any] = {"name": _s(256, min_len=1), "engine": _enum("rg", "jq", "sql", "read")}
+_CASE_PROPS: dict[str, Any] = {"name": _s(256, min_len=1), "engine": _enum("rg", "jq", "read")}
 _CASE_PROPS.update({"query": _s(8192, min_len=1), "scope": _s(1024), "expect_refs": _arr(_s(4096, min_len=1))})
 _CASE_PROPS.update({"forbid_refs": _arr(_s(4096, min_len=1)), "expect_text": _arr(_s(4096, min_len=1))})
 _CASE_PROPS.update({"min_count": _i(0), "max_count": _i(0), "expect_equals": {}})
-_EVAL_PROPS = {
-    "version": {"type": "integer", "const": FORMAT},
-    "cases": _arr(_obj(_CASE_PROPS, req=("name", "query")), max_items=500),
-}
-EVALS_SCHEMA = _doc(
-    "evals",
-    "Eval",
-    "Deterministic query evaluations in evals/ (schemas/evals.json).",
-    _obj(_EVAL_PROPS, req=("version", "cases")),
-)
+_EV_CASES = _arr(_obj(_CASE_PROPS, req=("name", "query")), max_items=500)
+_EV_DESC = "Deterministic query evaluations in evals/ (schemas/evals.json)."
+_EVAL_BODY = _obj({"version": {"type": "integer", "const": FORMAT}, "cases": _EV_CASES}, req=("version", "cases"))
+EVALS_SCHEMA = _doc("evals", "Eval", _EV_DESC, _EVAL_BODY)
 _SCHEMAS: dict[Kind, dict[str, Any]] = {"brain": BRAIN_SCHEMA, "record": RECORD_SCHEMA, "concepts": CONCEPTS_SCHEMA}
-_SCHEMAS.update({"logs": LOGS_SCHEMA, "evals": EVALS_SCHEMA})
+_SCHEMAS["evals"] = EVALS_SCHEMA
 
 
 def document(kind: Kind) -> dict[str, Any]:
@@ -234,14 +211,15 @@ def _describe_error(error: ValidationError) -> str:
         return f"{prefix}unknown property {', '.join(repr(k) for k in sorted(set(error.instance) - allowed))}"
     if rule in {"minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems"}:
         return f"{prefix}violates {rule} {val}"
-    table = {"type": f"expected type {val}", "enum": f"must be one of {val}", "const": f"must equal {val!r}"}
-    table.update(
-        {
-            "pattern": f"does not match pattern {val}",
-            "uniqueItems": "items must be unique",
-            "propertyNames": "invalid property name",
-        }
-    )
+    table = {
+        "type": f"expected type {val}",
+        "enum": f"must be one of {val}",
+        "const": f"must equal {val!r}",
+        "pattern": f"does not match pattern {val}",
+        "uniqueItems": "items must be unique",
+        "propertyNames": "invalid property name",
+        "not": "conflicting properties",
+    }
     return f"{prefix}{table.get(rule, f'failed schema rule {rule}')}"
 
 

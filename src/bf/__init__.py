@@ -3,7 +3,7 @@
 import os
 import sys
 
-__version__ = "26.0.1"
+__version__ = "27.0.0"
 
 
 def main() -> None:

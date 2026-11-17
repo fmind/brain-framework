@@ -1,8 +1,10 @@
-"""Tests for `jobs.py` and `watch.py`: schedules, KISS JSON events, hooks, timeouts, channels, servers, and watch."""
+"""Tests for `jobs.py` and `watch.py`: schedules, `.bf/state/`, `structlog` JSON logs, channels, services, and watch."""
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import socket
 import sys
 import threading
@@ -12,10 +14,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
 from bf import config, engine, jobs, records, watch
 from bf.models import FORMAT, Error, InputError, decode
-from bf.storage import Store
+from bf.storage import Store, private_dir
 
 
 def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: Path) -> None:
@@ -64,25 +67,23 @@ def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: P
         "bf.yaml",
         f"version: {FORMAT}\n"
         "name: orch\n"
-        "defaults:\n"
-        "  timezone: UTC\n"
+        "timezone: UTC\n"
         "jobs:\n"
         "  feed:\n"
         f"    run: [{sys.executable!r}, sensors/feed.py, '{{{{start}}}}']\n"
         "    ingest:\n"
         "      source: feed\n"
         "      mode: upsert\n"
-        "    every: 1h\n"
+        "    schedule: 1h\n"
         "  rebuild:\n"
-        "    builtin: build\n"
+        "    run: [bf, build]\n"
         "    events:\n"
         "      - kind: records.ingested\n"
         "        source: feed\n"
         "  brief:\n"
         f"    run: [{sys.executable!r}, routines/fake_harness.py, '{{{{context}}}}', '{{{{input}}}}']\n"
         "    input: prompts/digest.md\n"
-        "    at: '08:00'\n"
-        "    days: [sun]\n"
+        "    schedule: '0 8 * * 0'\n"
         "    channel: chat\n"
         "  assistant:\n"
         f"    run: [{sys.executable!r}, routines/fake_harness.py, '{{{{context}}}}', '{{{{input}}}}']\n"
@@ -94,14 +95,13 @@ def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: P
         "    channel: chat\n"
         "  ev-emitter:\n"
         f"    run: [{sys.executable!r}, routines/emit_events.py]\n"
-        "    emit: events\n"
         "    enabled: false\n"
         "  slow:\n"
         f"    run: [{sys.executable!r}, routines/slow.py]\n"
         "    timeout: 1s\n"
         "    enabled: false\n"
         "  guard-commit:\n"
-        "    builtin: validate\n"
+        "    run: [bf, validate]\n"
         "    hook: pre-commit\n"
         "  guard-push:\n"
         f"    run: [{sys.executable!r}, routines/hook_guard.py]\n"
@@ -112,18 +112,27 @@ def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: P
         f"    send: [{sys.executable!r}, channels/mock_chat.py, send]\n".encode(),
     )
 
-    # 2026-11-15 is a Sunday! At 09:00 UTC both `feed` (`every: 1h`) and `brief` (`at: "08:00"`, `days: [sun]`) are due.
+    # 2026-11-15 is a Sunday! At 09:00 UTC both `feed` (`1h`) and `brief` (`0 8 * * 0`) are due.
     t0 = datetime(2026, 11, 15, 9, 0, tzinfo=UTC)
     dry = jobs.run_jobs(store, ("feed",), dry_run=True, now=t0)
     assert dry["results"][0]["status"] == "dry_run"
 
-    # Bare `bf run` skips pure event-only (`rebuild`, `assistant`) and hook-only (`guard-*`) jobs!
-    bare = jobs.run_jobs(store, dry_run=True, now=t0)
-    assert [r["job"] for r in bare["results"]] == ["feed", "brief"]
+    # `bf run` requires an explicit selector (`JOB ...`, `--due`, or `--hook`), and guards `-- EXTRA_ARGS`.
+    with pytest.raises(InputError, match="specify job names, --due, or --hook"):
+        jobs.run_jobs(store, dry_run=True, now=t0)
+    with pytest.raises(InputError, match="specify job names, --due, or --hook"):
+        jobs.run_jobs(store, ("feed",), due_only=True, now=t0)
+    with pytest.raises(InputError, match="require a single job or --hook"):
+        jobs.run_jobs(store, due_only=True, extra_args=("--x",), now=t0)
+    with pytest.raises(InputError, match="require a single job or --hook"):
+        jobs.run_jobs(store, ("feed", "brief"), extra_args=("--x",), now=t0)
 
+    # `due_only=True` rebuilds dirty notes first before evaluating scheduled/event-triggered jobs!
+    store.write("concepts/dirty-due.md", b"---\ntype: guide\nstatus: draft\n---\n\n# Dirty Before Due\n")
     due1 = jobs.run_jobs(store, due_only=True, now=t0)
     assert due1["ok"], due1
     assert [r["job"] for r in due1["results"]] == ["feed", "brief"]
+    assert store.exists("memories/concepts/dirty-due.json")
     assert records.load_source(store, "feed")[0]["id"] == "f1"
 
     # Next tick 5 minutes later: `rebuild` triggers on `records.ingested`!
@@ -135,10 +144,10 @@ def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: P
     due3 = jobs.run_jobs(store, due_only=True, now=t1 + timedelta(minutes=5))
     assert due3["results"] == []
 
-    # `emit: events` job appends emitted JSON events to `logs/events.json`!
+    # One-shot JSON stdout summary dict captured in `summary` (`{"kind":"custom.ev","id":"e1"}`)!
     ev_res = jobs.run_jobs(store, ("ev-emitter",), now=t1)
     assert ev_res["ok"]
-    assert ev_res["results"][0]["summary"] == {"events": 1}
+    assert ev_res["results"][0]["summary"] == {"kind": "custom.ev", "id": "e1"}
 
     # Git hook execution (`pre-commit` and `pre-push` with extra_args and stdin_bytes)!
     hk1 = jobs.run_jobs(store, hook="pre-commit", now=t1)
@@ -150,29 +159,35 @@ def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: P
     assert hk2["ok"]
     assert (root / "routines" / "hook.args").read_text() == "--pre-push origin|refs/heads/main"
 
-    # Explicit `bf post` auto-selects the single enabled channel (`chat`) + dry_run!
-    p_dry = jobs.post_message(store, "Hello dry", dry_run=True, now=t1)
-    assert (p_dry["brain"], p_dry["channel"], p_dry["status"], p_dry["message"]["text"]) == (
-        "orch",
-        "chat",
-        "dry_run",
-        "Hello dry",
-    )
-    posted = jobs.post_message(store, "Hello live", thread="space-1", reply_to="m-0", now=t1)
+    # Channel delivery via `jobs.send_channel_message`!
+    posted = jobs.send_channel_message(store, "Hello live", to="chat", thread="space-1", reply_to="m-0", now=t1)
     assert posted["status"] == "ok"
     assert posted["channel"] == "chat"
     sent_lines = [json.loads(ln) for ln in (root / "channels" / "sent.jsonl").read_text().splitlines()]
-    assert any(m["text"] == "Hello live" and m["conversation"] == "space-1" for m in sent_lines)
+    assert any(
+        m["text"] == "Hello live" and m["conversation"] == "space-1" and m["reply_to"] == "m-0" for m in sent_lines
+    )
 
-    # Reactive `jobs.assistant` triggered via `watch.tick` when a `channel.message` event arrives!
-    records.append_event(store, "channel.message", "chat", {"text": "hi assistant", "direct": True}, now=t1)
+    # Reactive `jobs.assistant` triggered via `watch.tick` auto-threads reply from triggering `channel.message`!
+    records.append_event(
+        store,
+        "channel.message",
+        "chat",
+        {"id": "ev-msg-9", "conversation": "space-9/threads/t-1", "text": "hi assistant", "direct": True},
+        now=t1,
+    )
     tick_out = watch.tick(store, now=t1 + timedelta(minutes=6))
     assert tick_out["jobs_ran"] == 1
     assert tick_out["ok"]
-    sent_after = (root / "channels" / "sent.jsonl").read_text()
-    assert "Summary for event (1 ev) from reply.md" in sent_after
+    sent_after_lines = [json.loads(ln) for ln in (root / "channels" / "sent.jsonl").read_text().splitlines()]
+    assert any(
+        "Summary for event (1 ev) from reply.md" in m["text"]
+        and m["conversation"] == "space-9/threads/t-1"
+        and m["reply_to"] == "ev-msg-9"
+        for m in sent_after_lines
+    )
 
-    # `DaemonStream` captures JSON line output from `channels.chat.listen` into `logs/events.json`!
+    # `DaemonStream` captures JSON line output from `channels.chat.listen` into `.bf/state/events.json` & `logs/events.log`!
     cfg = config.load(store)
     stop_ev, wake_ev = threading.Event(), threading.Event()
     daemon = watch.DaemonStream(store, cfg.channels["chat"], stop_ev, wake_ev)
@@ -180,26 +195,33 @@ def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: P
     assert wake_ev.wait(timeout=5.0)
     stop_ev.set()
     daemon.terminate()
-    ev_doc = decode(store.read("logs/events.json"), "logs/events.json")
+    ev_doc = decode(private_dir(store, ".bf", "state").read("events.json"), ".bf/state/events.json")
     assert isinstance(ev_doc, dict)
     assert any(ev["source"] == "chat" and ev["data"].get("text") == "ping from chat" for ev in ev_doc["events"])
 
-    # Timeout reaps slow process group and records failure in `logs/slow.json`!
+    # Timeout reaps slow process group and records failure in `logs/slow.json`; `status_summary` includes `counts` + `attention`!
     slow_res = jobs.run_jobs(store, ("slow",), now=t1)
     assert not slow_res["ok"]
     assert slow_res["results"][0]["exit_code"] == 124
     assert "timed out" in slow_res["results"][0]["error"]
-    assert jobs.status_summary(store, check=True)["ok"]
+    st_sum = jobs.status_summary(store, check=True)
+    assert st_sum["ok"]
+    assert st_sum["counts"]["concepts"] >= 2
+    assert st_sum["attention"] == []
 
-    # Render TUI dashboard table (`job` + `channel` rows) and supervise file changes via `watch.serve`!
-    table = watch.render_dashboard(store)
-    assert len(table.rows) >= 3
+    # Render TUI dashboard panel (`job` + `channel` rows) and supervise file changes via `watch.serve`!
+    buf = io.StringIO()
+    Console(file=buf, width=120, force_terminal=False).print(watch.render_dashboard(store))
+    rendered = buf.getvalue()
+    assert "orch · watch" in rendered
+    assert "channel · listen+send" in rendered
+    assert "+1 · 1 record" in rendered
+    assert "2 disabled" in rendered
 
+    # Non-TTY `watch.serve` automatically emits JSON tick lines even with default `json_stream=False`!
     serve_stop = threading.Event()
     store.write("bf.yaml", store.read("bf.yaml") + b"watch:\n  interval: 500ms\n  debounce: 50ms\n")
-    serve_thread = threading.Thread(
-        target=lambda: watch.serve(store, json_stream=True, stop_event=serve_stop), daemon=True
-    )
+    serve_thread = threading.Thread(target=lambda: watch.serve(store, stop_event=serve_stop), daemon=True)
     serve_thread.start()
     deadline = time.monotonic() + 8.0
     step = 0
@@ -220,10 +242,10 @@ def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: P
     store.write(
         "bf.yaml",
         f"version: {FORMAT}\nname: orch\njobs:\n"
-        "  rev:\n    builtin: review\n"
-        "  ev:\n    builtin: eval\n"
-        "  rel-script:\n    run: [routines/exec_rel.py]\n    emit: action\n    keep: 1\n"
-        "  need-missing:\n    builtin: build\n    requires: [no-such-binary-bf-xyz]\n"
+        "  rev:\n    run: [bf, review]\n"
+        "  ev:\n    run: [bf, eval]\n"
+        "  rel-script:\n    run: [routines/exec_rel.py]\n    action:\n      keep: 1\n"
+        "  need-missing:\n    run: [bf, build]\n    requires: [no-such-binary-bf-xyz]\n"
         f"  bad-input:\n    run: [{sys.executable!r}, -c, 'pass']\n    input: prompts/missing.md\n"
         f"  bad-ing:\n    run: [{sys.executable!r}, sensors/bad_json.py]\n    ingest: feed\n"
         f"  post-fail:\n    run: [{sys.executable!r}, -c, 'print(\"hello\")']\n    channel: fail-send\n"
@@ -241,7 +263,9 @@ def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: P
     pf_res = jobs.run_jobs(store, ("post-fail",), now=t1)
     assert not pf_res["ok"]
     assert "exit code 2" in pf_res["results"][0]["error"]
-    assert not jobs.status_summary(store, check=True)["ok"]
+    st_fail = jobs.status_summary(store, check=True)
+    assert not st_fail["ok"]
+    assert {"kind": "job", "name": "post-fail", "failed": True} in st_fail["attention"]
     with pytest.raises(Error, match="no-such-binary-bf-xyz"):
         jobs.run_jobs(store, ("need-missing",), now=t1)
     with pytest.raises(Error, match="input file"):
@@ -251,11 +275,10 @@ def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: P
         lambda: jobs.exec_argv((), cwd=root, env={}, timeout=5),
         lambda: jobs.run_jobs(store, ("missing-job",)),
         lambda: jobs.run_jobs(store, hook="post-merge"),
-        lambda: jobs.post_message(store, "   "),
-        lambda: jobs.post_message(store, "hi"),  # 2 channels define `send` -> requires `--to`!
-        lambda: jobs.post_message(store, "hi", to="no-such-channel"),
-        lambda: jobs.post_message(store, "hi", to="req-send"),
-        lambda: jobs.post_message(store, "hi", to="fail-send"),
+        lambda: jobs.send_channel_message(store, "   ", to="fail-send"),
+        lambda: jobs.send_channel_message(store, "hi", to="no-such-channel"),
+        lambda: jobs.send_channel_message(store, "hi", to="req-send"),
+        lambda: jobs.send_channel_message(store, "hi", to="fail-send"),
     ):
         with pytest.raises((Error, InputError)):
             bad_call()
@@ -288,10 +311,10 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
     store.write(
         "bf.yaml",
         f"version: {FORMAT}\nname: resilient\n"
-        "defaults:\n  env:\n    GWS_DIR: '{{home}}/.config/gws'\n    LOCAL_SECRET: default-val\n"
+        "env:\n  GWS_DIR: '{{home}}/.config/gws'\n  LOCAL_SECRET: default-val\n"
         "jobs:\n"
-        f"  warn-ok:\n    run: [{sys.executable!r}, routines/warn_ok.py]\n    ingest:\n      source: warn-ok\n      mode: snapshot\n    every: 1h\n"
-        f"  flaky:\n    run: [{sys.executable!r}, routines/fail_fast.py]\n    every: 5m\n"
+        f"  warn-ok:\n    run: [{sys.executable!r}, routines/warn_ok.py]\n    ingest:\n      source: warn-ok\n      mode: snapshot\n    schedule: 1h\n"
+        f"  flaky:\n    run: [{sys.executable!r}, routines/fail_fast.py]\n    schedule: 5m\n"
         f"  flaky-ev:\n    run: [{sys.executable!r}, routines/fail_fast.py]\n    events:\n      - kind: channel.message\n"
         "channels:\n"
         f"  chat:\n    listen: [{sys.executable!r}, channels/dup_stream.py]\n".encode(),
@@ -303,18 +326,19 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
     ok_res = jobs.run_jobs(store, ("warn-ok",))
     assert ok_res["ok"]
     assert records.load_source(store, "warn-ok")[0]["title"] == f"override-gws|from-dotenv|{root.resolve()}"
-    warn_log = decode(store.read("logs/warn-ok.json"), "logs/warn-ok.json")
-    assert isinstance(warn_log, dict)
-    assert "Skipped feed x" in warn_log["history"][-1]["stderr"]
+    warn_lines = [decode(ln, "logs/warn-ok.log") for ln in store.read("logs/warn-ok.log").splitlines() if ln.strip()]
+    assert isinstance(warn_lines[-1], dict)
+    assert warn_lines[-1]["message"] == "job.succeeded"
+    assert "Skipped feed x" in warn_lines[-1]["stderr"]
 
     # Scheduled AND event-triggered failure backoff!
     t0 = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
     assert not jobs.run_jobs(store, ("flaky",), now=t0)["ok"]
     cfg = config.load(store)
-    flaky_log = jobs.load_run_log(store, "flaky", kind="job")
-    assert flaky_log["consecutive_failures"] == 1
-    assert not jobs.is_schedule_due(cfg.jobs["flaky"], flaky_log, t0 + timedelta(seconds=10))
-    assert jobs.is_schedule_due(cfg.jobs["flaky"], flaky_log, t0 + timedelta(seconds=65))
+    flaky_state = jobs.load_unit_state(store, "flaky", kind="job")
+    assert flaky_state["consecutive_failures"] == 1
+    assert not jobs.is_schedule_due(cfg.jobs["flaky"], flaky_state, t0 + timedelta(seconds=10))
+    assert jobs.is_schedule_due(cfg.jobs["flaky"], flaky_state, t0 + timedelta(seconds=65))
 
     records.append_event(store, "channel.message", "chat", {"id": "ev-b1", "text": "ping"}, now=t0)
     ev_fail = jobs.run_jobs(store, due_only=True, now=t0)
@@ -328,17 +352,17 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
     assert summary["jobs"]["warn-ok"]["last_run"]["added"] == 1
     assert "transient err" in summary["jobs"]["flaky"]["error"]
 
-    # `DaemonStream` deduplicates redelivered message IDs in `logs/events.json`!
+    # `DaemonStream` deduplicates redelivered message IDs in `.bf/state/events.json` & records `logs/chat.log`!
     stop_ev, wake_ev = threading.Event(), threading.Event()
     daemon = watch.DaemonStream(store, cfg.channels["chat"], stop_ev, wake_ev)
     daemon.start()
     assert wake_ev.wait(timeout=5.0)
     dup_deadline = time.monotonic() + 5.0
-    while time.monotonic() < dup_deadline and not jobs.load_run_log(store, "chat", kind="channel").get("history"):
+    while time.monotonic() < dup_deadline and not store.exists("logs/chat.log"):
         time.sleep(0.02)
     stop_ev.set()
     daemon.terminate()
-    ev_doc = decode(store.read("logs/events.json"), "logs/events.json")
+    ev_doc = decode(private_dir(store, ".bf", "state").read("events.json"), ".bf/state/events.json")
     assert isinstance(ev_doc, dict)
     assert sum(1 for e in ev_doc["events"] if e["data"].get("id") == "m-dup") == 1
 
@@ -379,10 +403,10 @@ def test_proxy_env_thread_reply_forwarding_and_reactive_schedule_anchors(
     )
     store.write(
         "bf.yaml",
-        f"version: {FORMAT}\nname: hybrid\ndefaults:\n  timezone: UTC\njobs:\n"
+        f"version: {FORMAT}\nname: hybrid\ntimezone: UTC\njobs:\n"
         "  bot:\n"
         f"    run: [{sys.executable!r}, routines/echo_ctx.py, '{{{{context}}}}']\n"
-        "    at: '08:00'\n"
+        "    schedule: '0 8 * * *'\n"
         "    events:\n"
         "      - kind: channel.message\n"
         "    channel: chat\n"
@@ -394,7 +418,7 @@ def test_proxy_env_thread_reply_forwarding_and_reactive_schedule_anchors(
         "    channel: alerts\n"
         "  hook-every:\n"
         f"    run: [{sys.executable!r}, routines/echo_ctx.py, '{{{{context}}}}']\n"
-        "    every: 1h\n"
+        "    schedule: 1h\n"
         "    hook: pre-commit\n"
         "    channel: alerts\n"
         "channels:\n"
@@ -490,9 +514,8 @@ def test_watch_supervises_mcp_daemon_server_and_input_jobs(tmp_path: Path) -> No
         "  brief:\n"
         f"    run: [{sys.executable!r}, routines/fake_harness.py, '{{{{input}}}}']\n"
         "    input: prompts/brief.md\n"
-        "    emit: action\n"
-        "    keep: 1\n"
-        "servers:\n"
+        "    action:\n      keep: 1\n"
+        "services:\n"
         "  mcp:\n"
         f"    run: [{sys.executable!r}, -m, bf, mcp, --transport, http, --port, '{port}']\n"
         "    enabled: true\n"
@@ -508,16 +531,16 @@ def test_watch_supervises_mcp_daemon_server_and_input_jobs(tmp_path: Path) -> No
     act2_rel = ran2["results"][0]["summary"]["action"]
     assert act2_rel != act1_rel
     assert not store.exists(act1_mem)
-    assert engine.validate(store)["valid"]
+    assert engine.validate(store)["ok"]
 
-    # Port-conflict second brain + missing `requires:` on server record `failed` in `logs/`!
+    # Port-conflict second brain + missing `requires:` on service record `failed` in `.bf/state/`!
     conflict_root = tmp_path / "mcp-conflict"
     engine.init_brain(conflict_root, name="mcp-conflict")
     conflict_store = Store(conflict_root)
     conflict_store.write(
         "bf.yaml",
         f"version: {FORMAT}\nname: mcp-conflict\n"
-        "servers:\n"
+        "services:\n"
         "  mcp:\n"
         f"    run: [{sys.executable!r}, -m, bf, mcp, --transport, http, --port, '{port}']\n"
         "    enabled: true\n"
@@ -551,7 +574,10 @@ def test_watch_supervises_mcp_daemon_server_and_input_jobs(tmp_path: Path) -> No
             c_deadline = time.monotonic() + 8.0
             while time.monotonic() < c_deadline:
                 st = jobs.status_summary(conflict_store)
-                if st["servers"]["mcp"]["consecutive_failures"] >= 1 and st["servers"]["badreq"]["status"] == "failed":
+                if (
+                    st["services"]["mcp"]["consecutive_failures"] >= 1
+                    and st["services"]["badreq"]["status"] == "failed"
+                ):
                     break
                 time.sleep(0.1)
         finally:
@@ -562,16 +588,15 @@ def test_watch_supervises_mcp_daemon_server_and_input_jobs(tmp_path: Path) -> No
         srv_thread.join(timeout=6)
 
     assert "bf_query" in resp_text
-    mcp_log = decode(store.read("logs/mcp.json"), "logs/mcp.json")
-    assert isinstance(mcp_log, dict)
-    assert mcp_log["status"] == "stopped"
+    mcp_state = jobs.load_unit_state(store, "mcp", kind="service")
+    assert mcp_state["status"] == "stopped"
 
     conflict_status = jobs.status_summary(conflict_store, check=True)
     assert not conflict_status["ok"]
-    assert conflict_status["servers"]["mcp"]["status"] == "failed"
-    assert conflict_status["servers"]["mcp"]["consecutive_failures"] >= 1
-    assert conflict_status["servers"]["badreq"]["status"] == "failed"
-    assert "nonexistent-req-cmd-xyz" in conflict_status["servers"]["badreq"]["error"]
+    assert conflict_status["services"]["mcp"]["status"] == "failed"
+    assert conflict_status["services"]["mcp"]["consecutive_failures"] >= 1
+    assert conflict_status["services"]["badreq"]["status"] == "failed"
+    assert "nonexistent-req-cmd-xyz" in conflict_status["services"]["badreq"]["error"]
 
 
 def test_dual_schedule_and_event_job_advances_cursor_after_scheduled_run(tmp_path: Path) -> None:
@@ -588,7 +613,7 @@ def test_dual_schedule_and_event_job_advances_cursor_after_scheduled_run(tmp_pat
         "jobs:\n"
         "  combo:\n"
         f"    run: [{sys.executable!r}, routines/count.py, '{{{{context}}}}']\n"
-        "    every: 1h\n"
+        "    schedule: 1h\n"
         "    events:\n"
         "      - kind: custom.ping\n".encode(),
     )
@@ -597,8 +622,8 @@ def test_dual_schedule_and_event_job_advances_cursor_after_scheduled_run(tmp_pat
 
     dry = jobs.run_jobs(store, due_only=True, dry_run=True)
     assert [item["job"] for item in dry["results"]] == ["combo"]
-    cursor_path = root / ".bf" / "state" / "combo.cursor.json"
-    assert not cursor_path.exists()
+    state_path = root / ".bf" / "state" / "combo.json"
+    assert not state_path.exists()
 
     first = jobs.run_jobs(store, due_only=True)
     assert [item["job"] for item in first["results"]] == ["combo"]
@@ -607,9 +632,294 @@ def test_dual_schedule_and_event_job_advances_cursor_after_scheduled_run(tmp_pat
     assert isinstance(seen, dict)
     assert seen["kind"] == "schedule"
     assert seen["events"] == []
-    assert decode(cursor_path.read_bytes(), str(cursor_path)) == {"seq": ev1["seq"]}
+    st1 = decode(state_path.read_bytes(), str(state_path))
+    assert isinstance(st1, dict)
+    assert st1["event_seq"] == ev1["seq"]
 
     ev2 = records.append_event(store, "custom.other", "test", {"id": "o2"})
     second = jobs.run_jobs(store, due_only=True)
     assert second["ran"] == 0
-    assert decode(cursor_path.read_bytes(), str(cursor_path)) == {"seq": ev2["seq"]}
+    st2 = decode(state_path.read_bytes(), str(state_path))
+    assert isinstance(st2, dict)
+    assert st2["event_seq"] == ev2["seq"]
+
+
+def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def render_text(st: Store, *, now: datetime | None = None, max_rows: int | None = None, width: int = 140) -> str:
+        out = io.StringIO()
+        Console(file=out, width=width, force_terminal=False).print(
+            watch.render_dashboard(st, now=now, max_rows=max_rows)
+        )
+        return out.getvalue()
+
+    empty_root = tmp_path / "empty-tui"
+    engine.init_brain(empty_root, name="empty-tui")
+    empty_store = Store(empty_root)
+    empty_store.write(
+        "bf.yaml", f"version: {FORMAT}\nname: empty-tui\nwatch:\n  interval: 500ms\n  debounce: 50ms\n".encode()
+    )
+    now = datetime(2026, 11, 16, 12, 30, 0, tzinfo=UTC)
+    empty_txt = render_text(empty_store, now=now)
+    assert "All healthy" in empty_txt
+    assert "No enabled jobs, channels, or services in bf.yaml" in empty_txt
+    assert "12:30:00 UTC" in empty_txt
+
+    root = tmp_path / "rich-tui"
+    engine.init_brain(root, name="rich-tui")
+    store = Store(root)
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: rich-tui\n"
+        "jobs:\n"
+        "  ing-diff:\n    run: [echo]\n    ingest: items\n    schedule: 30m\n"
+        "  ing-same:\n    run: [echo]\n    ingest:\n      source: archive\n      mode: snapshot\n    schedule: '0 8 * * 1-5'\n"
+        "  b-build:\n    run: [bf, build]\n    schedule: '0 9 * * *'\n"
+        "  b-val:\n    run: [bf, validate]\n    hook: pre-commit\n"
+        "  b-eval:\n    run: [bf, eval]\n    events:\n      - kind: a\n      - kind: b\n"
+        "  b-rev:\n    run: [bf, review]\n"
+        '  act-job:\n    run: [echo]\n    action:\n      keep: 1\n    events:\n      - kind: "ev\\u200b"\n'
+        "  idle-ing:\n    run: [echo]\n    ingest: raw\n"
+        "  idle-ch:\n    run: [echo]\n    channel: out-only\n"
+        "  idle-plain:\n    run: [echo]\n"
+        "  failing:\n    run: [echo]\n    schedule: 1m\n"
+        "  off-job:\n    run: [bf, build]\n    enabled: false\n"
+        "channels:\n"
+        "  live-ch:\n    listen: [echo]\n    send: [echo]\n"
+        "  out-only:\n    send: [echo]\n"
+        "services:\n"
+        "  mcp:\n    run: [echo]\n"
+        "  halted:\n    run: [echo]\n"
+        "watch:\n  interval: 500ms\n  debounce: 50ms\n".encode(),
+    )
+
+    def save_state(
+        name: str,
+        kind: str,
+        status: str,
+        *,
+        ago_s: int = 10,
+        summary: dict[str, object] | None = None,
+        err: str = "",
+        consec: int = 0,
+    ) -> None:
+        ts = (now - timedelta(seconds=ago_s)).isoformat().replace("+00:00", "Z")
+        doc: dict[str, object] = {
+            "kind": kind,
+            "name": name,
+            "status": status,
+            "updated": ts,
+            "last_start": ts,
+            "last_end": "" if status in {"running", "stopped"} else ts,
+            "last_success": "" if status == "failed" else ts,
+            "runs": 2,
+            "failures": consec,
+            "consecutive_failures": consec,
+            "duration_ms": 250,
+            "last_run": summary or {},
+            "error": err,
+        }
+        jobs.save_unit_state(store, doc)
+
+    save_state(
+        "ing-diff",
+        "job",
+        "ok",
+        ago_s=2,
+        summary={"records": 5, "added": 2, "updated": 1, "removed": 0, "incomplete": True},
+    )
+    save_state("ing-same", "job", "ok", ago_s=7200, summary={"records": 4, "added": 0, "updated": 0, "removed": 0})
+    save_state("b-build", "job", "ok", ago_s=120, summary={"notes": 3, "written": 1})
+    save_state("b-val", "job", "ok", ago_s=90000, summary={"ok": True, "notes": 3, "records": 5})
+    save_state("b-eval", "job", "ok", ago_s=30, summary={"passed": 4, "failed": 0})
+    save_state("b-rev", "job", "ok", ago_s=30, summary={"stale": [{"ref": "concepts/welcome.md"}], "tasks_open": 1})
+    save_state("act-job", "job", "ok", ago_s=30, summary={"action": "actions/2026-11-16_demo/ACTION.md"})
+    save_state(
+        "failing",
+        "job",
+        "failed",
+        ago_s=15,
+        err="Traceback (most recent call last):\n  File x.py\nboom \x1b[31m  bad",
+        consec=3,
+    )
+    save_state("live-ch", "channel", "running", ago_s=3600)
+    save_state("mcp", "service", "running", ago_s=45)
+    save_state("halted", "service", "stopped", ago_s=300)
+    # Corrupt one `.bf/state/<name>.json` file to verify per-row resilience!
+    private_dir(store, ".bf", "state").write("idle-ing.json", b"{corrupt json")
+
+    out_txt = render_text(store, now=now, max_rows=50)
+    assert "\x1b" not in out_txt
+    assert "\u200b" not in out_txt
+    assert "2 failed · 2 running · 7 ok · 1 event · 1 disabled" in out_txt
+    # Services & channels sit in their own section above Jobs; inside Jobs, failed sorts ahead of ok (newest first)!
+    assert out_txt.index("Services & channels (4)") < out_txt.index("Jobs (11)")
+    assert out_txt.index("failing") < out_txt.index("ing-diff") < out_txt.index("b-val")
+    for expected in (
+        "(3x) boom \\u001b[31m bad",
+        "idle-ing.json: invalid JSON",
+        "on ev\\u200b",
+        "items: +2 ~1 · 5 records · incomplete · 250ms",
+        "just now",
+        "archive: 4 records unchanged",
+        "cron 0 8 * * 1-5",
+        "cron 0 9 * * *",
+        "3 notes (1 built)",
+        "valid (3 notes, 5 records)",
+        "1d ago",
+        "on 2 events",
+        "4/4 passed",
+        "1 stale · 1 tasks",
+        "→ actions/2026-11-16_demo/ACTION.md",
+        "→ out-only",
+        "ready",
+        "outbound only",
+        "up 1h",
+        "up 45s",
+        "○ stopped",
+    ):
+        assert expected in out_txt, f"missing {expected!r} in:\n{out_txt}"
+
+    # Verify 80-column narrow layout never crops State (`● running`) or When (`just now`)!
+    monkeypatch.setattr(watch.shutil, "get_terminal_size", lambda _fb=(100, 40): os.terminal_size((80, 40)))
+    narrow_txt = render_text(store, now=now, max_rows=50, width=80)
+    assert "● running" in narrow_txt
+    assert "just now" in narrow_txt
+
+    capped_txt = render_text(store, now=now, max_rows=3)
+    assert "+ 9 more" in capped_txt
+    assert "7 ok · 2 idle" in capped_txt
+
+    # Verify cron DST transition handling + ServiceSpec emit=events + watch.serve `--json` structlog lines!
+    paris_cfg = config.JobSpec(name="paris", run=("echo",), schedule="0 2 * * *", cron="0 2 * * *")
+    pre_dst = datetime(2026, 3, 29, 0, 59, tzinfo=UTC)  # 01:59 CET before 02:00->03:00 CET->CEST spring forward
+    assert not jobs.is_schedule_due(
+        paris_cfg, {"last_scheduled": "2026-03-28T01:00:00Z"}, pre_dst, tz_name="Europe/Paris"
+    )
+    post_dst = datetime(2026, 3, 29, 1, 5, tzinfo=UTC)  # 03:05 CEST after spring-forward 02:xx gap
+    assert jobs.is_schedule_due(paris_cfg, {"last_scheduled": "2026-03-28T01:00:00Z"}, post_dst, tz_name="Europe/Paris")
+
+    # Exercise `watch.serve` with `use_tui=True` cleanly via an in-memory Rich Console!
+    tui_buf = io.StringIO()
+    stop_tui = threading.Event()
+    ticks = 0
+    real_tick = watch.tick
+
+    def stop_on_second_tick(s: Store, *, rebuild_notes: bool = True, now: datetime | None = None) -> dict[str, object]:
+        nonlocal ticks
+        ticks += 1
+        if ticks >= 2:
+            stop_tui.set()
+        return real_tick(s, rebuild_notes=rebuild_notes, now=now)
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(watch, "Console", lambda **_kw: Console(file=tui_buf, width=100, force_terminal=True))
+    monkeypatch.setattr(watch, "tick", stop_on_second_tick)
+    res = watch.serve(empty_store, stop_event=stop_tui)
+    assert res["ok"] is True
+    assert "empty-tui" in tui_buf.getvalue()
+
+    # `ServiceSpec(emit="events")` streams JSON stdout objects from `services.<name>.run` into `.bf/state/events.json`!
+    svc_root = tmp_path / "svc-events"
+    engine.init_brain(svc_root, name="svc-events")
+    svc_store = Store(svc_root)
+    svc_store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: svc-events\n"
+        "services:\n  emitter:\n"
+        f'    run: [{sys.executable!r}, -c, \'import json; print(json.dumps({{"id": "s1", "kind": "svc.ping"}}, ), flush=True)\']\n'
+        "    emit: events\n"
+        "watch:\n  interval: 500ms\n  debounce: 50ms\n".encode(),
+    )
+    svc_cfg = config.load(svc_store)
+    s_stop, s_wake, s_ui = threading.Event(), threading.Event(), threading.Event()
+    svc_d = watch.DaemonStream(svc_store, svc_cfg.services["emitter"], s_stop, s_wake, s_ui)
+    svc_d.start()
+    assert s_wake.wait(timeout=5.0)
+    s_stop.set()
+    svc_d.terminate()
+    svc_evs = decode(private_dir(svc_store, ".bf", "state").read("events.json"), ".bf/state/events.json")
+    assert isinstance(svc_evs, dict)
+    assert any(ev["kind"] == "svc.ping" and ev["source"] == "emitter" for ev in svc_evs["events"])
+
+
+def test_job_popen_failure_secret_redaction_and_watch_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "sec-watch"
+    engine.init_brain(root, name="sec-watch")
+    store = Store(root)
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: sec-watch\n"
+        "jobs:\n"
+        "  missing-bin:\n    run: [nonexistent-bf-bin-xyz]\n"
+        "  leaky:\n"
+        f"    run: [{sys.executable!r}, -c, \"import sys; sys.stderr.write('Authorization: bearer secret_tok_12345678~v2 ghp_1234567890abcdef\\n-----BEGIN PRIVATE KEY-----\\nABC\\n-----END PRIVATE KEY-----\\n'); sys.exit(2)\"]\n"
+        "  ch-fail:\n"
+        f"    run: [{sys.executable!r}, -c, 'print(\"hello\")']\n"
+        "    channel: badch\n"
+        "channels:\n"
+        "  badch:\n"
+        f"    send: [{sys.executable!r}, -c, \"import sys; sys.stderr.write('bearer chan_secret_987654~z\\n'); sys.exit(3)\"]\n"
+        "watch:\n  interval: 500ms\n  debounce: 50ms\n".encode(),
+    )
+    cfg = config.load(store)
+
+    # Failed Popen (`OSError`) never leaves `.bf/state/<job>.json` stuck in `"running"`.
+    missing_res = jobs.execute_one_job(store, cfg.jobs["missing-bin"], trigger="manual")
+    assert (missing_res["status"], missing_res["exit_code"]) == ("failed", 127)
+    assert jobs.load_unit_state(store, "missing-bin", kind="job")["status"] == "failed"
+    assert oct((root / "logs").stat().st_mode & 0o777) == "0o700"
+    assert oct((root / "logs" / "missing-bin.log").stat().st_mode & 0o777) == "0o600"
+
+    # Secrets in failing job and channel-send stderr are redacted in `.bf/state/`, CLI result, and `logs/`.
+    leaky_res = jobs.execute_one_job(store, cfg.jobs["leaky"], trigger="manual")
+    assert leaky_res["status"] == "failed"
+    for secret in ("secret_tok_12345678~v2", "ghp_1234567890abcdef", "BEGIN PRIVATE KEY", "ABC"):
+        assert secret not in leaky_res["error"]
+        assert secret not in jobs.load_unit_state(store, "leaky", kind="job")["error"]
+        assert secret not in (root / "logs" / "leaky.log").read_text()
+    assert "[REDACTED]" in leaky_res["error"]
+
+    ch_res = jobs.execute_one_job(store, cfg.jobs["ch-fail"], trigger="manual")
+    assert ch_res["status"] == "failed"
+    assert "chan_secret_987654~z" not in ch_res["error"]
+    assert "chan_secret_987654~z" not in (root / "logs" / "ch-fail.log").read_text()
+    assert "[REDACTED]" in ch_res["error"]
+
+    # `watch.serve(json_stream=True)` emits `structlog` JSON `watch.tick` lines on stdout.
+    stop_json = threading.Event()
+    real_tick = watch.tick
+
+    def stop_tick(s: Store, *, rebuild_notes: bool = True, now: datetime | None = None) -> dict[str, object]:
+        out_tick = real_tick(s, rebuild_notes=rebuild_notes, now=now)
+        stop_json.set()
+        return out_tick
+
+    monkeypatch.setattr(watch, "tick", stop_tick)
+    capsys.readouterr()
+    res = watch.serve(store, json_stream=True, stop_event=stop_json)
+    assert res["ok"] is True
+    lines = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert any(ev.get("message") == "watch.tick" and ev.get("brain") == "sec-watch" for ev in lines)
+
+    # Failed first tick keeps `rebuild_notes=True` on retry, and `watch_files` logs `OSError` instead of dying silently.
+    rebuilds: list[bool] = []
+    stop_retry = threading.Event()
+
+    def flaky_tick(s: Store, *, rebuild_notes: bool = True, now: datetime | None = None) -> dict[str, object]:
+        rebuilds.append(rebuild_notes)
+        if len(rebuilds) == 1:
+            raise Error("transient lock")
+        stop_retry.set()
+        return real_tick(s, rebuild_notes=rebuild_notes, now=now)
+
+    monkeypatch.setattr(watch, "tick", flaky_tick)
+    monkeypatch.setattr(watch, "watch_fs", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("inotify limit")))
+    capsys.readouterr()
+    retry_res = watch.serve(store, json_stream=True, stop_event=stop_retry)
+    assert retry_res["ok"] is True
+    assert rebuilds[:2] == [True, True]
+    assert "OSError" in capsys.readouterr().err

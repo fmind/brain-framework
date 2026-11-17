@@ -13,6 +13,7 @@ import pytest
 from bf import __version__, cli, engine
 from bf import main as bf_main
 from bf.models import MAX_BATCH
+from bf.storage import Store
 
 
 def test_cli_commands_and_exit_codes(
@@ -41,77 +42,153 @@ def test_cli_commands_and_exit_codes(
     assert cli.run(["ingest", "notes-feed", "--input", str(tmp_path / "missing.json"), "--brain", str(target)]) == 1
     assert "bf: cannot read input file" in capsys.readouterr().err
 
+    # Interactive TTY stdin without `--input` -> exit 2.
+    class _TtyStdin(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(sys, "stdin", _TtyStdin(""))
+    assert cli.run(["ingest", "notes-feed", "--brain", str(target)]) == 2
+    assert "stdin is a terminal" in capsys.readouterr().err
+
     # Oversized stdin -> exit 1.
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"x" * (MAX_BATCH + 1)), encoding="utf-8"))
     assert cli.run(["ingest", "notes-feed", "--brain", str(target)]) == 1
     assert "exceeds" in capsys.readouterr().err
 
-    # action, read, query, eval, status, watch --once, build, validate, review -> exit 0.
-    assert cli.run(["action", "Audit CLI", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["created"] is True
+    # Removed `action` and `post` commands -> exit 2.
+    assert cli.run(["action", "Audit CLI"]) == 2
+    capsys.readouterr()
+    assert cli.run(["post", "hello"]) == 2
+    capsys.readouterr()
 
-    assert cli.run(["read", "bf:///concepts/welcome.md#conventions", "--brain", str(target)]) == 0
+    # Plain Markdown under `actions/` builds cleanly with `bf build`!
+    (target / "actions" / "2026-11-16_audit-cli").mkdir(parents=True)
+    (target / "actions" / "2026-11-16_audit-cli" / "ACTION.md").write_text(
+        "---\ntype: action\nstatus: draft\n---\n\n# Audit CLI\n\n- [ ] Check help text\n"
+    )
+    assert cli.run(["build", "--brain", str(target)]) == 0
+    assert json.loads(capsys.readouterr().out)["notes"] == 2
+
+    # Pre- and post-subcommand `--brain`, conflicts, empty `--brain`, and `--brain` on `init`.
+    assert cli.run(["--brain", str(target), "read", "bf:///concepts/welcome.md#conventions"]) == 0
     assert "attr_list" in json.loads(capsys.readouterr().out)["text"]
+    assert (
+        cli.run(
+            [
+                "--brain",
+                str(target),
+                "read",
+                "bf:///concepts/welcome.md#conventions",
+                "--brain",
+                str(tmp_path / "other"),
+            ]
+        )
+        == 2
+    )
+    assert "conflicting --brain" in capsys.readouterr().err
+    assert cli.run(["read", "concepts/welcome.md", "--brain", ""]) == 2
+    assert "empty" in capsys.readouterr().err
+    assert cli.run(["--brain", str(target), "init", str(tmp_path / "b2")]) == 2
+    assert "does not accept --brain" in capsys.readouterr().err
 
-    assert cli.run(["query", "Conventions", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["count"] >= 1
+    # `read` requires TARGET and rejects `#fragment` on JSON/records (exit 2).
+    assert cli.run(["read", "--brain", str(target)]) == 2
+    capsys.readouterr()
+    assert cli.run(["read", "notes-feed:m-1#.title", "--brain", str(target)]) == 2
+    capsys.readouterr()
+
+    # `query` supports `-s/--scope`, `-n/--limit`, `--` for leading-dash patterns, and rejects `--sql`.
+    assert cli.run(["query", "Conventions", "-s", "concepts", "-n", "5", "--brain", str(target)]) == 0
+    q_rg = json.loads(capsys.readouterr().out)
+    assert q_rg["count"] >= 1
+    assert q_rg["truncated"] is False
 
     assert cli.run(["query", "--jq", 'select(.kind=="concept") | .ref', "--brain", str(target)]) == 0
     assert "concepts/welcome.md" in json.loads(capsys.readouterr().out)["items"]
 
-    assert cli.run(["query", "--sql", "SELECT count(*) AS n FROM records", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["items"][0]["n"] >= 2
+    assert cli.run(["query", "--brain", str(target), "--", "-unknown"]) == 0
+    capsys.readouterr()
 
+    assert cli.run(["query", "--sql", "SELECT 1", "--brain", str(target)]) == 2
+    capsys.readouterr()
     assert cli.run(["query", "--brain", str(target)]) == 2
-    assert "pass a QUERY pattern" in capsys.readouterr().err
+    assert "pass either positional QUERY" in capsys.readouterr().err
     assert cli.run(["query", "pat", "--jq", ".", "--brain", str(target)]) == 2
     capsys.readouterr()
     assert cli.run(["review", "--brain", str(target), "--", "extra"]) == 2
     capsys.readouterr()
 
+    # `run` requires JOB/--due/--hook; guards `-- EXTRA_ARGS`.
+    assert cli.run(["run", "--brain", str(target)]) == 2
+    capsys.readouterr()
+    assert cli.run(["run", "build", "--due", "--brain", str(target)]) == 2
+    capsys.readouterr()
+    assert cli.run(["run", "--due", "--brain", str(target), "--", "x"]) == 2
+    capsys.readouterr()
     assert cli.run(["run", "--dry-run", "build", "--brain", str(target)]) == 0
     assert json.loads(capsys.readouterr().out)["results"][0]["status"] == "dry_run"
     assert cli.run(["run", "--hook", "pre-commit", "--brain", str(target)]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert cli.run(["--brain", str(target), "run", "--due"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
 
-    (target / "bf.yaml").write_text((target / "bf.yaml").read_text() + "channels:\n  chat:\n    send: [echo, '{}']\n")
-    assert cli.run(["post", "hello", "--dry-run", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "dry_run"
-
-    called_mcp: list[tuple[str, str, int]] = []
+    # `mcp` rejects `--port` with stdio transport (exit 2) and accepts `--transport http --port`.
+    called_mcp: list[tuple[str, str, int | None]] = []
     monkeypatch.setattr(
-        "bf.mcp.serve", lambda b, *, transport="stdio", port=8765: called_mcp.append((b, transport, port))
+        "bf.mcp.serve", lambda b, *, transport="stdio", port=None: called_mcp.append((b, transport, port))
     )
-    assert cli.run(["mcp", "--brain", str(target), "--port", "9000"]) == 0
-    assert called_mcp == [(str(target), "stdio", 9000)]
+    assert cli.run(["mcp", "--brain", str(target)]) == 0
+    assert cli.run(["mcp", "--brain", str(target), "--transport", "http", "--port", "9000"]) == 0
+    assert called_mcp == [(str(target), "stdio", None), (str(target), "http", 9000)]
 
     assert cli.run(["eval", "--brain", str(target)]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
     assert cli.run(["status", "--check", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["ok"] is True
+    st_out = json.loads(capsys.readouterr().out)
+    assert st_out["ok"] is True
+    assert st_out["counts"]["actions"] == 1
+    assert st_out["attention"] == []
 
-    assert cli.run(["watch", "--once", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["brain"] == "cli-demo"
+    # `watch --once` is removed (exit 2); `watch` delegates to `watch.serve`.
+    assert cli.run(["watch", "--once", "--brain", str(target)]) == 2
+    capsys.readouterr()
+    called_watch: list[tuple[Path, bool]] = []
+
+    def fake_watch_serve(store: Store, *, json_stream: bool = False) -> dict[str, object]:
+        called_watch.append((store.root, json_stream))
+        return {"ok": len(called_watch) == 1, "brain": "cli-demo"}
+
+    monkeypatch.setattr("bf.watch.serve", fake_watch_serve)
+    assert cli.run(["watch", "--json", "--brain", str(target)]) == 0
+    assert cli.run(["watch", "--brain", str(target)]) == 1
+    assert called_watch == [(target.resolve(), True), (target.resolve(), False)]
 
     assert cli.run(["build", "--brain", str(target)]) == 0
     assert json.loads(capsys.readouterr().out)["notes"] == 2
 
     assert cli.run(["validate", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["valid"] is True
+    assert json.loads(capsys.readouterr().out)["ok"] is True
 
     assert cli.run(["review", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["brain"] == "cli-demo"
+    rv_ok = json.loads(capsys.readouterr().out)
+    assert rv_ok["ok"] is True
+    assert rv_ok["brain"] == "cli-demo"
 
-    # Broken note makes `build` and `validate` exit 1 while still emitting compact JSON.
+    # Broken note makes `build`, `validate`, and `review` exit 1 while still emitting compact JSON.
     (target / "concepts" / "broken.md").write_text("---\nid: forbidden\n---\n# Bad\n")
     assert cli.run(["build", "--brain", str(target)]) == 1
     assert json.loads(capsys.readouterr().out)["problems"]
     assert cli.run(["validate", "--brain", str(target)]) == 1
-    assert json.loads(capsys.readouterr().out)["valid"] is False
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+    assert cli.run(["review", "--brain", str(target)]) == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
 
-    # Invalid flag or reserved source -> exit 2.
+    # Invalid flag, abbreviated subcommand flag, or reserved source -> exit 2.
     assert cli.run(["--unknown-flag"]) == 2
+    assert "bf: invalid input:" in capsys.readouterr().err
+    assert cli.run(["query", "--sc", "concepts", "--brain", str(target)]) == 2
     assert "bf: invalid input:" in capsys.readouterr().err
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"[]"), encoding="utf-8"))
     assert cli.run(["ingest", "concepts", "--brain", str(target)]) == 2

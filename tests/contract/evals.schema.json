@@ -8,7 +8,7 @@
       "items": {
         "additionalProperties": false,
         "properties": {
-          "engine": { "enum": ["rg", "jq", "sql", "read"], "type": "string" },
+          "engine": { "enum": ["rg", "jq", "read"], "type": "string" },
           "expect_equals": {},
           "expect_refs": { "items": { "maxLength": 4096, "minLength": 1, "type": "string" }, "type": "array" },
           "expect_text": { "items": { "maxLength": 4096, "minLength": 1, "type": "string" }, "type": "array" },
@@ -25,7 +25,7 @@
       "maxItems": 500,
       "type": "array"
     },
-    "version": { "const": 12, "type": "integer" }
+    "version": { "const": 13, "type": "integer" }
   },
   "required": ["version", "cases"],
   "title": "Eval",

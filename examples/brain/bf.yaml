@@ -1,29 +1,28 @@
 # yaml-language-server: $schema=schemas/bf.schema.json
 # https://fmind.github.io/brain-framework/reference/
-version: 12
+version: 13
 name: example
-defaults:
-  timezone: UTC
-  env:
-    EXAMPLE_MODE: "local"
+timezone: UTC
+env:
+  EXAMPLE_MODE: "local"
 jobs:
   demo:
     run: [python3, sensors/demo.py, "{{start}}", "{{end}}"]
     ingest:
       source: demo
       mode: snapshot
-    every: 1h
+    schedule: 1h
   build:
-    builtin: build
+    run: [bf, build]
+    hook: pre-commit
     events:
       - kind: records.ingested
         source: demo
   weekly-review:
     run: [python3, routines/weekly-review.py]
-    emit: action
-    at: "08:00"
-    days: [sun]
-    keep: 4
+    action:
+      keep: 4
+    schedule: "0 8 * * 0"
   assistant:
     run: [claude, -p, "Context file: {{context}}"]
     input: prompts/digest.md
@@ -33,13 +32,13 @@ jobs:
     channel: local
     enabled: false
   validate:
-    builtin: validate
+    run: [bf, validate]
     hook: pre-commit
 channels:
   local:
     listen: [python3, channels/local.py, listen]
     send: [python3, channels/local.py, send]
-servers:
+services:
   mcp:
     run: [bf, mcp, --transport, http, --port, "8765"]
     enabled: false

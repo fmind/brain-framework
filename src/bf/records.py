@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from bf import config, models
-from bf.markdown import extract_relations, normalize_tags, parse_link
+from bf.markdown import add_link, extract_relations, normalize_tags, parse_link
 from bf.models import (
     MAX_BATCH,
     NAME_RE,
@@ -22,8 +22,8 @@ from bf.models import (
     invisible,
     now_utc,
 )
-from bf.schemas import LOGS_SCHEMA, RECORD_SCHEMA, load_validator, validate_instance
-from bf.storage import Store, writer
+from bf.schemas import RECORD_SCHEMA, load_validator, validate_instance
+from bf.storage import Store, private_dir, writer
 
 Mode = Literal["upsert", "snapshot"]
 MAX_EVENTS = 1000
@@ -52,15 +52,15 @@ def append_event(
     locked: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Append one schema-validated event to `logs/events.json` (bounded ring buffer)."""
+    """Append one event to `.bf/state/events.json` (ring buffer) and `logs/events.log` (`structlog` JSON)."""
     clean(kind, "event kind")
     clean(source, "event source")
 
     def write_event() -> dict[str, Any]:
-        log_val = load_validator(store, "schemas/logs.json", LOGS_SCHEMA)
+        state = private_dir(store, ".bf", "state")
         doc: dict[str, Any] = {"kind": "events", "seq": 0, "events": []}
         with suppress(FileNotFoundError):
-            existing = decode(store.read("logs/events.json", 16 << 20), "logs/events.json")
+            existing = decode(state.read("events.json", 16 << 20), ".bf/state/events.json")
             if isinstance(existing, dict) and existing.get("kind") == "events":
                 doc = dict(existing)
         items = [dict(e) for e in r_ev if isinstance(e, dict)] if isinstance(r_ev := doc.get("events"), list) else []
@@ -73,10 +73,12 @@ def append_event(
         seq = int(doc.get("seq", 0)) + 1
         event = {"seq": seq, "id": f"evt-{seq}-{os.urandom(4).hex()}", "time": now_utc(now)}
         event.update({"kind": kind, "source": source, "data": dict(data or {})})
+        line = models.log_line(
+            kind, time_iso=str(event["time"]), seq=seq, id=event["id"], source=source, data=event["data"]
+        )
+        store.append_log("events", line)
         updated_doc = {"kind": "events", "seq": seq, "events": [*items[-(MAX_EVENTS - 1) :], event]}
-        if log_val is not None and (errs := validate_instance(log_val, updated_doc, "logs/events.json")):
-            raise Error("; ".join(errs))
-        store.write("logs/events.json", encode(updated_doc))
+        state.write("events.json", encode(updated_doc), mode=0o600)
         return event
 
     if locked:
@@ -147,41 +149,48 @@ def _normalize_record_links(
     raw_links: object, raw_relations: object, label: str, brain_name: str
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, tuple[tuple[str, str], ...], str]] = set()
+    seen: set[tuple[Any, ...]] = set()
 
     def plink(tgt: str, *, section: str = "", attr_meta: dict[str, str] | None = None) -> None:
         parsed = parse_link(
             label, tgt, brain_name, section=section, attr_meta=attr_meta, relative_base=False, allow_record_ref=True
         )
-        key = (parsed["to"], parsed["kind"], parsed["anchor"], tuple(sorted(parsed["meta"].items())), parsed["section"])
-        if key not in seen:
-            seen.add(key)
-            out.append(parsed)
+        add_link(seen, out, parsed)
 
     if raw_links is not None:
         if not isinstance(raw_links, list):
             raise Error(f"{label}.links must be a list")
         for item in raw_links:
             if isinstance(item, str):
-                if item.strip():
-                    plink(item)
+                if not item.strip():
+                    raise Error(f"{label}.links entries must be nonempty link targets")
+                plink(item)
             elif isinstance(item, dict) and isinstance(item.get("to"), str):
-                raw_meta = item.get("meta") or {}
+                raw_meta = {} if item.get("meta") is None else item["meta"]
                 if not isinstance(raw_meta, dict) or not all(
                     isinstance(k, str) and isinstance(v, str) for k, v in raw_meta.items()
                 ):
                     raise Error(f"{label}.links: link meta must map strings to strings")
                 target = str(item["to"])
-                if isinstance(frag := item.get("anchor"), str) and frag and "#" not in target:
-                    target = f"{target}#{frag}"
-                sec = str(item.get("section", "")) if isinstance(item.get("section", ""), str) else ""
-                plink(target, section=sec, attr_meta=raw_meta)
+                frag = item.get("anchor")
+                if frag is not None and not isinstance(frag, str):
+                    raise Error(f"{label}.links: anchor must be a string")
+                if isinstance(frag, str) and frag:
+                    if "#" in target and target.partition("#")[2] != frag:
+                        raise Error(f"{label}.links: conflicting #anchor on target")
+                    if "#" not in target:
+                        target = f"{target}#{frag}"
+                sec = item.get("section")
+                if sec is not None and not isinstance(sec, str):
+                    raise Error(f"{label}.links: section must be a string")
+                plink(target, section=sec or "", attr_meta=raw_meta)
             else:
                 raise Error(f"{label}.links entries must be target strings or link objects")
 
-    for tgt, meta in extract_relations(raw_relations, label, strict=False):
+    for tgt, meta in extract_relations(raw_relations, label, strict=True):
         plink(tgt, attr_meta=meta)
-    return out
+    typed = {(it["to"], it["kind"], it["anchor"], it["section"]) for it in out if it["meta"]}
+    return [it for it in out if it["meta"] or (it["to"], it["kind"], it["anchor"], it["section"]) not in typed]
 
 
 def _prepare_record(raw: dict[str, Any], source: str, index: int, brain_name: str) -> tuple[dict[str, Any], bool]:
@@ -206,7 +215,6 @@ def _prepare_record(raw: dict[str, Any], source: str, index: int, brain_name: st
     if "text" in rec and rec["text"] is not None:
         if not isinstance(rec["text"], str):
             raise Error(f"{label}.text must be a string")
-        encode(rec["text"])
         if len(rec["text"]) > 4 << 20:
             raise Error(f"{label}.text exceeds 4 MiB")
     else:
@@ -280,46 +288,42 @@ def ingest(
 
     def apply() -> dict[str, Any]:
         forgotten = _forgotten_ids(store, source)
-        existing_files: dict[str, tuple[str, dict[str, Any]]] = {}
-        for path in store.files(f"memories/{source}"):
-            if (
-                path.endswith(".json")
-                and isinstance(p := decode(store.read(path), path), dict)
-                and isinstance(p.get("id"), str)
-            ):
-                existing_files[str(p["id"])] = (path, dict(p))
+        existing_paths = {p for p in store.files(f"memories/{source}") if not p.endswith("/.forgotten")}
 
         to_write: dict[str, dict[str, Any]] = {}
-        kept_ids: set[str] = set()
+        kept_paths: set[str] = set()
         added = updated_count = unchanged = skipped_forgotten = 0
         for rec, explicit_updated in prepared:
             if (rec_id := str(rec["id"])) in forgotten:
                 skipped_forgotten += 1
                 continue
-            kept_ids.add(rec_id)
             target_path = record_file(source, rec_id)
+            kept_paths.add(target_path)
             stamped = rec if explicit_updated else {**rec, "updated": stamp}
-            if (old_entry := existing_files.get(rec_id)) is None:
+            if target_path not in existing_paths:
                 to_write[target_path] = stamped
                 added += 1
-            elif (
-                old_entry[1] if explicit_updated else {k: v for k, v in old_entry[1].items() if k != "updated"}
-            ) == rec:
+                continue
+            old_raw = decode(store.read(target_path), target_path)
+            old_rec = dict(old_raw) if isinstance(old_raw, dict) else {}
+            cmp_rec = old_rec if explicit_updated else {k: v for k, v in old_rec.items() if k != "updated"}
+            if cmp_rec == rec:
                 unchanged += 1
             else:
                 to_write[target_path] = stamped
                 updated_count += 1
 
         snap_complete = mode == "snapshot" and not incomplete
-        to_delete = [
-            p for oid, (p, _) in existing_files.items() if oid in forgotten or (snap_complete and oid not in kept_ids)
-        ]
+        if snap_complete:
+            to_delete = [p for p in existing_paths if p not in kept_paths]
+        else:
+            to_delete = [p for fid in forgotten if (p := record_file(source, fid)) in existing_paths]
         removed = len(to_delete)
-        surviving = len(kept_ids) if snap_complete else len((set(existing_files) | kept_ids) - forgotten)
-        too_many = surviving == 0 or (len(existing_files) >= 10 and removed * 2 > len(existing_files))
-        if snap_complete and existing_files and not allow_removal and too_many:
-            msg = f"{source}: snapshot would remove {removed} of {len(existing_files)} records; re-run with --allow-removal if intended"
-            raise Error(msg)
+        existing_n = len(existing_paths)
+        surviving = len(kept_paths) if snap_complete else existing_n + added - len(to_delete)
+        too_many = surviving == 0 or (existing_n >= 10 and removed * 2 > existing_n)
+        if snap_complete and existing_paths and not allow_removal and too_many:
+            raise Error(f"{source}: snapshot would remove {removed} of {existing_n} records; pass --allow-removal")
         if not dry_run:
             for path, payload in sorted(to_write.items()):
                 store.write(path, encode(payload))
@@ -329,9 +333,10 @@ def ingest(
             if added or updated_count or removed:
                 ev_payload = {"records": surviving, "added": added, "updated": updated_count, "removed": removed}
                 append_event(store, "records.ingested", source, ev_payload, locked=True, now=now)
-        res = {"brain": cfg.name, "source": source, "mode": mode, "records": surviving, "added": added}
-        res.update({"updated": updated_count, "unchanged": unchanged, "removed": removed})
-        return {**res, "forgotten": skipped_forgotten, "incomplete": incomplete, "dry_run": dry_run}
+        c1 = {"records": surviving, "added": added, "updated": updated_count}
+        c2 = {"unchanged": unchanged, "removed": removed, "forgotten": skipped_forgotten}
+        head = {"brain": cfg.name, "source": source, "mode": mode}
+        return {**head, **c1, **c2, "incomplete": incomplete, "dry_run": dry_run}
 
     if dry_run:
         return apply()

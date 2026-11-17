@@ -4,6 +4,36 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v27.0.0](https://github.com/fmind/brain-framework/releases/tag/v27.0.0) - 2026-11-17
+
+A major release bumping the brain format to `version: 13`, simplifying `bf.yaml` (`timezone`, `env`, `services`, `schedule`, `action`), moving unit state into private `.bf/state/` and `structlog` JSON lines into `logs/*.log`, removing DuckDB/`--sql`, `bf action`, and `bf post`, and standardizing CLI JSON envelopes (`"ok": bool`) and exit codes. Update `bf.yaml` and `evals/*.yaml` to `version: 13`, refresh `schemas/{bf.schema.json,record.json,evals.json}` from a temporary `bf init` directory (preserving customizations in `schemas/concepts.json` and `schemas/<source>.json`), remove `schemas/logs.json`, normalize any legacy `memories/<source>/*.json` records, and refresh installed `/bf` skills (`skills/bf/SKILL.md`); see the breaking changes below.
+
+### Breaking changes
+
+- **Brain format bumped to `version: 13`: simplified `bf.yaml` (`timezone`, `env`, `services`, `schedule`, `action`).** Flattened `defaults: {timezone, env}` into top-level `timezone` and `env` (dropping per-job `timezone`), renamed `servers:` to `services:`, replaced `Job.builtin` with literal `run: [bf, ...]` commands (for example `[bf, validate]`), collapsed `Job.every`/`at`/`days` into a single `schedule` string or seconds backed by inline duration parsing + `croniter`, and replaced `Job.emit` + `keep` with strict `action: {keep: N}` (mutually exclusive with `ingest`, which is also mutually exclusive with `channel`). Update `bf.yaml` and `evals/*.yaml` to `version: 13`, refresh `schemas/{bf.schema.json,record.json,evals.json}` from a temporary `bf init` directory (preserving customizations in `schemas/concepts.json` and `schemas/<source>.json`), and remove `schemas/logs.json`.
+- **Runtime state in `.bf/state/` and `structlog` JSON logs in `logs/*.log`.** Unit states (`<name>.json`, holding `last_scheduled` and `event_seq`, plus `<name>.context.json` and `<name>.stderr`) and the event ring buffer (`events.json`) now live privately inside `.bf/state/` (`0600`), removing `schemas/logs.json` (`LOGS_SCHEMA`), `logs/*.json` schema validation in `bf validate`, and the `{{cursor}}` placeholder. `bf run`, `bf watch`, and `bf ingest` append bounded `structlog` JSON lines (`time`, `severity`, `message`) to `logs/<name>.log` and `logs/events.log`.
+- **Canonical `schemas/record.json` without read-time enrichment.** Stored `memories/**/*.json` records now require `id`, `ref`, `source`, `kind`, and `title`, plus normalized `Link` objects in `links` (no raw string links or legacy `_enrich_stored()` fallback in `bf query`/`bf read`). Normalize any legacy `memories/<source>/*.json` records when migrating from `version: 12`.
+- **Removed redundant commands (`bf action`, `bf post`).** Author plain Markdown under `actions/` directly; route replies and notifications through `jobs.<name>.channel` or custom channel scripts instead of `bf post` and `jobs.post_message` (replaced by `jobs.send_channel_message`).
+- **Removed DuckDB / `--sql` and `#<jq>` URL fragments.** `bf query`, `bf eval`, `bf mcp`, and `EVALS_SCHEMA` now support `rg` and `jq` only (`bf eval` supports `rg`, `jq`, and `read`). Dropped `duckdb` from `mise.toml`. `bf read` and `bf validate` reject `#anchor` fragments on JSON records (`InputError` / validation problem).
+- **Required explicit targets and selectors.** `bf read TARGET` now requires a target; folder `counts` and failed-unit `attention` moved to `bf status` (and the new `bf_status` MCP tool). `bf run` requires exactly one selector (`JOB ...`, `--due`, or `--hook`); `-- EXTRA_ARGS...` applies only to `--hook` or a single `JOB`. Removed `bf watch --once`.
+- **Standardized output envelopes and exit codes.** `bf build`, `bf validate`, `bf review`, `bf eval`, `bf run`, `bf status`, and `bf watch` all emit `"ok": bool` (`validate` replaces `"valid"` with `"ok"`), and `bf review` exits `1` when `problems` is non-empty. `bf ingest` rejects interactive TTY stdin (exit `2`), and `bf mcp --port` requires `--transport http` (exit `2`).
+- **Stricter `bf validate` compiled-note verification.** Fails on missing, corrupt/non-object, `sha256`-mismatched, or orphaned compiled JSON notes in `memories/{projects,concepts,actions}/`.
+
+### Added
+
+- **Symmetric pre/post `--brain` flag, `-s/--scope`, `-n/--limit`, `--`, and `Store.read_files`.** `bf --brain PATH CMD` and `bf CMD --brain PATH` both work (rejecting `init`, conflicting `--brain`, or empty `--brain ""` with exit `2`). `bf query` accepts `-s/--scope` and `-n/--limit` and returns `"truncated": bool`. Non-`run` commands support `--` before leading-dash positionals, and `Store.read_files()` reads `memories/` in a single `O_NOFOLLOW` pass.
+- **Auto-threaded channel replies and operational fast `bf watch`.** `jobs.<name>.channel` automatically sets `thread` and `reply_to` from a single same-channel `channel.message` event; `bf run --due` rebuilds dirty notes first. `bf watch` renders the TUI immediately from `.bf/state/*.json` without running `engine.review()` in the UI loop, filters `watchfiles` to config/authored/state paths, runs ticks in a background `bf-tick` thread, and streams `structlog` JSON `watch.tick` lines automatically when non-TTY or `--json`.
+- **`bf_status` MCP tool.** Exposes live readiness, `events_seq`, folder counts, failed-unit attention, jobs, channels, and services via MCP.
+
+### Changed
+
+- **Cleaner `bf watch` Rich TUI dashboard & lighter dependencies.** Replaced the heavy-bordered four-column status table in `bf watch` with a single rounded panel separating `Services & channels` from `Jobs`, showing health, trigger schedules, relative ages/uptimes, ingest diffs, and sanitized failure diagnostics sorted with failures first. Replaced `durationpy` with an inline duration parser, adding `croniter` and `structlog`.
+- **Direct file streaming into `jq -c`.** `bf query --jq` streams confined JSON files directly into `jq -c` without Python JSON decode/re-encode overhead, and `bf init`/example `build` jobs now use `run: [bf, build]` with `hook: pre-commit` (seeding `schemas/bf.schema.json`).
+
+### Fixed
+
+- **Removed unused helpers (`storage.xdg`, `markdown.is_jq_fragment`, `query.check_jq_syntax`).**
+
 ## [v26.0.1](https://github.com/fmind/brain-framework/releases/tag/v26.0.1) - 2026-11-16
 
 A patch release. The brain format (`version: 12`), `bf.yaml`, and the published JSON Schemas (`schemas/{record,concepts,logs,evals}.json`) are unchanged; upgrade `brain-framework` with no brain migration steps needed.

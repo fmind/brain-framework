@@ -6,7 +6,7 @@ Create a brain, ingest one piece of evidence, author a Markdown decision with `a
 
 - Linux or macOS
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (for Python 3.14 tool installation)
-- Standard CLI tools for retrieval: [`ripgrep` (`rg`)](https://github.com/BurntSushi/ripgrep), [`jq`](https://jqlang.org/), and [`duckdb`](https://duckdb.org/)
+- Standard CLI tools for retrieval: [`ripgrep` (`rg`)](https://github.com/BurntSushi/ripgrep) and [`jq`](https://jqlang.org/)
 
 ## Install and initialize a brain
 
@@ -18,10 +18,10 @@ bf validate
 bf eval
 ```
 
-`bf init` creates a minimal flat layout (`projects/`, `concepts/`, `actions/`, `memories/`, `logs/`, `evals/`, `docs/`, `skills/bf/SKILL.md`, `schemas/{record,concepts,logs,evals}.json`, linking `.agents/skills/bf`, with operational folders like `sensors/`, `routines/`, `channels/`, `prompts/`, and `settings/` added as needed) and compiles `concepts/welcome.md` into `memories/concepts/welcome.json`. `bf validate` prints:
+`bf init` creates a minimal flat layout (`projects/`, `concepts/`, `actions/`, `memories/`, `logs/`, `evals/`, `docs/`, `skills/bf/SKILL.md`, `schemas/{bf.schema.json,record.json,concepts.json,evals.json}`, linking `.agents/skills/bf`, with operational folders like `sensors/`, `routines/`, `channels/`, `prompts/`, and `settings/` added as needed) and compiles `concepts/welcome.md` into `memories/concepts/welcome.json`. `bf validate` prints:
 
 ```json
-{ "brain": "brain", "notes": 1, "problems": [], "records": 0, "valid": true }
+{ "brain": "brain", "notes": 1, "ok": true, "problems": [], "records": 0 }
 ```
 
 ## Ingest evidence and author a Markdown note
@@ -69,11 +69,9 @@ bf query "product page"
 # Filter heading and keyed attr_list metadata (jq)
 bf query --jq 'select(.attrs.decision.owner == "product") | {ref, title, attrs}'
 
-# Run sandboxed analytical SQL over memories/**/*.json (duckdb)
-bf query --sql "SELECT source, kind, ref, title FROM records ORDER BY source"
-
-# Read an exact section or JSON filter via bf:// URL
+# Read an exact section or JSON record via bf:// URL (pipe JSON reads into jq)
 bf read "bf:///projects/new-website.md#decision"
+bf read "bf:///memories/projects/new-website.json" | jq '.record | {ref, attrs}'
 
 # Check stale notes, newer evidence, and open tasks
 bf review
@@ -81,7 +79,7 @@ bf review
 
 ## Connect your coding agent
 
-There is zero global config file. `bf` resolves `--brain PATH` -> `BF_BRAIN` -> nearest enclosing `bf.yaml` -> `DEFAULT_BRAIN_PATH`. Inside a brain directory, agents automatically open or reuse an action workspace (`bf action "<topic>"`); outside a brain directory, set `export DEFAULT_BRAIN_PATH="$HOME/brain"`, copy `skills/bf` to `~/.agents/skills/bf`, and invoke `/bf` explicitly (or configure `bf mcp`).
+There is zero global config file. `bf` resolves `--brain PATH` -> `BF_BRAIN` -> nearest enclosing `bf.yaml` -> `DEFAULT_BRAIN_PATH`. Inside a brain directory, agents automatically open or reuse an action workspace (`actions/YYYY-MM-DD_<slug>/ACTION.md`); outside a brain directory, set `export DEFAULT_BRAIN_PATH="$HOME/brain"`, copy `skills/bf` to `~/.agents/skills/bf`, and invoke `/bf` explicitly (or configure `bf mcp`).
 
 ## Upgrade and pinned runtimes {#upgrade-and-pinned-runtimes}
 

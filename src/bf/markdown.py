@@ -20,7 +20,7 @@ from bf.config import yaml_object
 from bf.models import AUTHORED, MAX_NOTE, NAME_RE, RESERVED_SOURCES, Error, clean, clean_text, digest, encode, invisible
 
 _RESERVED_FM = frozenset({"id", "ref", "source", "kind", "text", "headings", "elements", "attrs", "tasks", "sha256"})
-_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 _CONFLICT = re.compile(r"^(?:<{7,}|>{7,}|\|{7,}|={7,})(?: |$)")
 _BAD_ATTR = re.compile(r"\{#[A-Za-z0-9_.-]+\?[^}\r\n]+\}")
 _TASK = re.compile(r"^\[([ xX])\]\s+(\S[\s\S]*)$")
@@ -86,23 +86,16 @@ def compiled_note_path(path: str) -> str:
     return f"memories/actions/{slug}.json" if role[1] == "action" else f"memories/{path.removesuffix('.md')}.json"
 
 
-def is_jq_fragment(anchor: str) -> bool:
-    """Whether a URL `#fragment` is a `jq` expression rather than a Markdown `#id` anchor."""
-    return bool(anchor) and (
-        anchor.startswith((".", "[", "select(", "map(")) or any(t in anchor for t in ("|", "==", "!=", "(", ")"))
-    )
-
-
 def _check_body_lines(path: str, source_lines: list[str], offset: int) -> None:
     fence = ""
     for number, line in enumerate(source_lines[offset:], offset + 1):
         stripped = line.rstrip("\r\n")
         if fence:
-            closing = _FENCE.fullmatch(stripped)
+            closing = FENCE.fullmatch(stripped)
             if closing and closing[1][0] == fence[0] and len(closing[1]) >= len(fence) and not closing[2].strip():
                 fence = ""
             continue
-        if (opening := _FENCE.fullmatch(stripped)) and not (opening[1][0] == "`" and "`" in opening[2]):
+        if (opening := FENCE.fullmatch(stripped)) and not (opening[1][0] == "`" and "`" in opening[2]):
             fence = opening[1]
         elif _CONFLICT.match(stripped):
             raise Error(f"{path}: line {number}: unresolved merge conflict marker")
@@ -209,17 +202,23 @@ def _normalize_note_path(source_path: str, raw_path: str, *, relative_base: bool
     return _normalize_target_ext(resolved)
 
 
+def _unquote(val: str, src: str) -> str:
+    try:
+        dec = unquote(val, errors="strict")
+    except UnicodeError as error:
+        raise Error(f"{src}: link contains invalid UTF-8 percent-encoding") from error
+    if invisible(dec):
+        raise Error(f"{src}: link contains invisible format characters")
+    return dec
+
+
 def _split_target_parts(source_path: str, raw: str, err_msg: str) -> tuple[str, dict[str, str], str]:
     before_hash, has_hash, raw_frag = raw.partition("#")
     if re.search(r"\s", before_hash) or (has_hash and not raw_frag):
         raise Error(f"{source_path}: {err_msg}")
     lhs, _, raw_query = before_hash.partition("?")
-    q_meta = _parse_query(raw_query, source_path)
-    try:
-        frag = clean(unquote(raw_frag, errors="strict"), "anchor") if raw_frag else ""
-        return unquote(lhs, errors="strict"), q_meta, frag
-    except UnicodeError as error:
-        raise Error(f"{source_path}: link contains invalid UTF-8 percent-encoding") from error
+    frag = clean(_unquote(raw_frag, source_path), "anchor") if raw_frag else ""
+    return _unquote(lhs, source_path), _parse_query(raw_query, source_path), frag
 
 
 def _is_memory_record_path(path: str) -> bool:
@@ -243,7 +242,7 @@ def parse_link(
     target = clean(raw_target, f"{source_path}: link target").strip()
     if len(target) > 8192:
         raise Error(f"{source_path}: link exceeds 8192 characters")
-    if invisible(target) or (target.lower().startswith("bf:") and "%" in target and invisible(unquote(target))):
+    if invisible(target):
         raise Error(f"{source_path}: link contains invisible format characters")
 
     def mk(to: str, kind: str, anchor: str = "", q_meta: dict[str, str] | None = None) -> dict[str, Any]:
@@ -271,8 +270,8 @@ def parse_link(
             raise Error(f"{source_path}: invalid bf:// URI or empty # fragment")
         uri = urlsplit(head)
         q_meta = _parse_query(uri.query, source_path)
-        anchor = clean(unquote(raw_frag, errors="strict"), "anchor") if raw_frag else ""
-        rest, netloc = unquote(uri.path.lstrip("/"), errors="strict"), uri.netloc
+        anchor = clean(_unquote(raw_frag, source_path), "anchor") if raw_frag else ""
+        rest, netloc = _unquote(uri.path.lstrip("/"), source_path), uri.netloc
         if netloc in RESERVED_SOURCES:
             raise Error(f"{source_path}: use bf:///{netloc}/... instead of bf://{netloc}/...")
         if not rest:
@@ -296,7 +295,7 @@ def parse_link(
     if scheme and scheme_match is not None:
         if not allow_record_ref:
             raise Error(f"{source_path}: unsupported link scheme {scheme}:; use a relative path, bf://, or https://")
-        if not NAME_RE.fullmatch(scheme) or not scheme_match[2]:
+        if not NAME_RE.fullmatch(scheme_match[1]) or not scheme_match[2]:
             raise Error(f"{source_path}: invalid record reference {target!r}")
         rhs = scheme_match[2]
         if rhs.startswith(("https://", "http://")):
@@ -317,6 +316,14 @@ def parse_link(
         raise Error(f"{source_path}: empty link target")
     to = _normalize_note_path(source_path, decoded_path, relative_base=relative_base)
     return mk(to, "record" if _is_memory_record_path(to) else "note", anchor, q_meta)
+
+
+def add_link(seen: set[tuple[Any, ...]], out: list[dict[str, Any]], parsed: dict[str, Any]) -> None:
+    """Append `parsed` link object to `out` when its normalized tuple key is unseen."""
+    key = (parsed["to"], parsed["kind"], parsed["anchor"], tuple(sorted(parsed["meta"].items())), parsed["section"])
+    if key not in seen:
+        seen.add(key)
+        out.append(parsed)
 
 
 def _extract_ast(path: str, body: str):
@@ -429,6 +436,8 @@ def extract_relations(raw_relations: object, label: str, *, strict: bool = True)
                 rtype = rel.get("type") or rel.get("rel")
                 meta = {"rel": str(rtype).strip()} if isinstance(rtype, str) and rtype.strip() else {}
                 out.append((tgt.strip(), meta))
+            elif strict:
+                raise Error(f"{label}: relations list items must be objects with target or to")
     elif isinstance(raw_relations, dict):
         for rtype, raw_vals in raw_relations.items():
             items = [raw_vals] if isinstance(raw_vals, str) else raw_vals
@@ -447,12 +456,14 @@ def normalize_tags(raw_tags: object, label: str) -> list[str]:
     if not isinstance(raw_tags, list):
         raise Error(f"{label}: tags must be a list of strings")
     out: list[str] = []
+    seen_tags: set[str] = set()
     for item in raw_tags:
         val = str(item) if type(item) in {int, float} else item
         if not isinstance(val, str) or not val.strip() or re.search(r"[/\\\s]", val):
             raise Error(f"{label}: tags must be nonempty tokens without spaces or slashes")
         clean(val, f"{label}: tag")
-        if val not in out:
+        if val not in seen_tags:
+            seen_tags.add(val)
             out.append(val)
     return out
 
@@ -475,7 +486,6 @@ def compile_note(path: str, data: bytes, *, brain_name: str) -> dict[str, Any]:
     h1_title = next((str(h["title"]) for h in headings if h["level"] == 1 and str(h["title"]).strip()), stem)
     title = clean((fm_title.strip() if isinstance(fm_title, str) else "") or h1_title, f"{path}: title")
     tags = normalize_tags(fm.pop("tags"), path) if "tags" in fm and fm["tags"] is not None else []
-    fm.pop("tags", None)
 
     fm_link_specs: list[tuple[str, dict[str, str], str, bool]] = []
     if (fm_links := fm.pop("links", None)) is not None:
@@ -492,38 +502,14 @@ def compile_note(path: str, data: bytes, *, brain_name: str) -> dict[str, Any]:
         fm_link_specs.append((tgt, meta, "", True))
 
     links: list[dict[str, Any]] = []
-    seen_links: set[tuple[str, str, str, tuple[tuple[str, str], ...], str]] = set()
+    seen_links: set[tuple[Any, ...]] = set()
     for target, link_meta, sec, is_fm in [*fm_link_specs, *((t, m, s, False) for t, m, s in raw_links)]:
-        parsed = parse_link(
-            path,
-            target,
-            brain_name,
-            section=sec,
-            attr_meta=link_meta,
-            relative_base=not is_fm,
-            require_uri=is_fm,
-            prose=not is_fm,
-        )
-        key = (parsed["to"], parsed["kind"], parsed["anchor"], tuple(sorted(parsed["meta"].items())), parsed["section"])
-        if key not in seen_links:
-            seen_links.add(key)
-            links.append(parsed)
+        kw: dict[str, Any] = {"section": sec, "attr_meta": link_meta, "relative_base": not is_fm}
+        parsed = parse_link(path, target, brain_name, **kw, require_uri=is_fm, prose=not is_fm)
+        add_link(seen_links, links, parsed)
 
-    compiled: dict[str, Any] = {
-        **fm,
-        "id": path,
-        "ref": path,
-        "source": source,
-        "kind": kind,
-        "title": title,
-        "text": plain_text,
-        "tags": tags,
-        "links": links,
-        "headings": headings,
-        "elements": elements,
-        "attrs": attrs,
-        "tasks": tasks,
-        "sha256": digest(data),
-    }
+    base = {"id": path, "ref": path, "source": source, "kind": kind, "title": title, "text": plain_text}
+    extra = {"tags": tags, "links": links, "headings": headings, "elements": elements, "attrs": attrs, "tasks": tasks}
+    compiled: dict[str, Any] = {**fm, **base, **extra, "sha256": digest(data)}
     encode(compiled)
     return compiled

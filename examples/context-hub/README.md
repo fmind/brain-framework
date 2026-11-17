@@ -4,7 +4,7 @@ Answer one question across Google Workspace, Jira, GitHub, and Google Cloud fixt
 
 | Path                      | Purpose                                                                                              |
 | ------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `bf.yaml`                 | YAML configuration (`version: 12`, `name: context-demo`).                                            |
+| `bf.yaml`                 | YAML configuration (`version: 13`, `name: context-demo`).                                            |
 | `schemas/jira.json`       | Per-source JSON Schema enforcing `type`, `status`, and `project` on `memories/jira/*.json`.          |
 | `fixtures/*.json`         | Offline JSON fixtures for `workspace`, `jira`, `github`, `gcloud`, plus `jira-done.json`.            |
 | `projects/new-website.md` | Authoritative Markdown project note with `attr_list` metadata on headings, links, blocks, and tasks. |
@@ -33,9 +33,9 @@ bf validate
 bf eval
 ```
 
-`bf validate` reports `"valid":true` with `1` note and `4` records. Both the compiled Markdown project (`memories/projects/new-website.json`) and the four sensor folders (`memories/{workspace,jira,github,gcloud}/*.json`) live as individual JSON files under `memories/`.
+`bf validate` reports `"ok":true` with `1` note and `4` records. Both the compiled Markdown project (`memories/projects/new-website.json`) and the four sensor folders (`memories/{workspace,jira,github,gcloud}/*.json`) live as individual JSON files under `memories/`.
 
-## 2. Query pure JSON records (`bf query`, `jq`, `rg`, `duckdb`)
+## 2. Query pure JSON records (`bf query`, `jq`, `rg`)
 
 ```bash
 # Every record linked to projects/new-website.md across all four tools
@@ -44,8 +44,8 @@ bf query --jq 'select(.kind == "memory" and any(.links[]; .to == "projects/new-w
 # Inspect the blocking Jira review via bf read
 bf read "jira:review"
 
-# Summarize all sources with sandboxed DuckDB
-bf query --sql "SELECT source, kind, ref, title FROM records ORDER BY source"
+# Summarize all sources via jq
+bf query --jq '{source, kind, ref, title}'
 ```
 
 `jira:review` shows `"status":"In review"` because the keyboard navigation check is still open, even though `github:implementation` is `"merged"` and `gcloud:deployment` is `"healthy"`.

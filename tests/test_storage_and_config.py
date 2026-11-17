@@ -13,7 +13,7 @@ import yaml
 
 from bf import config, models
 from bf.models import BusyError, Error, FormatError
-from bf.storage import Store, expand, private_dir, relative, writer, xdg
+from bf.storage import Store, expand, private_dir, relative, writer
 
 
 def test_models_sanitization_json_and_dates() -> None:
@@ -212,22 +212,15 @@ def test_store_containment_symlinks_special_files_and_locks(tmp_path: Path, monk
     finally:
         os.close(lock_fd)
 
-    # expand & xdg helpers.
+    # expand helper.
     assert expand(Path("~/sub")).is_absolute()
-    monkeypatch.setenv("XDG_CONFIG_HOME", "relative/ignored")
-    assert xdg("XDG_CONFIG_HOME", ".config").is_absolute()
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "abs-xdg"))
-    assert xdg("XDG_CONFIG_HOME", ".config") == tmp_path / "abs-xdg"
     monkeypatch.delenv("HOME")
-    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.setattr(Path, "expanduser", lambda _self: (_ for _ in ()).throw(RuntimeError("no home")))
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: (_ for _ in ()).throw(RuntimeError("no home"))))
     with pytest.raises(Error, match="set HOME"):
         expand(Path("~/x"))
     with pytest.raises(Error, match="check the user name"):
         expand(Path("~nosuchuser/x"))
-    with pytest.raises(Error, match="cannot find the home directory"):
-        xdg("XDG_STATE_HOME", ".local/state")
 
 
 def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,6 +247,9 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
             config.yaml_object(b"a: 1\n")
 
     # Brain selection precedence: --brain -> BF_BRAIN -> nearest enclosing bf.yaml -> Error.
+    monkeypatch.delenv("BF_BRAIN", raising=False)
+    monkeypatch.delenv("DEFAULT_BRAIN_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
     with pytest.raises(Error, match="no brain selected"):
         config.select()
 
@@ -307,33 +303,37 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     assert config.resolve_brain(s1, cfg1, quote("../b2", safe="")).root == b2.resolve()
     with pytest.raises(Error, match="unknown brain"):
         config.resolve_brain(s1, cfg1, "nonexistent-brain")
+    with pytest.raises(Error, match="percent-encoding"):
+        config.resolve_brain(s1, cfg1, "%FF")
 
-    # Jobs, channels, servers, humanized durations, env mapping, and .env loading in `bf.yaml`.
+    # Jobs, channels, services, humanized durations, cron schedule, env mapping, and .env loading in `bf.yaml`.
     rich_b = tmp_path / "rich"
     rich_b.mkdir()
     (rich_b / "bf.yaml").write_text(
         f"version: {models.FORMAT}\nname: rich\n"
-        "defaults:\n  timezone: UTC\n  env:\n    GWS_DIR: '{{home}}/.config/gws'\n    EMPTY_VAR: ''\n"
+        "timezone: Europe/Paris\nenv:\n  GWS_DIR: '{{home}}/.config/gws'\n  EMPTY_VAR: ''\n"
         "jobs:\n"
         "  sync:\n"
         "    run: [echo, hi]\n"
         "    ingest:\n      source: sync-src\n      mode: snapshot\n      allow_removal: true\n"
-        "    every: 10m\n"
+        "    schedule: 10m\n"
         "    lookback: 2d\n"
         "    overlap: 5m\n"
         "    timeout: 2m\n"
         "    hook: pre-commit\n"
         "    env:\n      EXTRA_VAR: custom\n"
-        "  digest:\n    run: [claude, -p, '{{input}}']\n    input: prompts/digest.md\n    at: '08:00'\n    channel: chat\n"
+        "  digest:\n    run: [claude, -p, '{{input}}']\n    input: prompts/digest.md\n    schedule: '0 8 * * *'\n    channel: chat\n"
         "  short-ing:\n    run: [echo, '[]']\n    ingest: simple\n"
         "channels:\n  chat:\n    listen: [echo, listen]\n    send: [echo, send]\n    timeout: 45s\n"
-        "servers:\n  mcp:\n    run: [bf, mcp, --transport, http, --port, '9012']\n"
+        "services:\n  mcp:\n    run: [bf, mcp, --transport, http, --port, '9012']\n"
         "watch:\n  interval: 1s\n  debounce: 250ms\n"
     )
     rich_store = Store(rich_b)
     rich_cfg = config.load(rich_store)
+    assert rich_cfg.timezone == "Europe/Paris"
     assert rich_cfg.env == {"GWS_DIR": "{{home}}/.config/gws", "EMPTY_VAR": ""}
     assert rich_cfg.jobs["sync"].every == 600
+    assert rich_cfg.jobs["digest"].cron == "0 8 * * *"
     assert rich_cfg.jobs["sync"].lookback == 172_800
     assert rich_cfg.jobs["sync"].overlap == 300
     assert rich_cfg.jobs["sync"].timeout == 120
@@ -349,8 +349,8 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     assert (rich_cfg.jobs["short-ing"].ingest, rich_cfg.jobs["short-ing"].mode) == ("simple", "upsert")
     assert rich_cfg.channels["chat"].timeout == 45
     assert rich_cfg.channels["chat"].env == {"GWS_DIR": "{{home}}/.config/gws", "EMPTY_VAR": ""}
-    assert rich_cfg.servers["mcp"].run == ("bf", "mcp", "--transport", "http", "--port", "9012")
-    assert rich_cfg.servers["mcp"].emit == "none"
+    assert rich_cfg.services["mcp"].run == ("bf", "mcp", "--transport", "http", "--port", "9012")
+    assert rich_cfg.services["mcp"].emit == "none"
     assert (rich_cfg.watch.interval, rich_cfg.watch.debounce_ms) == (1.0, 250)
     sec_b = tmp_path / "sec-watch"
     sec_b.mkdir()
@@ -389,43 +389,56 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
 
     for idx, (bad_yaml, err_match) in enumerate(
         (
-            (f"version: {models.FORMAT}\nname: badtz\ndefaults:\n  timezone: Not/AZone\n", "unknown IANA timezone"),
-            (f"version: {models.FORMAT}\nname: badpost\ndefaults:\n  post: chat\n", "unknown property 'post'"),
-            (f"version: {models.FORMAT}\nname: noexec\njobs:\n  j1:\n    every: 5m\n", "failed schema rule oneOf"),
+            (f"version: {models.FORMAT}\nname: badtz\ntimezone: Not/AZone\n", "unknown IANA timezone"),
+            (f"version: {models.FORMAT}\nname: baddef\ndefaults:\n  post: chat\n", "unknown property 'defaults'"),
+            (f"version: {models.FORMAT}\nname: noexec\njobs:\n  j1:\n    schedule: 5m\n", "missing required 'run'"),
             (
-                f"version: {models.FORMAT}\nname: bininp\njobs:\n  j1:\n    builtin: build\n    input: p.md\n",
-                "builtin job cannot specify input",
+                f"version: {models.FORMAT}\nname: badcron\njobs:\n  j1:\n    run: [echo]\n    schedule: 'not a cron'\n",
+                "duration .* or 5-field cron",
             ),
             (
                 f"version: {models.FORMAT}\nname: resing\njobs:\n  j1:\n    run: [echo]\n    ingest: concepts\n",
                 "reserved",
             ),
             (
-                f"version: {models.FORMAT}\nname: ingemit\njobs:\n  j1:\n    run: [echo]\n    ingest: x\n    emit: action\n",
-                "cannot combine ingest and emit",
+                f"version: {models.FORMAT}\nname: ingact\njobs:\n  j1:\n    run: [echo]\n    ingest: x\n    action:\n      keep: 1\n",
+                "conflicting properties",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: ingchan\njobs:\n  j1:\n    run: [echo]\n    ingest: x\n    channel: c1\n",
+                "conflicting properties",
             ),
             (
                 f"version: {models.FORMAT}\nname: badch\nchannels:\n  c1:\n    timeout: 10s\n",
                 "failed schema rule anyOf",
             ),
-            (f"version: {models.FORMAT}\nname: nosrv\nservers:\n  s1:\n    enabled: true\n", "missing required 'run'"),
+            (f"version: {models.FORMAT}\nname: nosrv\nservices:\n  s1:\n    enabled: true\n", "missing required 'run'"),
             (
-                f"version: {models.FORMAT}\nname: dupunit\njobs:\n  u1:\n    run: [echo]\nservers:\n  u1:\n    run: [echo]\n",
+                f"version: {models.FORMAT}\nname: dupunit\njobs:\n  u1:\n    run: [echo]\nservices:\n  u1:\n    run: [echo]\n",
                 "declared in multiple sections",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: resev\njobs:\n  events:\n    run: [echo]\n",
+                "unit name 'events' is reserved",
             ),
             (
                 f"version: {models.FORMAT}\nname: nosend\njobs:\n  j1:\n    run: [echo]\n    channel: c1\nchannels:\n  c1:\n    listen: [echo]\n",
                 "has no send command",
             ),
             (
-                f"version: {models.FORMAT}\nname: resenv\ndefaults:\n  env:\n    BF_BRAIN: /x\n",
+                f"version: {models.FORMAT}\nname: resenv\nenv:\n  BF_BRAIN: /x\n",
                 "cannot override reserved",
             ),
             (f"version: {models.FORMAT}\nname: badiv\nwatch:\n  interval: 100ms\n", "between 500ms and 1h"),
             (f"version: {models.FORMAT}\nname: baddeb\nwatch:\n  debounce: 10ms\n", "between 50ms and 60s"),
-            (f"version: {models.FORMAT}\nname: badenvlist\ndefaults:\n  env: [A]\n", "expected type object"),
-            (f"version: {models.FORMAT}\nname: badenvk\ndefaults:\n  env:\n    1BAD: v\n", "does not match pattern"),
-            (f"version: {models.FORMAT}\nname: badenvv\ndefaults:\n  env:\n    OK_K: 123\n", "expected type string"),
+            (f"version: {models.FORMAT}\nname: badenvlist\nenv: [A]\n", "expected type"),
+            (f"version: {models.FORMAT}\nname: badenvk\nenv:\n  1BAD: v\n", "does not match pattern"),
+            (f"version: {models.FORMAT}\nname: badenvv\nenv:\n  OK_K: 123\n", "expected type string"),
+            (
+                f"version: {models.FORMAT}\nname: unsatcron\njobs:\n  j1:\n    run: [echo]\n    schedule: '0 0 31 2 *'\n",
+                "duration .* or 5-field cron",
+            ),
+            (f'version: {models.FORMAT}\nname: ctlbr\nbrains:\n  sib: "/tmp/\\u0007bad"\n', "no control characters"),
         )
     ):
         bad_dir = tmp_path / f"bad-{idx}"
@@ -443,3 +456,31 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.chdir(sym_brain)
     with pytest.raises(Error, match="not a regular file owned by you"):
         config.select()
+
+    # `Store.read_files` & `Store.append_log` bounded trimming + `0700`/`0600` permissions:
+    log_store = Store(b1)
+    log_store.append_log("sample", b'{"msg":"one"}', max_lines=2, max_bytes=80)
+    log_store.append_log("sample", b'{"msg":"two"}', max_lines=2, max_bytes=80)
+    log_store.append_log("sample", b'{"msg":"three"}', max_lines=2, max_bytes=80)
+    assert oct((b1 / "logs").stat().st_mode & 0o777) == "0o700"
+    assert oct((b1 / "logs" / "sample.log").stat().st_mode & 0o777) == "0o600"
+    assert [ln.decode() for ln in log_store.read("logs/sample.log").splitlines()] == [
+        '{"msg":"two"}',
+        '{"msg":"three"}',
+    ]
+    log_store.write("logs/big.log", b"".join(f'{{"n":{i}}}\n'.encode() for i in range(40)), mode=0o600)
+    log_store.append_log("big", b'{"n":40}', max_lines=5, max_bytes=80)
+    big_bytes = log_store.read("logs/big.log")
+    assert len(big_bytes) <= 80
+    assert big_bytes.endswith(b'{"n":40}\n')
+    log_store.append_log("sample", b'{"msg":"012345678901234567890"}', max_lines=5, max_bytes=35)
+    assert log_store.read("logs/sample.log") == b'{"msg":"012345678901234567890"}\n'
+    with pytest.raises(Error, match="exceeds 20 bytes"):
+        log_store.append_log("sample", b"x" * 25, max_bytes=20)
+    os.mkfifo(b1 / "logs" / "fifo.log")
+    with pytest.raises(Error, match="expected a regular file"):
+        log_store.append_log("fifo", b'{"msg":"x"}')
+    b1_docs = Store(b1)
+    b1_docs.write("sub/a.json", b'{"a":1}\n')
+    b1_docs.write("sub/b.txt", b"ignored\n")
+    assert b1_docs.read_files("sub") == [("sub/a.json", b'{"a":1}\n')]

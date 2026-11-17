@@ -53,11 +53,10 @@ MCP Transport
 
 Authored notes follow **two link conventions** so Markdown links work in editors/GitHub while frontmatter links stay canonical URIs:
 
-- **Markdown prose (relative paths + cross-brain/external URLs)**: link to local notes (`../concepts/aaif.md#mcp`, `aaif.md`, `#mcp`) and sensor memories (`../memories/github-issues/7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451.json#.title`) with relative paths, and use `bf://<brain>/...` or external URLs when crossing brains or linking outside the brain.
+- **Markdown prose (relative paths + cross-brain/external URLs)**: link to local notes (`../concepts/aaif.md#mcp`, `aaif.md`, `#mcp`) and sensor memories (`../memories/github-issues/7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451.json`) with relative paths, and use `bf://<brain>/...` or external URLs when crossing brains or linking outside the brain.
 - **Note frontmatter (`links`, `sources`, `relations`)**: requires `bf://` or external URLs — same-brain `bf:///concepts/aaif.md?rel=project-of#mcp` and `bf:///memories/<source>/<sha256>.json`, or cross-brain `bf://team-brain/concepts/aaif.md#mcp` (resolved via `brains:` in `bf.yaml`, `../team-brain`, or `~/team-brain`). Sensor JSON `links` accept `bf://` URLs, external URLs, brain-relative paths, or `source:id` refs.
-- **`jq` fragment pointers**: `<bf:///memories/concepts/welcome.json#select(.status=="stable")>` resolves the target JSON file and applies the `#<jq_filter>` fragment on `bf read` (syntax-checked by `bf validate`).
-- **External URIs**: `https://`, `http://`, `mailto:`, and `urn:` keep `kind: "url"`. Legacy `source:id` (`github-issues:7`) and 2-slash `bf://concepts/...` note links are rejected in authored notes (`bf read "github-issues:7"` still looks up records on the CLI).
+- **External URIs**: `https://`, `http://`, `mailto:`, and `urn:` keep `kind: "url"`. Legacy `source:id` (`github-issues:7`) and 2-slash `bf://concepts/...` note links are rejected in authored notes, and JSON records do not support `#anchor` fragments (`bf read "github-issues:7" | jq ...` still reads and filters records on the CLI).
 
 ## Tracked actions and user schemas
 
-Create or reuse a dated workspace with `bf action "Retention review"` (`actions/YYYY-MM-DD_retention-review/ACTION.md`). Mark finished actions `status: stable` to clear them from `bf review`'s active inbox. Customize `schemas/concepts.json`, `schemas/record.json`, or any `schemas/<source>.json` file to enforce your brain's ontology during `bf build`, `bf ingest`, and `bf validate`.
+Author dated task workspaces directly at `actions/YYYY-MM-DD_<slug>/ACTION.md` (with `inputs/` and `outputs/`) and compile them with `bf build`. Mark finished actions `status: stable` to clear them from `bf review`'s active inbox. Customize `schemas/concepts.json`, `schemas/record.json`, or any `schemas/<source>.json` file to enforce your brain's ontology during `bf build`, `bf ingest`, and `bf validate`.

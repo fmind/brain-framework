@@ -1,9 +1,10 @@
 # https://fmind.github.io/brain-framework/reference/
-version: 12
+version: 13
 name: context-demo
 jobs:
   build:
-    builtin: build
+    run: [bf, build]
+    hook: pre-commit
   validate:
-    builtin: validate
+    run: [bf, validate]
     hook: pre-commit

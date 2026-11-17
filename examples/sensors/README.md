@@ -26,7 +26,7 @@ python3 sensors/agent-telemetry.py claude ~/.claude/projects 2026-11-01T00:00:00
 #   agent-telemetry:
 #     run: [python3, sensors/agent-telemetry.py, claude, "{{home}}/.claude/projects", "{{start}}", "{{end}}"]
 #     ingest: agent-telemetry
-#     every: 1h
+#     schedule: 1h
 ```
 
 Use `--mode upsert` (the default) for windowed feeds (`git-history.py`, `github-issues.py`, `gmail-headers.py`, `agent-telemetry.py`) and `--mode snapshot` for complete catalogs (`local-documents.py`). See [Operations](../../docs/operations.md) and [Reference](../../docs/reference.md).

@@ -1,18 +1,18 @@
 # Retrieval
 
-Agents query pure JSON records in `memories/**/*.json`. `bf` delegates text search to `rg`, JSON filtering to `jq`, and analytical SQL to `duckdb` — accessible through `bf query`, `bf read`, `bf eval`, `bf mcp`, or direct CLI invocations with zero custom databases or embeddings.
+Agents query pure JSON records in `memories/**/*.json`. `bf` delegates text search to `rg` and JSON filtering to `jq` — accessible through `bf query`, `bf read`, `bf eval`, `bf mcp`, or direct CLI invocations with zero custom databases or embeddings.
 
-## 1. Orient with `bf review` and `bf status`
+## 1. Orient with `bf status` and `bf review`
 
 ```bash
-bf review
 bf status
+bf review
 ```
 
+- `bf status` reports `"inside_brain"`, `events_seq`, folder `counts`, failed-unit `attention`, and the health of configured `jobs`, `channels`, and `services` stored in `.bf/state/*.json`.
 - `bf review` reports `stale` active notes (`newer_evidence` when cited records or backlinks to the note, `entity`, or `aliases` changed after `updated` or `sources[].retrieved`, `due` when `stale_after` elapsed, `future_updated`), open `draft` `actions`, and `tasks_open`.
-- `bf status` reports `"inside_brain"`, `events_seq`, and the health of configured `jobs`, `channels`, and `servers` in `logs/*.json`.
 
-## 2. Resolve `bf://` URLs, sections, and `jq` fragments (`bf read`)
+## 2. Resolve `bf://` URLs and `#anchor` sections (`bf read`)
 
 ```bash
 # Read a Markdown note or exact #anchor section
@@ -21,16 +21,14 @@ bf read "bf:///concepts/welcome.md#conventions"
 # Read across another brain (declared in bf.yaml brains: or sibling folder)
 bf read "bf://team-brain/concepts/policy.md#retention"
 
-# Apply a #<jq_filter> fragment to any compiled or ingested JSON file
-bf read "bf:///memories/concepts/welcome.json#{title, attrs}"
-
-# Look up a sensor record by source:id
-bf read "workspace:brief"
+# Read a compiled note or sensor record and pipe into jq
+bf read "bf:///memories/concepts/welcome.json" | jq '.record | {title, attrs}'
+bf read "workspace:brief" | jq '.record'
 ```
 
-## 3. Search, filter, and join (`bf query`: `rg`, `jq`, `duckdb`)
+## 3. Search and filter (`bf query`: `rg`, `jq`)
 
-Run `bf build` after editing Markdown notes so `memories/{concepts,projects,actions}/*.json` are current:
+Run `bf build` (or let `bf watch` / `bf run --due` rebuild) after editing Markdown notes so `memories/{concepts,projects,actions}/*.json` are current:
 
 ```bash
 # Lexical search via ripgrep (rg)
@@ -41,21 +39,12 @@ bf query --jq 'select(.kind == "concept" and .attrs.mcp.creator == "Anthropic") 
 
 # Backlinks via jq
 bf query --jq 'select(any(.links[]; .to == "concepts/aaif.md" and .anchor == "mcp")) | {from: .ref, links}'
-
-# Sandboxed analytical SQL via DuckDB (materialized temp table `records`, external access locked)
-bf query --sql "
-  SELECT n.ref AS from_ref, l->'meta'->>'rel' AS rel, r.ref AS to_ref, r.title
-  FROM records n, UNNEST(from_json(n.links, '[\"JSON\"]')) AS t(l)
-  JOIN records r ON (l->>'to') IN (r.ref, r.path)
-  WHERE n.kind IN ('project', 'concept', 'action')
-  ORDER BY from_ref, to_ref
-"
 ```
 
 ## 4. Deterministic evaluations (`bf eval`) and MCP (`bf mcp`)
 
-- **`bf eval`**: executes `evals/*.yaml` (`version: 12`, validated against `schemas/evals.json`) over `rg`, `jq`, `sql`, or `read` engines, verifying `expect_refs`, `forbid_refs`, `expect_text`, `min_count`, `max_count`, or `expect_equals` with zero LLM calls.
-- **`bf mcp`**: runs a read-only MCP server (`stdio` or localhost `--transport http`) exposing `bf_review`, `bf_read`, `bf_query` (`mode="rg"|"jq"|"sql"`), and `bf_validate` over `--brain PATH`, `BF_BRAIN`, or `DEFAULT_BRAIN_PATH`.
+- **`bf eval`**: executes `evals/*.yaml` (`version: 13`, validated against `schemas/evals.json`) over `rg`, `jq`, or `read` engines, verifying `expect_refs`, `forbid_refs`, `expect_text`, `min_count`, `max_count`, or `expect_equals` with zero LLM calls.
+- **`bf mcp`**: runs a read-only MCP server (`stdio` or localhost `--transport http`) exposing `bf_status`, `bf_review`, `bf_read`, `bf_query` (`mode="rg"|"jq"`), and `bf_validate` over `--brain PATH`, `BF_BRAIN`, or `DEFAULT_BRAIN_PATH`.
 
 ## Trust boundary
 

@@ -8,12 +8,13 @@ import math
 import re
 from datetime import UTC, date, datetime
 
-from durationpy import DurationError
-from durationpy import from_str as _duration_from_str
+import structlog
 
-FORMAT = 12
+FORMAT = 13
 AUTHORED = ("projects", "concepts", "actions")
-RESERVED_SOURCES = frozenset({"projects", "concepts", "actions", "memories", "notes", "record", "logs", "evals", "bf"})
+RESERVED_SOURCES = frozenset(
+    {"projects", "concepts", "actions", "memories", "notes", "record", "logs", "evals", "bf", "services", "channels"}
+)
 MAX_FILE = 64 << 20
 MAX_BATCH = 16 << 20
 MAX_NOTE = 4 << 20
@@ -24,6 +25,8 @@ NAME_RE = re.compile(NAME)
 DURATION_PAT = r"^(?:[0-9]+(?:\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$"
 DURATION_ZERO_PAT = r"^(?:0|(?:[0-9]+(?:\.[0-9]+)?(?:ms|s|m|h|d|w|y))+)$"
 DURATION_RE = re.compile(DURATION_PAT)
+_DURATION_PART_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)(ms|s|m|h|d|w|y)")
+_DURATION_UNITS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "w": 604800.0, "y": 31_557_600.0}
 
 _FORMAT = (
     r"\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064"
@@ -36,6 +39,17 @@ _TERMINAL = re.compile(rf"[\x7f-\x9f{_SEPARATORS}{_FORMAT}]")
 _UNPRINTABLE = re.compile(rf"[\x00-\x1f\x7f-\x9f{_SEPARATORS}{_FORMAT}]")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_PEM_TAG = r"[A-Z0-9 ]{0,32}PRIVATE KEY-----"
+_PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,16384}}"
+_SECRET_RE = re.compile(
+    r"(?i:bearer)\s+[A-Za-z0-9._~+/=-]{8,}|(?:gh[pousr]_|github_pat_|AKIA|ASIA|AIza|sk-|xox[baprs]-)[A-Za-z0-9._-]{8,}"
+    rf"|-----BEGIN {_PEM_TAG}{_PEM_BODY}(?:-----END {_PEM_TAG})?|(?<=://)[^/\s:@]{{1,64}}:[^/\s@]{{1,128}}(?=@)"
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Scrub common bearer/API tokens, private keys, and URL credentials before persisting diagnostics."""
+    return _SECRET_RE.sub("[REDACTED]", text)
 
 
 class Error(Exception):
@@ -72,21 +86,14 @@ def parse_duration_seconds(
     """Convert numeric seconds or humanized duration strings (`300ms`, `15m`, `1h30m`, `1d`, `1w`) into seconds."""
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         seconds = float(value)
-        if not math.isfinite(seconds):
-            raise Error(f"{label} must be finite")
-    elif isinstance(value, str):
-        stripped = value.strip()
-        if allow_zero and stripped == "0":
-            seconds = 0.0
-        elif DURATION_RE.fullmatch(stripped):
-            try:
-                seconds = _duration_from_str(stripped).total_seconds()
-            except DurationError, OverflowError, ValueError:
-                raise Error(f"{label} is not a valid duration") from None
-        else:
-            raise Error(f"{label} must be a duration such as 30s, 15m, 1h30m, 1d, or 1w")
+    elif isinstance(value, str) and allow_zero and value.strip() == "0":
+        seconds = 0.0
+    elif isinstance(value, str) and DURATION_RE.fullmatch(stripped := value.strip()):
+        seconds = sum(float(num) * _DURATION_UNITS[unit] for num, unit in _DURATION_PART_RE.findall(stripped))
     else:
         raise Error(f"{label} must be a duration such as 30s, 15m, 1h30m, 1d, or 1w")
+    if not math.isfinite(seconds):
+        raise Error(f"{label} must be finite")
     if seconds < 0 or (seconds == 0 and not allow_zero) or seconds > maximum:
         raise Error(f"{label} must be >{'=' if allow_zero else ''} 0s and <= {maximum:g}s")
     return seconds
@@ -207,6 +214,17 @@ def now_utc(now: datetime | None = None) -> str:
     """Return `now` (or the current UTC instant) formatted as `YYYY-MM-DDTHH:MM:SSZ`."""
     instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
     return instant.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+_JSON_LOG = structlog.processors.JSONRenderer(serializer=lambda obj, **_: terminal(obj).decode("utf-8").rstrip("\n"))
+
+
+def log_line(message: str, *, severity: str = "INFO", time_iso: str = "", **fields: object) -> bytes:
+    """Render one structured UTF-8 JSON log line (`time`, `severity`, `message`) via `structlog`."""
+    payload = {"time": time_iso or now_utc(), "severity": severity.upper(), "message": message}
+    rendered = _JSON_LOG(None, severity.lower(), {**payload, **{k: v for k, v in fields.items() if v is not None}})
+    text = rendered.decode("utf-8") if isinstance(rendered, bytes) else rendered
+    return f"{text}\n".encode()
 
 
 def failure(error: BaseException) -> str:

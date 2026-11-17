@@ -90,12 +90,11 @@ from typing import get_args
 import bf
 from bf.schemas import Kind, document
 
-assert get_args(Kind) == ("brain", "record", "concepts", "logs", "evals")
+assert get_args(Kind) == ("brain", "record", "concepts", "evals")
 for kind, title in [
     ("brain", "Config"),
     ("record", "Record"),
     ("concepts", "Concept"),
-    ("logs", "Log"),
     ("evals", "Eval"),
 ]:
     assert document(kind)["title"] == title
@@ -122,9 +121,9 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             if init_reply.get("brain") != "brain":
                 raise SystemExit(f"{artifact.name}: unexpected bf init reply: {init_reply}")
             starter_yaml = (brain / "bf.yaml").read_text()
-            if "version: 12" not in starter_yaml:
+            if "version: 13" not in starter_yaml:
                 raise SystemExit(f"{artifact.name}: unexpected starter bf.yaml: {starter_yaml}")
-            for schema_file in ("record.json", "concepts.json", "logs.json", "evals.json"):
+            for schema_file in ("bf.schema.json", "record.json", "concepts.json", "evals.json"):
                 if not (brain / "schemas" / schema_file).is_file():
                     raise SystemExit(f"{artifact.name}: missing starter schemas/{schema_file}")
 
@@ -159,7 +158,7 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             read_reply = json.loads(run(bf, "read", "bf:///projects/package.md#next", cwd=brain, env=env, capture=True))
             if (
                 build_reply.get("problems")
-                or not val_reply.get("valid")
+                or not val_reply.get("ok")
                 or rev_reply.get("tasks_open") != 1
                 or not eval_reply.get("ok")
                 or "Inspect the compiled note record" not in read_reply.get("text", "")

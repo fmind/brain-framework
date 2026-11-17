@@ -1,4 +1,4 @@
-"""Tests for init_brain, create_action, pure JSON build, validate, and review."""
+"""Tests for init_brain, pure JSON build, validate, and review."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from bf.models import FORMAT, Error, InputError
 from bf.storage import Store
 
 
-def test_init_brain_action_lifecycle_and_stale_note_pruning(tmp_path: Path) -> None:
+def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     created = engine.init_brain(tmp_path / "123--My Brain!!")
     assert created["brain"] == "brain-123-my-brain"
     root = Path(created["path"])
@@ -26,31 +26,35 @@ def test_init_brain_action_lifecycle_and_stale_note_pruning(tmp_path: Path) -> N
         assert (root / folder).is_dir()
     for deferred in ("sensors", "routines", "channels", "prompts", "settings"):
         assert not (root / deferred).exists()
-    assert engine.validate(store)["valid"]
+    assert engine.validate(store)["ok"]
+    assert engine.build(store)["ok"]
 
-    # Create, reuse, and update status of an action workspace!
-    t0 = datetime(2026, 11, 15, 10, 0, tzinfo=UTC)
-    act1 = engine.action(store, "Ship pure JSON!", now=t0)
-    assert act1 == {
-        "brain": "brain-123-my-brain",
-        "ref": "actions/2026-11-15_ship-pure-json/ACTION.md",
-        "memory": "memories/actions/2026-11-15_ship-pure-json.json",
-        "created": True,
-        "status": "draft",
-    }
-    assert (root / "actions" / "2026-11-15_ship-pure-json" / "inputs").is_dir()
+    # Plain Markdown under actions/ builds like projects/ and concepts/.
+    store.write(
+        "actions/2026-11-15_ship-pure-json/ACTION.md", b"---\ntype: action\nstatus: draft\n---\n\n# Ship pure JSON\n"
+    )
+    built_action = engine.build(store)
+    assert built_action["ok"]
     assert (root / "memories" / "actions" / "2026-11-15_ship-pure-json.json").is_file()
+    assert engine.validate(store)["ok"]
 
-    act2 = engine.action(store, "Ship pure JSON!", status="stable", now=t0)
-    assert act2["created"] is False
-    assert b"status: stable" in store.read("actions/2026-11-15_ship-pure-json/ACTION.md")
+    # Compiled-note drift, corruption, missing compiled JSON, and orphans fail `validate`.
+    raw_welcome = store.read("concepts/welcome.md")
+    store.write("concepts/unbuilt.md", b"---\ntype: guide\nstatus: draft\n---\n\n# Unbuilt\n")
+    assert any("missing compiled note for concepts/unbuilt.md" in p for p in engine.validate(store)["problems"])
+    store.delete("concepts/unbuilt.md")
 
-    # Hand-authored ACTION.md lacking status/updated gets both inserted on update.
-    store.write("actions/2026-11-15_bare/ACTION.md", b"---\ntype: action\n---\n\n# Bare\n")
-    engine.action(store, "2026-11-15_bare", status="stable", now=t0)
-    bare_txt = store.read("actions/2026-11-15_bare/ACTION.md").decode()
-    assert "status: stable\n" in bare_txt
-    assert "updated: 2026-11-15\n" in bare_txt
+    store.write("memories/concepts/orphan.json", b'{"ref":"concepts/orphan.md"}\n')
+    assert any("memories/concepts/orphan.json: orphaned compiled note" in p for p in engine.validate(store)["problems"])
+    store.delete("memories/concepts/orphan.json")
+
+    compiled_bytes = store.read("memories/concepts/welcome.json")
+    store.write("concepts/welcome.md", raw_welcome + b"\nEdited without rebuild.\n")
+    assert any("out of sync with concepts/welcome.md" in p for p in engine.validate(store)["problems"])
+    store.write("memories/concepts/welcome.json", b"{corrupt\n")
+    assert any("memories/concepts/welcome.json: invalid JSON" in p for p in engine.validate(store)["problems"])
+    store.write("concepts/welcome.md", raw_welcome)
+    store.write("memories/concepts/welcome.json", compiled_bytes)
 
     # Deleting a note prunes its compiled JSON file on next `bf build`!
     store.write("projects/temp.md", b"---\ntype: project\nstatus: draft\n---\n# Temp\n")
@@ -71,20 +75,18 @@ def test_init_brain_action_lifecycle_and_stale_note_pruning(tmp_path: Path) -> N
 
     with pytest.raises(InputError, match="lowercase letter"):
         engine.init_brain(tmp_path / "bad-name", name="Bad_Name")
-    with pytest.raises(InputError, match="status must be draft, stable, or deprecated"):
-        engine.action(store, "Bad", status="archived")
 
 
 def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_errors(
     tmp_path: Path, brain: Store
 ) -> None:
-    assert engine.validate(brain)["valid"]
+    assert engine.validate(brain)["ok"]
 
     bad_root = tmp_path / "bad-cfg"
     bad_root.mkdir()
     (bad_root / "bf.yaml").write_text("version: 99\nname: bad\n")
     invalid_cfg = engine.validate(Store(bad_root))
-    assert not invalid_cfg["valid"]
+    assert not invalid_cfg["ok"]
     assert "version 99" in invalid_cfg["problems"][0]
 
     # Sibling brain for cross-brain link checks.
@@ -102,16 +104,13 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
         f"version: {FORMAT}\nname: fixture\nbrains:\n  sib: {sib_root}\n  missing-sib: {tmp_path / 'nope'}\n".encode(),
     )
 
-    # Schema, .env, log, and eval errors.
+    # Schema, .env, and eval errors (`logs/` holds `structlog` JSON files and is not schema-validated).
     brain.write(".env", b'BAD_QUOTE="unclosed\\"\n')
     brain.write("schemas/nested/extra.json", b"{}")
     brain.write("schemas/broken.json", b'{"type": "nope"}')
     brain.write("schemas/projects.json", json.dumps({"type": "object", "required": ["owner"]}).encode())
     brain.write("concepts/incomplete.md", b"---\ntype: guide\n---\n\n# Missing status\n")
-    brain.write("logs/bad.json", b'{"kind": "job"}')
-    brain.write("logs/stray.txt", b"text")
-    brain.write("logs/corrupt.json", b"{bad")
-    brain.write("evals/bad.yaml", b"version: 12\ncases: not-a-list\n")
+    brain.write("evals/bad.yaml", f"version: {FORMAT}\ncases: not-a-list\n".encode())
     brain.write("evals/stray.txt", b"text")
     brain.write("evals/scalar.json", b"123\n")
     brain.write("evals/corrupt.json", b"{bad")
@@ -179,8 +178,8 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
         b"---\ntype: project\nstatus: draft\nowner: alice\nstale_after: 30d\nentity: org:acme\naliases: [proj:links]\n---\n\n"
         b"# Link Matrix\n\n"
         b"- [External](https://example.com)\n"
-        b"- [Good memory](../memories/repos/82f3e9c695dc6b8d1b11818d5701919e286de8d47f7c3eb3100c485f79e57828.json#.title)\n"
-        b"- [Bad json jq](../memories/projects/offline.json#[[[)\n"
+        b"- [Good memory](../memories/repos/82f3e9c695dc6b8d1b11818d5701919e286de8d47f7c3eb3100c485f79e57828.json)\n"
+        b"- [Bad json frag](../memories/projects/offline.json#.title)\n"
         b"- [Missing memory](../memories/repos/0000000000000000000000000000000000000000000000000000000000000000.json)\n"
         b"- [Good attachment](../actions/2026-11-15_demo/outputs/report.md#summary)\n"
         b"- [Bad attachment anchor](../actions/2026-11-15_demo/outputs/report.md#missing)\n"
@@ -189,16 +188,16 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
         b"- [Missing anchor](../concepts/welcome.md#no-such-heading)\n"
         b"- [Unknown brain](bf://undeclared/concepts/x.md)\n"
         b"- [Good sib note](bf://sib/concepts/shared.md#known)\n"
-        b"- [Good sib json](bf://sib/memories/concepts/shared.json#.title)\n"
+        b"- [Good sib json](bf://sib/memories/concepts/shared.json)\n"
         b"- [Bad sib anchor](bf://sib/concepts/shared.md#missing)\n"
         b"- [Bad sib note](bf://sib/concepts/missing.md)\n"
         b"- [Bad sib mem](bf://sib/memories/events/0000000000000000000000000000000000000000000000000000000000000000.json)\n"
-        b"- [Bad sib note jq](bf://sib/memories/concepts/shared.json#[[[)\n"
+        b"- [Bad sib json frag](bf://sib/memories/concepts/shared.json#.title)\n"
         b"- [Corrupt sib heading](bf://sib/concepts/badutf.md#sec)\n",
     )
 
     report = engine.validate(brain)
-    assert not report["valid"]
+    assert not report["ok"]
     joined = "\n".join(report["problems"])
     for expected in (
         ".env:1: unclosed quote",
@@ -209,9 +208,6 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
         "projects/badstaledur.md:",
         "projects/hugestale.md: stale_after",
         "concepts/incomplete.md: missing required 'status'",
-        "logs/bad.json:",
-        "logs/stray.txt: logs/ holds only .json files",
-        "logs/corrupt.json: invalid JSON",
         "evals/bad.yaml:",
         "evals/stray.txt: evals/ holds .yaml or .json files",
         "evals/scalar.json: expected a mapping",
@@ -225,7 +221,7 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
         "memories/dupes/a.json: source must equal 'dupes'",
         "memories/dupes/a.json: ref must equal 'dupes:d1'",
         "bf.yaml brains.missing-sib:",
-        "invalid jq fragment #[[[",
+        "JSON record links do not support #anchor fragments",
         "missing anchor #missing in actions/2026-11-15_demo/outputs/report.md",
         "actions/2026-11-15_demo/outputs/bad.md: note is not UTF-8",
         "broken link to concepts/ghost.md",
@@ -310,6 +306,14 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
         b"  - resource: https://example.com/spec\n    retrieved: '2026-11-10T12:00:00+02:00'\n"
         b"  - resource: https://example.com/draft\n    retrieved: unknown\n---\n\n# Retrieved Only\n",
     )
+    brain.write(
+        "concepts/tz-upd.md",
+        b"---\ntype: guide\nstatus: stable\nupdated: '2026-11-15T13:30:00+02:00'\nstale_after: 15m\n---\n# TZ Upd\n",
+    )
+    brain.write(
+        "concepts/undated-dur.md",
+        b"---\ntype: guide\nstatus: stable\nstale_after: 7d\n---\n# Undated Dur\n",
+    )
     records.ingest(
         brain,
         "github",
@@ -328,6 +332,7 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
 
     rep = engine.review(brain, now=now)
     assert rep["brain"] == "fixture"
+    assert rep["ok"] is False
     assert len(rep["problems"]) == 1
     assert "memories/broken/b.json" in rep["problems"][0]
     assert rep["tasks_open"] == 2
@@ -343,6 +348,8 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
     stale_by_ref = {item["ref"]: item for item in rep["stale"]}
     assert "projects/fresh-hours.md" not in stale_by_ref
     assert "projects/overflow-dur.md" not in stale_by_ref
+    assert stale_by_ref["concepts/tz-upd.md"]["reasons"] == ["due"]
+    assert stale_by_ref["concepts/undated-dur.md"]["reasons"] == ["due"]
     assert stale_by_ref["projects/future.md"]["reasons"] == ["future_updated", "due"]
     assert stale_by_ref["projects/overdue.md"] == {
         "ref": "projects/overdue.md",

@@ -5,7 +5,6 @@ min_version = "2026.11.4"
 [tools]
 betterleaks = "1.10.0"
 dprint = "0.64.3"
-duckdb = "2.0.0"
 jactionlint = { version = "2.5.0", workflow = "release.yaml" }
 jq = "1.8.2"
 lefthook = "2.2.2"
@@ -39,7 +38,7 @@ description = "Check, test, and build without rewriting source files"
 run = ["mise run check", "mise run test", "mise run build"]
 
 [tasks.benchmark]
-description = "Time JSON record ingestion, note compilation, validation, and review over a 20k-record corpus"
+description = "Time JSON record ingestion, note compilation, validation, review, query, and watch over a synthetic corpus"
 run = "uv run --locked python scripts/benchmark_scale.py"
 
 [tasks.build]

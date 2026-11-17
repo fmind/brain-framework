@@ -9,11 +9,11 @@ import pytest
 
 from bf import records, schemas
 from bf.models import MAX_BATCH, Error, InputError, decode
-from bf.storage import Store
+from bf.storage import Store, private_dir
 
 
 def test_schemas_compile_and_describe_all_validation_rules(brain: Store) -> None:
-    for kind in ("brain", "record", "concepts", "logs", "evals"):
+    for kind in ("brain", "record", "concepts", "evals"):
         doc = schemas.document(kind)
         assert doc["$schema"].endswith("2020-12/schema")
 
@@ -129,13 +129,16 @@ def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store)
     assert "url" not in saved1[0]
     assert any(lnk["to"] == "meetings:decision-1" for lnk in saved1[0]["links"])
 
-    # Ingesting new records emits `records.ingested` in `logs/events.json`, and `append_event(..., dedupe=True)` is idempotent!
+    # Ingesting new records emits `records.ingested` in `.bf/state/events.json` + `logs/events.log`, and `append_event(..., dedupe=True)` is idempotent!
     ev1 = records.append_event(brain, "channel.message", "chat", {"id": "msg-42", "text": "hi"}, dedupe=True, now=t1)
     ev2 = records.append_event(brain, "channel.message", "chat", {"id": "msg-42", "text": "hi"}, dedupe=True, now=t2)
     assert ev1 == ev2
-    ev_log = decode(brain.read("logs/events.json"), "logs/events.json")
-    assert isinstance(ev_log, dict)
-    assert sum(1 for e in ev_log["events"] if e["data"].get("id") == "msg-42") == 1
+    ev_raw = private_dir(brain, ".bf", "state").read("events.json")
+    ev_state = decode(ev_raw, ".bf/state/events.json")
+    assert isinstance(ev_state, dict)
+    assert sum(1 for e in ev_state["events"] if e["data"].get("id") == "msg-42") == 1
+    ev_lines = [decode(ln, "logs/events.log") for ln in brain.read("logs/events.log").splitlines() if ln.strip()]
+    assert any(isinstance(ln, dict) and ln.get("message") == "channel.message" for ln in ev_lines)
 
     # Re-ingesting identical payload without explicit `updated` preserves original `updated` timestamp!
     res2 = records.ingest(brain, "jira", batch1, now=t2)
@@ -199,7 +202,31 @@ def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store)
         ("valid", "upsert", b'[{"id":"1","title":"t","time":123}]', Error, "time must be an ISO"),
         ("valid", "upsert", b'[{"id":"1","title":"t","updated":123}]', Error, "updated must be an ISO"),
         ("valid", "upsert", b'[{"id":"1","title":"t","links":"bad"}]', Error, "links must be a list"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","links":[""]}]', Error, "nonempty link targets"),
         ("valid", "upsert", b'[{"id":"1","title":"t","links":[123]}]', Error, "target strings or link objects"),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"t","links":[{"to":"concepts/a.md","meta":[]}]}]',
+            Error,
+            "meta must map",
+        ),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"t","links":[{"to":"concepts/a.md#one","anchor":"two"}]}]',
+            Error,
+            "conflicting #anchor",
+        ),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"t","links":[{"to":"concepts/a.md","section":123}]}]',
+            Error,
+            "section must be",
+        ),
+        ("valid", "upsert", b'[{"id":"1","title":"t","relations":{"sender":123}}]', Error, "list of URI strings"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","relations":[{"bad":1}]}]', Error, "objects with target or to"),
         (
             "valid",
             "upsert",
@@ -224,15 +251,19 @@ def test_ingest_rejects_invalid_records_and_arguments(
 
 
 def test_load_source_handles_missing_and_corrupt_files(brain: Store) -> None:
-    # Dict-form `relations` and `entity` identity on ingested records:
+    # Dict-form `relations` and `entity` identity on ingested records drop overlapping untyped links:
     ing = records.ingest(
         brain,
         "mail",
-        b'[{"id":"m1","title":"Msg","entity":"msg:1","relations":{"sender":["person:email/a@example.com"]}}]',
+        b'[{"id":"m1","title":"Msg","entity":"msg:1",'
+        b'"links":["person:email/a@example.com",{"to":"concepts/welcome.md","anchor":"top"}],'
+        b'"relations":{"sender":["person:email/a@example.com"]}}]',
     )
     assert ing["records"] == 1
     stored_mail = records.load_source(brain, "mail")[0]
-    assert stored_mail["links"][0]["meta"] == {"rel": "sender"}
+    assert len(stored_mail["links"]) == 2
+    assert stored_mail["links"][0]["anchor"] == "top"
+    assert stored_mail["links"][1]["meta"] == {"rel": "sender"}
 
     assert records.load_source(brain, "missing") == []
     brain.write("memories/corrupt/bad.txt", b"text")
@@ -244,3 +275,12 @@ def test_load_source_handles_missing_and_corrupt_files(brain: Store) -> None:
     brain.write("memories/scalar/s.json", b"123\n")
     with pytest.raises(Error, match="expected a JSON object"):
         records.load_source(brain, "scalar")
+
+    # Oversized events fail on `logs/events.log` bounds BEFORE advancing `.bf/state/events.json`.
+    records.append_event(brain, "test.ok", "t", {"id": "e0"})
+    before = decode(private_dir(brain, ".bf", "state").read("events.json"), ".bf/state/events.json")
+    assert isinstance(before, dict)
+    with pytest.raises(Error, match="exceeds"):
+        records.append_event(brain, "test.huge", "t", {"id": "e1", "blob": "x" * ((1 << 20) + 64)})
+    after = decode(private_dir(brain, ".bf", "state").read("events.json"), ".bf/state/events.json")
+    assert after == before

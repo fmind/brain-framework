@@ -98,7 +98,7 @@ printf '%s\n' '[{"id":"brief","title":"Website brief","text":"Single product pag
   fail "bf ingest rejected the sample record"
 "${bf}" build --brain "${brain}" | grep -F '"problems":[]' > /dev/null || fail "bf build failed on the sample brain"
 # grep -F reads the whole reply: grep -q could exit first and fail bf's write under pipefail.
-"${bf}" validate --brain "${brain}" | grep -F '"valid":true' > /dev/null || fail "bf validate rejected the sample brain"
+"${bf}" validate --brain "${brain}" | grep -F '"ok":true' > /dev/null || fail "bf validate rejected the sample brain"
 "${bf}" review --brain "${brain}" | grep -F '"problems":[]' > /dev/null || fail "bf review failed on the sample brain"
 
 echo "verify-release: ${tag} at ${commit} is published at ${url}; PyPI digests and build attestations match ${wheel}" \

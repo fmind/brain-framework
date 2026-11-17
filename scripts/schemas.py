@@ -25,8 +25,12 @@ def main() -> None:
             name = "bf.schema.json" if kind == "brain" else f"{kind}.json"
             documents[ROOT / "examples" / example / "schemas" / name] = schema
     store = Store(ROOT)
-    for path in sorted((ROOT / "docs").glob("*.schema.json")):
-        if path in documents:
+    obsolete_roots = (
+        (ROOT / "docs").glob("*.schema.json"),
+        *((ROOT / "examples" / ex / "schemas").glob("*.json") for ex in ("brain", "context-hub")),
+    )
+    for path in sorted(p for group in obsolete_roots for p in group):
+        if path in documents or path == ROOT / "examples/context-hub/schemas/jira.json":
             continue
         if args.write:
             path.unlink()

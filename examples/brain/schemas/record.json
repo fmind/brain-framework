@@ -75,11 +75,7 @@
     "headings": { "items": { "$ref": "#/$defs/Heading" }, "type": "array" },
     "id": { "maxLength": 4096, "minLength": 1, "type": "string" },
     "kind": { "enum": ["project", "concept", "action", "memory"], "type": "string" },
-    "links": {
-      "items": { "anyOf": [{ "maxLength": 8192, "minLength": 1, "type": "string" }, { "$ref": "#/$defs/Link" }] },
-      "maxItems": 2000,
-      "type": "array"
-    },
+    "links": { "items": { "$ref": "#/$defs/Link" }, "maxItems": 2000, "type": "array" },
     "ref": { "maxLength": 4200, "minLength": 1, "type": "string" },
     "relations": {
       "anyOf": [{ "type": "object" }, { "items": { "type": "object" }, "maxItems": 2000, "type": "array" }]
@@ -119,7 +115,7 @@
     },
     "url": { "maxLength": 8192, "type": "string" }
   },
-  "required": ["id", "title"],
+  "required": ["id", "ref", "source", "kind", "title"],
   "title": "Record",
   "type": "object"
 }

@@ -8,15 +8,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import resource
 import statistics
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-from bf import engine, records
-from bf.models import FORMAT, MAX_FILES
-from bf.storage import Store, xdg
+from bf import engine, query, records, watch
+from bf.models import FORMAT, MAX_BATCH, MAX_FILES
+from bf.storage import Store
+
+
+def _seed_batches(store: Store, source: str, items: list[dict[str, object]]) -> None:
+    batch: list[dict[str, object]] = []
+    batch_bytes = 2
+    for item in items:
+        item_len = len(json.dumps(item).encode()) + 2
+        if batch and batch_bytes + item_len > MAX_BATCH - 65_536:
+            records.ingest(store, source, json.dumps(batch).encode(), mode="upsert")
+            batch, batch_bytes = [], 2
+        batch.append(item)
+        batch_bytes += item_len
+    if batch:
+        records.ingest(store, source, json.dumps(batch).encode(), mode="upsert")
 
 
 def main() -> None:
@@ -26,7 +42,8 @@ def main() -> None:
     parser.add_argument("--notes", type=int, default=100)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--batch", type=int, default=100, help="Records added, updated, and removed per write sample.")
-    cache = xdg("XDG_CACHE_HOME", ".cache")
+    xdg_cache = os.environ.get("XDG_CACHE_HOME", "").strip()
+    cache = Path(xdg_cache) if Path(xdg_cache).is_absolute() else Path.home() / ".cache"
     parser.add_argument("--dir", type=Path, default=cache / "bf-benchmark", help="Parent of the temporary brain.")
     args = parser.parse_args()
     if not (
@@ -47,7 +64,7 @@ def main() -> None:
         store = Store(root)
         store.write("bf.yaml", f"version: {FORMAT}\nname: benchmark\n".encode())
         background = ("Routine project background. " * args.body_chars)[: args.body_chars]
-        items = [
+        items: list[dict[str, object]] = [
             {
                 "id": str(n),
                 "title": f"Decision {n}",
@@ -57,7 +74,7 @@ def main() -> None:
             }
             for n in range(args.records)
         ]
-        records.ingest(store, "benchmark", json.dumps(items).encode(), mode="snapshot", allow_removal=True)
+        _seed_batches(store, "benchmark", items)
         for n in range(args.notes):
             rec_rel = records.record_file("benchmark", str(n % args.records))
             store.write(
@@ -88,6 +105,9 @@ def main() -> None:
             ("build", lambda: engine.build(store)),
             ("validate", lambda: engine.validate(store)),
             ("review", lambda: engine.review(store)),
+            ("query_rg", lambda: query.search_rg(store, "Retain evidence", scope="benchmark", limit=20)),
+            ("query_jq", lambda: query.query_jq(store, ".id", scope="benchmark", limit=20)),
+            ("watch_dashboard", lambda: (watch.render_dashboard(store), {"ok": True})[1]),
             ("unchanged_record", lambda: records.ingest(store, "benchmark", json.dumps([items[0]]).encode())),
             ("upsert_add", lambda: write_batch("add")),
             ("upsert_update", lambda: write_batch("update")),
@@ -95,12 +115,13 @@ def main() -> None:
         ]
 
         for name, op in operations:
+            op()  # untimed warmup
             timings: list[float] = []
             for _ in range(args.repeats):
                 start = time.perf_counter()
                 result = op()
                 timings.append(time.perf_counter() - start)
-                if result.get("problems") or (name == "validate" and not result.get("valid")):
+                if result.get("problems") or not result.get("ok", True):
                     raise RuntimeError(f"{name}: failed benchmark validation: {result}")
             measurements[name] = {
                 "min": round(min(timings), 4),
@@ -110,12 +131,14 @@ def main() -> None:
 
         notes_bytes = sum(p.stat().st_size for p in (store.root / "memories/concepts").glob("*.json"))
         memories_bytes = sum(p.stat().st_size for p in (store.root / "memories/benchmark").glob("*.json"))
+        max_rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         corpus = {key: value for key, value in vars(args).items() if key != "dir"}
         sys.stdout.write(
             json.dumps(
                 {
                     "corpus": corpus,
                     "seconds": measurements,
+                    "peak_rss_kib": max_rss_kb,
                     "notes_json_bytes": notes_bytes,
                     "memories_json_bytes": memories_bytes,
                 }

@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from bf.storage import Store
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_context_hub_walkthrough_and_duckdb_query(tmp_path: Path) -> None:
+def test_context_hub_walkthrough(tmp_path: Path) -> None:
     hub = tmp_path / "context-hub"
     shutil.copytree(ROOT / "examples" / "context-hub", hub)
     demo = hub / "sensors" / "demo.py"
@@ -38,7 +39,7 @@ def test_context_hub_walkthrough_and_duckdb_query(tmp_path: Path) -> None:
     built = engine.build(store)
     assert (built["notes"], built["problems"]) == (1, [])
     val = engine.validate(store)
-    assert val["valid"], val["problems"]
+    assert val["ok"], val["problems"]
     assert query.evaluate(store)["ok"]
 
     store.write(
@@ -62,14 +63,13 @@ def test_context_hub_walkthrough_and_duckdb_query(tmp_path: Path) -> None:
         b"  {: #task-a11y priority=p1}\n",
     )
     assert engine.build(store)["problems"] == []
-    assert engine.validate(store)["valid"]
+    assert engine.validate(store)["ok"]
     rev_before = engine.review(store, now=now)
     assert rev_before["stale"] == []
     assert rev_before["tasks_open"] == 1
 
-    sql_res = query.query_sql(store, "SELECT source, count(*) AS n FROM records GROUP BY source ORDER BY source")
-    rows = {row["source"]: row["n"] for row in sql_res["items"]}
-    assert rows == {"gcloud": 1, "github": 1, "jira": 1, "projects": 1, "workspace": 1}
+    jq_res = query.query_jq(store, ".source", limit=20)
+    assert dict(Counter(jq_res["items"])) == {"gcloud": 1, "github": 1, "jira": 1, "projects": 1, "workspace": 1}
 
     shutil.copy2(hub / "fixtures" / "jira-done.json", hub / "fixtures" / "jira.json")
     done_out = subprocess.run(  # noqa: S603
@@ -109,16 +109,14 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     records.ingest(store, "demo", demo_out.stdout, mode="snapshot")
     assert engine.build(store)["problems"] == []
     val = engine.validate(store)
-    assert val["valid"], val["problems"]
+    assert val["ok"], val["problems"]
     assert query.evaluate(store)["ok"]
     rev = engine.review(store, now=datetime(2026, 10, 1, 12, 0, tzinfo=UTC))
     assert len(rev["actions"]) == 2
-    edges = query.query_sql(
+    edges = query.query_jq(
         store,
-        "SELECT n.ref AS from_ref, l->'meta'->>'rel' AS rel, r.ref AS to_ref, r.title "
-        "FROM records n, UNNEST(from_json(n.links, '[\"JSON\"]')) AS t(l) "
-        "JOIN records r ON (l->>'to') IN (r.ref, r.path) "
-        "WHERE n.kind IN ('project', 'concept', 'action') ORDER BY from_ref, to_ref",
+        'select(.kind == "project" or .kind == "concept" or .kind == "action") | .links[]? | select(.meta.rel != null)',
+        limit=50,
     )
     assert edges["count"] >= 2
 
@@ -126,8 +124,8 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     # and reactive `jobs.assistant` (`input: prompts/digest.md` on stdin + `{{context}}` JSON)!
     wr = jobs.run_jobs(store, ("weekly-review",))
     assert wr["ok"], wr
-    assert engine.validate(store)["valid"]
-    posted = jobs.post_message(store, "Retention review ready", to="local")
+    assert engine.validate(store)["ok"]
+    posted = jobs.send_channel_message(store, "Retention review ready", to="local")
     assert posted["status"] == "ok"
     local_state = b_root / ".bf" / "state" / "local"
     assert "Retention review ready" in (local_state / "outbox.jsonl").read_text()
@@ -162,7 +160,7 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     assert tick_res["jobs_ran"] == 3
     assert tick_res["ok"]
     assert "Digest from digest.md" in (local_state / "outbox.jsonl").read_text()
-    assert engine.validate(store)["valid"]
+    assert engine.validate(store)["ok"]
 
     bench = subprocess.run(  # noqa: S603
         [
@@ -341,4 +339,4 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert records.ingest(store, "git-history", ghist.stdout.encode())["added"] == 1
     assert provider.run("git-history.py", str(repos_root), "bad-start", "bad-end").returncode != 0
 
-    assert engine.validate(store)["valid"]
+    assert engine.validate(store)["ok"]
