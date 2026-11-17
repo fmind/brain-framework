@@ -411,8 +411,19 @@ def _open_brain(chosen: str) -> Store:
 
 def select(value: str = "") -> Store:
     """Resolve `--brain PATH` -> `BF_BRAIN` -> enclosing `bf.yaml` -> `DEFAULT_BRAIN_PATH`."""
-    if chosen := (value or os.environ.get("BF_BRAIN", "")).strip():
-        return _open_brain(chosen)
+    if value.strip():
+        return _open_brain(value.strip())
+    if env_brain := os.environ.get("BF_BRAIN", "").strip():
+        try:
+            return _open_brain(env_brain)
+        except Error:
+            if models.NAME_RE.fullmatch(env_brain) and (nearest := inside_brain()) is not None:
+                with suppress(Error):
+                    if env_brain == load(nearest).name:
+                        return nearest
+                if env_brain == nearest.root.name:
+                    return nearest
+            raise
     if nearest := inside_brain():
         return nearest
     if fallback := os.environ.get("DEFAULT_BRAIN_PATH", "").strip():

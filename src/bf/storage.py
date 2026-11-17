@@ -1,4 +1,4 @@
-"""Confined O_NOFOLLOW filesystem access, private `.bf/` state, and brain writer locks."""
+"""Confined O_NOFOLLOW filesystem access, private `.bf/` runtime directory, and brain writer locks."""
 
 from __future__ import annotations
 
@@ -338,9 +338,8 @@ def private_dir(store: Store, *parts: str) -> Store:
 
 @contextmanager
 def writer(store: Store, wait: float = 10.0, *, busy: str = _WRITE_BUSY) -> Generator[None]:
-    """Hold an exclusive advisory lock on `.bf/locks/write.lock`."""
-    locks = private_dir(store, ".bf", "locks")
-    with locks.parent("write.lock") as (parent, leaf):
+    """Hold an exclusive advisory lock on `.bf/write.lock`."""
+    with private_dir(store).parent("write.lock") as (parent, leaf):
         flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
             fd = os.open(leaf, flags | os.O_CREAT, 0o600, dir_fd=parent)

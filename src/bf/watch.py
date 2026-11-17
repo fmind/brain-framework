@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import suppress
@@ -23,21 +24,10 @@ from rich.table import Table
 from rich.text import Text
 from watchfiles import watch as watch_fs
 
-from bf import config, engine, jobs, records
+from bf import config, engine, jobs, models, records
 from bf.config import ChannelSpec, JobSpec, ServiceSpec
-from bf.models import (
-    AUTHORED,
-    FAILURES,
-    MAX_BATCH,
-    Error,
-    decode,
-    failure,
-    log_line,
-    now_utc,
-    printable,
-    redact_secrets,
-)
-from bf.storage import Store, private_dir
+from bf.models import Error, decode, failure, now_utc, printable
+from bf.storage import Store
 
 _SKIP_DIRS = frozenset(
     {".git", "memories", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".ty_cache", "site", "dist", "logs"}
@@ -191,7 +181,7 @@ def _neg_ts(doc: dict[str, Any]) -> float:
 
 
 def render_dashboard(store: Store, *, now: datetime | None = None, max_rows: int | None = None) -> Panel:
-    """Render a calm, single-panel Rich dashboard from `.bf/state/` operational state."""
+    """Render a calm, single-panel Rich dashboard from `.bf/` operational state."""
     instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
     term = shutil.get_terminal_size((100, 40))
     cfg = config.load(store)
@@ -316,7 +306,6 @@ class DaemonStream:
 
     def _loop(self) -> None:
         backoff = 1.0
-        err_flags = os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC
         label = f"{self.kind}s.{self.unit.name}"
         while not self.stop_event.is_set():
             now_dt = datetime.now(UTC)
@@ -329,11 +318,9 @@ class DaemonStream:
                 argv, env = jobs.prepare_unit(
                     self.store, self.unit.name, self.cmd, run_id, now_iso, trigger=self.kind, unit_env=self.unit.env
                 )
-                with private_dir(self.store, ".bf", "state").parent(f"{self.unit.name}.stderr") as (pfd, leaf):
-                    efd = os.open(leaf, err_flags, 0o600, dir_fd=pfd)
                 dn, pipe = subprocess.DEVNULL, subprocess.PIPE
                 with (
-                    os.fdopen(efd, "w+b") as err_f,
+                    tempfile.TemporaryFile(mode="w+b") as err_f,
                     subprocess.Popen(  # noqa: S603
                         argv, cwd=self.store.root, env=env, stdin=dn, stdout=pipe, stderr=err_f, start_new_session=True
                     ) as proc,
@@ -347,9 +334,11 @@ class DaemonStream:
                             continue
                         self._mark("running", now_iso, last_start=now_iso)
                         if proc.stdout is not None:
-                            while not self.stop_event.is_set() and (raw_line := proc.stdout.readline(MAX_BATCH + 1)):
-                                if len(raw_line) > MAX_BATCH:
-                                    sys.stderr.write(f"bf: {label}: output line exceeds {MAX_BATCH} bytes\n")
+                            while not self.stop_event.is_set() and (
+                                raw_line := proc.stdout.readline(models.MAX_BATCH + 1)
+                            ):
+                                if len(raw_line) > models.MAX_BATCH:
+                                    sys.stderr.write(f"bf: {label}: output line exceeds {models.MAX_BATCH} bytes\n")
                                     jobs.stop_proc(proc)
                                     break
                                 if not (stripped := raw_line.strip()) or self.emit == "none":
@@ -375,11 +364,11 @@ class DaemonStream:
                 if self.stop_event.is_set():
                     self._mark("stopped", (t_stop := now_utc()), last_end=t_stop)
                     break
-                err_msg = "" if rc == 0 else redact_secrets(err_txt or f"exit code {rc}")[-1024:]
+                err_msg = "" if rc == 0 else models.redact_secrets(err_txt or f"exit code {rc}")[-1024:]
                 dur_ms = self._record(run_id, now_iso, t0, rc, err_msg, err_txt)
                 healthy = rc == 0 or dur_ms >= 30_000
-            except FAILURES as err:
-                msg = redact_secrets(printable(failure(err)))
+            except models.FAILURES as err:
+                msg = models.redact_secrets(printable(failure(err)))
                 sys.stderr.write(f"bf: {label}: {msg}\n")
                 with suppress(Error, OSError):
                     self._record(run_id, now_iso, t0, 1, msg[:1024])
@@ -397,8 +386,8 @@ class DaemonStream:
 def _safe_tick(store: Store, *, rebuild_notes: bool, fallback: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     try:
         return tick(store, rebuild_notes=rebuild_notes), True
-    except (*FAILURES, RuntimeError, ValueError, KeyError, TypeError) as err:
-        msg = printable(failure(err)) if isinstance(err, FAILURES) else type(err).__name__
+    except (*models.FAILURES, RuntimeError, ValueError, KeyError, TypeError) as err:
+        msg = printable(failure(err)) if isinstance(err, models.FAILURES) else type(err).__name__
         sys.stderr.write(f"bf: watch: {msg}\n")
         return {**fallback, "time": now_utc(), "built": 0, "jobs_ran": 0, "ok": False}, False
 
@@ -414,13 +403,13 @@ def serve(store: Store, *, json_stream: bool = False, stop_event: threading.Even
     con = Console(no_color=bool(os.environ.get("NO_COLOR", "")), highlight=False, emoji=False)
     live = Live(console=con, auto_refresh=False) if use_tui else None
     empty = {"brain": cfg.name, "time": now_utc(), "built": 0, "jobs_ran": 0, "ok": True}
-    last_summary, authored_pfx, root_pfx = empty, tuple(f"{f}/" for f in AUTHORED), f"{store.root}/"
+    last_summary, authored_pfx, root_pfx = empty, tuple(f"{f}/" for f in models.AUTHORED), f"{store.root}/"
 
     def emit_line(payload: dict[str, Any]) -> None:
         fields = {k: payload[k] for k in ("brain", "built", "jobs_ran", "ok")}
         sev, tm = "INFO" if payload["ok"] else "ERROR", str(payload["time"])
         with suppress(BrokenPipeError, OSError):
-            sys.stdout.buffer.write(log_line("watch.tick", severity=sev, time_iso=tm, **fields))
+            sys.stdout.buffer.write(models.log_line("watch.tick", severity=sev, time_iso=tm, **fields))
             sys.stdout.flush()
 
     def refresh_tui() -> None:
@@ -441,10 +430,10 @@ def serve(store: Store, *, json_stream: bool = False, stop_event: threading.Even
             return ""
         if rel.startswith(authored_pfx) and rel.endswith(".md"):
             return "note"
-        if rel in {"bf.yaml", ".bf/state/events.json"}:
+        if rel in {"bf.yaml", ".bf/events.json"}:
             return "wake"
-        if len(parts) == 3 and rel.startswith(".bf/state/") and parts[2].endswith(".json"):
-            return "" if parts[2].endswith(".context.json") else "ui"
+        if len(parts) == 2 and parts[0] == ".bf" and parts[1].endswith(".json"):
+            return "" if parts[1].endswith(".context.json") else "ui"
         return ""
 
     def watch_files() -> None:
@@ -458,7 +447,7 @@ def serve(store: Store, *, json_stream: bool = False, stop_event: threading.Even
                 if "note" in kinds or "wake" in kinds:
                     wake_event.set()
                 ui_event.set()
-        except (*FAILURES, OSError, RuntimeError) as err:
+        except (*models.FAILURES, OSError, RuntimeError) as err:
             sys.stderr.write(f"bf: watch: {type(err).__name__}\n")
 
     def run_ticks() -> None:

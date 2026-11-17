@@ -129,12 +129,12 @@ def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store)
     assert "url" not in saved1[0]
     assert any(lnk["to"] == "meetings:decision-1" for lnk in saved1[0]["links"])
 
-    # Ingesting new records emits `records.ingested` in `.bf/state/events.json` + `logs/events.log`, and `append_event(..., dedupe=True)` is idempotent!
+    # Ingesting new records emits `records.ingested` in `.bf/events.json` + `logs/events.log`, and `append_event(..., dedupe=True)` is idempotent!
     ev1 = records.append_event(brain, "channel.message", "chat", {"id": "msg-42", "text": "hi"}, dedupe=True, now=t1)
     ev2 = records.append_event(brain, "channel.message", "chat", {"id": "msg-42", "text": "hi"}, dedupe=True, now=t2)
     assert ev1 == ev2
-    ev_raw = private_dir(brain, ".bf", "state").read("events.json")
-    ev_state = decode(ev_raw, ".bf/state/events.json")
+    ev_raw = private_dir(brain).read("events.json")
+    ev_state = decode(ev_raw, ".bf/events.json")
     assert isinstance(ev_state, dict)
     assert sum(1 for e in ev_state["events"] if e["data"].get("id") == "msg-42") == 1
     ev_lines = [decode(ln, "logs/events.log") for ln in brain.read("logs/events.log").splitlines() if ln.strip()]
@@ -276,11 +276,11 @@ def test_load_source_handles_missing_and_corrupt_files(brain: Store) -> None:
     with pytest.raises(Error, match="expected a JSON object"):
         records.load_source(brain, "scalar")
 
-    # Oversized events fail on `logs/events.log` bounds BEFORE advancing `.bf/state/events.json`.
+    # Oversized events fail on `logs/events.log` bounds BEFORE advancing `.bf/events.json`.
     records.append_event(brain, "test.ok", "t", {"id": "e0"})
-    before = decode(private_dir(brain, ".bf", "state").read("events.json"), ".bf/state/events.json")
+    before = decode(private_dir(brain).read("events.json"), ".bf/events.json")
     assert isinstance(before, dict)
     with pytest.raises(Error, match="exceeds"):
         records.append_event(brain, "test.huge", "t", {"id": "e1", "blob": "x" * ((1 << 20) + 64)})
-    after = decode(private_dir(brain, ".bf", "state").read("events.json"), ".bf/state/events.json")
+    after = decode(private_dir(brain).read("events.json"), ".bf/events.json")
     assert after == before

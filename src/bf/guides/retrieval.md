@@ -9,7 +9,7 @@ bf status
 bf review
 ```
 
-- `bf status` reports `"inside_brain"`, `events_seq`, folder `counts`, failed-unit `attention`, and the health of configured `jobs`, `channels`, and `services` stored in `.bf/state/*.json`.
+- `bf status` reports `"inside_brain"`, `events_seq`, folder `counts`, failed-unit `attention`, and the health of configured `jobs`, `channels`, and `services` stored in `.bf/*.json`.
 - `bf review` reports `stale` active notes (`newer_evidence` when cited records or backlinks to the note, `entity`, or `aliases` changed after `updated` or `sources[].retrieved`, `due` when `stale_after` elapsed, `future_updated`), open `draft` `actions`, and `tasks_open`.
 
 ## 2. Resolve `bf://` URLs and `#anchor` sections (`bf read`)

@@ -1,4 +1,4 @@
-"""Tests for `jobs.py` and `watch.py`: schedules, `.bf/state/`, `structlog` JSON logs, channels, services, and watch."""
+"""Tests for `jobs.py` and `watch.py`: schedules, `.bf/`, `structlog` JSON logs, channels, services, and watch."""
 
 from __future__ import annotations
 
@@ -187,7 +187,7 @@ def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: P
         for m in sent_after_lines
     )
 
-    # `DaemonStream` captures JSON line output from `channels.chat.listen` into `.bf/state/events.json` & `logs/events.log`!
+    # `DaemonStream` captures JSON line output from `channels.chat.listen` into `.bf/events.json` & `logs/events.log`!
     cfg = config.load(store)
     stop_ev, wake_ev = threading.Event(), threading.Event()
     daemon = watch.DaemonStream(store, cfg.channels["chat"], stop_ev, wake_ev)
@@ -195,7 +195,11 @@ def test_jobs_schedules_events_hooks_input_channels_post_and_timeout(tmp_path: P
     assert wake_ev.wait(timeout=5.0)
     stop_ev.set()
     daemon.terminate()
-    ev_doc = decode(private_dir(store, ".bf", "state").read("events.json"), ".bf/state/events.json")
+    ev_doc = decode(private_dir(store).read("events.json"), ".bf/events.json")
+    assert not (root / ".bf" / "state").exists()
+    assert not (root / ".bf" / "locks").exists()
+    assert not (root / ".bf" / "feed").exists()
+    assert not (root / ".bf" / "chat").exists()
     assert isinstance(ev_doc, dict)
     assert any(ev["source"] == "chat" and ev["data"].get("text") == "ping from chat" for ev in ev_doc["events"])
 
@@ -352,7 +356,7 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
     assert summary["jobs"]["warn-ok"]["last_run"]["added"] == 1
     assert "transient err" in summary["jobs"]["flaky"]["error"]
 
-    # `DaemonStream` deduplicates redelivered message IDs in `.bf/state/events.json` & records `logs/chat.log`!
+    # `DaemonStream` deduplicates redelivered message IDs in `.bf/events.json` & records `logs/chat.log`!
     stop_ev, wake_ev = threading.Event(), threading.Event()
     daemon = watch.DaemonStream(store, cfg.channels["chat"], stop_ev, wake_ev)
     daemon.start()
@@ -362,7 +366,7 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
         time.sleep(0.02)
     stop_ev.set()
     daemon.terminate()
-    ev_doc = decode(private_dir(store, ".bf", "state").read("events.json"), ".bf/state/events.json")
+    ev_doc = decode(private_dir(store).read("events.json"), ".bf/events.json")
     assert isinstance(ev_doc, dict)
     assert sum(1 for e in ev_doc["events"] if e["data"].get("id") == "m-dup") == 1
 
@@ -533,7 +537,7 @@ def test_watch_supervises_mcp_daemon_server_and_input_jobs(tmp_path: Path) -> No
     assert not store.exists(act1_mem)
     assert engine.validate(store)["ok"]
 
-    # Port-conflict second brain + missing `requires:` on service record `failed` in `.bf/state/`!
+    # Port-conflict second brain + missing `requires:` on service record `failed` in `.bf/`!
     conflict_root = tmp_path / "mcp-conflict"
     engine.init_brain(conflict_root, name="mcp-conflict")
     conflict_store = Store(conflict_root)
@@ -622,7 +626,7 @@ def test_dual_schedule_and_event_job_advances_cursor_after_scheduled_run(tmp_pat
 
     dry = jobs.run_jobs(store, due_only=True, dry_run=True)
     assert [item["job"] for item in dry["results"]] == ["combo"]
-    state_path = root / ".bf" / "state" / "combo.json"
+    state_path = root / ".bf" / "combo.json"
     assert not state_path.exists()
 
     first = jobs.run_jobs(store, due_only=True)
@@ -744,8 +748,8 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
     save_state("live-ch", "channel", "running", ago_s=3600)
     save_state("mcp", "service", "running", ago_s=45)
     save_state("halted", "service", "stopped", ago_s=300)
-    # Corrupt one `.bf/state/<name>.json` file to verify per-row resilience!
-    private_dir(store, ".bf", "state").write("idle-ing.json", b"{corrupt json")
+    # Corrupt one `.bf/<name>.json` file to verify per-row resilience!
+    private_dir(store).write("idle-ing.json", b"{corrupt json")
 
     out_txt = render_text(store, now=now, max_rows=50)
     assert "\x1b" not in out_txt
@@ -820,7 +824,7 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
     assert res["ok"] is True
     assert "empty-tui" in tui_buf.getvalue()
 
-    # `ServiceSpec(emit="events")` streams JSON stdout objects from `services.<name>.run` into `.bf/state/events.json`!
+    # `ServiceSpec(emit="events")` streams JSON stdout objects from `services.<name>.run` into `.bf/events.json`!
     svc_root = tmp_path / "svc-events"
     engine.init_brain(svc_root, name="svc-events")
     svc_store = Store(svc_root)
@@ -839,7 +843,7 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
     assert s_wake.wait(timeout=5.0)
     s_stop.set()
     svc_d.terminate()
-    svc_evs = decode(private_dir(svc_store, ".bf", "state").read("events.json"), ".bf/state/events.json")
+    svc_evs = decode(private_dir(svc_store).read("events.json"), ".bf/events.json")
     assert isinstance(svc_evs, dict)
     assert any(ev["kind"] == "svc.ping" and ev["source"] == "emitter" for ev in svc_evs["events"])
 
@@ -867,14 +871,14 @@ def test_job_popen_failure_secret_redaction_and_watch_json(
     )
     cfg = config.load(store)
 
-    # Failed Popen (`OSError`) never leaves `.bf/state/<job>.json` stuck in `"running"`.
+    # Failed Popen (`OSError`) never leaves `.bf/<job>.json` stuck in `"running"`.
     missing_res = jobs.execute_one_job(store, cfg.jobs["missing-bin"], trigger="manual")
     assert (missing_res["status"], missing_res["exit_code"]) == ("failed", 127)
     assert jobs.load_unit_state(store, "missing-bin", kind="job")["status"] == "failed"
     assert oct((root / "logs").stat().st_mode & 0o777) == "0o700"
     assert oct((root / "logs" / "missing-bin.log").stat().st_mode & 0o777) == "0o600"
 
-    # Secrets in failing job and channel-send stderr are redacted in `.bf/state/`, CLI result, and `logs/`.
+    # Secrets in failing job and channel-send stderr are redacted in `.bf/`, CLI result, and `logs/`.
     leaky_res = jobs.execute_one_job(store, cfg.jobs["leaky"], trigger="manual")
     assert leaky_res["status"] == "failed"
     for secret in ("secret_tok_12345678~v2", "ghp_1234567890abcdef", "BEGIN PRIVATE KEY", "ABC"):

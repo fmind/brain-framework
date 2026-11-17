@@ -1,6 +1,6 @@
 # Reference
 
-Complete contract lookup for Brain Framework (`bf`), flat brain layout, `bf.yaml` (`version: 13`), pure JSON `memories/**/*.json` schemas, `.bf/state/`, `structlog` JSON logs, and exit codes.
+Complete contract lookup for Brain Framework (`bf`), flat brain layout, `bf.yaml` (`version: 13`), pure JSON `memories/**/*.json` schemas, `.bf/`, `structlog` JSON logs, and exit codes.
 
 ## CLI commands
 
@@ -31,7 +31,7 @@ Brain selection resolves `--brain PATH` -> `BF_BRAIN` -> nearest enclosing `bf.y
 
 ## Flat brain layout
 
-`projects/`, `concepts/`, `actions/`, `memories/`, `logs/` (`*.log` JSON lines via `structlog`), `evals/`, `docs/`, `skills/`, `schemas/`, optional operational folders created as needed (`sensors/`, `routines/`, `channels/`, `prompts/`, `settings/`), optional gitignored `.env`, plus private `.bf/` (`0700`: `locks/`, `state/` for `<unit>.json` and `events.json`).
+`projects/`, `concepts/`, `actions/`, `memories/`, `logs/` (`*.log` JSON lines via `structlog`), `evals/`, `docs/`, `skills/`, `schemas/`, optional operational folders created as needed (`sensors/`, `routines/`, `channels/`, `prompts/`, `settings/`), optional gitignored `.env`, plus private `.bf/` (`0700`: `write.lock`, `events.json`, `<unit>.json`, `<unit>.context.json`).
 
 ## `bf.yaml` schema {#bf-yaml-schema}
 

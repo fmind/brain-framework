@@ -52,15 +52,15 @@ def append_event(
     locked: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Append one event to `.bf/state/events.json` (ring buffer) and `logs/events.log` (`structlog` JSON)."""
+    """Append one event to `.bf/events.json` (ring buffer) and `logs/events.log` (`structlog` JSON)."""
     clean(kind, "event kind")
     clean(source, "event source")
 
     def write_event() -> dict[str, Any]:
-        state = private_dir(store, ".bf", "state")
+        state = private_dir(store)
         doc: dict[str, Any] = {"kind": "events", "seq": 0, "events": []}
         with suppress(FileNotFoundError):
-            existing = decode(state.read("events.json", 16 << 20), ".bf/state/events.json")
+            existing = decode(state.read("events.json", 16 << 20), ".bf/events.json")
             if isinstance(existing, dict) and existing.get("kind") == "events":
                 doc = dict(existing)
         items = [dict(e) for e in r_ev if isinstance(e, dict)] if isinstance(r_ev := doc.get("events"), list) else []

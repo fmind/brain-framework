@@ -1,4 +1,4 @@
-"""Orchestration of `jobs`, `.bf/state/<unit>.json`, `structlog` `logs/<unit>.log`, and channels."""
+"""Orchestration of `jobs`, `.bf/<unit>.json`, `structlog` `logs/<unit>.log`, and channels."""
 
 from __future__ import annotations
 
@@ -33,11 +33,11 @@ _GIT_HOOK_ENV = (*_GIT_ENV, "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_QUARANTINE_
 
 
 def load_unit_state(store: Store, name: str, kind: str = "job") -> dict[str, Any]:
-    """Load `.bf/state/<name>.json`, returning an initialized `idle` state when absent."""
-    state = private_dir(store, ".bf", "state")
+    """Load `.bf/<name>.json`, returning an initialized `idle` state when absent."""
+    state = private_dir(store)
     path = f"{name}.json"
     with suppress(FileNotFoundError):
-        if isinstance(parsed := decode(state.read(path, 1 << 20), f".bf/state/{path}"), dict):
+        if isinstance(parsed := decode(state.read(path, 1 << 20), f".bf/{path}"), dict):
             return dict(parsed)
     zeros = dict.fromkeys(("event_seq", "runs", "failures", "consecutive_failures", "duration_ms"), 0)
     empty = dict.fromkeys(("last_start", "last_end", "last_success", "last_scheduled", "error"), "")
@@ -45,8 +45,8 @@ def load_unit_state(store: Store, name: str, kind: str = "job") -> dict[str, Any
 
 
 def save_unit_state(store: Store, doc: dict[str, Any], *, locked: bool = False) -> None:
-    """Write `.bf/state/<name>.json` atomically with `0600` permissions."""
-    state = private_dir(store, ".bf", "state")
+    """Write `.bf/<name>.json` atomically with `0600` permissions."""
+    state = private_dir(store)
     path = f"{doc['name']}.json"
     if locked:
         state.write(path, encode(doc), mode=0o600)
@@ -77,9 +77,9 @@ def _match_event(event: dict[str, Any], rule: EventMatch) -> bool:
 
 
 def read_events_doc(store: Store) -> dict[str, Any] | None:
-    """Read `.bf/state/events.json` if present and a JSON object."""
+    """Read `.bf/events.json` if present and a JSON object."""
     with suppress(FileNotFoundError):
-        loaded = decode(private_dir(store, ".bf", "state").read("events.json", 16 << 20), ".bf/state/events.json")
+        loaded = decode(private_dir(store).read("events.json", 16 << 20), ".bf/events.json")
         if isinstance(loaded, dict):
             return dict(loaded)
     return None
@@ -88,7 +88,7 @@ def read_events_doc(store: Store) -> dict[str, Any] | None:
 def pending_events(
     store: Store, last_seq: int, rules: tuple[EventMatch, ...], *, events_doc: Mapping[str, Any] | None = None
 ) -> tuple[list[dict[str, Any]], int]:
-    """Return `(matching_events, latest_seq)` since `last_seq` from `.bf/state/events.json`."""
+    """Return `(matching_events, latest_seq)` since `last_seq` from `.bf/events.json`."""
     if not rules:
         return [], 0
     if events_doc is None and (events_doc := read_events_doc(store)) is None:
@@ -160,9 +160,9 @@ def prepare_unit(
     stdin_text: str = "",
     unit_env: Mapping[str, str] | None = None,
 ) -> tuple[list[str], dict[str, str]]:
-    """Expand `{{...}}` placeholders, write `.bf/state/<name>.context.json`, and build clean `env`."""
+    """Expand `{{...}}` placeholders, write `.bf/<name>.context.json`, and build clean `env`."""
     effective_end = end_iso or start_iso
-    state_root, unit_state = private_dir(store, ".bf", "state"), private_dir(store, ".bf", "state", name)
+    bf_dir = private_dir(store)
     input_abs = ""
     if input_rel:
         relative(input_rel)
@@ -170,15 +170,14 @@ def prepare_unit(
             raise Error(f"{name}: input file {input_rel} does not exist")
         input_abs = str(store.root / input_rel)
     ctx_path = f"{name}.context.json"
-    ctx_a = {"run": run_id, "kind": trigger, "job": name, "events": list(events)}
-    ctx_b = {"stdin": stdin_text, "start": start_iso, "end": effective_end, "input": input_abs}
-    state_root.write(ctx_path, encode({**ctx_a, **ctx_b}), mode=0o600)
+    ctx = {"run": run_id, "kind": trigger, "job": name, "events": list(events), "stdin": stdin_text}
+    bf_dir.write(ctx_path, encode({**ctx, "start": start_iso, "end": effective_end, "input": input_abs}), mode=0o600)
     home_str = os.environ.get("HOME", "")
     with suppress(RuntimeError):
         home_str = str(Path.home())
-    env_map = {"{{brain}}": str(store.root), "{{home}}": home_str, "{{state}}": str(state_root.root)}
+    env_map = {"{{brain}}": str(store.root), "{{home}}": home_str, "{{state}}": str(bf_dir.root)}
     toks = {**env_map, "{{run}}": run_id, "{{start}}": start_iso, "{{end}}": effective_end}
-    toks.update({"{{input}}": input_abs, "{{context}}": str(state_root.root / ctx_path)})
+    toks |= {"{{input}}": input_abs, "{{context}}": str(bf_dir.root / ctx_path)}
     argv = [re.sub(r"\{\{[a-z]+\}\}", lambda m: toks.get(m[0], m[0]), token) for token in base_argv]
     if argv and argv[0] == "bf":
         argv = [sys.executable, "-m", "bf", *argv[1:]]
@@ -188,12 +187,10 @@ def prepare_unit(
     env = {key: val for key in keys if (val := os.environ.get(key))}
     for ek, ev in (unit_env or {}).items():
         env[ek] = re.sub(r"\{\{[a-z]+\}\}", lambda m: env_map.get(m[0], m[0]), ev)
-    env.update(config.load_dotenv(store))
-    env.update(
-        {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8", "BF_BRAIN": str(store.root), "BF_STATE_DIR": str(unit_state.root)}
-    )
-    env.update({"BF_START": start_iso, "BF_END": effective_end, "BF_TRIGGER": trigger})
-    return argv, env
+    env |= config.load_dotenv(store)
+    bf_env = {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8", "BF_BRAIN": str(store.root), "BF_TRIGGER": trigger}
+    bf_env |= {"BF_STATE_DIR": str(bf_dir.root / name), "BF_START": start_iso, "BF_END": effective_end}
+    return argv, {**env, **bf_env}
 
 
 def stop_proc(proc: subprocess.Popen[bytes]) -> None:
@@ -271,7 +268,7 @@ def record_run(
     emit_job_event: bool = False,
     trigger: str = "",
 ) -> None:
-    """Update `.bf/state/<name>.json`, append a `structlog` JSON line to `logs/<name>.log`, and emit `job.*`."""
+    """Update `.bf/<name>.json`, append a `structlog` JSON line to `logs/<name>.log`, and emit `job.*`."""
     cfg_name = config.load(store).name
     ended_iso, ok = now_utc(ended), code == 0
     status = "ok" if ok else "failed"
@@ -312,7 +309,7 @@ def execute_one_job(
     dry_run: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Execute one `JobSpec`, optionally ingesting sensor stdout and recording `.bf/state/` + `logs/`."""
+    """Execute one `JobSpec`, optionally ingesting sensor stdout and recording `.bf/` + `logs/`."""
     instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
     started_iso = now_utc(instant)
     run_id = f"{job.name}-{int(instant.timestamp())}-{os.urandom(3).hex()}"
@@ -328,11 +325,10 @@ def execute_one_job(
     t0 = time.monotonic()
     summary: dict[str, Any] = {}
     err_msg = err_txt = ""
-    cmd = [*list(job.run), *list(extra_args)]
     in_txt = stdin_bytes.decode("utf-8", "replace")
-    prep_kw: dict[str, Any] = {"end_iso": started_iso, "input_rel": job.input, "trigger": trigger, "events": events}
-    prep_kw.update({"stdin_text": in_txt, "unit_env": job.env})
-    argv, env = prepare_unit(store, job.name, cmd, run_id, now_utc(win_start), **prep_kw)
+    prep = {"end_iso": started_iso, "input_rel": job.input, "trigger": trigger, "events": events, "stdin_text": in_txt}
+    cmd = [*job.run, *extra_args]
+    argv, env = prepare_unit(store, job.name, cmd, run_id, now_utc(win_start), **prep, unit_env=job.env)
     proc_stdin = stdin_bytes or (store.read(job.input, MAX_NOTE) if job.input else b"")
     save_unit_state(store, {**state_doc, "status": "running", "updated": started_iso, "last_start": started_iso})
     code, out_bytes, err_txt = exec_argv(argv, cwd=store.root, env=env, timeout=job.timeout, stdin_bytes=proc_stdin)

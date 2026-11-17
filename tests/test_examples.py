@@ -127,7 +127,7 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     assert engine.validate(store)["ok"]
     posted = jobs.send_channel_message(store, "Retention review ready", to="local")
     assert posted["status"] == "ok"
-    local_state = b_root / ".bf" / "state" / "local"
+    local_state = b_root / ".bf" / "local"
     assert "Retention review ready" in (local_state / "outbox.jsonl").read_text()
 
     (local_state / "inbox.offset").write_text("99\n")

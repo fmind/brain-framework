@@ -43,7 +43,7 @@ def _drain(inbox: Path, offset_file: Path) -> None:
 
 def main(argv: list[str]) -> int:
     mode = argv[1] if len(argv) > 1 else ""
-    state = Path(os.environ.get("BF_STATE_DIR", ".bf/state/local"))
+    state = Path(os.environ.get("BF_STATE_DIR", ".bf/local"))
     state.mkdir(parents=True, exist_ok=True)
 
     if mode == "send":

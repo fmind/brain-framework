@@ -201,10 +201,10 @@ def test_store_containment_symlinks_special_files_and_locks(tmp_path: Path, monk
         private_dir(store, "bad-state")
 
     with writer(store, wait=0.1):
-        lock_file = root / ".bf" / "locks" / "write.lock"
+        lock_file = root / ".bf" / "write.lock"
         assert lock_file.is_file()
     # Simulate another process holding LOCK_EX on write.lock.
-    lock_fd = os.open(root / ".bf" / "locks" / "write.lock", os.O_RDWR)
+    lock_fd = os.open(root / ".bf" / "write.lock", os.O_RDWR)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with pytest.raises(BusyError, match="another writer is active"), writer(store, wait=0.06):
@@ -281,8 +281,26 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.chdir(b2 / "projects")
     assert config.inside_brain() is not None
     assert config.load(config.select()).name == "beta"
+    monkeypatch.setenv("BF_BRAIN", "beta")
+    assert config.select().root == b2.resolve()  # bare BF_BRAIN matching bf.yaml name inside brain
+    monkeypatch.setenv("BF_BRAIN", "b2")
+    assert config.select().root == b2.resolve()  # bare BF_BRAIN matching enclosing brain folder
+    monkeypatch.setenv("BF_BRAIN", "alpha")
+    with pytest.raises(Error, match="does not exist"):
+        config.select()
+    monkeypatch.setenv("BF_BRAIN", str(tmp_path / "missing-brain"))
+    with pytest.raises(Error, match="does not exist"):
+        config.select()
+    monkeypatch.delenv("BF_BRAIN")
     monkeypatch.setenv("DEFAULT_BRAIN_PATH", str(b1))
     assert config.load(config.select()).name == "beta"  # enclosing bf.yaml beats DEFAULT_BRAIN_PATH!
+    bad_named = tmp_path / "bad-named"
+    bad_named.mkdir()
+    (bad_named / "bf.yaml").write_text("not: [valid: yaml")
+    monkeypatch.chdir(bad_named)
+    monkeypatch.setenv("BF_BRAIN", "bad-named")
+    assert config.select().root == bad_named.resolve()  # falls back to folder name when bf.yaml is invalid
+    monkeypatch.delenv("BF_BRAIN")
     monkeypatch.chdir(tmp_path)
     assert config.inside_brain() is None
     assert config.load(config.select()).name == "alpha"  # outside brain -> DEFAULT_BRAIN_PATH

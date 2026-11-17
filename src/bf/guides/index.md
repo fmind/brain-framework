@@ -8,7 +8,7 @@ Brain Framework (`bf`) keeps a local-first knowledge brain built around three ru
 
 1. **YAML for config.** Configure timezone, environment, jobs, channels, services, and watch settings in `bf.yaml` (`version: 13`, humanized durations like `15m` or `1d`, cron expressions, optional gitignored `.env`), deterministic checks in `evals/*.yaml`, and note frontmatter in YAML 1.2.
 2. **Markdown for humans.** Track volatile TODOs in `projects/`, durable knowledge in `concepts/`, dated workspaces in `actions/YYYY-MM-DD_topic/ACTION.md`, and input prompts in `prompts/`. Attach structured metadata directly to headings (`## MCP {#mcp license=mit}`), links (`[AAIF](../concepts/aaif.md#mcp){rel=depends-on}` in prose, `bf:///concepts/aaif.md` in frontmatter), tasks, and blocks (`{: #decision-1 confidence=high}`) using Python-Markdown's `attr_list` extension.
-3. **JSON for records.** `bf build` compiles Markdown notes into `memories/{concepts,projects,actions}/<slug>.json` and `bf ingest SOURCE` writes sensor records into `memories/<source>/<sha256(id)>.json` — validated by user-owned JSON Schemas in `schemas/` — while runtime orchestration keeps state in `.bf/state/` and writes `structlog` JSON lines to `logs/<name>.log` and `logs/events.log`.
+3. **JSON for records.** `bf build` compiles Markdown notes into `memories/{concepts,projects,actions}/<slug>.json` and `bf ingest SOURCE` writes sensor records into `memories/<source>/<sha256(id)>.json` — validated by user-owned JSON Schemas in `schemas/` — while runtime orchestration keeps state in `.bf/` and writes `structlog` JSON lines to `logs/<name>.log` and `logs/events.log`.
 
 ## Guides
 

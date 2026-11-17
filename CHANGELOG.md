@@ -4,6 +4,18 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v28.0.0](https://github.com/fmind/brain-framework/releases/tag/v28.0.0) - 2026-11-17
+
+A major release folding `.bf/state/` and `.bf/locks/` directly into `.bf/`, and fixing bare `BF_BRAIN` resolution inside an enclosing brain. The brain format (`version: 13`), `bf.yaml`, `memories/**/*.json`, and the published JSON Schemas (`schemas/{bf.schema.json,record.json,concepts.json,evals.json}`) are unchanged; remove legacy `.bf/state/` and `.bf/locks/` folders (or move `<name>.json`, `<name>.context.json`, `events.json`, and `write.lock` up into `.bf/`), update any scripts referencing `.bf/state/` or `.bf/locks/`, and refresh installed `/bf` skills (`skills/bf/SKILL.md`); see the breaking changes below.
+
+### Breaking changes
+
+- **Folded `.bf/state/` and `.bf/locks/` directly into `.bf/`.** Unit states (`<name>.json`), `<name>.context.json`, `events.json`, and `write.lock` now live directly in `.bf/` (`0700`); `prepare_unit` no longer creates `.bf/<name>/` directories eagerly (`BF_STATE_DIR` still targets `.bf/<name>` for scripts that create it on demand), `{{state}}` expands to `.bf`, and `DaemonStream` captures daemon `stderr` via an unlinked `tempfile.TemporaryFile` instead of `.bf/state/<name>.stderr`. Update any custom scripts reading `.bf/state/` or `.bf/locks/`, remove legacy `.bf/state/` and `.bf/locks/` folders (or move existing state files into `.bf/`), and refresh installed `/bf` skills.
+
+### Fixed
+
+- **Bare `BF_BRAIN` matching inside an enclosing brain.** When `BF_BRAIN` is a bare brain name (such as `my-brain`) that does not exist relative to the working directory, `config.select()` now falls back to the nearest enclosing `bf.yaml` brain when `bf.yaml`'s `name` or root directory name matches `BF_BRAIN`, failing closed otherwise.
+
 ## [v27.0.0](https://github.com/fmind/brain-framework/releases/tag/v27.0.0) - 2026-11-17
 
 A major release bumping the brain format to `version: 13`, simplifying `bf.yaml` (`timezone`, `env`, `services`, `schedule`, `action`), moving unit state into private `.bf/state/` and `structlog` JSON lines into `logs/*.log`, removing DuckDB/`--sql`, `bf action`, and `bf post`, and standardizing CLI JSON envelopes (`"ok": bool`) and exit codes. Update `bf.yaml` and `evals/*.yaml` to `version: 13`, refresh `schemas/{bf.schema.json,record.json,evals.json}` from a temporary `bf init` directory (preserving customizations in `schemas/concepts.json` and `schemas/<source>.json`), remove `schemas/logs.json`, normalize any legacy `memories/<source>/*.json` records, and refresh installed `/bf` skills (`skills/bf/SKILL.md`); see the breaking changes below.
@@ -519,7 +531,15 @@ A major release. Assistants replace prompts: one harness answers messages from b
 - The example weekly review no longer lists itself as needing attention on its first run, after its own failure or after a long pause, a line that alone wrote an action on an otherwise empty brain: BF records a run only after it exits, and the review recognizes its own by file name, so keep it named `weekly-review`, and by its brain's name, which it asks `bf status` for when the home page lists brains declared under `brains:`, so their `weekly-review` stays listed. It counts as recent only actions begun in the last seven days, up to today, names the `bf read` page holding the rest when a preview is full, says why it lists a silent source, writes `1 open task` and `1 note` in the singular and names `bf read projects` among its sources.
 - The example session hook labels a source that fell silent `silent` instead of `fresh`, while a failed or `overdue` one keeps that state, since a stopped sensor falls silent too, and lists a note linking the project with several relations once among the three newest linking notes. The example prompt hook reads prompts in NFKC form, as `bf search` does: pasted text with decomposed accents searched fragments such as `cide` instead of `décidé`.
 - The example Gmail headers sensor keeps at most 1,000 `from_refs`, like `to_refs` and `cc_refs`: a message with more senders failed every collection that mapped them, and its window never advanced.
-- Release tooling: `scripts/verify-release.sh` accepts only build attestations that CD signed for the release tag and its commit, where one from any workflow or ref of the repository passed, and ignores a relative `XDG_CACHE_HOME`, as bf does; release notes stop at the next level-2 heading, so an `## Unreleased` placed below a release no longer publishes its draft entries; `scripts/push-and-tag.sh` exits 1 with `pushing main failed; nothing tagged` when pushing `main` fails; and CD fails at the hash extraction, with jq's error, when PyPI's release metadata cannot be read, instead of reporting a hash mismatch.
+- Release tooling: ``scripts/verify-release.sh`` accepts only build attestations that CD signed for the release tag and its commit, where one from any workflow or ref of the repository passed, and ignores a relative ``XDG_CACHE_HOME``, as bf does; release notes stop at the next level-2 heading, so an `## Unreleased
+
+### Changed
+
+- **Folded `.bf/state/` and `.bf/locks/` directly into `.bf/`.** Unit states (`<name>.json`), `<name>.context.json`, `events.json`, and `write.lock` now live directly in `.bf/` (`0700`); `prepare_unit` no longer creates `.bf/state/<name>/` directories eagerly (scripts needing private state create `BF_STATE_DIR` on demand under `.bf/<name>`), and `DaemonStream` captures daemon `stderr` via an unlinked `tempfile.TemporaryFile` instead of `.bf/state/<name>.stderr`.
+
+### Fixed
+
+- **Bare ``BF_BRAIN`` matching inside an enclosing brain.** When ``BF_BRAIN`` is a bare brain name (such as ``my-brain``) that does not exist relative to the working directory, ``config.select()`` now falls back to the nearest enclosing ``bf.yaml`` brain when ``bf.yaml``'s ``name`` or root directory name matches ``BF_BRAIN``.``placed below a release no longer publishes its draft entries;``scripts/push-and-tag.sh``exits 1 with``pushing main failed; nothing tagged``when pushing``main` fails; and CD fails at the hash extraction, with jq's error, when PyPI's release metadata cannot be read, instead of reporting a hash mismatch.
 - Contributor checks: tests validate each search or read reply against the schema of its own kind, ignore the host's `TERMINAL_WIDTH`, `PY_COLORS`, `TYPER_USE_RICH` and `_TYPER_FORCE_DISABLE_TERMINAL`, give cold starts and the MCP handshake the documented 120-second deadline and cover more release-script failures; the contract check fails when a configuration `oneOf` alternative accepts more than its release; `check:links` checks anchors in repository Markdown; a workflow step that pipes commands must set `shell: bash`; the README test checks its images and badge against the checkout; and the scale benchmark times a misspelled word, rejects more records than one collection commits, writes its corpus under the writer lock and ignores a relative `XDG_CACHE_HOME`.
 
 ### Documentation
