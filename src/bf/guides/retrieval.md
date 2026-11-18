@@ -9,7 +9,7 @@ bf status
 bf review
 ```
 
-- `bf status` reports `"inside_brain"`, `events_seq`, folder `counts`, failed-unit `attention`, and the health of configured `jobs`, `channels`, and `services` stored in `.bf/*.json`.
+- `bf status` reports `"inside_brain"`, `events_seq`, folder `counts`, failed-unit `attention`, and the health of configured `jobs` and `services` stored in `.bf/*.json`.
 - `bf review` reports `stale` active notes (`newer_evidence` when cited records or backlinks to the note, `entity`, or `aliases` changed after `updated` or `sources[].retrieved`, `due` when `stale_after` elapsed, `future_updated`), open `draft` `actions`, and `tasks_open`.
 
 ## 2. Resolve `bf://` URLs and `#anchor` sections (`bf read`)
@@ -43,8 +43,8 @@ bf query --jq 'select(any(.links[]; .to == "concepts/aaif.md" and .anchor == "mc
 
 ## 4. Deterministic evaluations (`bf eval`) and MCP (`bf mcp`)
 
-- **`bf eval`**: executes `evals/*.yaml` (`version: 13`, validated against `schemas/evals.json`) over `rg`, `jq`, or `read` engines, verifying `expect_refs`, `forbid_refs`, `expect_text`, `min_count`, `max_count`, or `expect_equals` with zero LLM calls.
-- **`bf mcp`**: runs a read-only MCP server (`stdio` or localhost `--transport http`) exposing `bf_status`, `bf_review`, `bf_read`, `bf_query` (`mode="rg"|"jq"`), and `bf_validate` over `--brain PATH`, `BF_BRAIN`, or `DEFAULT_BRAIN_PATH`.
+- **`bf eval`**: executes `evals/*.{yaml,yml,json}` (`version: 14`, validated against `schemas/evals.json`) over `rg`, `jq`, or `read` engines, verifying `expect_refs`, `forbid_refs`, `expect_text`, `min_count`, `max_count`, or `expect_equals` with zero LLM calls.
+- **`bf mcp`**: runs a read-only `stdio` MCP server exposing `bf_status`, `bf_review`, `bf_read`, `bf_query` (`mode="rg"|"jq"`, `limit` `1..200`), and `bf_validate` over `--brain PATH`, `BF_BRAIN`, or `DEFAULT_BRAIN_PATH`. Cross-brain `bf://<host>/...` targets resolve only roots declared in `bf.yaml` `brains:`.
 
 ## Trust boundary
 

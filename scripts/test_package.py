@@ -121,7 +121,7 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             if init_reply.get("brain") != "brain":
                 raise SystemExit(f"{artifact.name}: unexpected bf init reply: {init_reply}")
             starter_yaml = (brain / "bf.yaml").read_text()
-            if "version: 13" not in starter_yaml:
+            if "version: 14" not in starter_yaml:
                 raise SystemExit(f"{artifact.name}: unexpected starter bf.yaml: {starter_yaml}")
             for schema_file in ("bf.schema.json", "record.json", "concepts.json", "evals.json"):
                 if not (brain / "schemas" / schema_file).is_file():

@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=schemas/bf.schema.json
 # https://fmind.github.io/brain-framework/reference/
-version: 13
+version: 14
 name: example
 timezone: UTC
 env:
@@ -27,20 +27,16 @@ jobs:
     run: [claude, -p, "Context file: {{context}}"]
     input: prompts/digest.md
     events:
-      - kind: channel.message
+      - kind: service.message
         source: local
-    channel: local
     enabled: false
   validate:
     run: [bf, validate]
     hook: pre-commit
-channels:
-  local:
-    listen: [python3, channels/local.py, listen]
-    send: [python3, channels/local.py, send]
 services:
-  mcp:
-    run: [bf, mcp, --transport, http, --port, "8765"]
+  local:
+    run: [python3, services/local.py, listen]
+    emit: messages
     enabled: false
 watch:
   interval: 5s

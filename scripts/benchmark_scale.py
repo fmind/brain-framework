@@ -88,36 +88,48 @@ def main() -> None:
 
         churn = {"add": 0, "update": 0, "remove": 0}
         measurements: dict[str, dict[str, float]] = {}
+        base_batch = items[: args.batch]
+        base_payload = json.dumps(base_batch).encode()
+        edited_payload = json.dumps(
+            [{**rec, "text": background + "\nRevised decision."} for rec in base_batch]
+        ).encode()
+        active_source = ""
 
-        def write_batch(kind: str) -> dict[str, object]:
+        def prep_write(kind: str) -> None:
+            nonlocal active_source
             churn[kind] += 1
-            source = f"churn-{churn[kind]}"
-            base_batch = items[: args.batch]
+            active_source = f"churn-{kind}-{churn[kind]}"
+            if kind != "add":
+                records.ingest(store, active_source, base_payload)
+
+        def run_write(kind: str) -> dict[str, object]:
             if kind == "add":
-                return records.ingest(store, source, json.dumps(base_batch).encode())
-            records.ingest(store, source, json.dumps(base_batch).encode())
+                return records.ingest(store, active_source, base_payload)
             if kind == "update":
-                edited = [{**rec, "text": background + "\nRevised decision."} for rec in base_batch]
-                return records.ingest(store, source, json.dumps(edited).encode())
-            return records.ingest(store, source, b"[]", mode="snapshot", allow_removal=True)
+                return records.ingest(store, active_source, edited_payload)
+            return records.ingest(store, active_source, b"[]", mode="snapshot", allow_removal=True)
 
         operations = [
-            ("build", lambda: engine.build(store)),
-            ("validate", lambda: engine.validate(store)),
-            ("review", lambda: engine.review(store)),
-            ("query_rg", lambda: query.search_rg(store, "Retain evidence", scope="benchmark", limit=20)),
-            ("query_jq", lambda: query.query_jq(store, ".id", scope="benchmark", limit=20)),
-            ("watch_dashboard", lambda: (watch.render_dashboard(store), {"ok": True})[1]),
-            ("unchanged_record", lambda: records.ingest(store, "benchmark", json.dumps([items[0]]).encode())),
-            ("upsert_add", lambda: write_batch("add")),
-            ("upsert_update", lambda: write_batch("update")),
-            ("snapshot_remove", lambda: write_batch("remove")),
+            ("build", None, lambda: engine.build(store)),
+            ("validate", None, lambda: engine.validate(store)),
+            ("review", None, lambda: engine.review(store)),
+            ("query_rg", None, lambda: query.search_rg(store, "Retain evidence", scope="benchmark", limit=20)),
+            ("query_jq", None, lambda: query.query_jq(store, ".id", scope="benchmark", limit=20)),
+            ("watch_dashboard", None, lambda: (watch.render_dashboard(store), {"ok": True})[1]),
+            ("unchanged_record", None, lambda: records.ingest(store, "benchmark", json.dumps([items[0]]).encode())),
+            ("upsert_add", lambda: prep_write("add"), lambda: run_write("add")),
+            ("upsert_update", lambda: prep_write("update"), lambda: run_write("update")),
+            ("snapshot_remove", lambda: prep_write("remove"), lambda: run_write("remove")),
         ]
 
-        for name, op in operations:
+        for name, prep, op in operations:
+            if prep is not None:
+                prep()
             op()  # untimed warmup
             timings: list[float] = []
             for _ in range(args.repeats):
+                if prep is not None:
+                    prep()
                 start = time.perf_counter()
                 result = op()
                 timings.append(time.perf_counter() - start)
@@ -131,7 +143,8 @@ def main() -> None:
 
         notes_bytes = sum(p.stat().st_size for p in (store.root / "memories/concepts").glob("*.json"))
         memories_bytes = sum(p.stat().st_size for p in (store.root / "memories/benchmark").glob("*.json"))
-        max_rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        max_rss_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        max_rss_kb = max_rss_raw // 1024 if sys.platform == "darwin" else max_rss_raw
         corpus = {key: value for key, value in vars(args).items() if key != "dir"}
         sys.stdout.write(
             json.dumps(

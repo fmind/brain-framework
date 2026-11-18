@@ -17,7 +17,6 @@ import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from email.utils import getaddresses
-from urllib.parse import quote
 
 MAX_MESSAGES = 1000
 MAX_PAGES = 10
@@ -25,8 +24,7 @@ MAX_BYTES = 16 << 20
 # One message's metadata: its headers are bounded by Gmail, far below this.
 MAX_MESSAGE_BYTES = 1 << 20
 MAX_REF = 8192
-MAX_LINKS = 1000
-HEADERS = ("From", "To", "Cc", "Subject", "Date", "Message-ID")
+HEADERS = ("From", "To", "Cc", "Subject", "Date")
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
 IDENTITY = re.compile(r"[a-z][a-z0-9+.-]*:\S+")
 
@@ -138,11 +136,6 @@ def reference(value: str) -> str:
     return value
 
 
-def person(email: str) -> str:
-    cleaned = email.strip().lower()
-    return reference("person:email/" + quote(cleaned, safe="@.")) if "@" in cleaned else ""
-
-
 def emit(records: list[dict[str, object]], *, max_bytes: int = MAX_BYTES) -> None:
     payload = (json.dumps(records, ensure_ascii=False) + "\n").encode("utf-8")
     if len(payload) > max_bytes:
@@ -169,11 +162,8 @@ def make_record(
     when: datetime,
     text: str,
     url: str,
-    aliases: Sequence[str],
-    relations: dict[str, list[str]],
     attributes: dict[str, object],
 ) -> dict[str, object]:
-    _ = aliases, relations
     out: dict[str, object] = {
         "id": identifier,
         "title": line(title, identifier),
@@ -288,14 +278,6 @@ def record(message_id: str, start: datetime, end: datetime) -> dict[str, object]
     lines += [f"{key.capitalize()}: {', '.join(people[key])}" for key in ("from", "to", "cc") if people[key]]
     if labels:
         lines.append("Labels: " + ", ".join(sorted(labels)))
-    # RFC 2392 names a message by its Message-ID across mail tools: other records can link the same message.
-    message_header = values.get("message-id", "").strip().removeprefix("<").removesuffix(">")
-    alias = reference("mid:" + quote(message_header, safe="@!$&'*+.^_`{|}~-")) if message_header else ""
-    thread_ref = f"gmail-thread:{thread}"
-    # Label ids, such as INBOX or Label_12, are opaque and case-sensitive: keep their case, encode anything else.
-    label_refs = sorted(
-        {ref for label in labels if label and (ref := reference("gmail-label:" + quote(label, safe="")))}
-    )
     return make_record(
         message_id,
         subject or "(no subject)",
@@ -303,14 +285,6 @@ def record(message_id: str, start: datetime, end: datetime) -> dict[str, object]
         when=when,
         text="\n".join(lines),
         url=f"https://mail.google.com/mail/#all/{thread}",
-        aliases=[alias] if alias else (),
-        relations={
-            "part-of": [thread_ref],
-            "label": label_refs,
-            "sender": [r for r in map(person, people["from"]) if r],
-            "recipient": [r for r in map(person, people["to"]) if r],
-            "cc": [r for r in map(person, people["cc"]) if r],
-        },
         attributes={
             "thread": thread,
             "labels": sorted(labels),

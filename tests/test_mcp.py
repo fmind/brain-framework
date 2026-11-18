@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+from urllib.parse import quote
 
 import pytest
 from mcp.types import CallToolResult, TextContent
 
 from bf import engine, mcp
-from bf.models import InputError
+from bf.models import FORMAT
 from bf.storage import Store
 
 
 def test_mcp_server_exposes_read_only_tools_and_redacts_brain_root(brain: Store) -> None:
+    decl_sib = brain.root.parent / "declared-sib"
+    engine.init_brain(decl_sib, name="declared-sib")
+    brain.write("bf.yaml", f"version: {FORMAT}\nname: fixture\nbrains:\n  decl: {decl_sib}\n".encode())
     srv = mcp.server(brain)
 
     async def exercise() -> None:
@@ -57,13 +61,25 @@ def test_mcp_server_exposes_read_only_tools_and_redacts_brain_root(brain: Store)
             assert isinstance(b_blk := bad_res.content[0], TextContent)
             assert "not declared in bf.yaml brains:" in b_blk.text
 
+        encoded_root = quote(str(brain.root), safe="")
         brain.write(
             "concepts/uri.md",
-            f'---\ntype: guide\nstatus: stable\nsummary: "file://{brain.root}/secret"\n---\n# U\n'.encode(),
+            f'---\ntype: guide\nstatus: stable\nsummary: "file://{brain.root}/secret file:////{brain.root}/four {encoded_root} {decl_sib}"\n---\n# U\n'.encode(),
         )
         engine.build(brain)
         uri_res = call_json(await srv.call_tool("bf_read", {"target": "concepts/uri.md"}))
-        assert "file://<brain>/secret" in uri_res["record"]["summary"]
+        summary = uri_res["record"]["summary"]
+        assert "file://<brain>/secret" in summary
+        assert "file://<brain>/four" in summary
+        assert encoded_root not in summary
+        assert str(decl_sib) not in summary
+
+        # Declared cross-brain `bf://decl/...` succeeds while undeclared sibling fails closed!
+        decl_res = call_json(await srv.call_tool("bf_read", {"target": "bf://decl/concepts/welcome.md"}))
+        assert decl_res["brain"] == "declared-sib"
+        jq_err = await srv.call_tool("bf_query", {"q": 'modulemeta("foo")', "mode": "jq"})
+        assert isinstance(jq_err, CallToolResult)
+        assert jq_err.is_error is True
 
         # `bf_validate` fails closed on undeclared sibling bf:// hosts instead of probing them on disk.
         sib_dir = brain.root.parent / "undeclared-sib"
@@ -88,20 +104,9 @@ def test_mcp_server_exposes_read_only_tools_and_redacts_brain_root(brain: Store)
 
     asyncio.run(exercise())
 
-    with pytest.raises(InputError, match="requires --transport http"):
-        mcp.serve(str(brain.root), transport="stdio", port=8799)
 
-    with pytest.raises(InputError, match="between 1 and 65535"):
-        mcp.serve(str(brain.root), transport="http", port=0)
-
-
-def test_mcp_serve_transports(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_serve_stdio(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     ran: list[str] = []
     monkeypatch.setattr("mcp.server.mcpserver.MCPServer.run", lambda _self, *, transport="stdio": ran.append(transport))
-    mcp.serve(str(brain.root), transport="stdio")
+    mcp.serve(str(brain.root))
     assert ran == ["stdio"]
-
-    http_calls: list[tuple[str, int]] = []
-    monkeypatch.setattr("uvicorn.run", lambda _app, *, host, port, **_kw: http_calls.append((host, port)))
-    mcp.serve(str(brain.root), transport="http", port=8799)
-    assert http_calls == [("127.0.0.1", 8799)]

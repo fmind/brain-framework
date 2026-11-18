@@ -39,6 +39,10 @@ def test_models_sanitization_json_and_dates() -> None:
         models.decode('{"a": 1, "a": 2}')
     with pytest.raises(Error, match="must be finite"):
         models.decode('{"a": NaN}')
+    assert models.decode('{"a": 1, "a": 2}', check_duplicates=False) == {"a": 2}
+    redacted = models.redact_secrets("Bearer tok_12345678 ya29.a0AfH6SMC_secret_token")
+    assert "ya29." not in redacted
+    assert redacted == "[REDACTED] [REDACTED]"
     with pytest.raises(Error, match="invalid JSON"):
         models.decode("{broken")
 
@@ -197,8 +201,17 @@ def test_store_containment_symlinks_special_files_and_locks(tmp_path: Path, monk
     (root / ".bf").chmod(0o700)
 
     (root / "bad-state").symlink_to(outside)
-    with pytest.raises(Error, match="without symlinks"):
+    with pytest.raises(Error, match="real directory without symlinks"):
         private_dir(store, "bad-state")
+    (root / "bad-state").unlink()
+    (root / "bad-state").mkdir(mode=0o755)
+    (root / "bad-state").chmod(0o755)
+    with pytest.raises(Error, match="bad-state must be owned by you with mode 700"):
+        private_dir(store, "bad-state")
+    with monkeypatch.context() as mp:
+        mp.setattr(os, "geteuid", lambda: os.getuid() + 1)
+        with pytest.raises(Error, match="owned by you with mode 700"):
+            private_dir(store)
 
     with writer(store, wait=0.1):
         lock_file = root / ".bf" / "write.lock"
@@ -319,12 +332,15 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     assert config.resolve_brain(s1, cfg1, "b2").root == b2.resolve()
     assert config.resolve_brain(s1, cfg1, quote(str(b2), safe="")).root == b2.resolve()
     assert config.resolve_brain(s1, cfg1, quote("../b2", safe="")).root == b2.resolve()
+    assert config.resolve_brain(s1, cfg1, "sib", declared_only=True).root == sib_path.resolve()
+    with pytest.raises(Error, match=r"not declared in bf\.yaml brains:"):
+        config.resolve_brain(s1, cfg1, "b2", declared_only=True)
     with pytest.raises(Error, match="unknown brain"):
         config.resolve_brain(s1, cfg1, "nonexistent-brain")
     with pytest.raises(Error, match="percent-encoding"):
         config.resolve_brain(s1, cfg1, "%FF")
 
-    # Jobs, channels, services, humanized durations, cron schedule, env mapping, and .env loading in `bf.yaml`.
+    # Jobs, services (`emit: none | events | messages`), humanized durations, cron schedule, env mapping, and .env loading in `bf.yaml`.
     rich_b = tmp_path / "rich"
     rich_b.mkdir()
     (rich_b / "bf.yaml").write_text(
@@ -340,10 +356,11 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
         "    timeout: 2m\n"
         "    hook: pre-commit\n"
         "    env:\n      EXTRA_VAR: custom\n"
-        "  digest:\n    run: [claude, -p, '{{input}}']\n    input: prompts/digest.md\n    schedule: '0 8 * * *'\n    channel: chat\n"
+        "  digest:\n    run: [claude, -p, '{{input}}']\n    input: prompts/digest.md\n    schedule: '0 8 * * *'\n"
         "  short-ing:\n    run: [echo, '[]']\n    ingest: simple\n"
-        "channels:\n  chat:\n    listen: [echo, listen]\n    send: [echo, send]\n    timeout: 45s\n"
-        "services:\n  mcp:\n    run: [bf, mcp, --transport, http, --port, '9012']\n"
+        "services:\n"
+        "  chat:\n    run: [echo, listen]\n    emit: messages\n"
+        "  daemon:\n    run: [echo, serve]\n"
         "watch:\n  interval: 1s\n  debounce: 250ms\n"
     )
     rich_store = Store(rich_b)
@@ -363,12 +380,11 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     assert rich_cfg.jobs["sync"].hooks == ("pre-commit",)
     assert rich_cfg.jobs["sync"].env == {"GWS_DIR": "{{home}}/.config/gws", "EMPTY_VAR": "", "EXTRA_VAR": "custom"}
     assert rich_cfg.jobs["digest"].input == "prompts/digest.md"
-    assert rich_cfg.jobs["digest"].channel == "chat"
     assert (rich_cfg.jobs["short-ing"].ingest, rich_cfg.jobs["short-ing"].mode) == ("simple", "upsert")
-    assert rich_cfg.channels["chat"].timeout == 45
-    assert rich_cfg.channels["chat"].env == {"GWS_DIR": "{{home}}/.config/gws", "EMPTY_VAR": ""}
-    assert rich_cfg.services["mcp"].run == ("bf", "mcp", "--transport", "http", "--port", "9012")
-    assert rich_cfg.services["mcp"].emit == "none"
+    assert rich_cfg.services["chat"].emit == "messages"
+    assert rich_cfg.services["chat"].env == {"GWS_DIR": "{{home}}/.config/gws", "EMPTY_VAR": ""}
+    assert rich_cfg.services["daemon"].run == ("echo", "serve")
+    assert rich_cfg.services["daemon"].emit == "none"
     assert (rich_cfg.watch.interval, rich_cfg.watch.debounce_ms) == (1.0, 250)
     sec_b = tmp_path / "sec-watch"
     sec_b.mkdir()
@@ -412,7 +428,7 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
             (f"version: {models.FORMAT}\nname: noexec\njobs:\n  j1:\n    schedule: 5m\n", "missing required 'run'"),
             (
                 f"version: {models.FORMAT}\nname: badcron\njobs:\n  j1:\n    run: [echo]\n    schedule: 'not a cron'\n",
-                "duration .* or 5-field cron",
+                "duration .*, @macro, or 5-field cron",
             ),
             (
                 f"version: {models.FORMAT}\nname: resing\njobs:\n  j1:\n    run: [echo]\n    ingest: concepts\n",
@@ -423,14 +439,18 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
                 "conflicting properties",
             ),
             (
-                f"version: {models.FORMAT}\nname: ingchan\njobs:\n  j1:\n    run: [echo]\n    ingest: x\n    channel: c1\n",
-                "conflicting properties",
+                f"version: {models.FORMAT}\nname: jobch\njobs:\n  j1:\n    run: [echo]\n    channel: c1\n",
+                "unknown property 'channel'",
             ),
             (
-                f"version: {models.FORMAT}\nname: badch\nchannels:\n  c1:\n    timeout: 10s\n",
-                "failed schema rule anyOf",
+                f"version: {models.FORMAT}\nname: badch\nchannels:\n  c1:\n    listen: [echo]\n",
+                "unknown property 'channels'",
             ),
             (f"version: {models.FORMAT}\nname: nosrv\nservices:\n  s1:\n    enabled: true\n", "missing required 'run'"),
+            (
+                f"version: {models.FORMAT}\nname: bademit\nservices:\n  s1:\n    run: [echo]\n    emit: invalid\n",
+                "must be one of",
+            ),
             (
                 f"version: {models.FORMAT}\nname: dupunit\njobs:\n  u1:\n    run: [echo]\nservices:\n  u1:\n    run: [echo]\n",
                 "declared in multiple sections",
@@ -438,10 +458,6 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
             (
                 f"version: {models.FORMAT}\nname: resev\njobs:\n  events:\n    run: [echo]\n",
                 "unit name 'events' is reserved",
-            ),
-            (
-                f"version: {models.FORMAT}\nname: nosend\njobs:\n  j1:\n    run: [echo]\n    channel: c1\nchannels:\n  c1:\n    listen: [echo]\n",
-                "has no send command",
             ),
             (
                 f"version: {models.FORMAT}\nname: resenv\nenv:\n  BF_BRAIN: /x\n",
@@ -454,7 +470,7 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
             (f"version: {models.FORMAT}\nname: badenvv\nenv:\n  OK_K: 123\n", "expected type string"),
             (
                 f"version: {models.FORMAT}\nname: unsatcron\njobs:\n  j1:\n    run: [echo]\n    schedule: '0 0 31 2 *'\n",
-                "duration .* or 5-field cron",
+                "duration .*, @macro, or 5-field cron",
             ),
             (f'version: {models.FORMAT}\nname: ctlbr\nbrains:\n  sib: "/tmp/\\u0007bad"\n', "no control characters"),
         )
@@ -464,6 +480,13 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
         (bad_dir / "bf.yaml").write_text(bad_yaml)
         with pytest.raises(Error, match=err_match):
             config.load(Store(bad_dir))
+
+    macro_dir = tmp_path / "macro-brain"
+    macro_dir.mkdir()
+    (macro_dir / "bf.yaml").write_text(
+        f"version: {models.FORMAT}\nname: macro\njobs:\n  daily:\n    run: [echo]\n    schedule: '@daily'\n"
+    )
+    assert config.load(Store(macro_dir)).jobs["daily"].cron == "@daily"
 
     # Symlinked bf.yaml rejected by inside_brain().
     sym_brain = tmp_path / "sym-brain"
@@ -501,4 +524,11 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     b1_docs = Store(b1)
     b1_docs.write("sub/a.json", b'{"a":1}\n')
     b1_docs.write("sub/b.txt", b"ignored\n")
-    assert b1_docs.read_files("sub") == [("sub/a.json", b'{"a":1}\n')]
+    assert list(b1_docs.iter_read_files("sub", suffix=".json", limit=1 << 20)) == [("sub/a.json", b'{"a":1}\n')]
+    skipped_ov: list[str] = []
+    assert list(b1_docs.iter_read_files("sub", suffix=".json", limit=2, skipped=skipped_ov)) == []
+    assert skipped_ov
+    assert "exceeds 2 bytes" in skipped_ov[0]
+    assert list(b1_docs.iter_read_files("sub")) == [("sub/a.json", b'{"a":1}\n')]
+    assert b1_docs.count_files("sub") == 2
+    assert b1_docs.count_files("sub", exclude_suffix=".txt") == 1

@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
+import tempfile
 import threading
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, cast
 from urllib.parse import quote
 
-from bf import config, markdown, records
+from bf import config, engine, markdown, records
 from bf.config import yaml_object
 from bf.models import AUTHORED, MAX_BATCH, MAX_NOTE, Error, InputError, check_version, clean, decode, encode
 from bf.schemas import EVALS_SCHEMA, load_validator, validate_instance
 from bf.storage import Store, relative
+
+JQ_PRELUDE = (
+    'def modulemeta: error("disabled"); def modulemeta($m): error("disabled"); '
+    "def get_jq_origin: null; def get_prog_origin: null; def get_search_list: [];"
+)
 
 
 def _tool(name: str) -> str:
@@ -25,8 +30,9 @@ def _tool(name: str) -> str:
     raise Error(f"{name} is required on PATH; install it with mise install")
 
 
-def _safe_env() -> dict[str, str]:
-    return {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8", "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+def safe_env() -> dict[str, str]:
+    """Return a minimal locale-only environment without host variables."""
+    return {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"}
 
 
 def _finish_proc(proc: subprocess.Popen[bytes], timer: threading.Timer, *, eof: bool) -> int:
@@ -43,8 +49,8 @@ def _finish_proc(proc: subprocess.Popen[bytes], timer: threading.Timer, *, eof: 
         timer.cancel()
 
 
-def _decode_obj(store: Store, path: str) -> dict[str, Any]:
-    if not isinstance(parsed := decode(store.read(path), path), dict):
+def _decode_obj(store: Store, path: str, *, check_duplicates: bool = True) -> dict[str, Any]:
+    if not isinstance(parsed := decode(store.read(path), path, check_duplicates=check_duplicates), dict):
         raise Error(f"{path}: expected a JSON object")
     return cast("dict[str, Any]", parsed)
 
@@ -64,17 +70,23 @@ def _arg_rel(value: str) -> str:
     return value
 
 
-def _scope_paths(store: Store, scope: str) -> tuple[list[str], str]:
+def _resolve_scope(store: Store, scope: str) -> tuple[str | None, str | None]:
+    """Return `(single_file, directory)` in `memories/` after `O_NOFOLLOW` confinement checks."""
     if not (stripped := scope.strip()):
-        return [p for p in store.files("memories") if p.endswith(".json")], "memories"
+        return None, ("memories" if store.is_dir("memories") else None)
     cleaned = _arg_rel(stripped.rstrip("/"))
     if markdown.okf_role(cleaned) is not None:
         comp = markdown.compiled_note_path(cleaned)
-        return ([comp] if store.exists(comp) else []), comp
+        return (comp if store.exists(comp) else None), None
     if cleaned.endswith(".json") and cleaned.startswith("memories/"):
-        return ([cleaned] if store.exists(cleaned) else []), cleaned
+        return (cleaned if store.exists(cleaned) else None), None
     sub = _arg_rel(cleaned if cleaned == "memories" or cleaned.startswith("memories/") else f"memories/{cleaned}")
-    return [p for p in store.files(sub) if p.endswith(".json")], sub
+    return None, (sub if store.is_dir(sub) else None)
+
+
+def _read_stderr(handle: IO[bytes]) -> bytes:
+    handle.seek(max(0, handle.seek(0, os.SEEK_END) - 8192))
+    return handle.read(8192)
 
 
 def _rg_snippet(data: dict[str, Any], width: int = 240) -> str:
@@ -90,21 +102,32 @@ def _rg_snippet(data: dict[str, Any], width: int = 240) -> str:
 
 
 def search_rg(store: Store, pattern: str, *, scope: str = "", limit: int = 20) -> dict[str, Any]:
-    """Run lexical search over pure JSON memories via `rg --json --no-config --no-ignore`."""
+    """Run lexical search over pure JSON memories via `rg --json --no-config --no-ignore --no-follow`."""
     cfg = config.load(store)
     _arg_clean(pattern, "query")
     if limit < 1 or limit > 500:
         raise InputError("limit must be between 1 and 500")
-    allowed_files, sub = _scope_paths(store, scope)
-    if not allowed_files:
+    single_file, sub_dir = _resolve_scope(store, scope)
+    target_rel = single_file or sub_dir
+    rg_bin = _tool("rg")
+    if target_rel is None:
+        r_kw: dict[str, Any] = {"input": b"", "capture_output": True, "cwd": "/", "env": safe_env(), "timeout": 5}
+        chk = subprocess.run([rg_bin, "--no-config", "-e", pattern], **r_kw, check=False)  # noqa: S603
+        if chk.returncode not in {0, 1}:
+            err_txt = chk.stderr.decode("utf-8", "replace").strip()
+            raise InputError(f"rg failed: {err_txt.splitlines()[-1] if err_txt else 'invalid regex pattern'}")
         return {"brain": cfg.name, "engine": "rg", "query": pattern, "count": 0, "truncated": False, "items": []}
-    allowed_set = set(allowed_files)
-    cmd = [_tool("rg"), "--json", "--no-config", "--no-ignore", "--max-count", "1", "-i", "--max-filesize", "64M"]
-    cmd.extend(["-e", pattern, str(store.root / sub)])
+    cmd = [rg_bin, "--json", "--no-config", "--no-ignore", "--no-follow", "--max-count", "1", "-i"]
+    if sub_dir is not None:
+        cmd.extend(["--glob", "*.json"])
+    cmd.extend(["--max-filesize", "64M", "-e", pattern, str(store.root / target_rel)])
     matched_paths: list[str] = []
     snippets: dict[str, str] = {}
     timed_out, eof = threading.Event(), False
-    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_safe_env()) as proc:  # noqa: S603
+    with (
+        tempfile.TemporaryFile(mode="w+b") as err_f,
+        subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err_f, cwd="/", env=safe_env()) as proc,  # noqa: S603
+    ):
         timer = threading.Timer(30.0, lambda: (timed_out.set(), proc.kill()) if proc.poll() is None else None)
         timer.daemon = True
         timer.start()
@@ -112,17 +135,18 @@ def search_rg(store: Store, pattern: str, *, scope: str = "", limit: int = 20) -
             for raw_line in cast("IO[bytes]", proc.stdout):
                 if not (stripped := raw_line.strip()):
                     continue
-                event = decode(stripped, "rg output")
+                event = decode(stripped, "rg output", check_duplicates=False)
                 if not isinstance(event, dict) or event.get("type") != "match":
                     continue
                 data = event.get("data")
-                if not isinstance(data, dict) or not isinstance(
-                    raw_path := data["path"].get("text") if isinstance(data.get("path"), dict) else None, str
-                ):
+                raw_path = (
+                    data["path"].get("text") if isinstance(data, dict) and isinstance(data.get("path"), dict) else None
+                )
+                if not isinstance(data, dict) or not isinstance(raw_path, str):
                     continue
                 with suppress(ValueError):
                     rel_path = Path(raw_path).resolve().relative_to(store.root).as_posix()
-                    if rel_path in allowed_set and rel_path not in snippets:
+                    if rel_path.startswith("memories/") and rel_path.endswith(".json") and rel_path not in snippets:
                         matched_paths.append(rel_path)
                         snippets[rel_path] = _rg_snippet(data)
                         if len(matched_paths) > limit:
@@ -131,7 +155,7 @@ def search_rg(store: Store, pattern: str, *, scope: str = "", limit: int = 20) -
                 eof = True
         finally:
             rc = _finish_proc(proc, timer, eof=eof)
-        err_bytes = proc.stderr.read(8192) if proc.stderr is not None else b""
+        err_bytes = _read_stderr(err_f)
 
     if not (truncated := len(matched_paths) > limit):
         if timed_out.is_set():
@@ -142,65 +166,45 @@ def search_rg(store: Store, pattern: str, *, scope: str = "", limit: int = 20) -
 
     items: list[dict[str, Any]] = []
     for rel_path in matched_paths[:limit]:
-        rec = _decode_obj(store, rel_path)
+        rec = _decode_obj(store, rel_path, check_duplicates=False)
         item = {"ref": rec.get("ref", rel_path), "source": rec.get("source", ""), "kind": rec.get("kind", "memory")}
         items.append({**item, "title": rec.get("title", ""), "path": rel_path, "snippet": snippets.get(rel_path, "")})
-    return {
-        "brain": cfg.name,
-        "engine": "rg",
-        "query": pattern,
-        "count": len(items),
-        "truncated": truncated,
-        "items": items,
-    }
+    head = {"brain": cfg.name, "engine": "rg", "query": pattern, "count": len(items)}
+    return {**head, "truncated": truncated, "items": items}
 
 
 def query_jq(store: Store, expr: str, *, scope: str = "", limit: int = 20) -> dict[str, Any]:
-    """Filter pure JSON memory records by streaming confined files directly into `jq -c`."""
+    """Filter pure JSON memory records by streaming confined files directly into isolated `jq -c`."""
     cfg = config.load(store)
     _arg_clean(expr, "jq filter")
     if limit < 1 or limit > 5000:
         raise InputError("limit must be between 1 and 5000")
-    files, _ = _scope_paths(store, scope)
-    jq_bin = _tool("jq")
-    if not files:
-        try:
-            run_kw: dict[str, Any] = {"input": "", "capture_output": True, "text": True, "env": _safe_env()}
-            chk = subprocess.run([jq_bin, "-c", "--", expr], **run_kw, timeout=5, check=False)  # noqa: S603
-        except subprocess.TimeoutExpired as error:
-            raise Error("jq syntax check timed out") from error
-        if chk.returncode != 0:
-            err = chk.stderr.strip().splitlines()[-1] if chk.stderr.strip() else "invalid jq syntax"
-            raise InputError(f"jq failed: {err}")
-        return {"brain": cfg.name, "engine": "jq", "query": expr, "count": 0, "truncated": False, "items": []}
+    single_file, sub_dir = _resolve_scope(store, scope)
+    jq_cmd = [_tool("jq"), "-L", "/dev/null", "-c", "--", f"{JQ_PRELUDE}\n{expr}"]
 
     stop_feed, timed_out = threading.Event(), threading.Event()
     feeder_err: list[Error | OSError] = []
-    err_chunks: list[bytes] = []
     out: list[Any] = []
     truncated, eof, pipe = False, False, subprocess.PIPE
-    with subprocess.Popen([jq_bin, "-c", "--", expr], stdin=pipe, stdout=pipe, stderr=pipe, env=_safe_env()) as proc:  # noqa: S603
+    with (
+        tempfile.TemporaryFile(mode="w+b") as err_f,
+        subprocess.Popen(jq_cmd, stdin=pipe, stdout=pipe, stderr=err_f, cwd="/", env=safe_env()) as proc,  # noqa: S603
+    ):
         timer = threading.Timer(30.0, lambda: (timed_out.set(), proc.kill()) if proc.poll() is None else None)
         timer.daemon = True
         timer.start()
 
-        def drain_err() -> None:
-            if (stderr := proc.stderr) is None:
-                return
-            total = 0
-            while chunk := stderr.read(4096):
-                if total < 8192:
-                    err_chunks.append(chunk[: 8192 - total])
-                    total += len(chunk)
-
         def feed() -> None:
             stdin = cast("IO[bytes]", proc.stdin)
             try:
-                for path in files:
-                    if stop_feed.is_set():
-                        break
-                    data = store.read(path)
+                if single_file is not None and not stop_feed.is_set():
+                    data = store.read(single_file)
                     stdin.write(data if data.endswith(b"\n") else data + b"\n")
+                elif sub_dir is not None:
+                    for _, data in store.iter_read_files(sub_dir, suffix=".json"):
+                        if stop_feed.is_set():
+                            break
+                        stdin.write(data if data.endswith(b"\n") else data + b"\n")
                 stdin.flush()
             except BrokenPipeError:
                 pass
@@ -212,9 +216,7 @@ def query_jq(store: Store, expr: str, *, scope: str = "", limit: int = 20) -> di
                     stdin.close()
 
         feeder = threading.Thread(target=feed, name="bf-jq-feed", daemon=True)
-        err_reader = threading.Thread(target=drain_err, name="bf-jq-err", daemon=True)
         feeder.start()
-        err_reader.start()
         try:
             stdout = cast("IO[bytes]", proc.stdout)
             while raw_line := stdout.readline(MAX_BATCH + 1):
@@ -231,8 +233,7 @@ def query_jq(store: Store, expr: str, *, scope: str = "", limit: int = 20) -> di
             stop_feed.set()
             rc = _finish_proc(proc, timer, eof=eof)
             feeder.join(timeout=5)
-            err_reader.join(timeout=2)
-        err_bytes = b"".join(err_chunks)
+        err_bytes = _read_stderr(err_f)
 
     if not truncated:
         if timed_out.is_set():
@@ -243,64 +244,8 @@ def query_jq(store: Store, expr: str, *, scope: str = "", limit: int = 20) -> di
             err = err_bytes.decode("utf-8", "replace").strip()
             raise InputError(f"jq failed: {err.splitlines()[-1] if err else 'jq filter failed'}")
     items = out[:limit]
-    return {
-        "brain": cfg.name,
-        "engine": "jq",
-        "query": expr,
-        "count": len(items),
-        "truncated": truncated,
-        "items": items,
-    }
-
-
-def _strip_heading_md(raw: str) -> str:
-    txt = re.sub(r"\s*\{[^}\n]+\}\s*$", "", re.sub(r"^#{1,6}\s+", "", raw.strip()))
-    txt = re.sub(r"\[([^\]]+)\]\([^)]*\)|[`*_~]", lambda m: m[1] or "", txt)
-    return re.sub(r"\s+", " ", txt).strip().lower()
-
-
-def _extract_markdown_section(text: str, anchor: str, compiled: dict[str, Any]) -> dict[str, Any]:
-    for key, out_key in (("elements", "element"), ("tasks", "task")):
-        for item in compiled.get(key, []):
-            if isinstance(item, dict) and item.get("id") == anchor:
-                return {"anchor": anchor, out_key: item}
-    headings = compiled.get("headings", [])
-    idx_h = next(((i, h) for i, h in enumerate(headings) if isinstance(h, dict) and h.get("id") == anchor), None)
-    if idx_h is None:
-        if isinstance(attrs := compiled.get("attrs"), dict) and anchor in attrs:
-            return {"anchor": anchor, "meta": attrs[anchor]}
-        raise Error(f"{compiled['ref']}: missing anchor #{anchor}")
-    level, lines, title_lc = int(idx_h[1]["level"]), text.splitlines(), idx_h[1]["title"].lower()
-    hs = [h for h in headings[: idx_h[0]] if isinstance(h, dict) and int(h["level"]) == level]
-    want_same = sum(1 for h in hs if h["title"].lower() == title_lc)
-    fm_end = next((i + 1 for i in range(1, len(lines)) if lines[i].rstrip() == "---"), 0)
-    offset = fm_end if lines and lines[0].rstrip() == "---" else 0
-    heading = idx_h[1]
-    start_line: int | None = None
-    end_line, fence, seen_same = len(lines), "", 0
-    for i in range(offset, len(lines)):
-        ln = lines[i]
-        if m_f := markdown.FENCE.fullmatch(ln):
-            if fence and m_f[1][0] == fence[0] and len(m_f[1]) >= len(fence) and not m_f[2].strip():
-                fence = ""
-            elif not fence and not (m_f[1][0] == "`" and "`" in m_f[2]):
-                fence = m_f[1]
-            continue
-        if fence:
-            continue
-        if m := re.match(r"^(#{1,6})\s+", ln):
-            if start_line is None and len(m[1]) == level:
-                attr_m = re.search(r"\{([^{}\n]+)\}\s*$", ln.rstrip())
-                id_m = re.search(r"(?:^|\s|[:{])#([^\s{}]+)", attr_m[1]) if attr_m else None
-                same_t = _strip_heading_md(ln) == title_lc
-                if (id_m and id_m[1] == anchor) or (not id_m and same_t and seen_same == want_same):
-                    start_line = i
-                seen_same += int(same_t)
-            elif start_line is not None and len(m[1]) <= level:
-                end_line = i
-                break
-    sec_txt = "\n".join(lines[start_line:end_line]).strip() if start_line is not None else ""
-    return {"anchor": anchor, "heading": heading, "text": sec_txt}
+    head = {"brain": cfg.name, "engine": "jq", "query": expr, "count": len(items)}
+    return {**head, "truncated": truncated, "items": items}
 
 
 def find_by_alias(store: Store, identity: str) -> tuple[str, dict[str, Any]] | None:
@@ -309,7 +254,7 @@ def find_by_alias(store: Store, identity: str) -> tuple[str, dict[str, Any]] | N
     def match_paths(paths: list[str]) -> tuple[str, dict[str, Any]] | None:
         for path in paths:
             with suppress(Error):
-                parsed = _decode_obj(store, path)
+                parsed = _decode_obj(store, path, check_duplicates=False)
                 aliases = parsed.get("aliases")
                 if parsed.get("entity") == identity or (isinstance(aliases, list) and identity in aliases):
                     return path, parsed
@@ -319,9 +264,10 @@ def find_by_alias(store: Store, identity: str) -> tuple[str, dict[str, Any]] | N
     if (found := match_paths(authored)) is not None or not store.is_dir("memories"):
         return found
     if (rg := shutil.which("rg")) and '"' not in identity and "\\" not in identity:
-        cmd = [rg, "-l", "-F", "--no-config", "--no-ignore", "--", identity, str(store.root / "memories")]
+        flags = ("-l", "-F", "--no-config", "--no-ignore", "--no-follow", "--glob", "*.json", "--")
+        cmd = [rg, *flags, identity, str(store.root / "memories")]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, env=_safe_env(), timeout=15, check=False)  # noqa: S603
+            proc = subprocess.run(cmd, capture_output=True, text=True, cwd="/", env=safe_env(), timeout=15, check=False)  # noqa: S603
         except subprocess.TimeoutExpired as error:
             raise Error("rg alias lookup timed out") from error
         if proc.returncode in {0, 1}:
@@ -335,7 +281,7 @@ def find_by_alias(store: Store, identity: str) -> tuple[str, dict[str, Any]] | N
     return match_paths([p for p in store.files("memories") if p.endswith(".json") and p.split("/")[1] not in AUTHORED])
 
 
-def read_target(store: Store, raw_target: str) -> dict[str, Any]:
+def read_target(store: Store, raw_target: str, *, declared_brains_only: bool = False) -> dict[str, Any]:
     """Read an OKF note, `note#anchor` section, `source:id` record, JSON memory, or `bf://` URI."""
     cfg = config.load(store)
     if not (target := raw_target.strip()):
@@ -350,19 +296,23 @@ def read_target(store: Store, raw_target: str) -> dict[str, Any]:
         host, _, rest = to.removeprefix("bf://").partition("/")
         q_rest = quote(rest, safe="/:@")
         sub = f"bf:///{q_rest}#{quote(anchor, safe='')}" if anchor else f"bf:///{q_rest}"
-        return read_target(config.resolve_brain(store, cfg, host), sub)
+        sib = config.resolve_brain(store, cfg, host, declared_only=declared_brains_only)
+        return read_target(sib, sub, declared_brains_only=declared_brains_only)
+
+    def render_record(hit_path: str, hit_rec: dict[str, Any], def_ref: str, def_kind: str = "record") -> dict[str, Any]:
+        ref_str = str(hit_rec.get("ref", def_ref))
+        return {"brain": cfg.name, "kind": def_kind, "ref": ref_str, "path": hit_path, "record": hit_rec}
+
     if kind == "url":
+        if (
+            hit := find_by_alias(store, to) or (find_by_alias(store, to[4:]) if to[:4] == "urn:" else None)
+        ) is not None:
+            return render_record(hit[0], hit[1], to)
         raise InputError("external URLs are not read offline; pass a note path, source:id, or bf:// URI")
     if anchor and (kind == "record" or to.endswith(".json")):
         raise InputError("JSON records do not support #fragments; pipe bf read into jq")
     if any(part.startswith(".") for part in to.split("/")) or to.split("/")[0].lower() == "logs":
         raise InputError(f"{to}: private or runtime paths are not readable via bf read")
-
-    def render_record(
-        hit_path: str, hit_rec: dict[str, Any], default_ref: str, default_kind: str = "record"
-    ) -> dict[str, Any]:
-        ref_str = str(hit_rec.get("ref", default_ref))
-        return {"brain": cfg.name, "kind": default_kind, "ref": ref_str, "path": hit_path, "record": hit_rec}
 
     if to.startswith("memories/") and to.endswith(".json"):
         if not store.exists(to):
@@ -381,12 +331,29 @@ def read_target(store: Store, raw_target: str) -> dict[str, Any]:
     raw_bytes = store.read(to, MAX_NOTE)
     text = raw_bytes.decode("utf-8").removeprefix("\ufeff")
     if markdown.okf_role(to) is not None:
-        compiled = markdown.compile_note(to, raw_bytes, brain_name=cfg.name)
+        compiled, _ = engine.load_or_compile_note(store, to, raw_bytes, brain_name=cfg.name)
         if anchor:
-            sec = _extract_markdown_section(text, anchor, compiled)
+            sec = markdown.extract_section(text, anchor, compiled)
             return {"brain": cfg.name, "kind": "section", "ref": to, **sec}
         return {"brain": cfg.name, "kind": compiled["kind"], "ref": to, "record": compiled, "markdown": text}
     return {"brain": cfg.name, "kind": "file", "ref": to, "text": text}
+
+
+def load_eval_doc(store: Store, path: str, val: Any, problems: list[str]) -> dict[str, Any] | None:
+    """Read, version-check, and schema-validate one `evals/*.{yaml,yml,json}` suite."""
+    try:
+        raw_bytes = store.read(path, 1 << 20)
+        doc = decode(raw_bytes, path) if path.endswith(".json") else yaml_object(raw_bytes, path)
+        if not isinstance(doc, dict):
+            raise Error(f"{path}: expected a mapping")
+        check_version(doc, path)
+        if val is not None and (errs := validate_instance(val, doc, path)):
+            problems.extend(errs)
+            return None
+        return doc
+    except Error as error:
+        problems.append(str(error))
+        return None
 
 
 def evaluate(store: Store, target: str = "") -> dict[str, Any]:
@@ -403,17 +370,7 @@ def evaluate(store: Store, target: str = "") -> dict[str, Any]:
             raise InputError(f"no eval file matching {wanted!r}")
 
     for path in cand_files:
-        try:
-            raw_bytes = store.read(path, 1 << 20)
-            doc = decode(raw_bytes, path) if path.endswith(".json") else yaml_object(raw_bytes, path)
-            if not isinstance(doc, dict):
-                raise Error(f"{path}: expected a mapping")
-            check_version(doc, path)
-            if val is not None and (errs := validate_instance(val, doc, path)):
-                problems.extend(errs)
-                continue
-        except Error as error:
-            problems.append(str(error))
+        if (doc := load_eval_doc(store, path, val, problems)) is None:
             continue
 
         for case in cases if isinstance(cases := doc.get("cases"), list) else []:
@@ -423,24 +380,22 @@ def evaluate(store: Store, target: str = "") -> dict[str, Any]:
             q_str, sc = str(case["query"]), str(case.get("scope") or "")
             reasons: list[str] = []
             try:
-                if eng == "rg":
-                    out = search_rg(store, q_str, scope=sc, limit=200)
-                elif eng == "jq":
-                    out = query_jq(store, q_str, scope=sc, limit=500)
-                elif eng == "read":
-                    out = read_target(store, q_str)
-                else:
+                if eng not in {"rg", "jq", "read"}:
                     raise Error(f"{path}: unsupported eval engine {eng!r}")
+                out = (
+                    search_rg(store, q_str, scope=sc, limit=200)
+                    if eng == "rg"
+                    else query_jq(store, q_str, scope=sc, limit=500)
+                    if eng == "jq"
+                    else read_target(store, q_str)
+                )
                 items = out["items"] if eng in {"rg", "jq"} else [out]
                 refs = {str(it.get("ref", "")) for it in items if isinstance(it, dict)}
-                rendered = encode(out).decode("utf-8").lower()
+                rendered = encode(items).decode("utf-8").lower()
                 reasons.extend(f"missing expected ref {r}" for r in (case.get("expect_refs") or []) if r not in refs)
                 reasons.extend(f"matched forbidden ref {b}" for b in (case.get("forbid_refs") or []) if b in refs)
-                reasons.extend(
-                    f"missing expected text {s!r}"
-                    for s in (case.get("expect_text") or [])
-                    if str(s).lower() not in rendered
-                )
+                exp_txt = case.get("expect_text") or []
+                reasons.extend(f"missing expected text {s!r}" for s in exp_txt if str(s).lower() not in rendered)
                 if "min_count" in case and len(items) < int(case["min_count"]):
                     reasons.append(f"count {len(items)} < min_count {case['min_count']}")
                 if "max_count" in case and len(items) > int(case["max_count"]):

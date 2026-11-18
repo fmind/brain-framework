@@ -12,6 +12,7 @@ such as stashes and notes.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -21,24 +22,19 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 # `git log --since-as-filter` first shipped in Git 2.37.
 MIN_GIT = (2, 37)
 MAX_REPOSITORIES = 200
 MAX_COMMITS = 10000
 MAX_BYTES = 16 << 20
-MAX_REF = 8192
-MAX_LINKS = 1000
 AUTOMATED = re.compile(r"(\[bot\]@users\.noreply\.github\.com|@([a-z0-9-]+\.)*(invalid|test|example|localhost))$")
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
-IDENTITY = re.compile(r"[a-z][a-z0-9+.-]*:\S+")
-_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
-_SEGMENT = re.compile(r"[A-Za-z0-9_.-]+")
-_SCP_REMOTE = re.compile(r"^git@([A-Za-z0-9.-]+):([^/\s]+)/([^/\s]+?)(?:\.git)?$")
 _GIT_ENV = frozenset(
     {
         "GIT_DIR",
@@ -148,23 +144,6 @@ def line(value: str, fallback: str = "") -> str:
     return (cleaned[:4096] or fallback)[:4096] if (cleaned or fallback) else ""
 
 
-def reference(value: str) -> str:
-    if (
-        not value
-        or len(value) > MAX_REF
-        or any(c.isspace() for c in value)
-        or CONTROL.search(value)
-        or not IDENTITY.fullmatch(value)
-    ):
-        return ""
-    return value
-
-
-def person(email: str) -> str:
-    cleaned = email.strip().lower()
-    return reference("person:email/" + quote(cleaned, safe="@.")) if "@" in cleaned else ""
-
-
 def iso_utc(value: str) -> str:
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
@@ -190,58 +169,6 @@ def cli(action: Callable[[], None], summary: str, hint: str) -> None:
         sys.exit(1)
 
 
-def _valid_host(host: str) -> str:
-    lowered = host.lower()
-    labels = lowered.split(".")
-    if (
-        len(labels) < 2
-        or any(not _DNS_LABEL.fullmatch(lbl) for lbl in labels)
-        or not re.fullmatch(r"[a-z]{2,63}", labels[-1])
-    ):
-        return ""
-    return lowered
-
-
-def repository_identity(raw_url: str) -> str:
-    """Canonical lowercase repo identity for credential-free HTTPS, ssh://git@, and git@HOST:OWNER/REPO remotes."""
-    url = raw_url.strip()
-    if not url or CONTROL.search(url):
-        return ""
-    if match := _SCP_REMOTE.fullmatch(url):
-        host, owner, name = _valid_host(match[1]), match[2], match[3]
-    else:
-        try:
-            parsed = urlsplit(url)
-        except ValueError:
-            return ""
-        if parsed.query or parsed.fragment or parsed.port is not None:
-            return ""
-        if parsed.scheme == "https":
-            if parsed.username is not None or parsed.password is not None:
-                return ""
-        elif parsed.scheme == "ssh":
-            if parsed.username != "git" or parsed.password is not None or parsed.netloc.partition("@")[0] != "git":
-                return ""
-        else:
-            return ""
-        host = _valid_host(parsed.hostname or "")
-        path = parsed.path.lstrip("/")
-        path = path.removesuffix(".git")
-        parts = path.split("/")
-        if len(parts) != 2:
-            return ""
-        owner, name = parts
-    if (
-        not host
-        or not _SEGMENT.fullmatch(owner)
-        or not _SEGMENT.fullmatch(name)
-        or owner in {".", ".."}
-        or name in {".", ".."}
-    ):
-        return ""
-    return reference(f"repo:{host}/{quote(owner.lower(), safe='')}/{quote(name.lower(), safe='')}")
-
-
 def make_record(
     identifier: str,
     title: str,
@@ -249,11 +176,8 @@ def make_record(
     item_type: str,
     time_value: str,
     text: str,
-    aliases: Sequence[str],
-    relations: dict[str, list[str]],
     attributes: dict[str, object],
 ) -> dict[str, object]:
-    _ = aliases, relations
     out: dict[str, object] = {
         "id": identifier,
         "title": line(title, identifier),
@@ -266,35 +190,72 @@ def make_record(
     return out
 
 
-def remote(repository: Path) -> str:
-    """The origin remote's repository identity, never its raw URL or credentials; "" when there is none."""
-    try:
-        raw = run(["git", "-C", str(repository), "remote", "get-url", "origin"], timeout=10, max_bytes=8192)
-    except ProviderError as error:
-        if error.status is None:
-            raise
-        return ""
-    except InvalidError:
-        return ""
-    return repository_identity(raw.decode(errors="replace"))
-
-
 def nameable(relative: str) -> bool:
-    """Whether a folder name can appear in record ids and titles: UTF-8, without control characters."""
+    """Whether a folder name can appear in record ids and titles: UTF-8, without control or format characters."""
     try:
         relative.encode()
     except UnicodeEncodeError:
         return False
-    return not CONTROL.search(relative)
+    return not CONTROL.search(relative) and not any(unicodedata.category(ch) == "Cf" for ch in relative)
 
 
-def shared(marker: Path) -> tuple[str, bool] | None:
+def _read_regular(path: Path, label: str) -> str:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        fd = os.open(path, flags)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise InvalidError(f"{label} symlink is refused") from None
+        raise
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise InvalidError(f"{label} must be a regular file")
+        return os.fsdecode(stream.read(4096)).strip()
+
+
+def _audit_git_dir(git_dir: Path, real_root: Path) -> None:
+    """Reject symlinked administrative entries, grafts, or external alternates inside `git_dir`."""
+
+    def scan_dir(path: Path, *, recurse: bool = False, depth: int = 0) -> None:
+        if depth > 16:
+            raise InvalidError("git refs exceed depth limit")
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        raise InvalidError(f"symlinked git entry {entry.name!r} is refused")
+                    if recurse and entry.is_dir(follow_symlinks=False):
+                        scan_dir(path / entry.name, recurse=True, depth=depth + 1)
+        finally:
+            os.close(fd)
+
+    scan_dir(git_dir)
+    for sub, recurse in (
+        (git_dir / "info", False),
+        (git_dir / "refs", True),
+        (git_dir / "objects", False),
+        (git_dir / "objects" / "info", False),
+    ):
+        with contextlib.suppress(FileNotFoundError):
+            scan_dir(sub, recurse=recurse)
+    if (git_dir / "objects" / "info" / "http-alternates").exists() or (git_dir / "info" / "grafts").exists():
+        raise InvalidError("git grafts and http-alternates are refused")
+    with contextlib.suppress(FileNotFoundError):
+        raw_alt = _read_regular(git_dir / "objects" / "info" / "alternates", "alternates")
+        for raw_ln in raw_alt.splitlines():
+            if (ln := raw_ln.strip()) and not ln.startswith("#"):
+                alt = Path(os.path.realpath((git_dir / "objects") / ln))
+                if not alt.is_relative_to(real_root) or not alt.is_dir():
+                    raise InvalidError("git alternate object store escapes ROOT")
+
+
+def shared(marker: Path, real_root: Path) -> tuple[str, bool] | None:
     """The Git directory a checkout shares with its repository's other worktrees, and whether it is its own.
 
-    A `.git` folder is its own repository. `git worktree add` writes a `.git` file naming `COMMON/worktrees/NAME`,
-    whose `commondir` file leads back to the repository, bare or not; a submodule or `--separate-git-dir` checkout
-    names a repository of its own, without one. A malformed or pruned marker stands for itself, so Git fails there
-    by name. None means no repository: no marker, or a symlinked one. Any other OSError is an unreadable folder.
+    A `.git` folder without `commondir` is its own repository. `git worktree add` writes a `.git` file naming
+    `COMMON/worktrees/NAME`, whose `commondir` file leads back to the repository inside `ROOT`. Any `.git` entry,
+    `commondir`, symlinked ref/object entry, or alternate pointing outside `ROOT` raises `InvalidError`.
     """
     try:
         info = marker.lstat()
@@ -302,19 +263,29 @@ def shared(marker: Path) -> tuple[str, bool] | None:
         return None
     if stat.S_ISLNK(info.st_mode):
         return None
-    if not stat.S_ISREG(info.st_mode):
-        return os.path.realpath(marker), True
-    with marker.open("rb") as stream:
-        header = os.fsdecode(stream.read(4096)).strip()
-    if not header.startswith("gitdir: "):
-        return os.path.realpath(marker), True
-    folder = marker.parent / header.removeprefix("gitdir: ")
+    if stat.S_ISDIR(info.st_mode):
+        folder = Path(os.path.realpath(marker))
+        if not folder.is_relative_to(real_root):
+            raise InvalidError(".git directory resolves outside ROOT")
+    elif stat.S_ISREG(info.st_mode):
+        header = _read_regular(marker, ".git")
+        if not header.startswith("gitdir: "):
+            return os.path.realpath(marker), True
+        folder = Path(os.path.realpath(marker.parent / header.removeprefix("gitdir: ")))
+        if not folder.is_relative_to(real_root):
+            raise InvalidError("gitdir target escapes ROOT")
+    else:
+        raise InvalidError("special .git entry is refused")
+    _audit_git_dir(folder, real_root)
     try:
-        with (folder / "commondir").open("rb") as stream:
-            common = os.fsdecode(stream.read(4096)).strip()
+        common = _read_regular(folder / "commondir", "commondir")
     except (FileNotFoundError, NotADirectoryError):
-        return os.path.realpath(folder), True
-    return os.path.realpath(folder / common), False
+        return str(folder), True
+    resolved_common = Path(os.path.realpath(folder / common))
+    if not resolved_common.is_relative_to(real_root):
+        raise InvalidError("commondir target escapes ROOT")
+    _audit_git_dir(resolved_common, real_root)
+    return str(resolved_common), False
 
 
 def repositories(root: Path, skip: frozenset[str]) -> tuple[list[tuple[str, Path]], int]:
@@ -339,6 +310,7 @@ def repositories(root: Path, skip: frozenset[str]) -> tuple[list[tuple[str, Path
         parents = directories(Path())
     except (FileNotFoundError, NotADirectoryError):
         raise InvalidError("ROOT is not a directory") from None
+    real = Path(os.path.realpath(root))
     candidates = list(parents)
     for parent in parents:
         try:
@@ -348,18 +320,22 @@ def repositories(root: Path, skip: frozenset[str]) -> tuple[list[tuple[str, Path
     # Worktrees share their repository's history: group checkouts by the Git directory they share.
     groups: dict[str, list[tuple[str, bool]]] = {}
     for path in candidates:
+        rel_posix = path.as_posix()
+        if rel_posix in skip or path.parts[0] in skip:
+            continue
         try:
-            found = shared(root / path / ".git")
+            found = shared(root / path / ".git", real)
+        except InvalidError as error:
+            raise InvalidError(f"{rel_posix}: {error}") from None
         except OSError:
             skipped.add(path)
             continue
         if found is None:
             continue
-        if not nameable(path.as_posix()):
+        if not nameable(rel_posix):
             skipped.add(path)
             continue
-        groups.setdefault(found[0], []).append((path.as_posix(), found[1]))
-    real = Path(os.path.realpath(root))
+        groups.setdefault(found[0], []).append((rel_posix, found[1]))
     selected = []
     for common, members in groups.items():
         owners = [relative for relative, own in members if own]
@@ -370,7 +346,11 @@ def repositories(root: Path, skip: frozenset[str]) -> tuple[list[tuple[str, Path
             home = Path(common).parent if Path(common).name == ".git" else Path(common)
             inside = home.relative_to(real).as_posix() if home.is_relative_to(real) else "."
             name = inside if inside != "." and nameable(inside) else checkout
-        if name not in skip and not any(relative in skip for relative, _ in members):
+        if (
+            name not in skip
+            and Path(name).parts[0] not in skip
+            and not any(relative in skip for relative, _ in members)
+        ):
             selected.append((name, root / checkout))
     if len(selected) > MAX_REPOSITORIES:
         raise InvalidError(f"more than {MAX_REPOSITORIES} repositories; select a narrower ROOT or add --skip")
@@ -441,7 +421,6 @@ def collect(
     records: list[dict[str, object]] = []
     for relative, repository in selected:
         try:
-            origin = remote(repository)
             fields = history(repository, start, end)
         except InvalidError as error:
             raise InvalidError(f"{relative}: {error}") from None
@@ -451,6 +430,7 @@ def collect(
             raise InvalidError(
                 f"{relative}: Git failed or timed out; repair the repository or add --skip {relative}"
             ) from None
+        encoded_repo = quote(relative, safe="/")
         for offset in range(0, len(fields), 4):
             commit, when, author, message = fields[offset : offset + 4]
             # Git's date bounds are inclusive; BF windows are [start, end).
@@ -462,13 +442,9 @@ def collect(
             author = author.strip().lower()
             if AUTOMATED.search(author):
                 continue
-            repository_ref = "repo:local/" + quote(relative, safe="/")
-            repo_refs = [repository_ref, *([origin] if origin else [])]
-            author_person = person(author)
-            author_refs = [author_person] if author_person else []
             message = message.strip()
             subject = message.partition("\n")[0]
-            key = relative + "@" + commit
+            key = f"{encoded_repo}@{commit}"
             records.append(
                 make_record(
                     key,
@@ -476,11 +452,6 @@ def collect(
                     item_type="Commit",
                     time_value=when,
                     text=f"Repository: {relative}\nCommit: {commit}\nAuthor: {author}\nCommitted: {when}\n\n{message}",
-                    aliases=["commit:local/" + quote(key, safe="/@")],
-                    relations={
-                        "author": author_refs,
-                        "repository": repo_refs,
-                    },
                     attributes={
                         "repository": relative,
                         "commit": commit,

@@ -18,7 +18,7 @@ sys.stdout.write(
                 "text": "Keep original evidence because upstream content can disappear.",
                 "time": start.isoformat(),
                 "updated": start.isoformat(),
-                "links": ["projects/example.md"],
+                "links": ["bf:///projects/example.md"],
             }
         ]
     )

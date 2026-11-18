@@ -1,6 +1,6 @@
 # Runnable example brain
 
-A fictional project, OKF concepts, resumable actions, `attr_list` metadata, user JSON Schemas (`schemas/*.json`), deterministic evals (`evals/smoke.yaml`), `/bf` skill (`skills/bf/SKILL.md`), and local `sensors/`, `routines/`, `channels/`, `prompts/`, `channels:`, and `services:` entries demonstrate the end-to-end workflow without credentials or network access.
+A fictional project, OKF concepts, resumable actions, `attr_list` metadata, user JSON Schemas (`schemas/*.json`), deterministic evals (`evals/smoke.yaml`), `/bf` skill (`skills/bf/SKILL.md`), and local `sensors/`, `routines/`, `services/`, `prompts/`, `jobs:`, and `services:` entries demonstrate the end-to-end workflow without credentials or network access.
 
 Run on a disposable copy from the repository checkout after `uv sync --locked`:
 

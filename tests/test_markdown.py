@@ -31,11 +31,15 @@ def test_compile_note_extracts_frontmatter_headings_keyed_attrs_and_unescapes_ht
         b"links:\n"
         b"  - bf:///projects/launch.md\n"
         b"  - bf:///projects/launch.md\n"
+        b"  - bf:///memories/github/0359a07b64f9a310ea420eca77e5b713b6b10ee3cdc9be5e6ad0ea1323889879.json?rel=implements\n"
+        b"  - to: https://github.com/example/agent-protocol\n"
+        b"    meta:\n"
+        b"      rel: depends-on\n"
+        b"  - to: urn:gcp:folder:123456789\n"
+        b"    meta:\n"
+        b"      rel: part-of\n"
         b"sources:\n"
         b"  - resource: bf:///memories/jira/6e727f27acc6af6f2cd2f6f2bc2eb801d4b22cfe3d43e5eb35404d0f6ac70fe4.json\n"
-        b"relations:\n"
-        b"  - target: bf:///memories/github/0359a07b64f9a310ea420eca77e5b713b6b10ee3cdc9be5e6ad0ea1323889879.json\n"
-        b"    type: implements\n"
         b"---\n\n"
         b"# Agent Protocol\n\n"
         b"Lead claim for R&D (`a < b && c > d`) with a footnote[^1], "
@@ -102,6 +106,20 @@ def test_compile_note_extracts_frontmatter_headings_keyed_attrs_and_unescapes_ht
     assert links[("memories/github/0359a07b64f9a310ea420eca77e5b713b6b10ee3cdc9be5e6ad0ea1323889879.json", "")][
         "meta"
     ] == {"rel": "implements"}
+    assert links[("https://github.com/example/agent-protocol", "")] == {
+        "to": "https://github.com/example/agent-protocol",
+        "kind": "url",
+        "anchor": "",
+        "meta": {"rel": "depends-on"},
+        "section": "",
+    }
+    assert links[("urn:gcp:folder:123456789", "")] == {
+        "to": "urn:gcp:folder:123456789",
+        "kind": "url",
+        "anchor": "",
+        "meta": {"rel": "part-of"},
+        "section": "",
+    }
     assert links[("concepts/aaif.md", "mcp")] == {
         "to": "concepts/aaif.md",
         "kind": "note",
@@ -135,8 +153,8 @@ def test_compile_note_supports_dprint_single_line_block_attrs_and_link_ids() -> 
         b"---\n"
         b"type: guide\n"
         b"status: stable\n"
-        b"relations:\n"
-        b"  supersedes: [bf:///concepts/prior.md]\n"
+        b"links:\n"
+        b"  - bf:///concepts/prior.md?rel=supersedes\n"
         b"---\n\n"
         b"# Single Line Attrs\n\n"
         b"Paragraph formatted on one line. {: #para-1 role=principle}\n\n"
@@ -169,6 +187,28 @@ def test_compile_note_supports_dprint_single_line_block_attrs_and_link_ids() -> 
         },
     ]
     assert markdown.anchor_ids("concepts/dprint.md", raw) >= {"single-line-attrs", "para-1", "lnk-1", "task-ship"}
+
+    # Loose task list items (blank lines between items -> `<p>` inside `<li>`) preserve `{: #id key=val}` without duplicate `<p>` elements!
+    loose = markdown.compile_note(
+        "concepts/loose-tasks.md",
+        b"---\ntype: guide\nstatus: stable\n---\n\n# Loose Tasks\n\n"
+        b"- [ ] Audit permissions\n  {: #loose-1 owner=sec}\n\n"
+        b"- [x] Rotate keys {: #loose-2 priority=p1}\n",
+        brain_name="b",
+    )
+    assert loose["attrs"]["loose-1"] == {"owner": "sec"}
+    assert loose["attrs"]["loose-2"] == {"priority": "p1"}
+    assert loose["tasks"] == [
+        {
+            "id": "loose-1",
+            "text": "Audit permissions",
+            "done": False,
+            "section": "loose-tasks",
+            "meta": {"owner": "sec"},
+        },
+        {"id": "loose-2", "text": "Rotate keys", "done": True, "section": "loose-tasks", "meta": {"priority": "p1"}},
+    ]
+    assert [el for el in loose["elements"] if el["tag"] == "p"] == []
 
 
 def test_compile_note_fallbacks_and_custom_user_metadata() -> None:
@@ -203,9 +243,15 @@ def test_compile_note_fallbacks_and_custom_user_metadata() -> None:
         ("concepts/badtags.md", b"---\ntags: not-a-list\n---\n# Hi\n", "tags must be a list"),
         ("concepts/badtagval.md", b"---\ntags: ['has/slash']\n---\n# Hi\n", "without spaces or slashes"),
         ("concepts/badlinks.md", b"---\nlinks: [123]\n---\n# Hi\n", "frontmatter links must be a list"),
-        ("concepts/relfm.md", b"---\nlinks: [projects/launch.md]\n---\n# Hi\n", "frontmatter links must use bf://"),
-        ("concepts/badrel.md", b"---\nrelations: 123\n---\n# Hi\n", "relations must be a list or mapping"),
-        ("concepts/badrelv.md", b"---\nrelations:\n  uses: 123\n---\n# Hi\n", "must be a list of URI strings"),
+        ("concepts/badlinkmap.md", b"---\nlinks: nope\n---\n# Hi\n", "frontmatter links must be a list"),
+        (
+            "concepts/badlinkobj.md",
+            b"---\nlinks:\n  - to: https://example.com\n    extra: 1\n---\n# Hi\n",
+            "frontmatter links must be a list",
+        ),
+        ("concepts/relfm.md", b"---\nlinks: [projects/launch.md]\n---\n# Hi\n", "links must use bf://"),
+        ("concepts/badrel.md", b"---\nrelations: []\n---\n# Hi\n", "'relations' was removed; use 'links'"),
+        ("concepts/badfmrec.md", b"---\nlinks: ['bf://demo/jira:WEB-1']\n---\n# Hi\n", "legacy record reference"),
         ("concepts/legacylnk.md", b"# Hi\n\nSee [ev](demo:ev-1).\n", "unsupported link scheme demo:"),
         (
             "concepts/prosebf.md",
@@ -273,10 +319,24 @@ def test_parse_link_variants_and_rejections() -> None:
     rec_meta = markdown.parse_link("projects/web.md", "jira:WEB-1?role=blocker#top", "my-brain", allow_record_ref=True)
     assert (rec_meta["to"], rec_meta["anchor"], rec_meta["meta"]) == ("jira:WEB-1", "top", {"role": "blocker"})
 
+    env_ex = markdown.parse_link("projects/web.md", "../.env.example", "my-brain")
+    assert (env_ex["to"], env_ex["kind"]) == (".env.example", "note")
+
     for bad_target, match in (
         ("https://example.com/" + "a" * 8200, "exceeds 8192"),
         ("concepts/bi\u202edi.md", "invisible"),
         ("bf://my-brain/concepts/%E2%80%AE.md", "invisible"),
+        ("concepts/%00bad.md", "control characters"),
+        ("concepts/%0abad.md", "control characters"),
+        ("concepts/%20bad.md", "invalid Markdown link target"),
+        ("bf:///concepts/%20bad.md", "expected bf:///path"),
+        ("bf://%00bad/concepts/x.md", "control characters"),
+        ("../.env", "private or runtime paths"),
+        ("../.env.local", "private or runtime paths"),
+        ("../.bf/events.jsonl", "private or runtime paths"),
+        ("../logs/events.log", "private or runtime paths"),
+        ("bf:///logs/events.log", "private or runtime paths"),
+        ("bf://team-brain/.env", "private or runtime paths"),
         ("javascript:alert(1)", "unsupported link scheme"),
         ("bf:concepts/x.md", "invalid bf:// URI"),
         ("bf://my-brain/concepts/x.md#", "empty # fragment"),
@@ -299,6 +359,11 @@ def test_parse_link_variants_and_rejections() -> None:
         with pytest.raises(Error, match=match):
             markdown.parse_link("projects/web.md", bad_target, "my-brain", allow_record_ref=True)
 
+    with pytest.raises(Error, match="control characters"):
+        markdown.parse_link("projects/web.md", "concepts/x.md", "my-brain", section="bad\nsec")
+    with pytest.raises(Error, match="invisible"):
+        markdown.parse_link("projects/web.md", "concepts/x.md", "my-brain", section="bad\u202esec")
+
     with pytest.raises(Error, match="conflicting link metadata"):
         markdown.parse_link("projects/web.md", "concepts/x.md?rel=a", "my-brain", attr_meta={"rel": "b"})
     with pytest.raises(Error, match="invalid link attribute"):
@@ -314,3 +379,13 @@ def test_anchor_ids_handles_frontmatter_and_rejects_bad_files() -> None:
         markdown.anchor_ids("out.md", b"x" * (MAX_NOTE + 1))
     with pytest.raises(Error, match="not UTF-8"):
         markdown.anchor_ids("out.md", b"\xff")
+
+    # Setext `{#id}` and wrapped list items immediately before `---` thematic break slice accurately without truncation!
+    tricky = (
+        "Setext Section {#setext-id}\n--------------\n\n"
+        "- list item\n  wrapped before hr\n---\n\nAfter hr.\n\n## Next\n\nTail.\n"
+    )
+    comp = markdown.compile_note("concepts/setext.md", tricky.encode(), brain_name="demo")
+    sliced = markdown.extract_section(tricky, "setext-id", comp)
+    assert "After hr." in sliced["text"]
+    assert "Tail." not in sliced["text"]

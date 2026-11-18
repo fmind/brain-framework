@@ -68,8 +68,24 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
     assert "Second notes." in query.read_target(brain, "concepts/collisions.md#notes_1")["text"]
     assert "First notes." not in query.read_target(brain, "concepts/collisions.md#notes_1")["text"]
 
-    for blocked in ("logs/events.log", "Logs/events.log", "LOGS"):
-        with pytest.raises(InputError, match="not readable"):
+    # Auto-anchored headings with underscores, inline emphasis, HTML entities, and Setext underlines slice cleanly!
+    brain.write(
+        "concepts/setext.md",
+        b"---\ntype: guide\nstatus: stable\n---\n# Top\n\n"
+        b"## Cost_benefit & *risk*\n\nInline body.\n\n"
+        b"Setext Section\n--------------\n\nSetext body.\n\n"
+        b"## Tail\n\nTail body.\n",
+    )
+    engine.build(brain)
+    inline_sec = query.read_target(brain, "concepts/setext.md#cost_benefit-risk")
+    assert "Inline body." in inline_sec["text"]
+    assert "Setext body." not in inline_sec["text"]
+    setext_sec = query.read_target(brain, "concepts/setext.md#setext-section")
+    assert "Setext body." in setext_sec["text"]
+    assert "Tail body." not in setext_sec["text"]
+
+    for blocked in ("logs/events.log", "Logs/events.log", "LOGS", ".vale.ini"):
+        with pytest.raises(InputError, match="private or runtime paths"):
             query.read_target(brain, blocked)
 
     non_okf = query.read_target(brain, "docs/index.md")
@@ -105,6 +121,8 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
     records.ingest(brain, "repos", b'[{"id":"r1","title":"Brain Repo","aliases":["repo:fmind/bf"]}]')
     by_alias = query.read_target(brain, "repo:fmind/bf")
     assert by_alias["ref"] == "repos:r1"
+    by_urn_alias = query.read_target(brain, "urn:repo:fmind/bf")
+    assert by_urn_alias["ref"] == "repos:r1"
 
     # 4. Cross-brain `bf://sib/...` read!
     sib_root = tmp_path / "sib"
@@ -186,17 +204,24 @@ def test_query_rg_jq_streaming_and_limits(brain: Store, monkeypatch: pytest.Monk
     assert jq_all["truncated"] is False
 
     # Streaming jq reports unreadable-file / feeder errors cleanly instead of silently dropping records.
-    real_read = brain.read
+    real_iter = brain.iter_read_files
 
-    def broken_read(rel: str, limit: int = 1 << 20) -> bytes:
-        if rel.startswith("memories/"):
-            raise Error("simulated read failure")
-        return real_read(rel, limit)
+    def broken_iter(_name: str, **_kw: object) -> object:
+        raise Error("simulated read failure")
+        yield  # pragma: no cover
 
-    monkeypatch.setattr(brain, "read", broken_read)
+    monkeypatch.setattr(brain, "iter_read_files", broken_iter)
     with pytest.raises(Error, match="simulated read failure"):
         query.query_jq(brain, ".ref")
-    monkeypatch.setattr(brain, "read", real_read)
+    monkeypatch.setattr(brain, "iter_read_files", real_iter)
+
+    # jq confinement blocks modulemeta/import/include file probes and strips host environment variables ($ENV).
+    for forbidden_jq in ('import "foo" as f; .', 'include "foo"; .', 'modulemeta("foo")'):
+        with pytest.raises(InputError, match="jq failed"):
+            query.query_jq(brain, forbidden_jq)
+    monkeypatch.setenv("SECRET_HOST_TOKEN", "should-not-leak")
+    env_probe = query.query_jq(brain, "$ENV.SECRET_HOST_TOKEN // $ENV.HOME // empty")
+    assert env_probe["items"] == []
 
     # Bad JSON returned by jq or invalid jq syntax raises InputError / Error cleanly.
     with pytest.raises(InputError, match="jq failed"):
@@ -256,7 +281,7 @@ def test_evaluate_passes_and_reports_failures(brain: Store) -> None:
     res = query.evaluate(brain)
     assert res["ok"], res
 
-    # Failing eval file reports structured failure reasons without raising.
+    # Failing eval file reports structured failure reasons without raising (including expect_text against empty items!).
     brain.write(
         "evals/failing.yaml",
         f"version: {FORMAT}\n"
@@ -268,6 +293,10 @@ def test_evaluate_passes_and_reports_failures(brain: Store) -> None:
         "    forbid_refs: [projects/offline.md]\n"
         "    min_count: 99\n"
         "    max_count: 0\n"
+        "  - name: self-match-guard\n"
+        "    engine: rg\n"
+        "    query: zzz-unmatched-query-literal\n"
+        "    expect_text: [zzz-unmatched-query-literal]\n"
         "  - name: broken-read\n"
         "    engine: read\n"
         "    query: concepts/nonexistent.md\n".encode(),
@@ -277,8 +306,9 @@ def test_evaluate_passes_and_reports_failures(brain: Store) -> None:
     brain.write("evals/scalar.json", b"123\n")
     fail_res = query.evaluate(brain, target="failing")
     assert not fail_res["ok"]
-    assert fail_res["failed"] == 2
+    assert fail_res["failed"] == 3
     assert len(fail_res["cases"][0]["reasons"]) == 4
+    assert "missing expected text 'zzz-unmatched-query-literal'" in fail_res["cases"][1]["reasons"][0]
 
     all_res = query.evaluate(brain)
     assert not all_res["ok"]

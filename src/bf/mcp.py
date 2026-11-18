@@ -7,6 +7,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.tools import Tool
@@ -53,40 +54,56 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
     selection = (lambda: store) if isinstance(store, Store) else store
     roots: set[str] = set()
 
+    def _add_root(path: Path) -> None:
+        for cand in (path, *([path.resolve()] if path.exists() else [])):
+            if cand.is_absolute() and cand.name:
+                raw = str(cand)
+                roots.update((raw, quote(raw, safe="/"), quote(raw, safe="")))
+
     def selected() -> Store:
         chosen = selection()
-        roots.add(str(chosen.root))
+        _add_root(chosen.root)
+        with suppress(Error):
+            cfg = config.load(chosen)
+            for alias in cfg.brains:
+                with suppress(Error):
+                    _add_root(config.resolve_brain(chosen, cfg, alias).root)
         return chosen
 
-    def redact(message: str) -> str:
+    def _redactor() -> Callable[[str], str]:
         hidden = dict.fromkeys(roots, "<brain>")
-        with suppress(RuntimeError):
-            if (home := Path.home()).is_absolute() and home.name:
-                hidden.setdefault(str(home), "~")
-        for raw_path in sorted(hidden, key=len, reverse=True):
-            pat = rf"(?:(?<=://)|(?<![A-Za-z0-9_./-])){re.escape(raw_path)}"
-            message = re.sub(pat, hidden[raw_path], message)
-        return message
+        with suppress(RuntimeError, OSError):
+            for hp in (Path.home(), Path.home().resolve()):
+                if hp.is_absolute() and hp.name:
+                    for form in (str(hp), quote(str(hp), safe="/"), quote(str(hp), safe="")):
+                        hidden.setdefault(form, "~")
+        if not hidden:
+            return lambda s: s
+        ordered = sorted(hidden, key=len, reverse=True)
+        pat = re.compile(rf"(?<![A-Za-z0-9_.-])(?:{'|'.join(re.escape(p) for p in ordered)})")
+        uri_pat = re.compile(r"file:///+(<brain>|~)")
+        return lambda msg: uri_pat.sub(r"file://\1", pat.sub(lambda m: hidden[m[0]], msg))
 
-    def redact_obj(val: Any) -> Any:
+    def redact_obj(val: Any, redact_fn: Callable[[str], str]) -> Any:
         if isinstance(val, str):
-            return redact(val)
+            return redact_fn(val)
         if isinstance(val, list):
-            return [redact_obj(v) for v in val]
+            return [redact_obj(v, redact_fn) for v in val]
         if isinstance(val, dict):
-            return {redact(k) if isinstance(k, str) else k: redact_obj(v) for k, v in val.items()}
+            return {redact_fn(k) if isinstance(k, str) else k: redact_obj(v, redact_fn) for k, v in val.items()}
         return val
 
     selected()
 
     def reply(op: Callable[[], dict[str, Any]]) -> CallToolResult:
         try:
-            payload = redact_obj(op())
+            res = op()
+            payload = redact_obj(res, _redactor())
             text = terminal(payload).decode("utf-8").rstrip("\n")
             return CallToolResult(content=[TextContent(type="text", text=text)], structured_content=payload)
         except FAILURES as error:
             msg = f"invalid input: {error}" if isinstance(error, InputError) else failure(error)
-            return CallToolResult(content=[TextContent(type="text", text=printable(redact(msg)))], is_error=True)
+            return CallToolResult(content=[TextContent(type="text", text=printable(_redactor()(msg)))], is_error=True)
 
     def bf_status() -> CallToolResult:
         """Return folder counts, failed-unit attention, and unit states."""
@@ -98,20 +115,7 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
 
     def bf_read(target: _TargetArg) -> CallToolResult:
         """Read an OKF note, note#anchor section, pure JSON memory record, or bf:// URI."""
-
-        def _do_read() -> dict[str, Any]:
-            chosen = selected()
-            low = (raw := target.strip()).lower()
-            if low.startswith("bf://") and not low.startswith("bf:///"):
-                cfg = config.load(chosen)
-                host = raw[5:].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
-                if host and host != cfg.name:
-                    if host not in cfg.brains:
-                        raise InputError(f"brain {host!r} is not declared in bf.yaml brains:")
-                    roots.add(str(config.resolve_brain(chosen, cfg, host).root))
-            return query.read_target(chosen, target)
-
-        return reply(_do_read)
+        return reply(lambda: query.read_target(selected(), target, declared_brains_only=True))
 
     def bf_query(q: _QueryArg, mode: _ModeArg = "rg", scope: _ScopeArg = "", limit: _LimitArg = 20) -> CallToolResult:
         """Query compiled notes and sensor memories offline with rg or jq."""
@@ -121,16 +125,7 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
 
     def bf_validate() -> CallToolResult:
         """Validate bf.yaml, JSON Schemas, OKF notes, JSON memories, evals, and links."""
-
-        def _do_val() -> dict[str, Any]:
-            chosen = selected()
-            cfg = config.load(chosen)
-            for alias in cfg.brains:
-                with suppress(Error):
-                    roots.add(str(config.resolve_brain(chosen, cfg, alias).root))
-            return engine.validate(chosen, declared_brains_only=True)
-
-        return reply(_do_val)
+        return reply(lambda: engine.validate(selected(), declared_brains_only=True))
 
     specs = (
         ("bf_status", "Inspect brain status, counts, and unit health", bf_status),
@@ -146,18 +141,6 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
     return MCPServer("bf", log_level="WARNING", tools=tools, **srv_kw)
 
 
-def serve(brain: str = "", *, transport: Literal["stdio", "http"] = "stdio", port: int | None = None) -> None:
-    """Run the read-only MCP server over `stdio` or localhost `streamable-http`."""
-    if transport == "stdio" and port is not None:
-        raise InputError("--port requires --transport http")
-    effective_port = 8765 if port is None else port
-    if effective_port < 1 or effective_port > 65535:
-        raise InputError("port must be between 1 and 65535")
-    srv = server(lambda: config.select(brain))
-    if transport == "stdio":
-        srv.run(transport="stdio")
-    else:
-        import uvicorn
-
-        app = srv.streamable_http_app(json_response=True, stateless_http=True, host="127.0.0.1")
-        uvicorn.run(app, host="127.0.0.1", port=effective_port, log_level="warning")
+def serve(brain: str = "") -> None:
+    """Run the read-only MCP server over `stdio`."""
+    server(lambda: config.select(brain)).run(transport="stdio")

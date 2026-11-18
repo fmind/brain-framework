@@ -133,7 +133,8 @@ class Store:
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(data)
                     stream.flush()
-                    os.fsync(stream.fileno())
+                    if durable:
+                        os.fsync(stream.fileno())
                 _atomic_replace(parent, tmp, leaf, name, durable=durable)
             finally:
                 with suppress(FileNotFoundError):
@@ -149,22 +150,20 @@ class Store:
                 os.fsync(parent)
 
     def exists(self, name: str) -> bool:
-        try:
+        with suppress(Error, OSError):
             return stat.S_ISREG(self.mode(name))
-        except Error, OSError:
-            return False
+        return False
 
     def is_dir(self, name: str) -> bool:
-        try:
+        with suppress(Error, OSError):
             return stat.S_ISDIR(self.mode(name))
-        except Error, OSError:
-            return False
+        return False
 
     def mode(self, name: str) -> int:
         with self.parent(name) as (parent, leaf):
             return os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode
 
-    def _iter_walk(
+    def walk(
         self, directory: str, *, suffix: str = "", limit: int | None = None, skipped: list[str] | None = None
     ) -> Generator[tuple[str, bytes | None]]:
         relative(directory)
@@ -179,55 +178,51 @@ class Store:
             nonlocal visited
             if prefix.count("/") > 64:
                 raise Error(f"{prefix}: directory exceeds the 64-level depth limit")
-            with os.scandir(fd) as entries:
-                for entry in entries:
-                    if _TEMPORARY.fullmatch(entry.name):
-                        continue
-                    visited += 1
-                    if visited > MAX_FILES:
-                        raise Error(f"{directory} exceeds the {MAX_FILES:,}-entry scan limit")
-                    shown = _shown(entry.name)
-                    path = f"{prefix}/{shown or entry.name}"
-                    try:
-                        info = entry.stat(follow_symlinks=False)
-                        opened = (
-                            os.open(entry.name, _DIR, dir_fd=fd)
-                            if stat.S_ISDIR(info.st_mode) and shown is None
-                            else None
-                        )
-                    except FileNotFoundError:
-                        continue
-                    except PermissionError as error:
-                        record_skip(path, "permission denied", error)
-                        continue
-                    except OSError as error:
-                        if error.errno not in {errno.ELOOP, errno.ENOTDIR}:
-                            raise
-                        record_skip(path, LINKED, error)
-                        continue
-                    if shown is not None:
-                        record_skip(path, UNNAMED)
-                    elif opened is not None:
-                        try:
-                            yield from visit(opened, path)
-                        finally:
-                            os.close(opened)
-                    elif stat.S_ISREG(info.st_mode):
-                        if limit is not None and (not suffix or entry.name.endswith(suffix)):
-                            try:
-                                yield path, _read_fd(_open_read(fd, entry.name, path), path, limit)
-                            except FileNotFoundError:
-                                continue
-                            except Error as error:
-                                if skipped is None:
-                                    raise
-                                skipped.append(str(error))
-                        else:
-                            yield path, None
-                    elif stat.S_ISLNK(info.st_mode):
+            with os.scandir(fd) as raw_entries:
+                entries = sorted(raw_entries, key=lambda item: item.name)
+            for entry in entries:
+                if entry.name.startswith(".write-") and _TEMPORARY.fullmatch(entry.name):
+                    continue
+                visited += 1
+                if visited > MAX_FILES:
+                    raise Error(f"{directory} exceeds the {MAX_FILES:,}-entry scan limit")
+                shown = _shown(entry.name)
+                path = f"{prefix}/{shown or entry.name}"
+                if shown is not None:
+                    record_skip(path, UNNAMED)
+                    continue
+                opened: int | None = None
+                ready, data = False, None
+                try:
+                    if entry.is_symlink():
                         record_skip(path, LINKED)
-                    else:
+                    elif entry.is_dir(follow_symlinks=False):
+                        opened = os.open(entry.name, _DIR, dir_fd=fd)
+                    elif not entry.is_file(follow_symlinks=False):
                         record_skip(path, "special files are not allowed")
+                    else:
+                        if limit is not None and (not suffix or entry.name.endswith(suffix)):
+                            data = _read_fd(_open_read(fd, entry.name, path), path, limit)
+                        ready = True
+                except FileNotFoundError:
+                    continue
+                except PermissionError as error:
+                    record_skip(path, "permission denied", error)
+                except Error as error:
+                    if skipped is None:
+                        raise
+                    skipped.append(str(error))
+                except OSError as error:
+                    if error.errno not in {errno.ELOOP, errno.ENOTDIR}:
+                        raise
+                    record_skip(path, LINKED, error)
+                if opened is not None:
+                    try:
+                        yield from visit(opened, path)
+                    finally:
+                        os.close(opened)
+                elif ready:
+                    yield path, data
 
         fd = os.open(self.root, _DIR)
         try:
@@ -255,21 +250,17 @@ class Store:
 
     def files(self, directory: str, *, skipped: list[str] | None = None) -> list[str]:
         """List regular files recursively below `directory`, recording bad entries in `skipped`."""
-        return sorted(p for p, _ in self._iter_walk(directory, skipped=skipped))
+        return sorted(p for p, _ in self.walk(directory, skipped=skipped))
 
     def iter_read_files(
         self, directory: str, *, suffix: str = ".json", limit: int = MAX_FILE, skipped: list[str] | None = None
     ) -> Generator[tuple[str, bytes]]:
         """Yield matching `(path, bytes)` recursively below `directory` in a streaming `O_NOFOLLOW` scan."""
-        for p, data in self._iter_walk(directory, suffix=suffix, limit=limit, skipped=skipped):
-            if data is not None:
-                yield p, data
+        return ((p, d) for p, d in self.walk(directory, suffix=suffix, limit=limit, skipped=skipped) if d is not None)
 
-    def read_files(
-        self, directory: str, *, suffix: str = ".json", limit: int = MAX_FILE, skipped: list[str] | None = None
-    ) -> list[tuple[str, bytes]]:
-        """Read matching regular files recursively below `directory` in a single `O_NOFOLLOW` scan."""
-        return sorted(self.iter_read_files(directory, suffix=suffix, limit=limit, skipped=skipped), key=lambda x: x[0])
+    def count_files(self, directory: str, *, exclude_suffix: str = "") -> int:
+        """Count regular files recursively below `directory` without sorting paths."""
+        return sum(1 for p, _ in self.walk(directory) if not (exclude_suffix and p.endswith(exclude_suffix)))
 
     def append_log(self, name: str, line: bytes, *, max_lines: int = 200, max_bytes: int = 1 << 20) -> None:
         """Append one private (`0600`) log line to `logs/<name>.log`, retaining up to `max_lines` / `max_bytes`."""
@@ -281,12 +272,9 @@ class Store:
         if max_lines > 1:
             with suppress(FileNotFoundError), self.parent(path) as (parent, leaf):
                 with os.fdopen(_open_read(parent, leaf, path), "rb") as stream:
-                    info = os.fstat(stream.fileno())
-                    if not stat.S_ISREG(info.st_mode):
+                    if not stat.S_ISREG((info := os.fstat(stream.fileno())).st_mode):
                         raise Error(f"{path}: expected a regular file")
-                    off = max(0, info.st_size - max_bytes)
-                    if off:
-                        stream.seek(off)
+                    stream.seek(off := max(0, info.st_size - max_bytes))
                     tail = stream.read(max_bytes)
                 if off:
                     tail = tail.split(b"\n", 1)[1] if b"\n" in tail else b""
@@ -329,8 +317,8 @@ def private_dir(store: Store, *parts: str) -> Store:
             os.close(fd)
             fd = child
             info = os.fstat(fd)
-            if info.st_uid != os.getuid() or info.st_mode & 0o077:
-                raise Error("state directory .bf must be owned by you with mode 700")
+            if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                raise Error(f"state directory {'/'.join(target)} must be owned by you with mode 700")
     finally:
         os.close(fd)
     return Store(store.root.joinpath(*target))
@@ -340,11 +328,7 @@ def private_dir(store: Store, *parts: str) -> Store:
 def writer(store: Store, wait: float = 10.0, *, busy: str = _WRITE_BUSY) -> Generator[None]:
     """Hold an exclusive advisory lock on `.bf/write.lock`."""
     with private_dir(store).parent("write.lock") as (parent, leaf):
-        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
-        try:
-            fd = os.open(leaf, flags | os.O_CREAT, 0o600, dir_fd=parent)
-        except FileNotFoundError:
-            fd = os.open(leaf, flags, dir_fd=parent)
+        fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise Error("invalid writer lock")

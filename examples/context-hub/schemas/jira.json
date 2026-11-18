@@ -2,11 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "JiraRecord",
   "type": "object",
-  "required": ["type", "status", "project"],
+  "required": ["type", "status", "links"],
   "additionalProperties": true,
   "properties": {
     "type": { "type": "string", "const": "issue" },
     "status": { "type": "string", "minLength": 1 },
-    "project": { "type": "string", "pattern": "^projects/.+\\.md$" }
+    "links": { "type": "array", "minItems": 1 }
   }
 }

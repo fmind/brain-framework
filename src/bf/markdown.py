@@ -16,8 +16,9 @@ import markdown
 from markdown.extensions import Extension
 from markdown.treeprocessors import Treeprocessor
 
+from bf import models
 from bf.config import yaml_object
-from bf.models import AUTHORED, MAX_NOTE, NAME_RE, RESERVED_SOURCES, Error, clean, clean_text, digest, encode, invisible
+from bf.models import Error, clean, clean_env, clean_text, digest, encode, invisible
 
 _RESERVED_FM = frozenset({"id", "ref", "source", "kind", "text", "headings", "elements", "attrs", "tasks", "sha256"})
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
@@ -64,12 +65,10 @@ def _engine() -> tuple[markdown.Markdown, _Capture]:
 
 
 def editor_lock(path: str) -> bool:
-    """Whether `path` is an editor lockfile such as `.#note.md`."""
     return path.rsplit("/", 1)[-1].startswith(".#")
 
 
 def okf_role(path: str) -> tuple[str, str] | None:
-    """Return `(source, kind)` for authoritative OKF Markdown paths, else `None`."""
     if editor_lock(path) or not path.endswith(".md"):
         return None
     parts = path.split("/")
@@ -79,7 +78,6 @@ def okf_role(path: str) -> tuple[str, str] | None:
 
 
 def compiled_note_path(path: str) -> str:
-    """Map an OKF Markdown note path to its individual JSON memory path."""
     if (role := okf_role(path)) is None:
         raise Error(f"{path}: not an OKF note path")
     slug = path.split("/")[1]
@@ -104,8 +102,8 @@ def _check_body_lines(path: str, source_lines: list[str], offset: int) -> None:
 
 
 def _split_frontmatter(path: str, data: bytes, *, parse_yaml: bool) -> tuple[dict[str, object], str]:
-    if len(data) > MAX_NOTE:
-        raise Error(f"{path}: note exceeds {MAX_NOTE} bytes")
+    if len(data) > models.MAX_NOTE:
+        raise Error(f"{path}: note exceeds {models.MAX_NOTE} bytes")
     try:
         text = data.decode("utf-8").removeprefix("\ufeff")
     except UnicodeError as error:
@@ -185,6 +183,13 @@ def _normalize_target_ext(resolved: str) -> str:
     return resolved
 
 
+def is_private_path(path: str) -> bool:
+    parts = [p.lower() for p in path.split("/") if p]
+    if not parts or parts[0] == "logs":
+        return True
+    return any(p in {".bf", ".git", ".venv", ".env"} or (p.startswith(".env.") and p != ".env.example") for p in parts)
+
+
 def _normalize_note_path(source_path: str, raw_path: str, *, relative_base: bool) -> str:
     if not raw_path:
         if not relative_base:
@@ -195,11 +200,15 @@ def _normalize_note_path(source_path: str, raw_path: str, *, relative_base: bool
     if not relative_base or raw_path.startswith(("projects/", "concepts/", "actions/", "memories/")):
         if any(part in {".", ".."} for part in raw_path.split("/")):
             raise Error(f"{source_path}: brain-root path must not contain . or .. segments")
-        return _normalize_target_ext(raw_path)
-    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), raw_path))
-    if resolved == ".." or resolved.startswith("../"):
-        raise Error(f"{source_path}: link leaves the brain")
-    return _normalize_target_ext(resolved)
+        out = _normalize_target_ext(raw_path)
+    else:
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), raw_path))
+        if resolved == ".." or resolved.startswith("../"):
+            raise Error(f"{source_path}: link leaves the brain")
+        out = _normalize_target_ext(resolved)
+    if is_private_path(out):
+        raise Error(f"{source_path}: private or runtime paths are not allowed in links")
+    return out
 
 
 def _unquote(val: str, src: str) -> str:
@@ -207,8 +216,10 @@ def _unquote(val: str, src: str) -> str:
         dec = unquote(val, errors="strict")
     except UnicodeError as error:
         raise Error(f"{src}: link contains invalid UTF-8 percent-encoding") from error
-    if invisible(dec):
-        raise Error(f"{src}: link contains invisible format characters")
+    if dec:
+        clean_env(dec, f"{src}: link")
+        if invisible(dec):
+            raise Error(f"{src}: link contains invisible format characters")
     return dec
 
 
@@ -217,28 +228,40 @@ def _split_target_parts(source_path: str, raw: str, err_msg: str) -> tuple[str, 
     if re.search(r"\s", before_hash) or (has_hash and not raw_frag):
         raise Error(f"{source_path}: {err_msg}")
     lhs, _, raw_query = before_hash.partition("?")
+    dec_lhs = _unquote(lhs, source_path)
+    if re.search(r"\s", dec_lhs):
+        raise Error(f"{source_path}: {err_msg}")
     frag = clean(_unquote(raw_frag, source_path), "anchor") if raw_frag else ""
-    return _unquote(lhs, source_path), _parse_query(raw_query, source_path), frag
+    return dec_lhs, _parse_query(raw_query, source_path), frag
 
 
-def _is_memory_record_path(path: str) -> bool:
-    parts = path.split("/")
-    return path.startswith("memories/") and len(parts) >= 3 and parts[1] not in AUTHORED
+def is_memory_record_path(path: str) -> bool:
+    p = path.split("/")
+    ok = len(p) == 3 and p[0] == "memories" and bool(models.NAME_RE.fullmatch(p[1])) and p[2].endswith(".json")
+    return ok and p[1] not in models.RESERVED_SOURCES and len(p[2]) > 5 and p[2][0] != "." and ":" not in path
 
 
-def parse_link(
-    source_path: str,
-    raw_target: str,
-    brain_name: str,
-    *,
-    section: str = "",
-    attr_meta: Mapping[str, str] | None = None,
-    relative_base: bool = True,
-    allow_record_ref: bool = False,
-    require_uri: bool = False,
-    prose: bool = False,
-) -> dict[str, Any]:
+def record_link_problem(lnk: Mapping[str, Any]) -> str:
+    k, t, a = str(lnk.get("kind", "")), str(lnk.get("to", "")), str(lnk.get("anchor", ""))
+    sib_h, _, sib_p = t.removeprefix("bf://").partition("/")
+    if k == "record" and not is_memory_record_path(t):
+        return f"record link {t!r} must use memories/<source>/<sha256>.json"
+    if k == "note" and (":" in t or not t.startswith(("projects/", "concepts/", "actions/")) or is_private_path(t)):
+        return f"note link {t!r} must target projects/, concepts/, or actions/"
+    if k == "brain" and (not t.startswith("bf://") or not sib_h or not sib_p or ":" in sib_p or is_private_path(sib_p)):
+        return f"cross-brain link {t!r} must use bf://<brain>/<path>"
+    return "JSON record links do not support #anchor fragments" if a and (k == "record" or t.endswith(".json")) else ""
+
+
+def parse_link(source_path: str, raw_target: str, brain_name: str, **opts: Any) -> dict[str, Any]:
     """Normalize a Markdown, frontmatter, or record link into `{to, kind, anchor, meta, section}`."""
+    section, attr_meta = str(opts.get("section", "")), opts.get("attr_meta")
+    if section:
+        section = clean(section, f"{source_path}: link section")
+        if invisible(section):
+            raise Error(f"{source_path}: link section contains invisible format characters")
+    relative_base, allow_record_ref = bool(opts.get("relative_base", True)), bool(opts.get("allow_record_ref"))
+    require_uri, prose = bool(opts.get("require_uri")), bool(opts.get("prose"))
     target = clean(raw_target, f"{source_path}: link target").strip()
     if len(target) > 8192:
         raise Error(f"{source_path}: link exceeds 8192 characters")
@@ -271,31 +294,34 @@ def parse_link(
         uri = urlsplit(head)
         q_meta = _parse_query(uri.query, source_path)
         anchor = clean(_unquote(raw_frag, source_path), "anchor") if raw_frag else ""
+        _unquote(uri.netloc, source_path)
         rest, netloc = _unquote(uri.path.lstrip("/"), source_path), uri.netloc
-        if netloc in RESERVED_SOURCES:
+        if netloc in models.RESERVED_SOURCES:
             raise Error(f"{source_path}: use bf:///{netloc}/... instead of bf://{netloc}/...")
-        if not rest:
+        if not rest or re.search(r"\s", rest):
             raise Error(f"{source_path}: expected bf:///path or bf://brain/path")
         src_part, sep, rec_id = rest.partition(":")
-        is_record = bool(sep and NAME_RE.fullmatch(src_part) and rec_id and "/" not in src_part)
+        is_record = bool(sep and models.NAME_RE.fullmatch(src_part) and rec_id and "/" not in src_part)
         if sep and not allow_record_ref:
-            raise Error(
-                f"{source_path}: legacy record reference in bf:// URI; use bf:///memories/<source>/<sha256>.json"
-            )
-        if not is_record and ("\\" in rest or any(p in {"", ".", ".."} for p in rest.split("/"))):
-            raise Error(f"{source_path}: invalid path in bf:// URI")
+            msg = "legacy record reference in bf:// URI; use bf:///memories/<source>/<sha256>.json"
+            raise Error(f"{source_path}: {msg}")
+        if not is_record:
+            if "\\" in rest or any(p in {"", ".", ".."} for p in rest.split("/")):
+                raise Error(f"{source_path}: invalid path in bf:// URI")
+            if is_private_path(rest):
+                raise Error(f"{source_path}: private or runtime paths are not allowed in links")
         if netloc in {"", brain_name}:
             if prose:
                 raise Error(f"{source_path}: use a relative path in Markdown prose instead of {target!r}")
             to = rest if is_record else _normalize_note_path(source_path, rest, relative_base=False)
-            link_kind = "record" if (is_record or _is_memory_record_path(to)) else "note"
+            link_kind = "record" if (is_record or is_memory_record_path(to)) else "note"
             return mk(to, link_kind, anchor, q_meta)
         return mk(f"bf://{netloc}/{rest if is_record else _normalize_target_ext(rest)}", "brain", anchor, q_meta)
 
     if scheme and scheme_match is not None:
         if not allow_record_ref:
             raise Error(f"{source_path}: unsupported link scheme {scheme}:; use a relative path, bf://, or https://")
-        if not NAME_RE.fullmatch(scheme_match[1]) or not scheme_match[2]:
+        if not models.NAME_RE.fullmatch(scheme_match[1]) or not scheme_match[2]:
             raise Error(f"{source_path}: invalid record reference {target!r}")
         rhs = scheme_match[2]
         if rhs.startswith(("https://", "http://")):
@@ -308,14 +334,14 @@ def parse_link(
         return mk(f"{scheme}:{rec_id}", "record", anchor, q_meta)
 
     if require_uri:
-        raise Error(f"{source_path}: frontmatter links must use bf:// or https:// URLs")
+        raise Error(f"{source_path}: links must use bf:// or https:// URLs")
     decoded_path, q_meta, anchor = _split_target_parts(
         source_path, target, "invalid Markdown link target or trailing #"
     )
     if not decoded_path and not anchor:
         raise Error(f"{source_path}: empty link target")
     to = _normalize_note_path(source_path, decoded_path, relative_base=relative_base)
-    return mk(to, "record" if _is_memory_record_path(to) else "note", anchor, q_meta)
+    return mk(to, "record" if is_memory_record_path(to) else "note", anchor, q_meta)
 
 
 def add_link(seen: set[tuple[Any, ...]], out: list[dict[str, Any]], parsed: dict[str, Any]) -> None:
@@ -339,6 +365,7 @@ def _extract_ast(path: str, body: str):
     elements: list[dict[str, Any]] = []
     tasks: list[dict[str, Any]] = []
     cited_footnotes: dict[str, str] = {}
+    consumed_p: set[int] = set()
     current_section = ""
 
     def register_id(item_id: str, meta: dict[str, str]) -> None:
@@ -386,7 +413,12 @@ def _extract_ast(path: str, body: str):
             tm = _TASK.match(_own_inline_text(elem, stash)) if is_task_li else None
             handled_task = bool(tm and tm[2].strip())
             if tm and (task_body := tm[2].strip()[:512]):
-                t_meta = _extract_meta(elem.attrib, path, drop=frozenset({"id"}))
+                src_attrib = elem.attrib
+                if not src_attrib and len(elem) and elem[0].tag == "p" and elem[0].attrib:
+                    src_attrib = elem[0].attrib
+                    consumed_p.add(id(elem[0]))
+                    elem_id = clean(src_attrib["id"], f"{path}: element id") if src_attrib.get("id") else ""
+                t_meta = _extract_meta(src_attrib, path, drop=frozenset({"id"}))
                 if elem_id:
                     register_id(elem_id, t_meta)
                 t_item: dict[str, Any] = {"text": task_body, "done": tm[1] != " ", "section": active, "meta": t_meta}
@@ -400,7 +432,7 @@ def _extract_ast(path: str, body: str):
                 if elem_id:
                     register_id(elem_id, meta)
                 add_elem(elem, "admonition", elem_id, active, meta)
-            elif not handled_task and elem is not root and elem.attrib:
+            elif not handled_task and id(elem) not in consumed_p and elem is not root and elem.attrib:
                 is_lang = (
                     tag == "code" and set(elem.attrib) == {"class"} and len(cls) == 1 and cls[0][:9] == "language-"
                 )
@@ -425,30 +457,60 @@ def anchor_ids(path: str, data: bytes) -> set[str]:
     return set(_extract_ast(path, body)[4])
 
 
-def extract_relations(raw_relations: object, label: str, *, strict: bool = True) -> list[tuple[str, dict[str, str]]]:
-    """Extract `(target, meta)` pairs from list-of-objects or mapping-of-targets `relations` structures."""
-    if raw_relations is None:
-        return []
-    out: list[tuple[str, dict[str, str]]] = []
-    if isinstance(raw_relations, list):
-        for rel in raw_relations:
-            if isinstance(rel, dict) and isinstance(tgt := (rel.get("target") or rel.get("to")), str) and tgt.strip():
-                rtype = rel.get("type") or rel.get("rel")
-                meta = {"rel": str(rtype).strip()} if isinstance(rtype, str) and rtype.strip() else {}
-                out.append((tgt.strip(), meta))
-            elif strict:
-                raise Error(f"{label}: relations list items must be objects with target or to")
-    elif isinstance(raw_relations, dict):
-        for rtype, raw_vals in raw_relations.items():
-            items = [raw_vals] if isinstance(raw_vals, str) else raw_vals
-            if not isinstance(items, list) or not all(isinstance(x, str) for x in items):
-                if strict:
-                    raise Error(f"{label}: relations.{rtype} must be a list of URI strings")
-                items = [x for x in items if isinstance(x, str)] if isinstance(items, list) else []
-            out.extend((t.strip(), {"rel": str(rtype)}) for t in items if t.strip())
-    elif strict:
-        raise Error(f"{label}: relations must be a list or mapping")
-    return out
+def extract_section(text: str, anchor: str, compiled: dict[str, Any]) -> dict[str, Any]:
+    """Extract a `#anchor` section, block element, task, or link metadata from `text` and `compiled`."""
+    for key, out_key in (("elements", "element"), ("tasks", "task")):
+        for item in compiled.get(key, []):
+            if isinstance(item, dict) and item.get("id") == anchor:
+                return {"anchor": anchor, out_key: item}
+    headings = [h for h in compiled.get("headings", []) if isinstance(h, dict)]
+    heading = next((h for h in headings if h.get("id") == anchor), None)
+    if heading is None:
+        if isinstance(attrs := compiled.get("attrs"), dict) and anchor in attrs:
+            return {"anchor": anchor, "meta": attrs[anchor]}
+        raise Error(f"{compiled['ref']}: missing anchor #{anchor}")
+    lines = text.splitlines()
+    fm_end = next((i + 1 for i in range(1, len(lines)) if lines[i].rstrip() == "---"), 0)
+    body_start = fm_end if lines and lines[0].rstrip() == "---" else 0
+    idx, fence, prev_heading = body_start, "", False
+    spans: list[tuple[int, str]] = []
+    while idx < len(lines):
+        ln, was_heading, prev_heading = lines[idx], prev_heading, False
+        if m_f := FENCE.fullmatch(ln):
+            if fence and m_f[1][0] == fence[0] and len(m_f[1]) >= len(fence) and not m_f[2].strip():
+                fence = ""
+            elif not fence and not (m_f[1][0] == "`" and "`" in m_f[2]):
+                fence = m_f[1]
+            idx += 1
+            continue
+        if not fence:
+            is_atx = bool(re.match(r"^ {0,3}#{1,6}(?:[ \t]+|$)", ln))
+            at_block = idx == body_start or was_heading or not lines[idx - 1].strip()
+            is_para = not is_atx and at_block and bool(ln.strip()) and not ln.startswith(("    ", "\t"))
+            is_para = is_para and not ln.lstrip().startswith((">", "-", "*", "+", "|", ":"))
+            is_setext = is_para and idx + 1 < len(lines) and bool(re.fullmatch(r"(?:=+|-+)[ ]*", lines[idx + 1]))
+            if is_atx or is_setext:
+                end_h = idx + (2 if is_setext else 1)
+                spans.append((idx, "\n".join(lines[idx:end_h])))
+                idx, prev_heading = end_h, True
+                continue
+        idx += 1
+    md, capture = _engine()
+    md.reset()
+    md.convert("\n\n".join(f"bfspan:{k}\n\n{span}" for k, (_, span) in enumerate(spans)))
+    known_ids = {str(h.get("id", "")) for h in headings}
+    parsed_spans: list[tuple[int, str, int]] = []
+    cur_k = -1
+    for elem in capture.root if capture.root is not None else ():
+        if elem.tag == "p" and (elem.text or "").startswith("bfspan:"):
+            cur_k = int((elem.text or "")[7:])
+        elif elem.tag in _HEADINGS and 0 <= cur_k < len(spans) and (hid := elem.attrib.get("id", "")) in known_ids:
+            parsed_spans.append((spans[cur_k][0], hid, int(elem.tag[1])))
+    hit = next(((pos, start, lvl) for pos, (start, hid, lvl) in enumerate(parsed_spans) if hid == anchor), None)
+    if hit is None:
+        return {"anchor": anchor, "heading": heading, "text": ""}
+    end_line = next((s for s, _, lvl in parsed_spans[hit[0] + 1 :] if lvl <= hit[2]), len(lines))
+    return {"anchor": anchor, "heading": heading, "text": "\n".join(lines[hit[1] : end_line]).strip()}
 
 
 def normalize_tags(raw_tags: object, label: str) -> list[str]:
@@ -476,6 +538,8 @@ def compile_note(path: str, data: bytes, *, brain_name: str) -> dict[str, Any]:
     frontmatter, body = _split_frontmatter(path, data, parse_yaml=True)
     if forbidden := sorted(_RESERVED_FM & frontmatter.keys()):
         raise Error(f"{path}: frontmatter cannot override computed field {', '.join(forbidden)}")
+    if "relations" in frontmatter:
+        raise Error(f"{path}: frontmatter 'relations' was removed; use 'links' with ?rel=... query parameters")
 
     plain_text, headings, raw_links, elements, attrs, tasks = _extract_ast(path, body)
     fm = dict(frontmatter)
@@ -489,17 +553,24 @@ def compile_note(path: str, data: bytes, *, brain_name: str) -> dict[str, Any]:
 
     fm_link_specs: list[tuple[str, dict[str, str], str, bool]] = []
     if (fm_links := fm.pop("links", None)) is not None:
-        if not isinstance(fm_links, list) or not all(isinstance(v, str) for v in fm_links):
-            raise Error(f"{path}: frontmatter links must be a list of strings")
-        fm_link_specs.extend((v, {}, "", True) for v in fm_links)
+        if not isinstance(fm_links, list):
+            raise Error(f"{path}: frontmatter links must be a list of URL strings or {{to, meta}} objects")
+        for item in fm_links:
+            if isinstance(item, str):
+                fm_link_specs.append((item, {}, "", True))
+            elif (
+                isinstance(item, dict)
+                and set(item) <= {"to", "meta"}
+                and isinstance(to_s := item.get("to"), str)
+                and isinstance(m_raw := item.get("meta", {}), dict)
+                and all(isinstance(k, str) and isinstance(v, str) for k, v in m_raw.items())
+            ):
+                fm_link_specs.append((to_s, dict(m_raw), "", True))
+            else:
+                raise Error(f"{path}: frontmatter links must be a list of URL strings or {{to, meta}} objects")
     if isinstance(sources_val := fm.get("sources"), list):
-        fm_link_specs.extend(
-            (res_str.strip(), {"rel": "cites"}, "", True)
-            for s in sources_val
-            if isinstance(s, dict) and isinstance(res_str := s.get("resource"), str) and res_str.strip()
-        )
-    for tgt, meta in extract_relations(fm.get("relations"), path, strict=True):
-        fm_link_specs.append((tgt, meta, "", True))
+        cites = (s.get("resource") for s in sources_val if isinstance(s, dict))
+        fm_link_specs.extend((r.strip(), {"rel": "cites"}, "", True) for r in cites if isinstance(r, str) and r.strip())
 
     links: list[dict[str, Any]] = []
     seen_links: set[tuple[Any, ...]] = set()

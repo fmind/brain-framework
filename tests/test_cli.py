@@ -133,14 +133,15 @@ def test_cli_commands_and_exit_codes(
     assert cli.run(["--brain", str(target), "run", "--due"]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
-    # `mcp` rejects `--port` with stdio transport (exit 2) and accepts `--transport http --port`.
-    called_mcp: list[tuple[str, str, int | None]] = []
-    monkeypatch.setattr(
-        "bf.mcp.serve", lambda b, *, transport="stdio", port=None: called_mcp.append((b, transport, port))
-    )
+    # `mcp` serves `stdio` only and rejects removed `--transport` and `--port` flags (exit 2).
+    called_mcp: list[str] = []
+    monkeypatch.setattr("bf.mcp.serve", lambda b: called_mcp.append(b))
     assert cli.run(["mcp", "--brain", str(target)]) == 0
-    assert cli.run(["mcp", "--brain", str(target), "--transport", "http", "--port", "9000"]) == 0
-    assert called_mcp == [(str(target), "stdio", None), (str(target), "http", 9000)]
+    assert called_mcp == [str(target)]
+    assert cli.run(["mcp", "--brain", str(target), "--transport", "http"]) == 2
+    capsys.readouterr()
+    assert cli.run(["mcp", "--brain", str(target), "--port", "9000"]) == 2
+    capsys.readouterr()
 
     assert cli.run(["eval", "--brain", str(target)]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True

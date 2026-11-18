@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -53,29 +54,50 @@ def test_schemas_compile_and_describe_all_validation_rules(brain: Store) -> None
     assert any("must be one of" in e for e in schemas.validate_instance(strict, {"a": 1, "b": "z"}, "rec"))
 
 
+def _load_source(store: Store, source: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for rel, raw in store.walk(f"memories/{source}", suffix=".json", limit=4 << 20):
+        assert raw is not None
+        obj = decode(raw, rel)
+        assert isinstance(obj, dict)
+        out.append(obj)
+    return out
+
+
 def test_parse_batch_supports_array_envelope_single_object_and_jsonl() -> None:
-    assert records.parse_batch(b"\xef\xbb\xbf  \n ") == []
-    arr = records.parse_batch(b'[{"id": "1", "title": "One"}]')
-    single = records.parse_batch(b'{"id": "solo", "title": "Solo"}')
+    assert records.parse_batch_envelope(b"\xef\xbb\xbf  \n ") == ([], False)
+    arr, _ = records.parse_batch_envelope(b'[{"id": "1", "title": "One"}]')
+    single, _ = records.parse_batch_envelope(b'{"id": "solo", "title": "Solo"}')
+    pretty_single, pretty_inc = records.parse_batch_envelope(b'{\n  "id": "multi",\n  "title": "Pretty"\n}')
     env_items, incomplete = records.parse_batch_envelope(
         b'{"records": [{"id": "e1", "title": "Env"}], "incomplete": {"missed": 2}}'
     )
-    jsonl = records.parse_batch(b'\n{"id": "1", "title": "One"}\n\n{"id": "2", "title": "Two"}\n')
+    bool_items, bool_inc = records.parse_batch_envelope(
+        b'{"records": [{"id": "e2", "title": "Bool"}], "incomplete": true}'
+    )
+    _, zero_inc = records.parse_batch_envelope(b'{"records": [], "incomplete": {"missed": 0}}')
+    jsonl, _ = records.parse_batch_envelope(b'\n{"id": "1", "title": "One"}\n\n{"id": "2", "title": "Two"}\n')
     assert len(arr) == 1
     assert single[0]["id"] == "solo"
+    assert (pretty_single[0]["id"], pretty_inc) == ("multi", False)
     assert (len(env_items), incomplete) == (1, True)
+    assert (len(bool_items), bool_inc, zero_inc) == (1, True, False)
     assert [r["id"] for r in jsonl] == ["1", "2"]
 
-    with pytest.raises(Error, match="exceeds"):
-        records.parse_batch(b"x" * (MAX_BATCH + 1))
-    with pytest.raises(Error, match="not valid UTF-8"):
-        records.parse_batch(b"\xff")
-    with pytest.raises(Error, match="JSON array of record objects"):
-        records.parse_batch(b"[1, 2]")
-    with pytest.raises(Error, match="expected a JSON array of record objects"):
-        records.parse_batch(b'{"records": "bad"}')
-    with pytest.raises(Error, match="line 1: expected a JSON object"):
-        records.parse_batch(b'"scalar"\n')
+    for payload, match in (
+        (b"x" * (MAX_BATCH + 1), "exceeds"),
+        (b"\xff", "not valid UTF-8"),
+        (b"[1, 2]", "JSON array of record objects"),
+        (b'{"records": "bad"}', "expected a JSON array of record objects"),
+        (b'"scalar"\n', "line 1: expected a JSON object"),
+        (b'{\n  "id": "1",\n  "id": "2"\n}', "duplicate key"),
+        (b'{\n  "id": "1",\n  "score": NaN\n}', "must be finite"),
+        (b'{"records": [], "incomplete": "yes"}', "expected a boolean"),
+        (b'{"records": [], "incomplete": {"missed": -1}}', "expected a boolean"),
+        (b'{"records": [], "incomplete": {"missed": true}}', "expected a boolean"),
+    ):
+        with pytest.raises(Error, match=match):
+            records.parse_batch_envelope(payload)
 
 
 def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store) -> None:
@@ -98,6 +120,7 @@ def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store)
     with pytest.raises(Error, match="must be one of"):
         records.ingest(brain, "jira", b'[{"id":"J-1","title":"Bug","priority":"P9"}]', now=t1)
 
+    meet_file = records.record_file("meetings", "decision-1")
     batch1 = json.dumps(
         [
             {
@@ -110,10 +133,10 @@ def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store)
                 "updated": "",
                 "tags": ["auth"],
                 "links": [
-                    "projects/offline.md",
-                    {"to": "projects/offline.md", "anchor": "decision", "meta": {"rel": "blocks"}},
+                    "bf:///projects/offline.md",
+                    {"to": "bf:///projects/offline.md", "anchor": "decision", "meta": {"rel": "blocks"}},
+                    {"to": f"bf:///{meet_file}", "meta": {"rel": "cites"}},
                 ],
-                "relations": [{"target": "meetings:decision-1", "type": "cites"}],
             }
         ]
     ).encode()
@@ -124,32 +147,31 @@ def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store)
 
     res1 = records.ingest(brain, "jira", batch1, now=t1)
     assert (res1["added"], res1["updated"], res1["unchanged"], brain.exists(rec_path)) == (1, 0, 0, True)
-    saved1 = records.load_source(brain, "jira")
+    saved1 = _load_source(brain, "jira")
     assert saved1[0]["updated"] == "2026-11-15T09:00:00Z"
     assert "url" not in saved1[0]
-    assert any(lnk["to"] == "meetings:decision-1" for lnk in saved1[0]["links"])
+    assert any(lnk["to"] == meet_file and lnk["meta"] == {"rel": "cites"} for lnk in saved1[0]["links"])
 
-    # Ingesting new records emits `records.ingested` in `.bf/events.json` + `logs/events.log`, and `append_event(..., dedupe=True)` is idempotent!
-    ev1 = records.append_event(brain, "channel.message", "chat", {"id": "msg-42", "text": "hi"}, dedupe=True, now=t1)
-    ev2 = records.append_event(brain, "channel.message", "chat", {"id": "msg-42", "text": "hi"}, dedupe=True, now=t2)
+    # Ingesting new records emits `records.ingested` in `.bf/events.jsonl` + `logs/events.log`, and `append_event(..., dedupe=True)` is idempotent!
+    ev1 = records.append_event(brain, "service.message", "chat", {"id": "msg-42", "text": "hi"}, dedupe=True, now=t1)
+    ev2 = records.append_event(brain, "service.message", "chat", {"id": "msg-42", "text": "hi"}, dedupe=True, now=t2)
     assert ev1 == ev2
-    ev_raw = private_dir(brain).read("events.json")
-    ev_state = decode(ev_raw, ".bf/events.json")
-    assert isinstance(ev_state, dict)
-    assert sum(1 for e in ev_state["events"] if e["data"].get("id") == "msg-42") == 1
+    ev_items, latest_seq = records.read_events(brain)
+    assert latest_seq == records.latest_event_seq(brain)
+    assert sum(1 for e in ev_items if e["data"].get("id") == "msg-42") == 1
     ev_lines = [decode(ln, "logs/events.log") for ln in brain.read("logs/events.log").splitlines() if ln.strip()]
-    assert any(isinstance(ln, dict) and ln.get("message") == "channel.message" for ln in ev_lines)
+    assert any(isinstance(ln, dict) and ln.get("message") == "service.message" for ln in ev_lines)
 
     # Re-ingesting identical payload without explicit `updated` preserves original `updated` timestamp!
     res2 = records.ingest(brain, "jira", batch1, now=t2)
     assert (res2["added"], res2["updated"], res2["unchanged"]) == (0, 0, 1)
-    assert records.load_source(brain, "jira")[0]["updated"] == "2026-11-15T09:00:00Z"
+    assert _load_source(brain, "jira")[0]["updated"] == "2026-11-15T09:00:00Z"
 
     # Modifying title updates record and advances `updated` to t2.
     batch2 = json.dumps([{"id": "J-1", "title": "Fix SSO login", "priority": "P0"}]).encode()
     res3 = records.ingest(brain, "jira", batch2, now=t2)
     assert (res3["added"], res3["updated"], res3["unchanged"]) == (0, 1, 0)
-    assert records.load_source(brain, "jira")[0]["updated"] == "2026-11-15T10:00:00Z"
+    assert _load_source(brain, "jira")[0]["updated"] == "2026-11-15T10:00:00Z"
 
     # `.forgotten` skips new records and deletes already-saved forgotten records!
     brain.write("memories/jira/.forgotten", b"# comment\nJ-1\nJ-2\n")
@@ -178,7 +200,7 @@ def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store)
     with pytest.raises(Error, match="snapshot would remove 4 of 4 records"):
         records.ingest(brain, "catalog", b"[]", mode="snapshot", now=t2)
     emptied = records.ingest(brain, "catalog", b"[]", mode="snapshot", allow_removal=True, now=t2)
-    assert (emptied["records"], emptied["removed"], records.load_source(brain, "catalog")) == (0, 4, [])
+    assert (emptied["records"], emptied["removed"], _load_source(brain, "catalog")) == (0, 4, [])
 
 
 @pytest.mark.parametrize(
@@ -225,8 +247,22 @@ def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store)
             Error,
             "section must be",
         ),
-        ("valid", "upsert", b'[{"id":"1","title":"t","relations":{"sender":123}}]', Error, "list of URI strings"),
-        ("valid", "upsert", b'[{"id":"1","title":"t","relations":[{"bad":1}]}]', Error, "objects with target or to"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","relations":[]}]', Error, "'relations' was removed; use 'links'"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","links":["projects/offline.md"]}]', Error, "links must use bf://"),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"t","links":["meetings:decision-1"]}]',
+            Error,
+            "unsupported link scheme",
+        ),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"t","links":[{"to":"concepts/a.md","anchor":123}]}]',
+            Error,
+            "anchor must be a string",
+        ),
         (
             "valid",
             "upsert",
@@ -241,6 +277,34 @@ def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store)
             Error,
             "duplicate record id",
         ),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"a","links":["bf:///docs/index.md"]}]',
+            Error,
+            "must target projects/, concepts/, or actions/",
+        ),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"a","links":["bf:///memories/concepts/welcome.json"]}]',
+            Error,
+            "must target projects/, concepts/, or actions/",
+        ),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"a","links":["bf:///memories/notes/x.json"]}]',
+            Error,
+            "must target projects/, concepts/, or actions/",
+        ),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"a","links":["bf:///memories/jira/abcdef.json#frag"]}]',
+            Error,
+            "do not support #anchor fragments",
+        ),
     ],
 )
 def test_ingest_rejects_invalid_records_and_arguments(
@@ -250,37 +314,95 @@ def test_ingest_rejects_invalid_records_and_arguments(
         records.ingest(brain, source, payload, mode=mode)  # ty: ignore[invalid-argument-type]
 
 
-def test_load_source_handles_missing_and_corrupt_files(brain: Store) -> None:
-    # Dict-form `relations` and `entity` identity on ingested records drop overlapping untyped links:
+def test_record_links_dedupe_events_jsonl_compaction_and_cursor_healing(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Typed `{to, meta}` links on ingested records drop overlapping untyped links and re-ingest idempotently:
     ing = records.ingest(
         brain,
         "mail",
         b'[{"id":"m1","title":"Msg","entity":"msg:1",'
-        b'"links":["person:email/a@example.com",{"to":"concepts/welcome.md","anchor":"top"}],'
-        b'"relations":{"sender":["person:email/a@example.com"]}}]',
+        b'"links":["https://example.com/u/a",{"to":"https://example.com/u/a","meta":{"rel":"sender"}},'
+        b'{"to":"concepts/welcome.md","anchor":"top"}]}]',
     )
     assert ing["records"] == 1
-    stored_mail = records.load_source(brain, "mail")[0]
-    assert len(stored_mail["links"]) == 2
-    assert stored_mail["links"][0]["anchor"] == "top"
-    assert stored_mail["links"][1]["meta"] == {"rel": "sender"}
+    stored_mail = _load_source(brain, "mail")[0]
+    links = stored_mail["links"]
+    assert isinstance(links, list)
+    assert len(links) == 2
+    assert links[0] == {
+        "to": "https://example.com/u/a",
+        "kind": "url",
+        "anchor": "",
+        "meta": {"rel": "sender"},
+        "section": "",
+    }
+    assert links[1]["anchor"] == "top"
+    # Re-ingesting normalized stored record object (with brain-root `to` in link object) succeeds unchanged:
+    reing = records.ingest(brain, "mail", json.dumps([stored_mail]).encode())
+    assert reing["unchanged"] == 1
 
-    assert records.load_source(brain, "missing") == []
-    brain.write("memories/corrupt/bad.txt", b"text")
-    with pytest.raises(Error, match=r"expected a \.json record file"):
-        records.load_source(brain, "corrupt")
-    brain.write("memories/corrupt2/bad.json", b"\xff\xfe")
-    with pytest.raises(Error, match="invalid JSON"):
-        records.load_source(brain, "corrupt2")
-    brain.write("memories/scalar/s.json", b"123\n")
-    with pytest.raises(Error, match="expected a JSON object"):
-        records.load_source(brain, "scalar")
+    assert _load_source(brain, "missing") == []
 
-    # Oversized events fail on `logs/events.log` bounds BEFORE advancing `.bf/events.json`.
+    # Oversized events fail on `logs/events.log` bounds BEFORE advancing `.bf/events.jsonl`.
     records.append_event(brain, "test.ok", "t", {"id": "e0"})
-    before = decode(private_dir(brain).read("events.json"), ".bf/events.json")
-    assert isinstance(before, dict)
+    before_seq = records.latest_event_seq(brain)
+    before_bytes = private_dir(brain).read("events.jsonl")
     with pytest.raises(Error, match="exceeds"):
         records.append_event(brain, "test.huge", "t", {"id": "e1", "blob": "x" * ((1 << 20) + 64)})
-    after = decode(private_dir(brain).read("events.json"), ".bf/events.json")
-    assert after == before
+    assert records.latest_event_seq(brain) == before_seq
+    assert private_dir(brain).read("events.jsonl") == before_bytes
+
+    # Cursor self-healing when `after_seq > latest`, multi-chunk `latest_event_seq`, and amortized compaction!
+    healed, latest = records.read_events(brain, after_seq=999_999)
+    assert len(healed) >= 1
+    assert latest == before_seq
+
+    priv = private_dir(brain)
+    # Multi-chunk (> 65536 bytes) tail scan in `latest_event_seq`:
+    records.append_event(brain, "test.pad", "t", {"id": "pad", "blob": "y" * 70_000})
+    records.append_event(brain, "test.tail", "t", {"id": "tail"})
+    assert records.latest_event_seq(brain) == before_seq + 2
+
+    # Amortized compaction when `seq > MAX_EVENTS and seq % 200 == 0`:
+    monkeypatch.setattr(records, "MAX_EVENTS", 5)
+    seed_lines = b"".join(
+        (
+            json.dumps(
+                {"seq": s, "id": f"e-{s}", "time": "2026-11-15T00:00:00Z", "kind": "k", "source": "s", "data": {}}
+            )
+            + "\n"
+        ).encode()
+        for s in range(190, 200)
+    )
+    priv.write("events.jsonl", seed_lines, mode=0o600, durable=False)
+    ev200 = records.append_event(brain, "test.compact", "t", {"id": "c200"})
+    assert ev200["seq"] == 200
+    compacted, comp_latest = records.read_events(brain)
+    assert comp_latest == 200
+    assert len(compacted) == 5
+
+    # Byte-cap compaction (`size_after > COMPACT_BYTES`) trims to half-budget (`<= 300`) and next append skips rewrite:
+    monkeypatch.setattr(records, "MAX_EVENTS", 1000)
+    monkeypatch.setattr(records, "COMPACT_BYTES", 600)
+    for idx in range(5):
+        records.append_event(brain, "test.bytes", "t", {"id": f"b{idx}", "pad": "z" * 90})
+    assert len(private_dir(brain).read("events.jsonl")) <= 300
+    records.append_event(brain, "test.bytes", "t", {"id": "b5", "pad": "z" * 90})
+    assert 300 < len(private_dir(brain).read("events.jsonl")) < 600
+
+    # Empty / blank `.bf/events.jsonl` and missing `.bf/events.jsonl` return `0` cleanly:
+    priv.write("events.jsonl", b"", mode=0o600, durable=False)
+    assert records.latest_event_seq(brain) == 0
+    priv.write("events.jsonl", b"\n\n", mode=0o600, durable=False)
+    assert records.latest_event_seq(brain) == 0
+    priv.delete("events.jsonl")
+    assert records.read_events(brain) == ([], 0)
+    first_dedup = records.append_event(brain, "test.dedup", "t", {"id": "d1"}, dedupe=True)
+    assert records.append_event(brain, "test.dedup", "t", {"id": "d1"}, dedupe=True)["id"] == first_dedup["id"]
+
+    # Symlinked `.bf/events.jsonl` is refused by `O_NOFOLLOW`:
+    (priv.root / "events.jsonl").unlink()
+    (priv.root / "events.jsonl").symlink_to(brain.root / "bf.yaml")
+    with pytest.raises(Error, match="symlinks are not followed"):
+        records.append_event(brain, "test.sym", "t", {"id": "s1"})

@@ -18,7 +18,7 @@ bf validate
 bf eval
 ```
 
-`bf init` creates a minimal flat layout (`projects/`, `concepts/`, `actions/`, `memories/`, `logs/`, `evals/`, `docs/`, `skills/bf/SKILL.md`, `schemas/{bf.schema.json,record.json,concepts.json,evals.json}`, linking `.agents/skills/bf`, with operational folders like `sensors/`, `routines/`, `channels/`, `prompts/`, and `settings/` added as needed) and compiles `concepts/welcome.md` into `memories/concepts/welcome.json`. `bf validate` prints:
+`bf init` creates a minimal flat layout (`projects/`, `concepts/`, `actions/`, `memories/`, `logs/`, `evals/`, `docs/`, `skills/bf/SKILL.md`, `schemas/{bf.schema.json,record.json,concepts.json,evals.json}`, linking `.agents/skills/bf`, with operational folders like `sensors/`, `routines/`, `services/`, `prompts/`, and `settings/` added as needed) and compiles `concepts/welcome.md` into `memories/concepts/welcome.json`. `bf validate` prints:
 
 ```json
 { "brain": "brain", "notes": 1, "ok": true, "problems": [], "records": 0 }

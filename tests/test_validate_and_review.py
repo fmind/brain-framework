@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from bf import engine, records
-from bf.models import FORMAT, Error, InputError
+from bf.models import FORMAT, Error, InputError, encode
 from bf.storage import Store
 
 
@@ -24,7 +24,7 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     assert (root / "evals" / "smoke.yaml").is_file()
     for folder in ("projects", "concepts", "actions", "memories", "logs", "schemas"):
         assert (root / folder).is_dir()
-    for deferred in ("sensors", "routines", "channels", "prompts", "settings"):
+    for deferred in ("sensors", "routines", "services", "channels", "prompts", "settings"):
         assert not (root / deferred).exists()
     assert engine.validate(store)["ok"]
     assert engine.build(store)["ok"]
@@ -56,6 +56,17 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     store.write("concepts/welcome.md", raw_welcome)
     store.write("memories/concepts/welcome.json", compiled_bytes)
 
+    tampered = json.loads(store.read("memories/actions/2026-11-15_ship-pure-json.json"))
+    tampered["title"] = "Tampered Title"
+    store.write("memories/actions/2026-11-15_ship-pure-json.json", encode(tampered))
+    assert any(
+        "out of sync with actions/2026-11-15_ship-pure-json/ACTION.md" in p for p in engine.validate(store)["problems"]
+    )
+    assert engine.build(store, incremental=True)["written"] == 0
+    assert not engine.validate(store)["ok"]
+    assert engine.build(store)["written"] == 1
+    assert engine.validate(store)["ok"]
+
     # Deleting a note prunes its compiled JSON file on next `bf build`!
     store.write("projects/temp.md", b"---\ntype: project\nstatus: draft\n---\n# Temp\n")
     engine.build(store)
@@ -75,6 +86,22 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
 
     with pytest.raises(InputError, match="lowercase letter"):
         engine.init_brain(tmp_path / "bad-name", name="Bad_Name")
+    assert not (tmp_path / "bad-name").exists()
+
+    dangling = tmp_path / "dangling-link"
+    dangling.symlink_to(tmp_path / "missing-target")
+    with pytest.raises(Error, match="not a directory"):
+        engine.init_brain(dangling)
+
+    # Tampered compiled note JSON with matching `sha256` is still caught by `validate`!
+    tampered = json.loads(store.read("memories/concepts/welcome.json"))
+    tampered["status"] = "invalid-status"
+    store.write("memories/concepts/welcome.json", (json.dumps(tampered) + "\n").encode())
+    assert any(
+        "memories/concepts/welcome.json" in p or "concepts/welcome.md" in p for p in engine.validate(store)["problems"]
+    )
+    engine.build(store)
+    assert engine.validate(store)["ok"]
 
 
 def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_errors(
@@ -141,30 +168,36 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
     ).encode()
     brain.write("memories/dupes/a.json", dupe_obj)
     brain.write("memories/dupes/b.json", dupe_obj)
-
-    # Local record with alias + sensor record link matrix so `kind == "record"` & cross-brain record links validate!
-    records.ingest(brain, "repos", b'[{"id":"r1","title":"Local repo","aliases":["repo:local/one"]}]')
-    records.ingest(
-        brain,
-        "linkcheck",
+    brain.write(
+        "memories/relbad/r.json",
         json.dumps(
-            [
-                {
-                    "id": "lc1",
-                    "title": "Link matrix record",
-                    "links": [
-                        "repo:local/one",
-                        "repos:r1#[[[",
-                        "meetings:ghost",
-                        "bf://sib/repo:acme/demo",
-                        "bf://sib/events:ev-1",
-                        "bf://sib/events:ev-1#[[[",
-                        "bf://sib/events:missing",
-                    ],
-                }
-            ]
+            {
+                "id": "r1",
+                "ref": "relbad:r1",
+                "source": "relbad",
+                "kind": "memory",
+                "title": "Bad relations and legacy links",
+                "text": "",
+                "tags": [],
+                "links": [
+                    {"to": "meetings:decision-1", "kind": "record", "anchor": "", "meta": {}, "section": ""},
+                    {"to": "projects:bad", "kind": "note", "anchor": "", "meta": {}, "section": ""},
+                    {"to": "bf://sib/events:ev-1", "kind": "brain", "anchor": "", "meta": {}, "section": ""},
+                    {
+                        "to": records.record_file("meetings", "decision-1"),
+                        "kind": "record",
+                        "anchor": "frag",
+                        "meta": {},
+                        "section": "",
+                    },
+                ],
+                "relations": [],
+            }
         ).encode(),
     )
+
+    # Local record so `memories/repos/<sha256>.json` link checks validate!
+    records.ingest(brain, "repos", b'[{"id":"r1","title":"Local repo","aliases":["repo:local/one"]}]')
 
     brain.write("projects/badstale.md", b"---\ntype: project\nstatus: draft\nowner: alice\nstale_after: -5\n---\n# S\n")
     brain.write(
@@ -220,6 +253,10 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
         "memories/dupes/b.json: duplicate record id 'd1'",
         "memories/dupes/a.json: source must equal 'dupes'",
         "memories/dupes/a.json: ref must equal 'dupes:d1'",
+        "memories/relbad/r.json: 'relations' was removed; use 'links'",
+        "memories/relbad/r.json: record link 'meetings:decision-1' must use memories/<source>/<sha256>.json",
+        "memories/relbad/r.json: note link 'projects:bad' must target projects/, concepts/, or actions/",
+        "memories/relbad/r.json: cross-brain link 'bf://sib/events:ev-1' must use bf://<brain>/<path>",
         "bf.yaml brains.missing-sib:",
         "JSON record links do not support #anchor fragments",
         "missing anchor #missing in actions/2026-11-15_demo/outputs/report.md",
@@ -244,7 +281,11 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
     )
     brain.write(
         "actions/2026-11-10_active/ACTION.md",
-        b"---\ntype: action\nstatus: draft\nupdated: 2026-11-10\nsummary: Ship v1\n---\n\n# Ship v1\n\n- [ ] Task A\n",
+        b"---\ntype: action\nstatus: draft\nupdated: '2026-11-10T12:00:00+02:00'\nsummary: Ship v1\n---\n\n# Ship v1\n\n- [ ] Task A\n",
+    )
+    brain.write(
+        "actions/2026-11-10_later/ACTION.md",
+        b"---\ntype: action\nstatus: draft\nupdated: '2026-11-10T10:30:00.500Z'\nsummary: Later UTC\n---\n\n# Later UTC\n",
     )
     brain.write(
         "projects/future.md",
@@ -271,7 +312,7 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
                     "id": "WEB-9",
                     "title": "Launch update",
                     "updated": "2026-11-12T08:00:00Z",
-                    "project": "projects/offline.md",
+                    "links": ["bf:///projects/offline.md"],
                     "aliases": ["alias:web-9"],
                 }
             ]
@@ -289,7 +330,7 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
     brain.write("memories/scalar/s.json", b"123\n")
     brain.write(
         "memories/rawlinks/r1.json",
-        b'{"id":"r1","title":"R","updated":"2026-11-13","relations":[{"target":"bf:///projects/overdue.md#top"}]}\n',
+        b'{"id":"r1","title":"R","updated":"2026-11-13","links":[{"to":"bf:///projects/overdue.md#top","kind":"note","anchor":"top","meta":{},"section":""}]}\n',
     )
 
     brain.write(
@@ -314,6 +355,7 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
         "concepts/undated-dur.md",
         b"---\ntype: guide\nstatus: stable\nstale_after: 7d\n---\n# Undated Dur\n",
     )
+    repo_mem = records.record_file("repo", "acme/web")
     records.ingest(
         brain,
         "github",
@@ -323,7 +365,11 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
                     "id": "pr-7",
                     "title": "Alias PR",
                     "updated": "2026-11-10T11:00:00Z",
-                    "relations": {"repo": "repo:acme/web", "topic": "bf:///concepts/retrieved-only.md"},
+                    "links": [
+                        {"to": "urn:repo:acme/web", "meta": {"rel": "repo"}},
+                        {"to": f"bf:///{repo_mem}", "meta": {"rel": "record"}},
+                        {"to": "bf:///concepts/retrieved-only.md", "meta": {"rel": "topic"}},
+                    ],
                 }
             ]
         ).encode(),
@@ -338,11 +384,17 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
     assert rep["tasks_open"] == 2
     assert rep["actions"] == [
         {
+            "ref": "actions/2026-11-10_later/ACTION.md",
+            "title": "Later UTC",
+            "updated": "2026-11-10T10:30:00.500Z",
+            "summary": "Later UTC",
+        },
+        {
             "ref": "actions/2026-11-10_active/ACTION.md",
             "title": "Ship v1",
-            "updated": "2026-11-10",
+            "updated": "2026-11-10T12:00:00+02:00",
             "summary": "Ship v1",
-        }
+        },
     ]
 
     stale_by_ref = {item["ref"]: item for item in rep["stale"]}

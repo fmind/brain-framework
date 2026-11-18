@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import hashlib
 import json
@@ -22,7 +23,15 @@ TOTAL_BYTES = 64 << 20
 MAX_BYTES = 16 << 20
 TEXT_CHARS = 4096
 CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
-REDACT = re.compile(r"(?i)(bearer\s+[a-z0-9._~+/=-]+|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{16,})")
+_PEM_TAG = r"[A-Z0-9 ]{0,32}PRIVATE KEY-----"
+_PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,16384}}"
+_KV_KEY = r"(?i:\b(?:password|passwd|(?:client[_-]?)?secret|api[_-]?key|(?:access|refresh)[_-]?token))"
+_KV_VAL = r'(?:\\?"[^"\r\n]{1,512}"|\\?\'[^\'\r\n]{1,512}\'|[^\s"\',;}{\]]{1,512})'
+REDACT = re.compile(
+    r"(?:(?i:bearer)\s+[A-Za-z0-9._~+/=-]{8,}|(?<=://)[^/\s:@]{1,64}:[^/\s@]{1,128}(?=@)"
+    r"|(?:gh[pousr]_|github_pat_|AKIA|ASIA|AIza|ya29\.|sk-|xox[baprs]-)[A-Za-z0-9._-]{8,}"
+    rf"|-----BEGIN {_PEM_TAG}{_PEM_BODY}(?:-----END {_PEM_TAG})?|{_KV_KEY}(?:\\?[\"'])?\s*[:=]\s*{_KV_VAL})"
+)
 
 
 class InvalidError(ValueError):
@@ -41,7 +50,7 @@ def parse_window_iso(value: str, label: str) -> datetime:
 
 
 def sanitize(value: str, limit: int = TEXT_CHARS) -> str:
-    cleaned = REDACT.sub("[REDACTED]", CONTROL.sub(" ", value))
+    cleaned = CONTROL.sub(" ", REDACT.sub("[REDACTED]", value))
     return " ".join(cleaned.split())[:limit]
 
 
@@ -94,8 +103,8 @@ def open_nofollow_dir(root: Path) -> int:
 def collect(harness: str, root: Path, start: datetime, end: datetime) -> list[dict[str, Any]]:
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", harness):
         raise InvalidError("HARNESS must start with a lowercase letter and use [a-z0-9-]")
-    if end < start:
-        raise InvalidError("END must be >= START")
+    if start >= end:
+        raise InvalidError("START must be before END")
 
     records: list[dict[str, Any]] = []
     visited = total_bytes = 0
@@ -132,8 +141,10 @@ def collect(harness: str, root: Path, start: datetime, end: datetime) -> list[di
             mtime = datetime.fromtimestamp(info.st_mtime, UTC)
             if mtime < start:
                 continue
-            file_fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+            file_fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
             with os.fdopen(file_fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise InvalidError(f"{rel}: not a regular file")
                 raw = stream.read(FILE_BYTES + 1)
             if len(raw) > FILE_BYTES:
                 raise InvalidError(f"{rel}: file exceeds {FILE_BYTES} bytes")
@@ -142,7 +153,7 @@ def collect(harness: str, root: Path, start: datetime, end: datetime) -> list[di
                 raise InvalidError("telemetry input exceeds 64 MiB")
             text = raw.decode("utf-8")
             prompts: list[str] = []
-            latest_dt = mtime
+            event_dts: list[datetime] = []
             items: list[dict[str, Any]] = []
             if suffix == ".json":
                 parsed = json.loads(text)
@@ -161,16 +172,21 @@ def collect(harness: str, root: Path, start: datetime, end: datetime) -> list[di
             for item in items:
                 role, prompt_txt, ts_raw = extract_prompt(item)
                 if ts_raw:
-                    try:
-                        ev_dt = parse_window_iso(ts_raw, rel)
-                        if ev_dt > latest_dt:
-                            latest_dt = ev_dt
-                    except InvalidError:
-                        pass
+                    with contextlib.suppress(InvalidError):
+                        event_dts.append(parse_window_iso(ts_raw, rel))
                 if prompt_txt and role in {"", "user", "human", "prompt", "session"}:
                     prompts.append(prompt_txt)
 
-            if not prompts or not (start <= latest_dt <= end):
+            if not prompts:
+                continue
+            if event_dts:
+                window_dts = [dt for dt in event_dts if start <= dt < end]
+                if not window_dts:
+                    continue
+                latest_dt = max(window_dts)
+            elif start <= mtime < end:
+                latest_dt = mtime
+            else:
                 continue
             rec_hash = hashlib.sha256(f"{harness}:{rel}".encode()).hexdigest()[:16]
             when_iso = latest_dt.isoformat().replace("+00:00", "Z")
@@ -200,7 +216,7 @@ def main() -> None:
     parser.add_argument("harness", help="lowercase harness label (e.g. claude, agy, codex)")
     parser.add_argument("root", type=Path, help="local harness session directory")
     parser.add_argument("start", help="inclusive window start (ISO 8601 UTC)")
-    parser.add_argument("end", help="inclusive window end (ISO 8601 UTC)")
+    parser.add_argument("end", help="exclusive window end (ISO 8601 UTC)")
     args = parser.parse_args()
     try:
         out = collect(
@@ -213,8 +229,13 @@ def main() -> None:
         if len(payload) > MAX_BYTES:
             raise InvalidError("output exceeds 16 MiB")
         sys.stdout.buffer.write(payload)
-    except (InvalidError, OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
-        sys.stderr.write(f"Agent telemetry collection failed: {error}\n")
+    except InvalidError as error:
+        sys.stderr.write(f"Agent telemetry collection failed: {error}.\n")
+        sys.exit(1)
+    except (OSError, UnicodeError, ValueError):
+        sys.stderr.write(
+            "Agent telemetry collection failed; check the session directory, permissions, and JSON logs.\n"
+        )
         sys.exit(1)
 
 

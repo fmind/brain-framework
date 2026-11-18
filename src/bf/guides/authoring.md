@@ -54,8 +54,8 @@ MCP Transport
 Authored notes follow **two link conventions** so Markdown links work in editors/GitHub while frontmatter links stay canonical URIs:
 
 - **Markdown prose (relative paths + cross-brain/external URLs)**: link to local notes (`../concepts/aaif.md#mcp`, `aaif.md`, `#mcp`) and sensor memories (`../memories/github-issues/7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451.json`) with relative paths, and use `bf://<brain>/...` or external URLs when crossing brains or linking outside the brain.
-- **Note frontmatter (`links`, `sources`, `relations`)**: requires `bf://` or external URLs — same-brain `bf:///concepts/aaif.md?rel=project-of#mcp` and `bf:///memories/<source>/<sha256>.json`, or cross-brain `bf://team-brain/concepts/aaif.md#mcp` (resolved via `brains:` in `bf.yaml`, `../team-brain`, or `~/team-brain`). Sensor JSON `links` accept `bf://` URLs, external URLs, brain-relative paths, or `source:id` refs.
-- **External URIs**: `https://`, `http://`, `mailto:`, and `urn:` keep `kind: "url"`. Legacy `source:id` (`github-issues:7`) and 2-slash `bf://concepts/...` note links are rejected in authored notes, and JSON records do not support `#anchor` fragments (`bf read "github-issues:7" | jq ...` still reads and filters records on the CLI).
+- **Note frontmatter & sensor JSON (`links`, `sources`)**: requires `bf://` or external URLs — same-brain `bf:///concepts/aaif.md?rel=project-of#mcp` and `bf:///memories/<source>/<sha256>.json`, cross-brain `bf://team-brain/concepts/aaif.md#mcp` (resolved via `brains:` in `bf.yaml`, `../team-brain`, or `~/team-brain`), or `{to, meta}` objects (`{to: "https://example.org/repo", meta: {rel: depends-on}}`) when attaching metadata to external URLs or URNs.
+- **External URIs**: `https://`, `http://`, `mailto:`, and `urn:` keep `kind: "url"`. Legacy `source:id` (`github-issues:7`) and 2-slash `bf://concepts/...` links are rejected in authored notes and sensor JSON, and JSON records do not support `#anchor` fragments (`bf read "github-issues:7" | jq ...` still reads and filters records on the CLI and MCP).
 
 ## Tracked actions and user schemas
 

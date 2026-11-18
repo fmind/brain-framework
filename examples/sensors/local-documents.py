@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 
 # UTF-8-only XML is rejected before parsing if it contains a DTD/entity; elements and nesting are bounded below.
 import xml.etree.ElementTree as ET
@@ -332,12 +333,12 @@ def unreadable(relative: str) -> InvalidError:
 
 
 def nameable(relative: str) -> bool:
-    """Whether a path can appear in a record id and title: UTF-8 (not lone surrogates), without control characters."""
+    """Whether a path can appear in a record id and title: UTF-8, without control or invisible format characters."""
     try:
         relative.encode()
     except UnicodeEncodeError:
         return False
-    return not CONTROL.search(relative)
+    return not CONTROL.search(relative) and not any(unicodedata.category(ch) == "Cf" for ch in relative)
 
 
 def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str, object]], int]:
@@ -392,13 +393,8 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
                 suffix = Path(entry.name).suffix.lower()
                 if suffix not in EXTENSIONS:
                     continue
-                identifier = label + "/" + relative
-                alias = "file:" + quote(identifier, safe="/")
-                if (
-                    len(identifier) > MAX_ID
-                    or len(quote(identifier, safe="/@:")) > MAX_ENCODED_ID
-                    or len(alias) > MAX_REF
-                ):
+                identifier = label + "/" + quote(relative, safe="/")
+                if len(identifier) > MAX_ID or len(quote(identifier, safe="/@:")) > MAX_ENCODED_ID:
                     skipped += 1
                     continue
                 try:

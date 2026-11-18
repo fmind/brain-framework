@@ -1,4 +1,4 @@
-"""Orchestration of `jobs`, `.bf/<unit>.json`, `structlog` `logs/<unit>.log`, and channels."""
+"""Orchestration of `jobs`, `.bf/<unit>.json`, and `structlog` `logs/<unit>.log`."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -18,16 +19,17 @@ from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
-from bf import config, engine, markdown, models, records
-from bf.config import ChannelSpec, EventMatch, JobSpec, ServiceSpec
-from bf.models import AUTHORED, MAX_NOTE, Error, InputError, clean, decode, encode, now_utc
+from bf import config, engine, markdown, models, query, records
+from bf.config import EventMatch, JobSpec, ServiceSpec
+from bf.models import AUTHORED, MAX_NOTE, Error, InputError, decode, encode, now_utc
 from bf.storage import Store, private_dir, relative, writer
 
-_ENV_1 = "PATH HOME USER LOGNAME TMPDIR SHELL TERM TZ SSH_AUTH_SOCK DISPLAY WAYLAND_DISPLAY XDG_CONFIG_HOME"
-_ENV_2 = "XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS GH_TOKEN GITHUB_TOKEN"
-_ENV_3 = "GOOGLE_APPLICATION_CREDENTIALS CLOUDSDK_CONFIG SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE"
-_ENV_4 = "HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY http_proxy https_proxy no_proxy all_proxy"
-_ENV_ALLOWLIST: tuple[str, ...] = tuple(f"{_ENV_1} {_ENV_2} {_ENV_3} {_ENV_4}".split())
+_ENV_SYS = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "SHELL", "TERM", "TZ", "SSH_AUTH_SOCK", "DISPLAY")
+_ENV_XDG = ("WAYLAND_DISPLAY", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
+_ENV_BUS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "GH_TOKEN", "GITHUB_TOKEN", "CLOUDSDK_CONFIG")
+_ENV_TLS = ("GOOGLE_APPLICATION_CREDENTIALS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+_ENV_PRX = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy")
+_ENV_ALLOWLIST: tuple[str, ...] = (*_ENV_SYS, *_ENV_XDG, *_ENV_BUS, *_ENV_TLS, *_ENV_PRX)
 _GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
 _GIT_HOOK_ENV = (*_GIT_ENV, "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_QUARANTINE_PATH")
 
@@ -55,56 +57,53 @@ def save_unit_state(store: Store, doc: dict[str, Any], *, locked: bool = False) 
             state.write(path, encode(doc), mode=0o600)
 
 
-def _ev_meta(ev_d: Mapping[str, Any], *keys: str) -> str:
-    for k in keys:
-        if isinstance(v := ev_d.get(k), str) or type(v) is int:
-            with suppress(Error):
-                return clean(str(v).strip(), k)
-    return ""
-
-
-def _match_event(event: dict[str, Any], rule: EventMatch) -> bool:
-    if (rule.kind and event.get("kind") != rule.kind) or (rule.source and event.get("source") != rule.source):
-        return False
-    if not rule.filter:
-        return True
-    if (jq := shutil.which("jq")) is None:
-        raise Error("jq is required for event filters; install it with mise install")
-    proc = subprocess.run(  # noqa: S603
-        [jq, "-e", "--", rule.filter], input=encode(event), capture_output=True, timeout=5, check=False
-    )
-    return proc.returncode == 0
-
-
-def read_events_doc(store: Store) -> dict[str, Any] | None:
-    """Read `.bf/events.json` if present and a JSON object."""
-    with suppress(FileNotFoundError):
-        loaded = decode(private_dir(store).read("events.json", 16 << 20), ".bf/events.json")
-        if isinstance(loaded, dict):
-            return dict(loaded)
-    return None
+def _rule_head_matches(event: Mapping[str, Any], rule: EventMatch) -> bool:
+    return (not rule.kind or event.get("kind") == rule.kind) and (not rule.source or event.get("source") == rule.source)
 
 
 def pending_events(
-    store: Store, last_seq: int, rules: tuple[EventMatch, ...], *, events_doc: Mapping[str, Any] | None = None
+    store: Store, last_seq: int, rules: tuple[EventMatch, ...], **opts: Any
 ) -> tuple[list[dict[str, Any]], int]:
-    """Return `(matching_events, latest_seq)` since `last_seq` from `.bf/events.json`."""
+    """Return `(matching_events, latest_seq)` since `last_seq` from `.bf/events.jsonl`."""
     if not rules:
         return [], 0
-    if events_doc is None and (events_doc := read_events_doc(store)) is None:
-        return [], last_seq
-    if not isinstance(raw_evs := events_doc.get("events"), list):
-        return [], last_seq
-    latest = raw_seq if type(raw_seq := events_doc.get("seq")) is int else last_seq
-    matched = [
-        dict(ev)
-        for ev in raw_evs
-        if isinstance(ev, dict)
-        and type(ev_seq := ev.get("seq")) is int
-        and ev_seq > last_seq
-        and any(_match_event(ev, rule) for rule in rules)
-    ]
-    return matched, max(latest, last_seq)
+    events_data: tuple[list[dict[str, Any]], int] | None = opts.get("events_data")
+    if events_data is not None:
+        all_evs, latest = events_data
+        floor = 0 if (latest and last_seq > latest) else last_seq
+        cands = [ev for ev in all_evs if int(ev["seq"]) > floor]
+    else:
+        cands, latest = records.read_events(store, after_seq=last_seq)
+    if not cands:
+        return [], latest
+    plain_rules = [r for r in rules if not r.filter]
+    matched_idx = {idx for idx, ev in enumerate(cands) if any(_rule_head_matches(ev, r) for r in plain_rules)}
+    filter_groups: dict[str, list[EventMatch]] = {}
+    for rule in rules:
+        if rule.filter:
+            filter_groups.setdefault(rule.filter, []).append(rule)
+    if filter_groups:
+        jq_bin: str | None = None
+        for flt, flt_rules in filter_groups.items():
+            unmatched = (i for i in range(len(cands)) if i not in matched_idx)
+            sub_idx = [i for i in unmatched if any(_rule_head_matches(cands[i], r) for r in flt_rules)]
+            if not sub_idx:
+                continue
+            if jq_bin is None and (jq_bin := shutil.which("jq")) is None:
+                raise Error("jq is required for event filters; install it with mise install")
+            wrapped = (
+                f"{query.JQ_PRELUDE}\n[({flt})] | if length == 0 then false else (.[-1] // false | . != false) end"
+            )
+            jq_kw: dict[str, Any] = {"capture_output": True, "cwd": "/", "env": query.safe_env(), "timeout": 5}
+            in_b = b"".join(encode(cands[i]) for i in sub_idx)
+            proc = subprocess.run([jq_bin, "-L", "/dev/null", "-c", "--", wrapped], input=in_b, **jq_kw, check=False)  # noqa: S603
+            if proc.returncode != 0:
+                err = proc.stderr.decode("utf-8", "replace").strip()
+                raise Error(f"event filter failed: {err.splitlines()[-1] if err else 'jq exited nonzero'}")
+            matched_idx.update(
+                sub_idx[pos] for pos, ln in enumerate(proc.stdout.splitlines()[: len(sub_idx)]) if ln == b"true"
+            )
+    return [ev for i, ev in enumerate(cands) if i in matched_idx], latest
 
 
 def _parse_dt(raw: str) -> datetime | None:
@@ -147,21 +146,13 @@ def check_requires(bins: tuple[str, ...], label: str) -> list[str]:
 
 
 def prepare_unit(
-    store: Store,
-    name: str,
-    base_argv: Sequence[str],
-    run_id: str,
-    start_iso: str,
-    *,
-    end_iso: str = "",
-    trigger: str = "manual",
-    input_rel: str = "",
-    events: Sequence[dict[str, Any]] = (),
-    stdin_text: str = "",
-    unit_env: Mapping[str, str] | None = None,
+    store: Store, name: str, base_argv: Sequence[str], run_id: str, start_iso: str, **opts: Any
 ) -> tuple[list[str], dict[str, str]]:
     """Expand `{{...}}` placeholders, write `.bf/<name>.context.json`, and build clean `env`."""
-    effective_end = end_iso or start_iso
+    trigger, input_rel = str(opts.get("trigger", "manual")), str(opts.get("input_rel", ""))
+    effective_end = str(opts.get("end_iso") or start_iso)
+    events, stdin_text = list(opts.get("events", ())), str(opts.get("stdin_text", ""))
+    unit_env: Mapping[str, str] = opts.get("unit_env") or {}
     bf_dir = private_dir(store)
     input_abs = ""
     if input_rel:
@@ -170,7 +161,7 @@ def prepare_unit(
             raise Error(f"{name}: input file {input_rel} does not exist")
         input_abs = str(store.root / input_rel)
     ctx_path = f"{name}.context.json"
-    ctx = {"run": run_id, "kind": trigger, "job": name, "events": list(events), "stdin": stdin_text}
+    ctx = {"run": run_id, "kind": trigger, "job": name, "events": events, "stdin": stdin_text}
     bf_dir.write(ctx_path, encode({**ctx, "start": start_iso, "end": effective_end, "input": input_abs}), mode=0o600)
     home_str = os.environ.get("HOME", "")
     with suppress(RuntimeError):
@@ -207,23 +198,37 @@ def stop_proc(proc: subprocess.Popen[bytes]) -> None:
 
 
 def exec_argv(
-    argv: Sequence[str], *, cwd: Path, env: dict[str, str], timeout: int, stdin_bytes: bytes = b""
+    argv: Sequence[str], *, cwd: Path, env: dict[str, str], timeout: int, **opts: Any
 ) -> tuple[int, bytes, str]:
     """Run literal `argv` in a dedicated process group with bounded timeout and clean teardown."""
+    stdin_bytes: bytes = opts.get("stdin_bytes", b"")
+    stop_event: threading.Event | None = opts.get("stop_event")
     if not argv:
         raise Error("empty command argv")
-    pipe = subprocess.PIPE
+    if stop_event is not None and stop_event.is_set():
+        return 130, b"", "stopped"
+    pipe, deadline = subprocess.PIPE, time.monotonic() + timeout
     try:
         with subprocess.Popen(  # noqa: S603
             list(argv), cwd=cwd, env=env, stdin=pipe, stdout=pipe, stderr=pipe, start_new_session=True
         ) as proc:
             try:
-                out, err = proc.communicate(input=stdin_bytes, timeout=timeout)
-                return proc.returncode, out, err[-65536:].decode("utf-8", "replace").strip()
-            except BaseException as exc:
+                inp: bytes | None = stdin_bytes
+                while True:
+                    if stop_event is not None and stop_event.is_set():
+                        stop_proc(proc)
+                        return 130, b"", "stopped"
+                    if (rem := deadline - time.monotonic()) <= 0:
+                        stop_proc(proc)
+                        return 124, b"", f"timed out after {timeout}s"
+                    try:
+                        step = rem if stop_event is None else min(0.2, rem)
+                        out, err = proc.communicate(input=inp, timeout=step)
+                        return proc.returncode, out, err[-65536:].decode("utf-8", "replace").strip()
+                    except subprocess.TimeoutExpired:
+                        inp = None
+            except BaseException:
                 stop_proc(proc)
-                if isinstance(exc, subprocess.TimeoutExpired):
-                    return 124, b"", f"timed out after {timeout}s"
                 raise
     except (OSError, ValueError) as error:
         return 127, b"", models.failure(error)
@@ -251,24 +256,16 @@ def _save_report_action(store: Store, name: str, out_bytes: bytes, keep: int, in
     return rel
 
 
-def record_run(
-    store: Store,
-    kind: str,
-    name: str,
-    run_id: str,
-    started_iso: str,
-    *,
-    ended: datetime,
-    dur_ms: int,
-    code: int,
-    err_msg: str = "",
-    stderr: str = "",
-    summary: dict[str, Any] | None = None,
-    cursor_seq: int | None = None,
-    emit_job_event: bool = False,
-    trigger: str = "",
-) -> None:
+def record_run(store: Store, kind: str, name: str, run_id: str, started_iso: str, **opts: Any) -> None:
     """Update `.bf/<name>.json`, append a `structlog` JSON line to `logs/<name>.log`, and emit `job.*`."""
+    ended: datetime = opts["ended"]
+    dur_ms, code = int(opts["dur_ms"]), int(opts["code"])
+    err_msg, stderr, summary = str(opts.get("err_msg", "")), str(opts.get("stderr", "")), opts.get("summary")
+    cursor_seq, emit_job_event, trigger = (
+        opts.get("cursor_seq"),
+        bool(opts.get("emit_job_event")),
+        str(opts.get("trigger", "")),
+    )
     cfg_name = config.load(store).name
     ended_iso, ok = now_utc(ended), code == 0
     status = "ok" if ok else "failed"
@@ -297,19 +294,14 @@ def record_run(
             records.append_event(store, "job.succeeded" if ok else "job.failed", name, ev_data, locked=True, now=ended)
 
 
-def execute_one_job(
-    store: Store,
-    job: JobSpec,
-    *,
-    trigger: str,
-    events: Sequence[dict[str, Any]] = (),
-    cursor_target_seq: int | None = None,
-    extra_args: Sequence[str] = (),
-    stdin_bytes: bytes = b"",
-    dry_run: bool = False,
-    now: datetime | None = None,
-) -> dict[str, Any]:
+def execute_one_job(store: Store, job: JobSpec, *, trigger: str, **opts: Any) -> dict[str, Any]:
     """Execute one `JobSpec`, optionally ingesting sensor stdout and recording `.bf/` + `logs/`."""
+    events: Sequence[dict[str, Any]] = opts.get("events", ())
+    cursor_target_seq: int | None = opts.get("cursor_target_seq")
+    extra_args: Sequence[str] = opts.get("extra_args", ())
+    stdin_bytes, dry_run = bytes(opts.get("stdin_bytes", b"")), bool(opts.get("dry_run"))
+    now: datetime | None = opts.get("now")
+    stop_event: threading.Event | None = opts.get("stop_event")
     instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
     started_iso = now_utc(instant)
     run_id = f"{job.name}-{int(instant.timestamp())}-{os.urandom(3).hex()}"
@@ -330,55 +322,55 @@ def execute_one_job(
     cmd = [*job.run, *extra_args]
     argv, env = prepare_unit(store, job.name, cmd, run_id, now_utc(win_start), **prep, unit_env=job.env)
     proc_stdin = stdin_bytes or (store.read(job.input, MAX_NOTE) if job.input else b"")
+    recorded = False
     save_unit_state(store, {**state_doc, "status": "running", "updated": started_iso, "last_start": started_iso})
-    code, out_bytes, err_txt = exec_argv(argv, cwd=store.root, env=env, timeout=job.timeout, stdin_bytes=proc_stdin)
-    if code != 0:
-        err_msg = models.redact_secrets(err_txt or f"exit code {code}")[-1024:]
-    else:
-        try:
-            if job.ingest:
-                ing_kw: dict[str, Any] = {"mode": job.mode, "allow_removal": job.allow_removal, "now": now}
-                summary = records.ingest(store, job.ingest, out_bytes, **ing_kw)
-            elif job.action_keep and out_bytes.strip():
-                act_time = datetime.now(UTC) if now is None else instant
-                summary = {"action": _save_report_action(store, job.name, out_bytes, job.action_keep, act_time)}
-            txt = out_bytes.decode("utf-8", "replace").strip()
-            if not job.ingest and job.channel and txt and txt != "NO_REPLY":
-                src_ev = (ev for ev in events if ev.get("source") == job.channel)
-                ch_evs = [ev.get("data") for ev in src_ev if ev.get("kind") == "channel.message"]
-                ev_d = ch_evs[0] if len(ch_evs) == 1 and isinstance(ch_evs[0], dict) else {}
-                th, rp = _ev_meta(ev_d, "conversation", "thread"), _ev_meta(ev_d, "reply_to", "id")
-                send_channel_message(store, txt, to=job.channel, thread=th, reply_to=rp, run_id=run_id, now=now)
-            elif not summary and txt.startswith("{") and len(out_bytes) <= 65536:
-                with suppress(Error):
-                    if isinstance(dec := decode(out_bytes, f"jobs.{job.name}"), dict):
-                        summary = dict(dec)
-        except Error as error:
-            code, err_msg = 1, models.redact_secrets(str(error))[-1024:]
+    try:
+        code, out_bytes, err_txt = exec_argv(
+            argv, cwd=store.root, env=env, timeout=job.timeout, stdin_bytes=proc_stdin, stop_event=stop_event
+        )
+        if stop_event is not None and stop_event.is_set() and code == 130:
+            dur_ms = max(0, int((time.monotonic() - t0) * 1000))
+            return {"job": job.name, "run": run_id, "status": "stopped", "exit_code": 130, "duration_ms": dur_ms}
+        if code != 0:
+            err_msg = models.redact_secrets(err_txt or f"exit code {code}")[-1024:]
+        else:
+            try:
+                if job.ingest:
+                    ing_kw: dict[str, Any] = {"mode": job.mode, "allow_removal": job.allow_removal, "now": now}
+                    summary = records.ingest(store, job.ingest, out_bytes, **ing_kw)
+                elif job.action_keep and out_bytes.strip():
+                    act_time = datetime.now(UTC) if now is None else instant
+                    summary = {"action": _save_report_action(store, job.name, out_bytes, job.action_keep, act_time)}
+                txt = out_bytes.decode("utf-8", "replace").strip()
+                if not job.ingest and not summary and txt.startswith("{") and len(out_bytes) <= 65536:
+                    with suppress(Error):
+                        if isinstance(dec := decode(out_bytes, f"jobs.{job.name}"), dict):
+                            summary = dict(dec)
+            except models.FAILURES as error:
+                code, err_msg = 1, models.redact_secrets(models.failure(error))[-1024:]
 
-    ended = datetime.now(UTC) if now is None else instant
-    dur_ms = max(0, int((time.monotonic() - t0) * 1000))
-    kw: dict[str, Any] = {"ended": ended, "dur_ms": dur_ms, "code": code, "err_msg": err_msg, "stderr": err_txt}
-    rec_kw: dict[str, Any] = {"summary": summary, "cursor_seq": cursor_target_seq, "emit_job_event": True}
-    record_run(store, "job", job.name, run_id, started_iso, **kw, **rec_kw, trigger=trigger)
+        ended = datetime.now(UTC) if now is None else instant
+        dur_ms = max(0, int((time.monotonic() - t0) * 1000))
+        kw: dict[str, Any] = {"ended": ended, "dur_ms": dur_ms, "code": code, "err_msg": err_msg, "stderr": err_txt}
+        rec_kw: dict[str, Any] = {"summary": summary, "cursor_seq": cursor_target_seq, "emit_job_event": True}
+        record_run(store, "job", job.name, run_id, started_iso, **kw, **rec_kw, trigger=trigger)
+        recorded = True
+    finally:
+        if not recorded:
+            with suppress(Error, OSError):
+                t_end = now_utc(None if now is None else instant)
+                save_unit_state(store, {**state_doc, "status": "stopped", "updated": t_end, "last_end": t_end})
     status = "ok" if code == 0 else "failed"
     out_res = {"job": job.name, "run": run_id, "status": status, "exit_code": code, "duration_ms": dur_ms}
     return {**out_res, **({"error": err_msg} if err_msg else {}), **({"summary": summary} if summary else {})}
 
 
-def run_jobs(
-    store: Store,
-    names: Sequence[str] = (),
-    *,
-    due_only: bool = False,
-    hook: str = "",
-    extra_args: Sequence[str] = (),
-    stdin_bytes: bytes = b"",
-    dry_run: bool = False,
-    rebuild: bool = True,
-    now: datetime | None = None,
-) -> dict[str, Any]:
+def run_jobs(store: Store, names: Sequence[str] = (), **opts: Any) -> dict[str, Any]:
     """Run selected, due, or Git-hook jobs in declaration order."""
+    due_only, hook = bool(opts.get("due_only")), str(opts.get("hook", ""))
+    extra_args, stdin_bytes = opts.get("extra_args", ()), bytes(opts.get("stdin_bytes", b""))
+    dry_run, rebuild = bool(opts.get("dry_run")), bool(opts.get("rebuild", True))
+    now, stop_event = opts.get("now"), opts.get("stop_event")
     cfg = config.load(store)
     sched_now = datetime.now(UTC) if now is None else now.astimezone(UTC)
     if bool(names) + bool(due_only) + bool(hook) != 1:
@@ -391,8 +383,8 @@ def run_jobs(
     if extra_args and (due_only or len(names) > 1):
         raise InputError("passthrough -- arguments require a single job or --hook")
 
-    built = engine.build(store, now=now) if due_only and rebuild and not dry_run else None
-    cached_events = read_events_doc(store) if due_only else None
+    built = engine.build(store, now=now, incremental=True) if due_only and rebuild and not dry_run else None
+    cached_events = records.read_events(store) if due_only else None
 
     selected: list[tuple[JobSpec, str, list[dict[str, Any]], int | None]] = []
     advance_cursors: list[tuple[str, int]] = []
@@ -410,8 +402,8 @@ def run_jobs(
             if _in_backoff(state_doc, job.every or 3600, sched_now):
                 continue
             cur_seq = int(state_doc.get("event_seq") or 0)
-            matched_evs, latest_seq = pending_events(store, cur_seq, job.events, events_doc=cached_events)
-            target_seq = latest_seq if job.events and latest_seq else None
+            matched_evs, latest_seq = pending_events(store, cur_seq, job.events, events_data=cached_events)
+            target_seq = latest_seq if job.events else None
             if matched_evs:
                 selected.append((job, "event", matched_evs, target_seq))
             elif is_schedule_due(job, state_doc, sched_now, tz_name=cfg.timezone):
@@ -425,60 +417,39 @@ def run_jobs(
         with writer(store):
             for cursor_name, cursor_seq in advance_cursors:
                 latest = load_unit_state(store, cursor_name, kind="job")
-                seq = max(int(latest.get("event_seq") or 0), cursor_seq)
-                save_unit_state(store, {**latest, "event_seq": seq}, locked=True)
+                save_unit_state(store, {**latest, "event_seq": cursor_seq}, locked=True)
 
-    ex_kw: dict[str, Any] = {"extra_args": extra_args, "stdin_bytes": stdin_bytes, "dry_run": dry_run, "now": now}
-    results = [execute_one_job(store, j, trigger=t, events=e, cursor_target_seq=s, **ex_kw) for j, t, e, s in selected]
-    ok_all = (built is None or bool(built["ok"])) and all(r["status"] in {"ok", "dry_run"} for r in results)
+    ex_kw: dict[str, Any] = {"extra_args": extra_args, "stdin_bytes": stdin_bytes, "dry_run": dry_run}
+    ex_kw |= {"now": now, "stop_event": stop_event}
+    results: list[dict[str, Any]] = []
+    for job, trig, evs, seq_target in selected:
+        if stop_event is not None and stop_event.is_set():
+            break
+        try:
+            results.append(execute_one_job(store, job, trigger=trig, events=evs, cursor_target_seq=seq_target, **ex_kw))
+        except models.FAILURES as err:
+            if not due_only or dry_run:
+                raise
+            msg = models.redact_secrets(models.failure(err))[-1024:]
+            end_dt = datetime.now(UTC) if now is None else sched_now
+            pre_id = f"{job.name}-{int(end_dt.timestamp())}-{os.urandom(3).hex()}"
+            r_kw: dict[str, Any] = {"ended": end_dt, "dur_ms": 0, "code": 1, "err_msg": msg, "emit_job_event": True}
+            with suppress(Error, OSError):
+                record_run(store, "job", job.name, pre_id, now_utc(end_dt), **r_kw, trigger=trig)
+            res_err = {"job": job.name, "run": pre_id, "status": "failed", "exit_code": 1, "duration_ms": 0}
+            results.append({**res_err, "error": msg})
+    ok_all = (built is None or bool(built["ok"])) and all(r["status"] in {"ok", "dry_run", "stopped"} for r in results)
     out_d = {"brain": cfg.name, "ok": ok_all, "ran": len(results), "results": results}
     return {**out_d, "problems": list(built["problems"])} if built and built["problems"] else out_d
 
 
-def send_channel_message(
-    store: Store,
-    text: str,
-    *,
-    to: str,
-    thread: str = "",
-    reply_to: str = "",
-    run_id: str = "",
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Send an outbound message through a `channels.<name>.send` command."""
-    cfg = config.load(store)
-    if not (cleaned_text := text.strip()):
-        raise InputError("message text must be nonempty")
-    ch = cfg.channels.get(to)
-    if ch is None or not ch.send:
-        raise Error(f"channel {to!r} has no send command configured in bf.yaml")
-    if missing := check_requires(ch.requires, f"channels.{to}"):
-        raise Error("; ".join(missing))
-
-    instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
-    msg_id = f"post-{int(instant.timestamp())}-{os.urandom(3).hex()}"
-    extra_meta = (("conversation", thread, "thread"), ("reply_to", reply_to, "reply_to"), ("run", run_id, "run"))
-    payload: dict[str, Any] = {"id": msg_id, "text": cleaned_text, **{k: clean(v, f) for k, v, f in extra_meta if v}}
-    argv, env = prepare_unit(store, to, ch.send, run_id or msg_id, now_utc(instant), trigger="post", unit_env=ch.env)
-    code, out_bytes, err_txt = exec_argv(argv, cwd=store.root, env=env, timeout=ch.timeout, stdin_bytes=encode(payload))
-    if code != 0:
-        raise Error(f"channels.{to} send failed: {models.redact_secrets(err_txt or f'exit code {code}')[-1024:]}")
-    dec = decode(out_bytes.strip(), f"channels.{to} send output") if out_bytes.strip() else {}
-    reply_obj = dict(dec) if isinstance(dec, dict) else {}
-    r_id, r_conv = reply_obj.get("id"), reply_obj.get("conversation")
-    ev_id = clean(r_id, "reply id") if isinstance(r_id, str) and r_id.strip() else msg_id
-    ev_conv = clean(r_conv, "reply conversation") if isinstance(r_conv, str) and r_conv.strip() else thread
-    records.append_event(store, "channel.sent", to, {"id": ev_id, "conversation": ev_conv}, now=instant)
-    return {"brain": cfg.name, "channel": to, "status": "ok", "reply": reply_obj or {"id": msg_id}}
-
-
 def _collect_unit_status(
     store: Store,
-    units: Mapping[str, JobSpec | ChannelSpec | ServiceSpec],
+    units: Mapping[str, JobSpec | ServiceSpec],
     kind: str,
+    problems: list[str],
     *,
     check: bool,
-    problems: list[str],
 ) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for name, unit in units.items():
@@ -501,15 +472,14 @@ def _collect_unit_status(
 
 
 def status_summary(store: Store, *, check: bool = False) -> dict[str, Any]:
-    """Return folder counts, failed-unit attention, `jobs`/`channels`/`services` states, and `events_seq`."""
+    """Return folder counts, failed-unit attention, `jobs`/`services` states, and `events_seq`."""
     cfg = config.load(store)
     problems: list[str] = []
-    groups: Any = (("job", cfg.jobs), ("channel", cfg.channels), ("service", cfg.services))
-    units = {f"{k}s": _collect_unit_status(store, g, k, check=check, problems=problems) for k, g in groups}
-    ev_doc = read_events_doc(store)
-    events_seq = raw_seq if ev_doc and type(raw_seq := ev_doc.get("seq")) is int else 0
+    groups: Any = (("job", cfg.jobs), ("service", cfg.services))
+    units = {f"{k}s": _collect_unit_status(store, g, k, problems, check=check) for k, g in groups}
+    events_seq = records.latest_event_seq(store)
     folders = (*AUTHORED, "memories", "schemas", "evals")
-    counts = {f: len([p for p in store.files(f) if not p.endswith("/.forgotten")]) for f in folders}
+    counts = {f: store.count_files(f, exclude_suffix="/.forgotten") for f in folders}
     att = ((k[:-1], n) for k, g in units.items() for n, i in g.items() if i["enabled"] and i["status"] == "failed")
     attention = [{"kind": k, "name": n, "failed": True} for k, n in att]
     inside = False

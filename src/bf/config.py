@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -29,12 +29,9 @@ LIBYAML = (
     "uv tool install --reinstall --python 3.14 brain-framework"
 )
 _FLOAT_RE = r"^(?:[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$"
-_CORE = (
-    ("null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]),
-    ("bool", r"^(?:true|True|TRUE|false|False|FALSE)$", list("tTfF")),
-    ("int", r"^(?:[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+)$", list("-+0123456789")),
-    ("float", _FLOAT_RE, list("-+.0123456789")),
-)
+_NULL_BOOL = (("null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]), ("bool", r"^(?i:true|false)$", list("tTfF")))
+_INT_SPEC = ("int", r"^(?:[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+)$", list("-+0123456789"))
+_CORE = (*_NULL_BOOL, _INT_SPEC, ("float", _FLOAT_RE, list("-+.0123456789")))
 _ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _PROTECTED_ENV = frozenset({"BF_BRAIN", "BF_STATE_DIR", "BF_START", "BF_END", "BF_TRIGGER", "LC_ALL", "LANG"})
 
@@ -55,7 +52,6 @@ class JobSpec:
     mode: Literal["upsert", "snapshot"] = "upsert"
     allow_removal: bool = False
     action_keep: int = 0
-    channel: str = ""
     schedule: str = ""
     every: int | None = None
     cron: str = ""
@@ -70,21 +66,10 @@ class JobSpec:
 
 
 @dataclass(frozen=True)
-class ChannelSpec:
-    name: str
-    listen: tuple[str, ...] = ()
-    send: tuple[str, ...] = ()
-    timeout: int = 60
-    enabled: bool = True
-    requires: tuple[str, ...] = ()
-    env: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class ServiceSpec:
     name: str
     run: tuple[str, ...] = ()
-    emit: str = "none"
+    emit: Literal["none", "events", "messages"] = "none"
     enabled: bool = True
     requires: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
@@ -103,7 +88,6 @@ class Config:
     timezone: str = "UTC"
     env: dict[str, str] = field(default_factory=dict)
     jobs: dict[str, JobSpec] = field(default_factory=dict)
-    channels: dict[str, ChannelSpec] = field(default_factory=dict)
     services: dict[str, ServiceSpec] = field(default_factory=dict)
     watch: WatchSpec = WatchSpec()
 
@@ -207,13 +191,8 @@ def _check_tz(tz: str, label: str) -> str:
 
 
 def _parse_events(raw: object) -> tuple[EventMatch, ...]:
-    if not isinstance(raw, list):
-        return ()
-    return tuple(
-        EventMatch(str(x.get("kind", "")), str(x.get("source", "")), str(x.get("filter", "")))
-        for x in raw
-        if isinstance(x, dict)
-    )
+    items = (x for x in raw if isinstance(x, dict)) if isinstance(raw, list) else ()
+    return tuple(EventMatch(str(x.get("kind", "")), str(x.get("source", "")), str(x.get("filter", ""))) for x in items)
 
 
 def _str_tuple(raw: object) -> tuple[str, ...]:
@@ -286,20 +265,17 @@ def _parse_schedule(raw_sched: object, label: str) -> tuple[str, int | None, str
     if raw_sched is None:
         return "", None, ""
     sched = models.clean(str(raw_sched).strip(), label) if isinstance(raw_sched, str) else str(raw_sched).strip()
-    if isinstance(raw_sched, (int, float)) or (isinstance(raw_sched, str) and models.DURATION_RE.fullmatch(sched)):
+    is_dur = type(raw_sched) is int or (isinstance(raw_sched, str) and bool(models.DURATION_RE.fullmatch(sched)))
+    if is_dur:
         return sched, models.parse_duration(raw_sched, label), ""
     if ((sched.startswith("@") and len(sched.split()) == 1) or len(sched.split()) == 5) and croniter.is_valid(sched):
-        try:
+        with suppress(ValueError, KeyError, TypeError):
             croniter(sched, datetime(2026, 1, 1, tzinfo=UTC)).get_prev(datetime)
             return sched, None, sched
-        except ValueError, KeyError, TypeError:
-            pass
-    raise Error(f"{label}: must be a duration (e.g. 1h, 1d) or 5-field cron expression")
+    raise Error(f"{label}: must be a duration (e.g. 1h, 1d), @macro, or 5-field cron expression")
 
 
-def _unit_meta(
-    raw: dict[str, object], kind: str, name: str, base_env: dict[str, str]
-) -> tuple[bool, tuple[str, ...], dict[str, str]]:
+def _unit_meta(raw: dict[str, object], kind: str, name: str, base_env: dict[str, str]):
     env = {**base_env, **_parse_env_map(raw.get("env"), f"bf.yaml {kind}s.{name}.env")}
     return bool(raw.get("enabled", True)), _str_tuple(raw.get("requires")), env
 
@@ -326,20 +302,19 @@ def _parse_job(name: str, raw: dict[str, object], base_env: dict[str, str]) -> J
     lb = models.parse_duration(raw.get("lookback", 86400), f"bf.yaml jobs.{name}.lookback")
     ov = models.parse_duration(raw.get("overlap", 0), f"bf.yaml jobs.{name}.overlap", allow_zero=True)
     to = models.parse_duration(raw.get("timeout", 300), f"bf.yaml jobs.{name}.timeout", maximum=86_400)
-    head = (name, run, inp, ingest, mode, allow_removal, action_keep, str(raw.get("channel") or ""), sched, every, cron)
-    tail = (_parse_events(raw.get("events")), hooks, lb, ov, to, *_unit_meta(raw, "job", name, base_env))
-    return JobSpec(*head, *tail)
-
-
-def _parse_channel(name: str, raw: dict[str, object], base_env: dict[str, str]) -> ChannelSpec:
-    listen, send = _str_tuple(raw.get("listen")), _str_tuple(raw.get("send"))
-    to = models.parse_duration(raw.get("timeout", 60), f"bf.yaml channels.{name}.timeout", maximum=86_400)
-    return ChannelSpec(name, listen, send, to, *_unit_meta(raw, "channel", name, base_env))
+    io_kw: dict[str, Any] = {"input": inp, "ingest": ingest, "mode": mode, "allow_removal": allow_removal}
+    evs = _parse_events(raw.get("events"))
+    trig_kw: dict[str, Any] = {"schedule": sched, "every": every, "cron": cron, "events": evs, "hooks": hooks}
+    lim_kw: dict[str, Any] = {"lookback": lb, "overlap": ov, "timeout": to}
+    en, req, env = _unit_meta(raw, "job", name, base_env)
+    return JobSpec(
+        name=name, run=run, **io_kw, action_keep=action_keep, **trig_kw, **lim_kw, enabled=en, requires=req, env=env
+    )
 
 
 def _parse_service(name: str, raw: dict[str, object], base_env: dict[str, str]) -> ServiceSpec:
-    run, emit = _str_tuple(raw.get("run")), str(raw.get("emit", "none"))
-    return ServiceSpec(name, run, emit, *_unit_meta(raw, "service", name, base_env))
+    emit = cast("Literal['none', 'events', 'messages']", str(raw.get("emit", "none")))
+    return ServiceSpec(name, _str_tuple(raw.get("run")), emit, *_unit_meta(raw, "service", name, base_env))
 
 
 def load(store: Store) -> Config:
@@ -355,9 +330,9 @@ def load(store: Store) -> Config:
     if problems := validate_instance(_brain_validator(), raw, "bf.yaml"):
         raise Error("; ".join(problems))
     rb = raw.get("brains")
-    brains = (
-        {str(a): models.clean(str(t), f"bf.yaml brains.{a}") for a, t in rb.items()} if isinstance(rb, dict) else {}
-    )
+    brains = {
+        str(a): models.clean(str(t), f"bf.yaml brains.{a}") for a, t in (rb.items() if isinstance(rb, dict) else ())
+    }
     tz = _check_tz(str(raw.get("timezone") or "UTC"), "bf.yaml timezone")
     base_env = _parse_env_map(raw.get("env"), "bf.yaml env")
 
@@ -365,21 +340,17 @@ def load(store: Store) -> Config:
         return cast("dict[str, dict[str, object]]", raw[k]) if isinstance(raw.get(k), dict) else {}
 
     jobs = {str(k): _parse_job(str(k), v, base_env) for k, v in sec("jobs").items()}
-    channels = {str(k): _parse_channel(str(k), v, base_env) for k, v in sec("channels").items()}
     services = {str(k): _parse_service(str(k), v, base_env) for k, v in sec("services").items()}
-    all_names = (*jobs, *channels, *services)
+    all_names = (*jobs, *services)
     if "events" in all_names:
         raise Error("bf.yaml: unit name 'events' is reserved")
     if len(set(all_names)) != len(all_names):
         dup = next(u for i, u in enumerate(all_names) if u in all_names[:i])
         raise Error(f"bf.yaml: unit name {dup!r} is declared in multiple sections")
-    for job in jobs.values():
-        if job.channel and (job.channel not in channels or not channels[job.channel].send):
-            raise Error(f"bf.yaml jobs.{job.name}.channel: channel {job.channel!r} has no send command")
     w_spec = _parse_watch(cast("dict[str, object]", rw) if isinstance(rw := raw.get("watch"), dict) else {})
     if len(_LOADED) >= 64:
         _LOADED.clear()
-    _LOADED[key] = cfg = Config(str(raw["name"]), brains, tz, base_env, jobs, channels, services, w_spec)
+    _LOADED[key] = cfg = Config(str(raw["name"]), brains, tz, base_env, jobs, services, w_spec)
     return cfg
 
 
@@ -431,10 +402,12 @@ def select(value: str = "") -> Store:
     raise Error("no brain selected; pass --brain PATH, set BF_BRAIN or DEFAULT_BRAIN_PATH, or run inside a brain")
 
 
-def resolve_brain(current: Store, cfg: Config, host: str) -> Store:
+def resolve_brain(current: Store, cfg: Config, host: str, *, declared_only: bool = False) -> Store:
     """Resolve a `bf://<host>/...` brain target confined to user-owned brain directories."""
     if host in {"", cfg.name}:
         return current
+    if declared_only and host not in cfg.brains:
+        raise models.InputError(f"brain {host!r} is not declared in bf.yaml brains:")
     owner = os.geteuid()
     candidates: list[Path] = []
     if host in cfg.brains:

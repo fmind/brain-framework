@@ -10,11 +10,10 @@ from datetime import UTC, date, datetime
 
 import structlog
 
-FORMAT = 13
+FORMAT = 14
 AUTHORED = ("projects", "concepts", "actions")
-RESERVED_SOURCES = frozenset(
-    {"projects", "concepts", "actions", "memories", "notes", "record", "logs", "evals", "bf", "services", "channels"}
-)
+_RES_EXTRA = ("memories", "notes", "record", "logs", "evals", "bf", "services")
+RESERVED_SOURCES = frozenset((*AUTHORED, *_RES_EXTRA))
 MAX_FILE = 64 << 20
 MAX_BATCH = 16 << 20
 MAX_NOTE = 4 << 20
@@ -41,9 +40,12 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _PEM_TAG = r"[A-Z0-9 ]{0,32}PRIVATE KEY-----"
 _PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,16384}}"
+_KV_KEY = r"(?i:\b(?:password|passwd|(?:client[_-]?)?secret|api[_-]?key|(?:access|refresh)[_-]?token))"
+_KV_VAL = r'(?:\\?"[^"\r\n]{1,512}"|\\?\'[^\'\r\n]{1,512}\'|[^\s"\',;}{\]]{1,512})'
 _SECRET_RE = re.compile(
-    r"(?i:bearer)\s+[A-Za-z0-9._~+/=-]{8,}|(?:gh[pousr]_|github_pat_|AKIA|ASIA|AIza|sk-|xox[baprs]-)[A-Za-z0-9._-]{8,}"
-    rf"|-----BEGIN {_PEM_TAG}{_PEM_BODY}(?:-----END {_PEM_TAG})?|(?<=://)[^/\s:@]{{1,64}}:[^/\s@]{{1,128}}(?=@)"
+    r"(?i:bearer)\s+[A-Za-z0-9._~+/=-]{8,}|(?<=://)[^/\s:@]{1,64}:[^/\s@]{1,128}(?=@)"
+    r"|(?:gh[pousr]_|github_pat_|AKIA|ASIA|AIza|ya29\.|sk-|xox[baprs]-)[A-Za-z0-9._-]{8,}"
+    rf"|-----BEGIN {_PEM_TAG}{_PEM_BODY}(?:-----END {_PEM_TAG})?|{_KV_KEY}(?:\\?[\"'])?\s*[:=]\s*{_KV_VAL}"
 )
 
 
@@ -111,28 +113,24 @@ def parse_duration(
 
 
 def clean(value: str, label: str = "value") -> str:
-    """Require a nonempty single-line string without control characters."""
     if not value.strip() or _CONTROL.search(value):
         raise Error(f"{label} must be nonempty and contain no control characters")
     return value
 
 
 def clean_env(value: str, label: str = "env") -> str:
-    """Require a single-line string (possibly empty) without C0/DEL/C1 control characters."""
     if _CONTROL.search(value):
         raise Error(f"{label} must contain no control characters")
     return value
 
 
 def clean_text(value: str, label: str = "text") -> str:
-    """Require text without C0/DEL/C1 control characters other than tab, CR, and LF."""
     if _TEXT_CONTROL.search(value):
         raise Error(f"{label} contains forbidden control characters")
     return value
 
 
 def invisible(value: str) -> bool:
-    """Whether `value` contains invisible Unicode format or bidirectional control characters."""
     return not value.isascii() and _INVISIBLE.search(value) is not None
 
 
@@ -142,12 +140,10 @@ def _escape(match: re.Match[str]) -> str:
 
 
 def printable(text: str) -> str:
-    """Escape control, separator, and format characters for single-line stderr diagnostics."""
     return _UNPRINTABLE.sub(_escape, text)
 
 
 def encode(value: object) -> bytes:
-    """Serialize `value` to compact UTF-8 JSON ending in a newline."""
     try:
         text = json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
         return (text + "\n").encode()
@@ -156,14 +152,11 @@ def encode(value: object) -> bytes:
 
 
 def terminal(value: object) -> bytes:
-    """Serialize `value` to compact UTF-8 JSON while escaping terminal/invisible control characters."""
     text = encode(value).decode("utf-8")
     return (_TERMINAL.sub(_escape, text) if _TERMINAL.search(text) else text).encode()
 
 
-def decode(data: bytes | str, label: str = "JSON") -> object:
-    """Decode one JSON value rejecting duplicate object keys, NaN, and Infinity."""
-
+def decode(data: bytes | str, label: str = "JSON", *, check_duplicates: bool = True) -> object:
     def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
         if len(out := dict(items)) != len(items):
             raise Error(f"{label} contains a duplicate key")
@@ -173,7 +166,7 @@ def decode(data: bytes | str, label: str = "JSON") -> object:
         raise Error(f"{label} numbers must be finite")
 
     try:
-        return json.loads(data, object_pairs_hook=pairs, parse_constant=no_nan)
+        return json.loads(data, object_pairs_hook=pairs if check_duplicates else None, parse_constant=no_nan)
     except Error:
         raise
     except (ValueError, RecursionError, UnicodeError) as error:
@@ -181,12 +174,10 @@ def decode(data: bytes | str, label: str = "JSON") -> object:
 
 
 def digest(data: bytes) -> str:
-    """Return the lowercase SHA-256 hex digest of `data`."""
     return hashlib.sha256(data).hexdigest()
 
 
 def normalize_date(value: str, label: str = "date") -> str:
-    """Validate strict `YYYY-MM-DD` calendar dates."""
     try:
         if date.fromisoformat(value).isoformat() != value or value in {"0001-01-01", "9999-12-31"}:
             raise ValueError
@@ -196,7 +187,6 @@ def normalize_date(value: str, label: str = "date") -> str:
 
 
 def normalize_time(value: str, label: str = "timestamp") -> str:
-    """Validate a timezone-aware ISO 8601 timestamp and normalize to UTC `YYYY-MM-DDTHH:MM:SSZ`."""
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as error:
@@ -211,7 +201,6 @@ def normalize_time(value: str, label: str = "timestamp") -> str:
 
 
 def now_utc(now: datetime | None = None) -> str:
-    """Return `now` (or the current UTC instant) formatted as `YYYY-MM-DDTHH:MM:SSZ`."""
     instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
     return instant.isoformat(timespec="seconds").replace("+00:00", "Z")
 

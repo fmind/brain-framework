@@ -101,7 +101,7 @@ class Provider:
     def records(self, adapter: str, *arguments: str, home: Path | None = None) -> list[dict[str, Any]]:
         result = self.run(adapter, *arguments, home=home)
         assert result.returncode == 0, result.stderr
-        return records.parse_batch(result.stdout.encode())
+        return records.parse_batch_envelope(result.stdout.encode())[0]
 
 
 @pytest.fixture
@@ -144,7 +144,7 @@ def brain(tmp_path: Path) -> Store:
                     "text": "The team chose offline JSONL retrieval.",
                     "time": "2026-08-31T12:00:00Z",
                     "updated": "2026-08-31T12:00:00Z",
-                    "links": ["projects/offline.md"],
+                    "links": ["bf:///projects/offline.md"],
                 },
                 {
                     "id": "lunch",

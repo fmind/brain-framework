@@ -77,9 +77,6 @@
     "kind": { "enum": ["project", "concept", "action", "memory"], "type": "string" },
     "links": { "items": { "$ref": "#/$defs/Link" }, "maxItems": 2000, "type": "array" },
     "ref": { "maxLength": 4200, "minLength": 1, "type": "string" },
-    "relations": {
-      "anyOf": [{ "type": "object" }, { "items": { "type": "object" }, "maxItems": 2000, "type": "array" }]
-    },
     "sha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
     "source": { "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
     "stale_after": {

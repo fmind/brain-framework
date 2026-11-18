@@ -4,8 +4,8 @@ Answer one question across Google Workspace, Jira, GitHub, and Google Cloud fixt
 
 | Path                      | Purpose                                                                                              |
 | ------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `bf.yaml`                 | YAML configuration (`version: 13`, `name: context-demo`).                                            |
-| `schemas/jira.json`       | Per-source JSON Schema enforcing `type`, `status`, and `project` on `memories/jira/*.json`.          |
+| `bf.yaml`                 | YAML configuration (`version: 14`, `name: context-demo`).                                            |
+| `schemas/jira.json`       | Per-source JSON Schema enforcing `type`, `status`, and `links` on `memories/jira/*.json`.            |
 | `fixtures/*.json`         | Offline JSON fixtures for `workspace`, `jira`, `github`, `gcloud`, plus `jira-done.json`.            |
 | `projects/new-website.md` | Authoritative Markdown project note with `attr_list` metadata on headings, links, blocks, and tasks. |
 | `sensors/demo.py`         | Normalizes `fixtures/TOOL.json` into unified JSON records piped into `bf ingest`.                    |

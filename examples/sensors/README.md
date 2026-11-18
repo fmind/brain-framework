@@ -5,7 +5,7 @@ Five standalone Python 3.11+ standard-library sensors showcasing popular CLI too
 | Sensor                                           | Arguments                                  | Saves                                                                              |
 | ------------------------------------------------ | ------------------------------------------ | ---------------------------------------------------------------------------------- |
 | `git-history.py`                                 | `ROOT START END [--skip RELATIVE_REPO]...` | Commits on branches, tags, and remote branches across local `git` checkouts.       |
-| `github-issues.py`                               | `OWNER/REPO START END`                     | GitHub issues updated in `[START, END]` via `gh`, with best-effort token redaction |
+| `github-issues.py`                               | `OWNER/REPO START END`                     | GitHub issues updated in `[START, END)` via `gh`, with best-effort token redaction |
 | `gmail-headers.py`                               | `START END [--query=SEARCH]`               | Gmail message headers (`From`, `To`, `Cc`, `Subject`, labels) via `gws`.           |
 | `local-documents.py`                             | `LABEL ROOT [--exclude GLOB]...`           | Snapshot of text, Markdown, CSV, HTML, PDF (`pdftotext`), and Office documents.    |
 | `agent-telemetry.py`                             | `HARNESS ROOT START END`                   | Circular telemetry sensor turning local coding-agent JSON/JSONL logs into records. |

@@ -20,29 +20,32 @@ import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
 
 MAX_ISSUES = 500
 MAX_BYTES = 16 << 20
 MAX_REF = 8192
-MAX_LINKS = 1000
 TIMEOUT = 60
 FIELDS = "number,title,body,state,stateReason,author,assignees,labels,createdAt,updatedAt,closedAt,url"
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
 IDENTITY = re.compile(r"[a-z][a-z0-9+.-]*:\S+")
+_PEM_TAG = r"[A-Z0-9 ]{0,32}PRIVATE KEY-----"
+_PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,16384}}"
+_KV_KEY = r"(?i:\b(?:password|passwd|(?:client[_-]?)?secret|api[_-]?key|(?:access|refresh)[_-]?token))"
+_KV_VAL = r'(?:\\?"[^"\r\n]{1,512}"|\\?\'[^\'\r\n]{1,512}\'|[^\s"\',;}{\]]{1,512})'
 _SECRET_PATTERNS = re.compile(
     r"(?:gh[pousr]_[A-Za-z0-9_]{20,}"
     r"|github_pat_[A-Za-z0-9_]{20,}"
     r"|AKIA[0-9A-Z]{16}"
     r"|ASIA[0-9A-Z]{16}"
     r"|AIza[0-9A-Za-z_-]{35}"
+    r"|ya29\.[A-Za-z0-9._-]{8,}"
     r"|xox[baprs]-[0-9A-Za-z-]+"
     r"|sk-[A-Za-z0-9_-]{20,}"
-    r"|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
-    r"|(?<=://)[^/\s:@]+:[^/\s@]+(?=@)"
-    r"|(?i:\b(?:password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*\S+)"
-    r"|(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{12,}))"
+    rf"|-----BEGIN {_PEM_TAG}{_PEM_BODY}(?:-----END {_PEM_TAG})?"
+    r"|(?<=://)[^/\s:@]{1,64}:[^/\s@]{1,128}(?=@)"
+    rf"|{_KV_KEY}(?:\\?[\"'])?\s*[:=]\s*{_KV_VAL}"
+    r"|(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{8,}))"
 )
 
 
@@ -182,14 +185,6 @@ def cli(action: Callable[[], None], summary: str, hint: str) -> None:
         sys.exit(1)
 
 
-def repo(host: str, owner: str, name: str) -> str:
-    return reference(f"repo:{host.lower()}/{quote(owner.lower(), safe='')}/{quote(name.lower(), safe='')}")
-
-
-def account(host: str, login_name: str) -> str:
-    return reference(f"person:{host.lower()}/{quote(login_name.lower(), safe='')}")
-
-
 def login(value: object) -> str:
     """A GitHub account's login, or "" for a deleted (ghost) account."""
     name = value.get("login") if isinstance(value, dict) else None
@@ -204,11 +199,8 @@ def make_record(
     text: str,
     time_value: str,
     url: str,
-    aliases: Sequence[str],
-    relations: dict[str, list[str]],
     attributes: dict[str, object],
 ) -> dict[str, Any]:
-    _ = aliases, relations
     out: dict[str, Any] = {
         "id": identifier,
         "title": line(title, identifier),
@@ -250,8 +242,6 @@ def issue(repository: str, item: object, start: datetime, end: datetime) -> dict
         raise InvalidError("timestamps require timezones")
     if not start <= updated_at < end:
         return None
-    owner, name = repository.split("/")
-    repository_ref = repo("github.com", owner, name)
     author = login(item.get("author"))
     people = [login(person_obj) for person_obj in assignees]
     names = sorted(
@@ -264,18 +254,6 @@ def issue(repository: str, item: object, start: datetime, end: datetime) -> dict
     lines += [f"Author: {author}"] if author else []
     lines += [f"Assignees: {', '.join(filter(None, people))}"] if any(people) else []
     lines += [f"Labels: {', '.join(names)}"] if names else []
-    author_refs = [ref] if author and (ref := account("github.com", author)) else []
-    # GitHub matches label names regardless of case; invalid references are filtered out.
-    label_refs = [
-        ref
-        for label in names
-        if (
-            ref := reference(
-                "label:" + "/".join(quote(part, safe="") for part in ("github.com", owner, name, label.lower()))
-            )
-        )
-    ]
-    assignee_refs = [ref for person_name in people if person_name and (ref := account("github.com", person_name))]
     return make_record(
         f"{repository}/issues/{number}",
         f"{repository}: {title}",
@@ -284,13 +262,6 @@ def issue(repository: str, item: object, start: datetime, end: datetime) -> dict
         text="\n".join(lines) + ("\n\n" + redact(body) if isinstance(body, str) and body else ""),
         time_value=created,
         url=item.get("url") or "",
-        aliases=[f"github:{repository}/issues/{number}"],
-        relations={
-            "author": author_refs,
-            "assignee": assignee_refs,
-            "repository": [repository_ref] if repository_ref else [],
-            "label": label_refs,
-        },
         attributes={
             "number": number,
             "kind": "issue",
@@ -305,7 +276,7 @@ def issue(repository: str, item: object, start: datetime, end: datetime) -> dict
 def collect(repository: str, start_arg: str, end_arg: str) -> list[dict[str, Any]]:
     if not REPOSITORY.fullmatch(repository):
         raise InvalidError("repository must be OWNER/REPO")
-    repo_name = repository.lower()  # gh accepts any case; ids and the alias match github-history.py's
+    repo_name = repository.lower()  # gh accepts any case; keep repository ids lowercase
     start, end = datetime.fromisoformat(start_arg), datetime.fromisoformat(end_arg)
     if start.tzinfo is None or end.tzinfo is None or start >= end:
         raise InvalidError("START and END need timezones, with START before END")

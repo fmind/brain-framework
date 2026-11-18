@@ -53,7 +53,8 @@ def _build_parser() -> _Parser:
     p_query.add_argument("pattern", nargs="?", default=None, metavar="QUERY", help="Lexical pattern for rg.")
     p_query.add_argument("--jq", default=None, metavar="FILTER", help="jq filter expression over JSON memories.")
     p_query.add_argument("-s", "--scope", default="", metavar="SCOPE", help="Optional folder or source name.")
-    p_query.add_argument("-n", "--limit", type=int, default=20, metavar="N", help="Max items returned (default 20).")
+    lim_help = "Max items returned (default 20; 1..500 rg, 1..5000 jq)."
+    p_query.add_argument("-n", "--limit", type=int, default=20, metavar="N", help=lim_help)
 
     _sub(sub, "validate", "Validate bf.yaml, schemas/, OKF notes, JSON memories, evals, and links.")
     _sub(sub, "review", "List stale notes, newer linked evidence, draft actions, and open tasks.")
@@ -61,7 +62,7 @@ def _build_parser() -> _Parser:
     p_eval = _sub(sub, "eval", "Run deterministic evaluations in evals/.")
     p_eval.add_argument("target", nargs="?", default="", metavar="SUITE", help="Optional eval file path or stem.")
 
-    p_run = _sub(sub, "run", "Execute jobs declared in bf.yaml (named, due, or Git hooks).")
+    p_run = _sub(sub, "run", "Execute jobs declared in bf.yaml (use -- EXTRA_ARGS... for one job or --hook).")
     p_run.add_argument("jobs", nargs="*", metavar="JOB", help="Specific job names to execute.")
     sel = p_run.add_mutually_exclusive_group()
     sel.add_argument("--due", action="store_true", help="Rebuild dirty notes and run due scheduled/event jobs.")
@@ -74,9 +75,7 @@ def _build_parser() -> _Parser:
     p_watch = _sub(sub, "watch", "Supervise constant services, file changes, events, and scheduled jobs.")
     p_watch.add_argument("--json", dest="json_stream", action="store_true", help="Emit compact JSON lines.")
 
-    p_mcp = _sub(sub, "mcp", "Run the read-only Model Context Protocol server.")
-    p_mcp.add_argument("--transport", choices=("stdio", "http"), default="stdio", help="MCP transport (default stdio).")
-    p_mcp.add_argument("--port", type=int, default=None, help="Localhost port for HTTP transport (default 8765).")
+    _sub(sub, "mcp", "Run the read-only Model Context Protocol server over stdio.")
     return parser
 
 
@@ -143,7 +142,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         if args.command == "mcp":
             from bf import mcp
 
-            mcp.serve(brain_arg, transport=args.transport, port=args.port)
+            mcp.serve(brain_arg)
             return 0
         from bf import config
 
