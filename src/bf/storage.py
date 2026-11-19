@@ -11,6 +11,7 @@ import time
 from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import Any
 
 from bf.models import MAX_FILE, MAX_FILES, BusyError, Error
 
@@ -37,17 +38,28 @@ def relative(value: str) -> tuple[str, ...]:
     return tuple(parts)
 
 
-def _open_read(dir_fd: int, leaf: str, name: str) -> int:
+def open_regular(dir_fd: int, leaf: str, name: str, flags: int = os.O_RDONLY, mode: int = 0o600) -> int:
+    """Open `leaf` under `dir_fd` with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, failing closed on symlinks/specials."""
     try:
-        return os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+        return os.open(leaf, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, mode, dir_fd=dir_fd)
     except OSError as error:
         if error.errno == errno.ELOOP:
             raise Error(f"{name}: {LINKED}") from error
-        if error.errno in {errno.ENXIO, errno.EOPNOTSUPP} and not stat.S_ISREG(
-            os.stat(leaf, dir_fd=dir_fd, follow_symlinks=False).st_mode
-        ):
+        if error.errno in {errno.ENXIO, errno.EOPNOTSUPP}:
             raise Error(f"{name}: expected a regular file") from error
         raise
+
+
+def tail_lines(lines: list[bytes], max_lines: int, budget: int) -> list[bytes]:
+    """Return the newest suffix of `lines` fitting within `max_lines` and `budget` bytes."""
+    kept: list[bytes] = []
+    for item in reversed(lines[-max_lines:] if max_lines > 0 and budget > 0 else ()):
+        if len(item) > budget:
+            break
+        kept.append(item)
+        budget -= len(item)
+    kept.reverse()
+    return kept
 
 
 def _read_fd(fd: int, name: str, limit: int) -> bytes:
@@ -121,7 +133,7 @@ class Store:
     def read(self, name: str, limit: int = MAX_FILE) -> bytes:
         """Read up to `limit` bytes from a regular file without following symlinks."""
         with self.parent(name) as (parent, leaf):
-            fd = _open_read(parent, leaf, name)
+            fd = open_regular(parent, leaf, name)
         return _read_fd(fd, name, limit)
 
     def write(self, name: str, data: bytes, *, mode: int = 0o644, durable: bool = True) -> None:
@@ -164,10 +176,16 @@ class Store:
             return os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode
 
     def walk(
-        self, directory: str, *, suffix: str = "", limit: int | None = None, skipped: list[str] | None = None
+        self,
+        directory: str,
+        *,
+        suffix: str = "",
+        limit: int | None = None,
+        skipped: list[str] | None = None,
+        **opts: Any,
     ) -> Generator[tuple[str, bytes | None]]:
+        ordered, skip_dirs, visited = bool(opts.get("ordered", True)), frozenset(opts.get("skip_dirs", ())), 0
         relative(directory)
-        visited = 0
 
         def record_skip(path: str, message: str, err: Exception | None = None) -> None:
             if skipped is None:
@@ -179,30 +197,30 @@ class Store:
             if prefix.count("/") > 64:
                 raise Error(f"{prefix}: directory exceeds the 64-level depth limit")
             with os.scandir(fd) as raw_entries:
-                entries = sorted(raw_entries, key=lambda item: item.name)
+                entries = sorted(raw_entries, key=lambda item: item.name) if ordered else list(raw_entries)
             for entry in entries:
                 if entry.name.startswith(".write-") and _TEMPORARY.fullmatch(entry.name):
                     continue
-                visited += 1
-                if visited > MAX_FILES:
+                if (visited := visited + 1) > MAX_FILES:
                     raise Error(f"{directory} exceeds the {MAX_FILES:,}-entry scan limit")
                 shown = _shown(entry.name)
                 path = f"{prefix}/{shown or entry.name}"
                 if shown is not None:
                     record_skip(path, UNNAMED)
                     continue
-                opened: int | None = None
-                ready, data = False, None
+                opened, ready, data = None, False, None
                 try:
                     if entry.is_symlink():
                         record_skip(path, LINKED)
                     elif entry.is_dir(follow_symlinks=False):
+                        if prefix == directory and entry.name in skip_dirs:
+                            continue
                         opened = os.open(entry.name, _DIR, dir_fd=fd)
                     elif not entry.is_file(follow_symlinks=False):
                         record_skip(path, "special files are not allowed")
                     else:
                         if limit is not None and (not suffix or entry.name.endswith(suffix)):
-                            data = _read_fd(_open_read(fd, entry.name, path), path, limit)
+                            data = _read_fd(open_regular(fd, entry.name, path), path, limit)
                         ready = True
                 except FileNotFoundError:
                     continue
@@ -239,8 +257,7 @@ class Store:
                     record_skip(key, "permission denied", error)
                     return
                 if child is None:
-                    why = LINKED if stat.S_ISLNK(info.st_mode) else "expected a directory"
-                    record_skip(key, why)
+                    record_skip(key, LINKED if stat.S_ISLNK(info.st_mode) else "expected a directory")
                     return
                 os.close(fd)
                 fd = child
@@ -250,42 +267,42 @@ class Store:
 
     def files(self, directory: str, *, skipped: list[str] | None = None) -> list[str]:
         """List regular files recursively below `directory`, recording bad entries in `skipped`."""
-        return sorted(p for p, _ in self.walk(directory, skipped=skipped))
+        return sorted(p for p, _ in self.walk(directory, skipped=skipped, ordered=False))
 
     def iter_read_files(
-        self, directory: str, *, suffix: str = ".json", limit: int = MAX_FILE, skipped: list[str] | None = None
+        self, directory: str, *, suffix: str = ".json", limit: int = MAX_FILE, **opts: Any
     ) -> Generator[tuple[str, bytes]]:
         """Yield matching `(path, bytes)` recursively below `directory` in a streaming `O_NOFOLLOW` scan."""
-        return ((p, d) for p, d in self.walk(directory, suffix=suffix, limit=limit, skipped=skipped) if d is not None)
+        return ((p, d) for p, d in self.walk(directory, suffix=suffix, limit=limit, **opts) if d is not None)
 
     def count_files(self, directory: str, *, exclude_suffix: str = "") -> int:
         """Count regular files recursively below `directory` without sorting paths."""
-        return sum(1 for p, _ in self.walk(directory) if not (exclude_suffix and p.endswith(exclude_suffix)))
+        return sum(
+            1 for p, _ in self.walk(directory, ordered=False) if not (exclude_suffix and p.endswith(exclude_suffix))
+        )
+
+    def read_tail(self, name: str, span: int, *, label: str = "") -> tuple[bytes, int]:
+        """Read up to the last `span` bytes of a regular file, dropping any split leading line."""
+        tag = label or name
+        with self.parent(name) as (parent, leaf), os.fdopen(open_regular(parent, leaf, tag), "rb") as stream:
+            if not stat.S_ISREG((info := os.fstat(stream.fileno())).st_mode):
+                raise Error(f"{tag}: expected a regular file")
+            stream.seek(off := max(0, info.st_size - span))
+            tail = stream.read(span)
+        return (tail.split(b"\n", 1)[1] if b"\n" in tail else b"") if off else tail, off
 
     def append_log(self, name: str, line: bytes, *, max_lines: int = 200, max_bytes: int = 1 << 20) -> None:
         """Append one private (`0600`) log line to `logs/<name>.log`, retaining up to `max_lines` / `max_bytes`."""
-        path, entry = f"logs/{name}.log", (line if line.endswith(b"\n") else line + b"\n")
+        leaf_name, path = f"{name}.log", f"logs/{name}.log"
+        entry = line if line.endswith(b"\n") else line + b"\n"
         if len(entry) > max_bytes:
             raise Error(f"{path}: log entry exceeds {max_bytes} bytes")
-        private_dir(self, "logs")
-        kept: list[bytes] = []
+        logs_store, kept = private_dir(self, "logs"), []
         if max_lines > 1:
-            with suppress(FileNotFoundError), self.parent(path) as (parent, leaf):
-                with os.fdopen(_open_read(parent, leaf, path), "rb") as stream:
-                    if not stat.S_ISREG((info := os.fstat(stream.fileno())).st_mode):
-                        raise Error(f"{path}: expected a regular file")
-                    stream.seek(off := max(0, info.st_size - max_bytes))
-                    tail = stream.read(max_bytes)
-                if off:
-                    tail = tail.split(b"\n", 1)[1] if b"\n" in tail else b""
-                budget = max_bytes - len(entry)
-                for item in reversed(tail.splitlines(keepends=True)[-(max_lines - 1) :]):
-                    if len(item) > budget:
-                        break
-                    kept.append(item)
-                    budget -= len(item)
-                kept.reverse()
-        self.write(path, b"".join([*kept, entry]), mode=0o600, durable=False)
+            with suppress(FileNotFoundError):
+                tail, _ = logs_store.read_tail(leaf_name, max_bytes, label=path)
+                kept = tail_lines(tail.splitlines(keepends=True), max_lines - 1, max_bytes - len(entry))
+        logs_store.write(leaf_name, b"".join([*kept, entry]), mode=0o600, durable=False)
 
 
 def expand(path: Path) -> Path:
@@ -296,7 +313,7 @@ def expand(path: Path) -> Path:
         raise Error(f"cannot resolve home directory in path; {hint}") from error
 
 
-def private_dir(store: Store, *parts: str) -> Store:
+def private_dir(store: Store, *parts: str, create: bool = True) -> Store:
     """Ensure `<brain>/.bf/...` exists with mode `0700` owned by the current user without following symlinks."""
     target = parts or (".bf",)
     if any(not p or p in {".", ".."} or "/" in p or "\\" in p or "\x00" in p for p in target):
@@ -305,11 +322,14 @@ def private_dir(store: Store, *parts: str) -> Store:
     try:
         for part in target:
             try:
-                with suppress(FileExistsError):
-                    os.mkdir(part, 0o700, dir_fd=fd)
-                    os.fsync(fd)
+                if create:
+                    with suppress(FileExistsError):
+                        os.mkdir(part, 0o700, dir_fd=fd)
+                        os.fsync(fd)
                 child = os.open(part, _DIR, dir_fd=fd)
             except OSError as error:
+                if error.errno == errno.ENOENT and not create:
+                    raise
                 if error.errno in {errno.ELOOP, errno.ENOTDIR}:
                     raise Error("state directory must be a real directory without symlinks") from error
                 extra = f" ({error.strerror})" if error.strerror else ""

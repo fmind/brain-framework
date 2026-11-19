@@ -26,7 +26,7 @@ _CONFLICT = re.compile(r"^(?:<{7,}|>{7,}|\|{7,}|={7,})(?: |$)")
 _BAD_ATTR = re.compile(r"\{#[A-Za-z0-9_.-]+\?[^}\r\n]+\}")
 _TASK = re.compile(r"^\[([ xX])\]\s+(\S[\s\S]*)$")
 _META_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
-_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):(.*)$")
+_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):(.*)\Z")
 _URL_SCHEMES = frozenset({"https", "http", "mailto", "urn"})
 _FORBIDDEN_SCHEMES = frozenset({"javascript", "data", "file", "vbscript", "tel"})
 _HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
@@ -238,17 +238,27 @@ def _split_target_parts(source_path: str, raw: str, err_msg: str) -> tuple[str, 
 def is_memory_record_path(path: str) -> bool:
     p = path.split("/")
     ok = len(p) == 3 and p[0] == "memories" and bool(models.NAME_RE.fullmatch(p[1])) and p[2].endswith(".json")
-    return ok and p[1] not in models.RESERVED_SOURCES and len(p[2]) > 5 and p[2][0] != "." and ":" not in path
+    safe = not _bad_rel(path) and not re.search(r"[\x00-\x1f\x7f-\x9f\s]", path)
+    return ok and safe and p[1] not in models.RESERVED_SOURCES and len(p[2]) > 5 and p[2][0] != "." and ":" not in path
+
+
+def _bad_rel(path: str) -> bool:
+    return "\\" in path or "\x00" in path or any(p in {"", ".", ".."} for p in path.split("/"))
 
 
 def record_link_problem(lnk: Mapping[str, Any]) -> str:
     k, t, a = str(lnk.get("kind", "")), str(lnk.get("to", "")), str(lnk.get("anchor", ""))
     sib_h, _, sib_p = t.removeprefix("bf://").partition("/")
+    bad_ch = bool(re.search(r"[\x00-\x1f\x7f-\x9f\s]", t))
+    if k == "url" and (bad_ch or not ((m := _SCHEME.match(t)) and m[1].lower() in _URL_SCHEMES)):
+        return f"url link {t!r} must use https://, http://, mailto:, or urn:"
     if k == "record" and not is_memory_record_path(t):
         return f"record link {t!r} must use memories/<source>/<sha256>.json"
-    if k == "note" and (":" in t or not t.startswith(("projects/", "concepts/", "actions/")) or is_private_path(t)):
+    bad_n = bad_ch or ":" in t or _bad_rel(t) or not t.startswith(("projects/", "concepts/", "actions/"))
+    if k == "note" and (bad_n or is_private_path(t)):
         return f"note link {t!r} must target projects/, concepts/, or actions/"
-    if k == "brain" and (not t.startswith("bf://") or not sib_h or not sib_p or ":" in sib_p or is_private_path(sib_p)):
+    bad_b = bad_ch or not t.startswith("bf://") or not sib_h or "\\" in sib_h or not sib_p or ":" in sib_p
+    if k == "brain" and (bad_b or _bad_rel(sib_p) or is_private_path(sib_p)):
         return f"cross-brain link {t!r} must use bf://<brain>/<path>"
     return "JSON record links do not support #anchor fragments" if a and (k == "record" or t.endswith(".json")) else ""
 
@@ -306,7 +316,7 @@ def parse_link(source_path: str, raw_target: str, brain_name: str, **opts: Any) 
             msg = "legacy record reference in bf:// URI; use bf:///memories/<source>/<sha256>.json"
             raise Error(f"{source_path}: {msg}")
         if not is_record:
-            if "\\" in rest or any(p in {"", ".", ".."} for p in rest.split("/")):
+            if _bad_rel(rest):
                 raise Error(f"{source_path}: invalid path in bf:// URI")
             if is_private_path(rest):
                 raise Error(f"{source_path}: private or runtime paths are not allowed in links")
@@ -314,16 +324,14 @@ def parse_link(source_path: str, raw_target: str, brain_name: str, **opts: Any) 
             if prose:
                 raise Error(f"{source_path}: use a relative path in Markdown prose instead of {target!r}")
             to = rest if is_record else _normalize_note_path(source_path, rest, relative_base=False)
-            link_kind = "record" if (is_record or is_memory_record_path(to)) else "note"
-            return mk(to, link_kind, anchor, q_meta)
+            return mk(to, "record" if (is_record or is_memory_record_path(to)) else "note", anchor, q_meta)
         return mk(f"bf://{netloc}/{rest if is_record else _normalize_target_ext(rest)}", "brain", anchor, q_meta)
 
     if scheme and scheme_match is not None:
         if not allow_record_ref:
             raise Error(f"{source_path}: unsupported link scheme {scheme}:; use a relative path, bf://, or https://")
-        if not models.NAME_RE.fullmatch(scheme_match[1]) or not scheme_match[2]:
+        if not models.NAME_RE.fullmatch(scheme_match[1]) or not (rhs := scheme_match[2]):
             raise Error(f"{source_path}: invalid record reference {target!r}")
-        rhs = scheme_match[2]
         if rhs.startswith(("https://", "http://")):
             if re.search(r"\s", rhs):
                 raise Error(f"{source_path}: invalid record reference {target!r}")
@@ -335,12 +343,10 @@ def parse_link(source_path: str, raw_target: str, brain_name: str, **opts: Any) 
 
     if require_uri:
         raise Error(f"{source_path}: links must use bf:// or https:// URLs")
-    decoded_path, q_meta, anchor = _split_target_parts(
-        source_path, target, "invalid Markdown link target or trailing #"
-    )
-    if not decoded_path and not anchor:
+    dec_p, q_meta, anchor = _split_target_parts(source_path, target, "invalid Markdown link target or trailing #")
+    if not dec_p and not anchor:
         raise Error(f"{source_path}: empty link target")
-    to = _normalize_note_path(source_path, decoded_path, relative_base=relative_base)
+    to = _normalize_note_path(source_path, dec_p, relative_base=relative_base)
     return mk(to, "record" if is_memory_record_path(to) else "note", anchor, q_meta)
 
 
@@ -362,11 +368,7 @@ def _extract_ast(path: str, body: str):
     headings: list[dict[str, Any]] = []
     attrs: dict[str, dict[str, str]] = {}
     raw_links: list[tuple[str, dict[str, str], str]] = []
-    elements: list[dict[str, Any]] = []
-    tasks: list[dict[str, Any]] = []
-    cited_footnotes: dict[str, str] = {}
-    consumed_p: set[int] = set()
-    current_section = ""
+    elements, tasks, cited_footnotes, consumed_p, current_section = [], [], {}, set(), ""
 
     def register_id(item_id: str, meta: dict[str, str]) -> None:
         if item_id in attrs:
@@ -470,10 +472,9 @@ def extract_section(text: str, anchor: str, compiled: dict[str, Any]) -> dict[st
             return {"anchor": anchor, "meta": attrs[anchor]}
         raise Error(f"{compiled['ref']}: missing anchor #{anchor}")
     lines = text.splitlines()
-    fm_end = next((i + 1 for i in range(1, len(lines)) if lines[i].rstrip() == "---"), 0)
-    body_start = fm_end if lines and lines[0].rstrip() == "---" else 0
-    idx, fence, prev_heading = body_start, "", False
-    spans: list[tuple[int, str]] = []
+    fm_end = next((i + 1 for i in range(1, len(lines)) if lines[i] == "---"), 0)
+    body_start = fm_end if lines and lines[0] == "---" else 0
+    idx, fence, prev_heading, spans, ref_defs = body_start, "", False, [], []
     while idx < len(lines):
         ln, was_heading, prev_heading = lines[idx], prev_heading, False
         if m_f := FENCE.fullmatch(ln):
@@ -484,7 +485,9 @@ def extract_section(text: str, anchor: str, compiled: dict[str, Any]) -> dict[st
             idx += 1
             continue
         if not fence:
-            is_atx = bool(re.match(r"^ {0,3}#{1,6}(?:[ \t]+|$)", ln))
+            if re.match(r"^ {0,3}\[[^\]]+\]:", ln):
+                ref_defs.append(ln)
+            is_atx = bool(re.match(r"^ {0,3}#{1,6}(?:[^#]|$)", ln))
             at_block = idx == body_start or was_heading or not lines[idx - 1].strip()
             is_para = not is_atx and at_block and bool(ln.strip()) and not ln.startswith(("    ", "\t"))
             is_para = is_para and not ln.lstrip().startswith((">", "-", "*", "+", "|", ":"))
@@ -497,17 +500,15 @@ def extract_section(text: str, anchor: str, compiled: dict[str, Any]) -> dict[st
         idx += 1
     md, capture = _engine()
     md.reset()
-    md.convert("\n\n".join(f"bfspan:{k}\n\n{span}" for k, (_, span) in enumerate(spans)))
-    known_ids = {str(h.get("id", "")) for h in headings}
-    parsed_spans: list[tuple[int, str, int]] = []
-    cur_k = -1
+    doc_parts = [f"bfspan:{k}\n\n{span}" for k, (_, span) in enumerate(spans)]
+    md.convert("\n\n".join([*doc_parts, "\n".join(ref_defs)] if ref_defs else doc_parts))
+    known_ids, parsed_spans, cur_k = {str(h.get("id", "")) for h in headings}, [], -1
     for elem in capture.root if capture.root is not None else ():
         if elem.tag == "p" and (elem.text or "").startswith("bfspan:"):
             cur_k = int((elem.text or "")[7:])
         elif elem.tag in _HEADINGS and 0 <= cur_k < len(spans) and (hid := elem.attrib.get("id", "")) in known_ids:
             parsed_spans.append((spans[cur_k][0], hid, int(elem.tag[1])))
-    hit = next(((pos, start, lvl) for pos, (start, hid, lvl) in enumerate(parsed_spans) if hid == anchor), None)
-    if hit is None:
+    if (hit := next(((p, s, lv) for p, (s, h, lv) in enumerate(parsed_spans) if h == anchor), None)) is None:
         return {"anchor": anchor, "heading": heading, "text": ""}
     end_line = next((s for s, _, lvl in parsed_spans[hit[0] + 1 :] if lvl <= hit[2]), len(lines))
     return {"anchor": anchor, "heading": heading, "text": "\n".join(lines[hit[1] : end_line]).strip()}
@@ -552,22 +553,20 @@ def compile_note(path: str, data: bytes, *, brain_name: str) -> dict[str, Any]:
     tags = normalize_tags(fm.pop("tags"), path) if "tags" in fm and fm["tags"] is not None else []
 
     fm_link_specs: list[tuple[str, dict[str, str], str, bool]] = []
+    bad_fm_lk = f"{path}: frontmatter links must be a list of URL strings or {{to, meta}} objects"
     if (fm_links := fm.pop("links", None)) is not None:
         if not isinstance(fm_links, list):
-            raise Error(f"{path}: frontmatter links must be a list of URL strings or {{to, meta}} objects")
+            raise Error(bad_fm_lk)
         for item in fm_links:
             if isinstance(item, str):
                 fm_link_specs.append((item, {}, "", True))
-            elif (
-                isinstance(item, dict)
-                and set(item) <= {"to", "meta"}
-                and isinstance(to_s := item.get("to"), str)
-                and isinstance(m_raw := item.get("meta", {}), dict)
-                and all(isinstance(k, str) and isinstance(v, str) for k, v in m_raw.items())
-            ):
-                fm_link_specs.append((to_s, dict(m_raw), "", True))
+            elif isinstance(item, dict) and set(item) <= {"to", "meta"} and isinstance(to_s := item.get("to"), str):
+                m = item.get("meta", {})
+                if not isinstance(m, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in m.items()):
+                    raise Error(bad_fm_lk)
+                fm_link_specs.append((to_s, dict(m), "", True))
             else:
-                raise Error(f"{path}: frontmatter links must be a list of URL strings or {{to, meta}} objects")
+                raise Error(bad_fm_lk)
     if isinstance(sources_val := fm.get("sources"), list):
         cites = (s.get("resource") for s in sources_val if isinstance(s, dict))
         fm_link_specs.extend((r.strip(), {"rel": "cites"}, "", True) for r in cites if isinstance(r, str) and r.strip())

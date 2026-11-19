@@ -26,7 +26,8 @@ Each decision states why it holds and what evidence would reopen it. This list w
 
 These planned breaks change a contract, so they wait for the next major release, which has no date yet. Never ship one in a minor or patch release.
 
-No breaking changes are currently queued.
+- **Forbid removed `relations` property in `schemas/record.json`.** Add `"relations": false` to `RECORD_SCHEMA` (`docs/record.schema.json`) so JSON Schema validators reject legacy `relations` directly alongside `bf ingest` and `bf validate` runtime checks.
+- **Tighten calendar-date validation in `schemas/record.json` and `schemas/concepts.json`.** Narrow `updated` and `stale_after` date patterns/checks in published JSON Schemas to reject impossible calendar dates (such as `2026-02-31`) at schema validation time in addition to runtime normalization.
 
 ## Record a decision
 

@@ -199,7 +199,7 @@ def nameable(relative: str) -> bool:
     return not CONTROL.search(relative) and not any(unicodedata.category(ch) == "Cf" for ch in relative)
 
 
-def _read_regular(path: Path, label: str) -> str:
+def _read_regular_bytes(path: Path, label: str) -> bytes:
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     try:
         fd = os.open(path, flags)
@@ -210,7 +210,68 @@ def _read_regular(path: Path, label: str) -> str:
     with os.fdopen(fd, "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise InvalidError(f"{label} must be a regular file")
-        return os.fsdecode(stream.read(4096)).strip()
+        raw = stream.read(4097)
+        if len(raw) > 4096:
+            raise InvalidError(f"{label} exceeds 4096 bytes")
+        return raw
+
+
+def _read_regular(path: Path, label: str) -> str:
+    text = os.fsdecode(_read_regular_bytes(path, label)).rstrip("\r\n")
+    if "\n" in text or "\r" in text or "\x00" in text:
+        raise InvalidError(f"{label} contains invalid control characters")
+    return text
+
+
+def _audit_objects_dir(obj_dir: Path, real_root: Path, seen: set[Path], depth: int = 0) -> None:
+    if depth > 5:
+        raise InvalidError("git alternates exceed depth limit")
+    resolved = Path(os.path.realpath(obj_dir))
+    if not resolved.is_relative_to(real_root) or not resolved.is_dir():
+        raise InvalidError("git alternate object store escapes ROOT")
+    if resolved in seen:
+        return
+    seen.add(resolved)
+    visited = 0
+
+    def scan_fd(dir_fd: int, cur_depth: int = 0) -> None:
+        nonlocal visited
+        if cur_depth > 8:
+            raise InvalidError("git objects exceed depth limit")
+        with os.scandir(dir_fd) as entries:
+            for entry in entries:
+                visited += 1
+                if visited > 100_000:
+                    raise InvalidError("git objects exceed entry limit")
+                if entry.is_symlink():
+                    raise InvalidError(f"symlinked git entry {entry.name!r} is refused")
+                if entry.is_dir(follow_symlinks=False):
+                    sub_fd = os.open(
+                        entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd
+                    )
+                    try:
+                        scan_fd(sub_fd, cur_depth + 1)
+                    finally:
+                        os.close(sub_fd)
+
+    root_fd = os.open(resolved, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        scan_fd(root_fd)
+    finally:
+        os.close(root_fd)
+    if (resolved / "info" / "http-alternates").exists():
+        raise InvalidError("git grafts and http-alternates are refused")
+    with contextlib.suppress(FileNotFoundError):
+        raw_alt = _read_regular_bytes(resolved / "info" / "alternates", "alternates")
+        for raw_ln in raw_alt.split(b"\n"):
+            if not raw_ln or raw_ln.startswith(b"#"):
+                continue
+            if b"\r" in raw_ln or b"\x00" in raw_ln:
+                raise InvalidError("invalid control character in git alternates")
+            ln = os.fsdecode(raw_ln)
+            if ln.startswith('"'):
+                raise InvalidError("quoted git alternates entries are refused")
+            _audit_objects_dir(resolved / ln, real_root, seen, depth + 1)
 
 
 def _audit_git_dir(git_dir: Path, real_root: Path) -> None:
@@ -219,7 +280,7 @@ def _audit_git_dir(git_dir: Path, real_root: Path) -> None:
     def scan_dir(path: Path, *, recurse: bool = False, depth: int = 0) -> None:
         if depth > 16:
             raise InvalidError("git refs exceed depth limit")
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             with os.scandir(fd) as entries:
                 for entry in entries:
@@ -231,23 +292,18 @@ def _audit_git_dir(git_dir: Path, real_root: Path) -> None:
             os.close(fd)
 
     scan_dir(git_dir)
-    for sub, recurse in (
-        (git_dir / "info", False),
-        (git_dir / "refs", True),
-        (git_dir / "objects", False),
-        (git_dir / "objects" / "info", False),
-    ):
+    for sub, recurse in ((git_dir / "info", False), (git_dir / "refs", True)):
         with contextlib.suppress(FileNotFoundError):
             scan_dir(sub, recurse=recurse)
-    if (git_dir / "objects" / "info" / "http-alternates").exists() or (git_dir / "info" / "grafts").exists():
+    if (git_dir / "info" / "grafts").exists():
         raise InvalidError("git grafts and http-alternates are refused")
-    with contextlib.suppress(FileNotFoundError):
-        raw_alt = _read_regular(git_dir / "objects" / "info" / "alternates", "alternates")
-        for raw_ln in raw_alt.splitlines():
-            if (ln := raw_ln.strip()) and not ln.startswith("#"):
-                alt = Path(os.path.realpath((git_dir / "objects") / ln))
-                if not alt.is_relative_to(real_root) or not alt.is_dir():
-                    raise InvalidError("git alternate object store escapes ROOT")
+    obj_path = git_dir / "objects"
+    try:
+        os.lstat(obj_path)
+    except FileNotFoundError:
+        pass
+    else:
+        _audit_objects_dir(obj_path, real_root, set())
 
 
 def shared(marker: Path, real_root: Path) -> tuple[str, bool] | None:

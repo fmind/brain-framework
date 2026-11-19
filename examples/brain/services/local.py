@@ -19,29 +19,55 @@ _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
 def _open_state_dir(state: Path) -> int:
-    abs_state = state if state.is_absolute() else Path.cwd() / state
-    tail: list[str] = []
-    cur = abs_state
-    while cur != cur.parent and (cur == abs_state or cur.name == ".bf" or cur.is_symlink() or not cur.exists()):
-        if cur.name in {"", ".", ".."}:
-            raise SystemExit("invalid BF_STATE_DIR path")
-        tail.append(cur.name)
-        cur = cur.parent
+    if ".." in state.parts:
+        raise SystemExit("invalid BF_STATE_DIR path")
+    base: Path | None = None
+    rel_parts: tuple[str, ...] = ()
     try:
-        fd = os.open(cur.resolve(strict=True), _DIR_FLAGS)
+        if not state.is_absolute():
+            base, rel_parts = Path.cwd().resolve(strict=True), state.parts
+        else:
+            if base_str := os.environ.get("BF_BRAIN"):
+                raw_brain = Path(base_str)
+                real_brain = raw_brain.resolve(strict=True)
+                for cand in (real_brain, raw_brain):
+                    with contextlib.suppress(ValueError):
+                        rel_parts = state.relative_to(cand).parts
+                        base = real_brain
+                        break
+            if base is None:
+                cur = state
+                while cur != cur.parent and (cur == state or cur.name == ".bf" or cur.is_symlink() or not cur.exists()):
+                    cur = cur.parent
+                base, rel_parts = cur.resolve(strict=True), state.relative_to(cur).parts
+    except (OSError, ValueError) as err:
+        raise SystemExit(f"cannot resolve state directory parent: {err}") from err
+    if not rel_parts or any(p in {"", ".", ".."} for p in rel_parts):
+        raise SystemExit("invalid BF_STATE_DIR path")
+    try:
+        fd = os.open(base, _DIR_FLAGS)
     except OSError as err:
         raise SystemExit(f"cannot open state directory parent: {err.strerror}") from err
     try:
-        for part in reversed(tail):
-            with contextlib.suppress(FileExistsError):
+        for part in rel_parts:
+            created = False
+            try:
                 os.mkdir(part, 0o700, dir_fd=fd)
+                created = True
+            except FileExistsError:
+                pass
             try:
                 child = os.open(part, _DIR_FLAGS, dir_fd=fd)
             except OSError as err:
                 if err.errno in {errno.ELOOP, errno.ENOTDIR}:
                     raise SystemExit(f"refusing symlink or non-directory path: {part}") from err
                 raise
-            os.fchmod(child, 0o700)
+            info = os.fstat(child)
+            if info.st_uid != os.geteuid() or (not created and info.st_mode & 0o077):
+                os.close(child)
+                raise SystemExit(f"refusing state directory {part}: must be owned by you with mode 700")
+            if created:
+                os.fchmod(child, 0o700)
             os.close(fd)
             fd = child
         return fd
@@ -89,6 +115,29 @@ def _write_file(dir_fd: int, name: str, content: str) -> None:
         raise
 
 
+def _append_file(dir_fd: int, name: str, line: str) -> None:
+    raw = line.encode("utf-8")
+    if len(raw) > MAX_BYTES:
+        raise SystemExit(f"{name} exceeds {MAX_BYTES} bytes")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
+    except OSError as err:
+        if err.errno in {errno.ELOOP, errno.ENXIO, errno.EOPNOTSUPP}:
+            raise SystemExit(f"refusing symlink or non-regular path: {name}") from err
+        raise
+    with os.fdopen(fd, "wb", buffering=0) as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit(f"refusing non-regular path: {name}")
+        if info.st_size + len(raw) > MAX_BYTES:
+            raise SystemExit(f"{name} exceeds {MAX_BYTES} bytes")
+        os.fchmod(stream.fileno(), 0o600)
+        view = memoryview(raw)
+        while view:
+            view = view[stream.write(view) :]
+
+
 def _drain(dir_fd: int) -> None:
     offset_raw = _read_file(dir_fd, "inbox.offset")
     try:
@@ -99,6 +148,8 @@ def _drain(dir_fd: int) -> None:
     if inbox_raw is None:
         return
     lines = inbox_raw.splitlines()
+    if len(lines) == seen and offset_raw is not None:
+        return
     if len(lines) < seen:
         seen = 0
     for line in lines[seen:]:
@@ -126,8 +177,7 @@ def main(argv: list[str]) -> int:
             payload = json.loads(raw_in.decode("utf-8"))
             if not isinstance(payload, dict) or not str(payload.get("text", "")).strip():
                 raise SystemExit("expected JSON message object with nonempty text")
-            existing = _read_file(dir_fd, "outbox.jsonl") or ""
-            _write_file(dir_fd, "outbox.jsonl", existing + json.dumps(payload) + "\n")
+            _append_file(dir_fd, "outbox.jsonl", json.dumps(payload) + "\n")
             reply = {
                 "id": str(payload.get("id", "local-1")),
                 "conversation": str(payload.get("conversation", "local")),

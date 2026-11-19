@@ -31,7 +31,10 @@ CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206
 IDENTITY = re.compile(r"[a-z][a-z0-9+.-]*:\S+")
 _PEM_TAG = r"[A-Z0-9 ]{0,32}PRIVATE KEY-----"
 _PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,16384}}"
-_KV_KEY = r"(?i:\b(?:password|passwd|(?:client[_-]?)?secret|api[_-]?key|(?:access|refresh)[_-]?token))"
+_KV_KEY = (
+    r"(?i:(?<![A-Za-z0-9])(?:password|passwd|(?:client[_-]?)?secret(?:[_-]?access[_-]?key|[_-]?key)?"
+    r"|private[_-]?key|api[_-]?key|(?:access|refresh|auth|api|session|id|bot|private)[_-]?token))"
+)
 _KV_VAL = r'(?:\\?"[^"\r\n]{1,512}"|\\?\'[^\'\r\n]{1,512}\'|[^\s"\',;}{\]]{1,512})'
 _SECRET_PATTERNS = re.compile(
     r"(?:gh[pousr]_[A-Za-z0-9_]{20,}"
@@ -45,7 +48,7 @@ _SECRET_PATTERNS = re.compile(
     rf"|-----BEGIN {_PEM_TAG}{_PEM_BODY}(?:-----END {_PEM_TAG})?"
     r"|(?<=://)[^/\s:@]{1,64}:[^/\s@]{1,128}(?=@)"
     rf"|{_KV_KEY}(?:\\?[\"'])?\s*[:=]\s*{_KV_VAL}"
-    r"|(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{8,}))"
+    r"|(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{8,}|\bauthorization\s*[:=]\s*basic\s+[A-Za-z0-9+/=-]{8,}))"
 )
 
 
@@ -256,7 +259,7 @@ def issue(repository: str, item: object, start: datetime, end: datetime) -> dict
     lines += [f"Labels: {', '.join(names)}"] if names else []
     return make_record(
         f"{repository}/issues/{number}",
-        f"{repository}: {title}",
+        f"{repository}: {redact(title)}",
         item_type="Issue",
         # Issue bodies sometimes quote a pasted token: mask common credential shapes before saving.
         text="\n".join(lines) + ("\n\n" + redact(body) if isinstance(body, str) and body else ""),

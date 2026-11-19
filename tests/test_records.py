@@ -93,6 +93,8 @@ def test_parse_batch_supports_array_envelope_single_object_and_jsonl() -> None:
         (b'{\n  "id": "1",\n  "id": "2"\n}', "duplicate key"),
         (b'{\n  "id": "1",\n  "score": NaN\n}', "must be finite"),
         (b'{"records": [], "incomplete": "yes"}', "expected a boolean"),
+        (b'{"records": [], "incomplete": {}}', "expected a boolean"),
+        (b'{"records": [], "incomplete": {"reason": "rate"}}', "expected a boolean"),
         (b'{"records": [], "incomplete": {"missed": -1}}', "expected a boolean"),
         (b'{"records": [], "incomplete": {"missed": true}}', "expected a boolean"),
     ):
@@ -305,6 +307,20 @@ def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store)
             Error,
             "do not support #anchor fragments",
         ),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"a","links":[{"to":"bf:///projects/offline.md","rel":"cites"}]}]',
+            Error,
+            "unknown link keys rel",
+        ),
+        (
+            "valid",
+            "upsert",
+            b'[{"id":"1","title":"a","links":[{"to":"bf:///projects/offline.md","kind":"url"}]}]',
+            Error,
+            "does not match target",
+        ),
     ],
 )
 def test_ingest_rejects_invalid_records_and_arguments(
@@ -359,8 +375,9 @@ def test_record_links_dedupe_events_jsonl_compaction_and_cursor_healing(
     assert latest == before_seq
 
     priv = private_dir(brain)
-    # Multi-chunk (> 65536 bytes) tail scan in `latest_event_seq`:
+    # Multi-chunk (> 65536 bytes) tail scan in `latest_event_seq` (assert BEFORE appending small tail!):
     records.append_event(brain, "test.pad", "t", {"id": "pad", "blob": "y" * 70_000})
+    assert records.latest_event_seq(brain) == before_seq + 1
     records.append_event(brain, "test.tail", "t", {"id": "tail"})
     assert records.latest_event_seq(brain) == before_seq + 2
 
@@ -401,8 +418,17 @@ def test_record_links_dedupe_events_jsonl_compaction_and_cursor_healing(
     first_dedup = records.append_event(brain, "test.dedup", "t", {"id": "d1"}, dedupe=True)
     assert records.append_event(brain, "test.dedup", "t", {"id": "d1"}, dedupe=True)["id"] == first_dedup["id"]
 
-    # Symlinked `.bf/events.jsonl` is refused by `O_NOFOLLOW`:
+    # Symlinked or FIFO `.bf/events.jsonl` is refused without blocking by `O_NOFOLLOW | O_NONBLOCK`:
     (priv.root / "events.jsonl").unlink()
     (priv.root / "events.jsonl").symlink_to(brain.root / "bf.yaml")
     with pytest.raises(Error, match="symlinks are not followed"):
         records.append_event(brain, "test.sym", "t", {"id": "s1"})
+    (priv.root / "events.jsonl").unlink()
+    import os
+
+    os.mkfifo(priv.root / "events.jsonl", 0o600)
+    with pytest.raises(Error, match="expected a regular file"):
+        records.latest_event_seq(brain)
+    with pytest.raises(Error, match="expected a regular file"):
+        records.append_event(brain, "test.fifo", "t", {"id": "f1"})
+    (priv.root / "events.jsonl").unlink()

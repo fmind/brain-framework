@@ -3,9 +3,9 @@
 min_version = "2026.11.4"
 
 [tools]
-betterleaks = "1.10.0"
-dprint = "0.64.3"
-jactionlint = { version = "2.5.0", workflow = "release.yaml" }
+betterleaks = "1.10.1"
+dprint = "0.65.0"
+jactionlint = { version = "2.6.0", workflow = "release.yaml" }
 jq = "1.8.2"
 lefthook = "2.2.2"
 lychee = "0.24.2"
@@ -15,7 +15,7 @@ python = "3.14.10"
 ripgrep = "15.2.0"
 shellcheck = "0.11.0"
 trivy = "0.76.2"
-"aqua:astral-sh/uv" = "0.13.7"
+"aqua:astral-sh/uv" = "0.13.9"
 
 [settings]
 aqua.cosign = true

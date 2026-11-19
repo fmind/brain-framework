@@ -773,7 +773,9 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
     ticks = 0
     real_tick = watch.tick
 
-    def stop_on_second_tick(s: Store, *, rebuild_notes: bool = True, now: datetime | None = None) -> dict[str, object]:
+    def stop_on_second_tick(
+        s: Store, *, rebuild_notes: bool = True, now: datetime | None = None, **_kw: object
+    ) -> dict[str, object]:
         nonlocal ticks
         ticks += 1
         if ticks >= 2:
@@ -872,7 +874,9 @@ def test_job_popen_failure_secret_redaction_and_watch_json(
     stop_json = threading.Event()
     real_tick = watch.tick
 
-    def stop_tick(s: Store, *, rebuild_notes: bool = True, now: datetime | None = None) -> dict[str, object]:
+    def stop_tick(
+        s: Store, *, rebuild_notes: bool = True, now: datetime | None = None, **_kw: object
+    ) -> dict[str, object]:
         out_tick = real_tick(s, rebuild_notes=rebuild_notes, now=now)
         stop_json.set()
         return out_tick
@@ -888,7 +892,9 @@ def test_job_popen_failure_secret_redaction_and_watch_json(
     rebuilds: list[bool] = []
     stop_retry = threading.Event()
 
-    def flaky_tick(s: Store, *, rebuild_notes: bool = True, now: datetime | None = None) -> dict[str, object]:
+    def flaky_tick(
+        s: Store, *, rebuild_notes: bool = True, now: datetime | None = None, **_kw: object
+    ) -> dict[str, object]:
         rebuilds.append(rebuild_notes)
         if len(rebuilds) == 1:
             raise Error("transient lock")
@@ -994,6 +1000,59 @@ def test_batched_jq_filters_stop_event_due_isolation_and_live_reload(
                 break
             time.sleep(0.05)
         assert found_reload
+        # Disabling the live service stops it cleanly via `reconcile_config` without restarting `bf watch`!
+        live_store.write(
+            "bf.yaml", f"version: {FORMAT}\nname: live-reload\nwatch:\n  interval: 500ms\n  debounce: 50ms\n".encode()
+        )
+        stop_dl = time.monotonic() + 8.0
+        while (
+            time.monotonic() < stop_dl
+            and jobs.load_unit_state(live_store, "added", kind="service")["status"] != "stopped"
+        ):
+            time.sleep(0.05)
+        assert jobs.load_unit_state(live_store, "added", kind="service")["status"] == "stopped"
     finally:
         stop_live.set()
         live_t.join(timeout=6.0)
+
+    # 5. Read-only `status_summary` never creates `.bf/`, and `pending_events` handles comments, heterogeneous nulls, timeouts, and `--due` filter isolation!
+    ro_root = tmp_path / "ro-status"
+    engine.init_brain(ro_root, name="ro-status")
+    import shutil as _shutil
+
+    _shutil.rmtree(ro_root / ".bf")
+    assert jobs.status_summary(Store(ro_root))["events_seq"] == 0
+    assert not (ro_root / ".bf").exists()
+
+    records.append_event(store, "custom.het", "src", {"id": "h-null", "arr": None}, now=t0)
+    records.append_event(store, "custom.het", "src", {"id": "h-hit", "arr": [1]}, now=t0)
+    het_rules = (config.EventMatch(kind="custom.het", filter=".data.arr[] == 1 # comment"),)
+    het_matched, _ = jobs.pending_events(store, 0, het_rules)
+    assert [ev["data"]["id"] for ev in het_matched] == ["h-hit"]
+
+    iso_root = tmp_path / "iso-filter"
+    engine.init_brain(iso_root, name="iso-filter")
+    iso_store = Store(iso_root)
+    iso_store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: iso-filter\njobs:\n"
+        "  bad-flt:\n    run: [echo, no]\n    events:\n      - kind: custom.x\n        filter: '[[['\n"
+        f"  good-job:\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n    schedule: 1m\n".encode(),
+    )
+    records.append_event(iso_store, "custom.x", "src", {"id": "x1"}, now=t0)
+    iso_res = jobs.run_jobs(iso_store, due_only=True, now=t0)
+    assert {r["job"]: r["status"] for r in iso_res["results"]} == {"bad-flt": "failed", "good-job": "ok"}
+
+    import subprocess as _sub
+
+    monkeypatch.setattr(_sub, "run", lambda *_a, **_kw: (_ for _ in ()).throw(_sub.TimeoutExpired(["jq"], 5)))
+    with pytest.raises(Error, match="event filter timed out after 5s"):
+        jobs.pending_events(store, 0, het_rules)
+
+    # Stale pre-reset `cursor_seq > disk_seq` never overwrites a healed post-reset `event_seq`:
+    reset_root = tmp_path / "cursor-reset"
+    engine.init_brain(reset_root, name="cursor-reset")
+    reset_store = Store(reset_root)
+    jobs.save_unit_state(reset_store, {**jobs.load_unit_state(reset_store, "j1"), "event_seq": 1})
+    jobs.record_run(reset_store, "job", "j1", "r1", "2026-11-16T08:00:00Z", ended=t0, dur_ms=1, code=0, cursor_seq=100)
+    assert jobs.load_unit_state(reset_store, "j1")["event_seq"] == 1

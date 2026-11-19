@@ -38,43 +38,35 @@ def _build_parser() -> _Parser:
     p_init.add_argument("path", type=Path, metavar="PATH", help="New or empty directory for the brain.")
     p_init.add_argument("--name", default="", help="Explicit brain name (defaults to directory slug).")
     _sub(sub, "build", "Compile OKF Markdown notes into memories/{concepts,projects,actions}/*.json.")
-
     p_ingest = _sub(sub, "ingest", "Validate and save JSON records into memories/<source>/<sha256>.json.")
     p_ingest.add_argument("source", metavar="SOURCE", help="Lowercase source name for memories/<source>/.")
     p_ingest.add_argument("--input", default="-", metavar="FILE", help="Input JSON/JSONL file path, or '-' for stdin.")
     p_ingest.add_argument("--mode", choices=("upsert", "snapshot"), default="upsert", help="Merge or snapshot mode.")
-    p_ingest.add_argument("--allow-removal", action="store_true", help="Allow snapshot to drop >50%% of >=10 records.")
+    rm_help = "Allow snapshot to drop >50%% of >=10 records or empty a source."
+    p_ingest.add_argument("--allow-removal", action="store_true", help=rm_help)
     p_ingest.add_argument("--dry-run", action="store_true", help="Validate and report counts without writing files.")
-
     p_read = _sub(sub, "read", "Read an OKF note, note#anchor section, source:id record, JSON memory, or bf:// URI.")
     p_read.add_argument("target", metavar="TARGET", help="Note path, source:id, JSON memory path, or bf:// URI.")
-
     p_query = _sub(sub, "query", "Query pure JSON memories via rg or jq.")
     p_query.add_argument("pattern", nargs="?", default=None, metavar="QUERY", help="Lexical pattern for rg.")
     p_query.add_argument("--jq", default=None, metavar="FILTER", help="jq filter expression over JSON memories.")
     p_query.add_argument("-s", "--scope", default="", metavar="SCOPE", help="Optional folder or source name.")
     lim_help = "Max items returned (default 20; 1..500 rg, 1..5000 jq)."
     p_query.add_argument("-n", "--limit", type=int, default=20, metavar="N", help=lim_help)
-
     _sub(sub, "validate", "Validate bf.yaml, schemas/, OKF notes, JSON memories, evals, and links.")
     _sub(sub, "review", "List stale notes, newer linked evidence, draft actions, and open tasks.")
-
     p_eval = _sub(sub, "eval", "Run deterministic evaluations in evals/.")
     p_eval.add_argument("target", nargs="?", default="", metavar="SUITE", help="Optional eval file path or stem.")
-
     p_run = _sub(sub, "run", "Execute jobs declared in bf.yaml (use -- EXTRA_ARGS... for one job or --hook).")
     p_run.add_argument("jobs", nargs="*", metavar="JOB", help="Specific job names to execute.")
     sel = p_run.add_mutually_exclusive_group()
     sel.add_argument("--due", action="store_true", help="Rebuild dirty notes and run due scheduled/event jobs.")
     sel.add_argument("--hook", choices=("pre-commit", "pre-push"), default="", help="Run jobs matching Git hook.")
     p_run.add_argument("--dry-run", action="store_true", help="Validate job selection without executing commands.")
-
     p_status = _sub(sub, "status", "Inspect folder counts, attention, unit states, and event sequence.")
     p_status.add_argument("--check", action="store_true", help="Exit 1 if required binaries fail or a unit failed.")
-
     p_watch = _sub(sub, "watch", "Supervise constant services, file changes, events, and scheduled jobs.")
     p_watch.add_argument("--json", dest="json_stream", action="store_true", help="Emit compact JSON lines.")
-
     _sub(sub, "mcp", "Run the read-only Model Context Protocol server over stdio.")
     return parser
 
@@ -134,37 +126,29 @@ def run(argv: Sequence[str] | None = None) -> int:
         head_argv, extra = _split_run_passthrough(items)
         args = parser.parse_args(head_argv)
         brain_arg = _resolve_brain_arg(args)
-        if args.command == "init":
-            from bf import engine
-
-            _emit(engine.init_brain(args.path, name=args.name))
-            return 0
         if args.command == "mcp":
             from bf import mcp
 
             mcp.serve(brain_arg)
             return 0
-        from bf import config
+        from bf import config, engine, jobs, query, records
 
+        if args.command == "init":
+            _emit(engine.init_brain(args.path, name=args.name))
+            return 0
         store, c = config.select(brain_arg), args.command
         if c == "watch":
             from bf import watch
 
             return 0 if watch.serve(store, json_stream=args.json_stream)["ok"] else 1
         if c in {"build", "validate", "review"}:
-            from bf import engine
-
             res = {"build": engine.build, "validate": engine.validate, "review": engine.review}[c](store)
         elif c == "ingest":
-            from bf import records
-
             if args.input == "-" and sys.stdin.isatty():
                 raise InputError("stdin is a terminal; pipe JSON records or pass --input FILE")
             kw_in: dict[str, Any] = {"mode": args.mode, "allow_removal": args.allow_removal, "dry_run": args.dry_run}
             res = records.ingest(store, args.source, _read_input(args.input), **kw_in)
         elif c in {"read", "query", "eval"}:
-            from bf import query
-
             if c == "read":
                 res = query.read_target(store, args.target)
             elif c == "eval":
@@ -172,19 +156,14 @@ def run(argv: Sequence[str] | None = None) -> int:
             elif (args.jq is not None) == (args.pattern is not None):
                 raise InputError("pass either positional QUERY (rg) or --jq FILTER")
             else:
-                qkw: dict[str, Any] = {"scope": args.scope, "limit": args.limit}
                 fn = query.query_jq if args.jq is not None else query.search_rg
-                res = fn(store, args.jq if args.jq is not None else args.pattern, **qkw)
+                res = fn(store, args.jq if args.jq is not None else args.pattern, scope=args.scope, limit=args.limit)
+        elif c == "run":
+            b = _read_input("-") if (args.hook == "pre-push" and not args.dry_run and not sys.stdin.isatty()) else b""
+            ro: jobs.RunOpts = {"extra_args": extra, "stdin_bytes": b, "dry_run": args.dry_run}
+            res = jobs.run_jobs(store, args.jobs, due_only=args.due, hook=args.hook, **ro)
         else:
-            from bf import jobs
-
-            if c == "run":
-                is_push = args.hook == "pre-push" and not args.dry_run and not sys.stdin.isatty()
-                kw_run: dict[str, Any] = {"due_only": args.due, "hook": args.hook, "extra_args": extra}
-                kw_run["stdin_bytes"] = _read_input("-") if is_push else b""
-                res = jobs.run_jobs(store, args.jobs, **kw_run, dry_run=args.dry_run)
-            else:
-                res = jobs.status_summary(store, check=args.check)
+            res = jobs.status_summary(store, check=args.check)
         _emit(res)
         return 0 if (c in {"ingest", "read", "query"} or (c == "status" and not args.check) or res["ok"]) else 1
     except KeyboardInterrupt:

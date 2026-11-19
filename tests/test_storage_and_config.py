@@ -13,7 +13,7 @@ import yaml
 
 from bf import config, models
 from bf.models import BusyError, Error, FormatError
-from bf.storage import Store, expand, private_dir, relative, writer
+from bf.storage import Store, expand, private_dir, relative, tail_lines, writer
 
 
 def test_models_sanitization_json_and_dates() -> None:
@@ -40,9 +40,12 @@ def test_models_sanitization_json_and_dates() -> None:
     with pytest.raises(Error, match="must be finite"):
         models.decode('{"a": NaN}')
     assert models.decode('{"a": 1, "a": 2}', check_duplicates=False) == {"a": 2}
-    redacted = models.redact_secrets("Bearer tok_12345678 ya29.a0AfH6SMC_secret_token")
-    assert "ya29." not in redacted
-    assert redacted == "[REDACTED] [REDACTED]"
+    redacted = models.redact_secrets(
+        'Bearer tok_12345678 ya29.a0AfH6SMC_secret_token DB_PASSWORD=pw1 GOOGLE_CLIENT_SECRET=cs1 AWS_SECRET_ACCESS_KEY=ak1 MY_API_KEY=mk1 "db_password": "pw2"'
+    )
+    for leaked in ("ya29.", "pw1", "cs1", "ak1", "mk1", "pw2"):
+        assert leaked not in redacted
+    assert redacted.startswith("[REDACTED] [REDACTED]")
     with pytest.raises(Error, match="invalid JSON"):
         models.decode("{broken")
 
@@ -237,8 +240,8 @@ def test_store_containment_symlinks_special_files_and_locks(tmp_path: Path, monk
 
 
 def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    parsed = config.yaml_object(b"oct: 0o10\nhex: 0x10\ndec: 42\ndate: 2026-11-15\nempty:\n")
-    assert parsed == {"oct": 8, "hex": 16, "dec": 42, "date": "2026-11-15", "empty": None}
+    parsed = config.yaml_object(b"oct: 0o10\nhex: 0x10\ndec: 42\ndate: 2026-11-15\nmixed: TrUe\nempty:\n")
+    assert parsed == {"oct": 8, "hex": 16, "dec": 42, "date": "2026-11-15", "mixed": "TrUe", "empty": None}
     assert config.yaml_object(b"") == {}
 
     for payload, match in (
@@ -532,3 +535,9 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     assert list(b1_docs.iter_read_files("sub")) == [("sub/a.json", b'{"a":1}\n')]
     assert b1_docs.count_files("sub") == 2
     assert b1_docs.count_files("sub", exclude_suffix=".txt") == 1
+    assert tail_lines([b"a\n", b"b\n"], 0, 100) == []
+    assert tail_lines([b"a\n", b"b\n"], 2, 0) == []
+    for raw_sec in ("SECRET_KEY=topsecret1", "AWS_SESSION_TOKEN=tok12345", "Authorization: Basic dXNlcjpwYXNz"):
+        assert models.redact_secrets(raw_sec) != raw_sec
+        assert "[REDACTED]" in models.redact_secrets(raw_sec)
+    assert models.redact_secrets("Error: basic validation failed") == "Error: basic validation failed"

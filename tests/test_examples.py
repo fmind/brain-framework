@@ -141,9 +141,9 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     assert oct((local_state / "outbox.jsonl").stat().st_mode & 0o777) == "0o600"
     assert "Retention review ready" in (local_state / "outbox.jsonl").read_text()
 
-    # Refuses symlinked outbox.jsonl cleanly!
+    # Refuses symlinked outbox.jsonl and loose-permission state dirs cleanly!
     sym_state = tmp_path / "sym-local"
-    sym_state.mkdir()
+    sym_state.mkdir(mode=0o700)
     (sym_state / "outbox.jsonl").symlink_to(tmp_path / "target.jsonl")
     sym_send = subprocess.run(  # noqa: S603
         [sys.executable, str(b_root / "services" / "local.py"), "send"],
@@ -156,6 +156,20 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     )
     assert sym_send.returncode != 0
     assert "refusing" in sym_send.stderr
+    loose_state = tmp_path / "loose-local"
+    loose_state.mkdir()
+    loose_state.chmod(0o755)
+    loose_send = subprocess.run(  # noqa: S603
+        [sys.executable, str(b_root / "services" / "local.py"), "send"],
+        input='{"text": "hi"}\n',
+        env={**os.environ, "BF_STATE_DIR": str(loose_state)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert loose_send.returncode != 0
+    assert "mode 700" in loose_send.stderr
 
     (local_state / "inbox.offset").write_text("99\n")
     (local_state / "inbox.jsonl").write_text("not-json\n" + json.dumps({"id": "in-1", "text": "status?"}) + "\n")
@@ -315,7 +329,7 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
                 "stdout": [
                     {
                         "number": 7,
-                        "title": "Support attr_list",
+                        "title": "Support attr_list (DB_PASSWORD=topsecretpw)",
                         "body": "Use Python-Markdown.",
                         "state": "OPEN",
                         "url": "https://github.com/acme/demo/issues/7",
@@ -332,6 +346,8 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     )
     ghi = provider.run("github-issues.py", "acme/demo", "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
     assert ghi.returncode == 0, ghi.stderr
+    assert "topsecretpw" not in ghi.stdout
+    assert "[REDACTED]" in ghi.stdout
     assert records.ingest(store, "github-issues", ghi.stdout.encode())["added"] == 1
     ghi_fail = provider.run("github-issues.py", "acme/demo", "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
     assert ghi_fail.returncode != 0
@@ -413,14 +429,22 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert "escapes ROOT" in ghist_esc.stderr
     shutil.rmtree(escape_repo)
 
+    # Legitimate Git worktree (`git worktree add`, no local `objects/`) succeeds cleanly!
+    git_bin = shutil.which("git") or "/usr/bin/git"
+    wt_dir = repos_root / "demo-wt"
+    subprocess.run([git_bin, "-C", str(repo), "worktree", "add", "-b", "wt", str(wt_dir)], check=True, timeout=30)  # noqa: S603
+    ghist_wt = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
+    assert ghist_wt.returncode == 0, ghist_wt.stderr
+    subprocess.run([git_bin, "-C", str(repo), "worktree", "remove", "--force", str(wt_dir)], check=True, timeout=30)  # noqa: S603
+
     # `.git` directory with `commondir` or symlinked `refs` pointing outside ROOT is also refused!
     cd_repo = repos_root / "escape-commondir"
-    (cd_repo / ".git").mkdir(parents=True)
+    (cd_repo / ".git" / "objects").mkdir(parents=True)
     (cd_repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     (cd_repo / ".git" / "commondir").write_text(f"{tmp_path}\n")
     ghist_cd = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
     assert ghist_cd.returncode != 0
-    assert "escapes ROOT" in ghist_cd.stderr
+    assert "commondir target escapes ROOT" in ghist_cd.stderr
     shutil.rmtree(cd_repo)
 
     sym_git_repo = repos_root / "escape-symref"
@@ -429,5 +453,64 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     ghist_sym = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
     assert ghist_sym.returncode != 0
     assert "symlinked git entry" in ghist_sym.stderr
+    shutil.rmtree(sym_git_repo)
+
+    # Nested symlink inside `objects/pack/`, quoted `alternates`, leading/trailing-space `alternates` differentials, and >4096B `alternates` are refused!
+    pack_repo = repos_root / "escape-pack"
+    (pack_repo / ".git" / "objects" / "pack").mkdir(parents=True)
+    (pack_repo / ".git" / "objects" / "pack" / "evil.pack").symlink_to(tmp_path)
+    ghist_pack = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
+    assert ghist_pack.returncode != 0
+    assert "symlinked git entry" in ghist_pack.stderr
+    shutil.rmtree(pack_repo)
+
+    alt_repo = repos_root / "escape-alt"
+    (alt_repo / ".git" / "objects" / "info").mkdir(parents=True)
+    (alt_repo / ".git" / "objects" / "info" / "alternates").write_text('"/etc"\n')
+    ghist_alt = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
+    assert ghist_alt.returncode != 0
+    assert "quoted git alternates" in ghist_alt.stderr
+    (alt_repo / ".git" / "objects" / " #").mkdir()
+    (alt_repo / ".git" / "objects" / "info" / "alternates").write_text(" #/../../../../../etc\n")
+    ghist_space = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
+    assert ghist_space.returncode != 0
+    assert "escapes ROOT" in ghist_space.stderr
+    (alt_repo / ".git" / "objects" / "info" / "alternates").write_text(("#" * 4100) + "\n/etc\n")
+    ghist_big = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
+    assert ghist_big.returncode != 0
+    assert "exceeds 4096 bytes" in ghist_big.stderr
+
+    # `examples/brain/services/local.py`: refuses symlinked `.bf` without `BF_BRAIN`, and handles empty `inbox.jsonl` truncation without dropping subsequent messages!
+    local_svc = ROOT / "examples" / "brain" / "services" / "local.py"
+    svc_tmp = tmp_path / "svc-sec"
+    svc_tmp.mkdir()
+    outside_dir = tmp_path / "svc-outside"
+    outside_dir.mkdir(mode=0o755)
+    (svc_tmp / ".bf").symlink_to(outside_dir)
+    env_no_brain = {k: v for k, v in os.environ.items() if not k.startswith("BF_")}
+
+    def run_local(args: list[str], env: dict[str, str], *, stdin: str = "", check: bool = True):
+        cmd = [sys.executable, str(local_svc), *args]
+        return subprocess.run(cmd, input=stdin, capture_output=True, text=True, env=env, check=check)  # noqa: S603
+
+    sym_svc = run_local(
+        ["send"], {**env_no_brain, "BF_STATE_DIR": str(svc_tmp / ".bf" / "local")}, stdin='{"text":"hi"}\n', check=False
+    )
+    assert sym_svc.returncode != 0
+    assert "refusing symlink" in sym_svc.stderr
+    assert not (outside_dir / "local").exists()
+
+    trunc_state = tmp_path / "svc-trunc" / ".bf" / "local"
+    env_trunc = {**env_no_brain, "BF_STATE_DIR": str(trunc_state)}
+    (tmp_path / "svc-trunc").mkdir()
+    run_local(["listen", "--once"], env_trunc)
+    (trunc_state / "inbox.jsonl").write_text('{"id":"m1","text":"a"}\n{"id":"m2","text":"b"}\n')
+    assert len(run_local(["listen", "--once"], env_trunc).stdout.splitlines()) == 2
+    (trunc_state / "inbox.jsonl").write_text("")
+    run_local(["listen", "--once"], env_trunc)
+    assert (trunc_state / "inbox.offset").read_text().strip() == "0"
+    (trunc_state / "inbox.jsonl").write_text('{"id":"m3","text":"c"}\n{"id":"m4","text":"d"}\n')
+    r_after = run_local(["listen", "--once"], env_trunc)
+    assert [json.loads(ln)["id"] for ln in r_after.stdout.splitlines()] == ["m3", "m4"]
 
     assert engine.validate(store)["ok"]

@@ -191,6 +191,7 @@ def office(data: bytes, suffix: str) -> tuple[str, bool]:
     Also returns whether a part reached its structure bound, so the record keeps what was read, marked partial.
     """
     partial = False
+    expanded = 0
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         entries = archive.infolist()
         if len(entries) > 10000 or sum(item.file_size for item in entries) > TOTAL_BYTES:
@@ -199,10 +200,14 @@ def office(data: bytes, suffix: str) -> tuple[str, bool]:
             raise InvalidError("duplicate Office archive member")
 
         def xml(name: str) -> ET.Element:
-            nonlocal partial
-            raw = archive.read(name)
+            nonlocal partial, expanded
+            with archive.open(name) as member:
+                raw = member.read(FILE_BYTES + 1)
+            expanded += len(raw)
+            if len(raw) > FILE_BYTES or expanded > TOTAL_BYTES:
+                raise InvalidError("unsafe or oversized document XML")
             text = raw.decode("utf-8-sig")
-            if len(raw) > FILE_BYTES or "\x00" in text or "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
+            if "\x00" in text or "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
                 raise InvalidError("unsafe or oversized document XML")
             events: tuple[Literal["start", "end"], ...] = ("start", "end")
             parser: ET.XMLPullParser[ET.Element] = ET.XMLPullParser(events=events)

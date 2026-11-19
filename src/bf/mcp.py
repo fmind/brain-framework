@@ -16,7 +16,7 @@ from pydantic import BeforeValidator, Field
 
 from bf import __version__, config, engine, jobs, query
 from bf.models import FAILURES, Error, InputError, failure, printable, terminal
-from bf.storage import Store
+from bf.storage import Store, expand
 
 INSTRUCTIONS = (
     "Read-only access to a local Brain Framework brain (OKF Markdown notes and pure JSON memories). "
@@ -29,12 +29,19 @@ INSTRUCTIONS = (
 
 _Integral = BeforeValidator(lambda value: int(value) if isinstance(value, float) and value.is_integer() else value)
 _TargetArg = Annotated[
-    str, Field(min_length=1, max_length=8192, description="Note path, note#anchor, source:id, JSON path, or bf:// URI.")
+    str, Field(min_length=1, max_length=8192, description="Note, #anchor, source:id, JSON, or bf:// URI.")
 ]
 _QueryArg = Annotated[str, Field(min_length=1, max_length=8192, description="rg regex or jq filter.")]
 _ModeArg = Annotated[Literal["rg", "jq"], Field(description="Query engine: 'rg' or 'jq'.")]
 _ScopeArg = Annotated[str, Field(max_length=1024, description="Optional subfolder or source name.")]
 _LimitArg = Annotated[int, Field(ge=1, le=200, description="Maximum items returned for rg and jq queries."), _Integral]
+
+
+_REDACT_PFX = re.compile(
+    r"(?:(?i:[a-z][a-z0-9+.-]{0,31}://(?:[^/\s?#]{1,255}|\[[0-9A-Fa-f:.]{1,64}\])/*"
+    r"|file:///*|file%3a%2f%2f[A-Za-z0-9._:-]{0,255}|%2f)|[^A-Za-z0-9_.-])\Z"
+)
+_REDACT_FILE = re.compile(r"(?i:file://(?:/++|(?:[A-Za-z0-9._:-]{1,255}|\[[0-9A-Fa-f:.]{1,64}\])/*+))(<brain>|~)")
 
 
 def _strict(tool: Tool) -> Tool:
@@ -48,14 +55,15 @@ def _strict(tool: Tool) -> Tool:
 
 def server(store: Store | Callable[[], Store]) -> MCPServer:
     """Create a read-only `MCPServer` bound to `store` or a per-call brain selector."""
-    annotations = ToolAnnotations(
-        read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
-    )
+    ann = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
     selection = (lambda: store) if isinstance(store, Store) else store
     roots: set[str] = set()
 
     def _add_root(path: Path) -> None:
-        for cand in (path, *([path.resolve()] if path.exists() else [])):
+        cands = [path]
+        with suppress(OSError, RuntimeError):
+            cands.append(path.resolve())
+        for cand in cands:
             if cand.is_absolute() and cand.name:
                 raw = str(cand)
                 roots.update((raw, quote(raw, safe="/"), quote(raw, safe="")))
@@ -65,7 +73,10 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
         _add_root(chosen.root)
         with suppress(Error):
             cfg = config.load(chosen)
-            for alias in cfg.brains:
+            for alias, raw_target in cfg.brains.items():
+                with suppress(Error):
+                    raw_path = expand(Path(raw_target))
+                    _add_root(raw_path if raw_path.is_absolute() else (chosen.root / raw_path))
                 with suppress(Error):
                     _add_root(config.resolve_brain(chosen, cfg, alias).root)
         return chosen
@@ -79,18 +90,27 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
                         hidden.setdefault(form, "~")
         if not hidden:
             return lambda s: s
-        ordered = sorted(hidden, key=len, reverse=True)
-        pat = re.compile(rf"(?<![A-Za-z0-9_.-])(?:{'|'.join(re.escape(p) for p in ordered)})")
-        uri_pat = re.compile(r"file:///+(<brain>|~)")
-        return lambda msg: uri_pat.sub(r"file://\1", pat.sub(lambda m: hidden[m[0]], msg))
+        lower_map = {k.lower(): v for k, v in hidden.items()}
+        terms = (f"(?i:{re.escape(p)})" if "%" in p else re.escape(p) for p in sorted(hidden, key=len, reverse=True))
+        pat = re.compile("|".join(terms))
 
-    def redact_obj(val: Any, redact_fn: Callable[[str], str]) -> Any:
+        def _redact(msg: str) -> str:
+            def _sub(m: re.Match[str]) -> str:
+                pre = msg[max(0, m.start() - 320) : m.start()]
+                return (hidden.get(p := m[0]) or lower_map[p.lower()]) if not pre or _REDACT_PFX.search(pre) else m[0]
+
+            out = pat.sub(_sub, msg)
+            return _REDACT_FILE.sub(r"file://\1", out) if out != msg else out
+
+        return _redact
+
+    def redact_obj(val: Any, fn: Callable[[str], str]) -> Any:
         if isinstance(val, str):
-            return redact_fn(val)
+            return fn(val)
         if isinstance(val, list):
-            return [redact_obj(v, redact_fn) for v in val]
+            return [redact_obj(v, fn) for v in val]
         if isinstance(val, dict):
-            return {redact_fn(k) if isinstance(k, str) else k: redact_obj(v, redact_fn) for k, v in val.items()}
+            return {fn(k) if isinstance(k, str) else k: redact_obj(v, fn) for k, v in val.items()}
         return val
 
     selected()
@@ -119,9 +139,8 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
 
     def bf_query(q: _QueryArg, mode: _ModeArg = "rg", scope: _ScopeArg = "", limit: _LimitArg = 20) -> CallToolResult:
         """Query compiled notes and sensor memories offline with rg or jq."""
-        if mode == "jq":
-            return reply(lambda: query.query_jq(selected(), q, scope=scope, limit=limit))
-        return reply(lambda: query.search_rg(selected(), q, scope=scope, limit=limit))
+        fn = query.query_jq if mode == "jq" else query.search_rg
+        return reply(lambda: fn(selected(), q, scope=scope, limit=limit))
 
     def bf_validate() -> CallToolResult:
         """Validate bf.yaml, JSON Schemas, OKF notes, JSON memories, evals, and links."""
@@ -134,11 +153,10 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
         ("bf_query", "Query brain JSON memories via rg or jq", bf_query),
         ("bf_validate", "Validate brain schemas, notes, and links", bf_validate),
     )
-    tools = [
-        _strict(Tool.from_function(fn, name=name, title=title, annotations=annotations)) for name, title, fn in specs
-    ]
-    srv_kw: dict[str, Any] = {"title": "Brain Framework", "version": __version__, "instructions": INSTRUCTIONS}
-    return MCPServer("bf", log_level="WARNING", tools=tools, **srv_kw)
+    tools = [_strict(Tool.from_function(fn, name=n, title=t, annotations=ann)) for n, t, fn in specs]
+    return MCPServer(
+        "bf", log_level="WARNING", tools=tools, title="Brain Framework", version=__version__, instructions=INSTRUCTIONS
+    )
 
 
 def serve(brain: str = "") -> None:

@@ -7,13 +7,12 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import IO, Any, cast
 
 from rich import box
 from rich.console import Console, Group
@@ -24,19 +23,16 @@ from rich.table import Table
 from rich.text import Text
 from watchfiles import watch as watch_fs
 
-from bf import config, engine, jobs, models, records
+from bf import config, engine, jobs, models, query, records
 from bf.config import JobSpec, ServiceSpec
 from bf.models import Error, decode, failure, now_utc, printable
 from bf.storage import Store
 
 _SKIP_A = (".git", "memories", ".venv", "__pycache__", ".pytest_cache")
 _SKIP_DIRS = frozenset((*_SKIP_A, ".ruff_cache", ".ty_cache", "site", "dist", "logs"))
-_BADGE_A = {"failed": ("✗ failed", "bold red", 0), "running": ("● running", "bold green", 1)}
-_STATE_BADGE: dict[str, tuple[str, str, int]] = {
-    **_BADGE_A,
-    "ok": ("✓ ok", "green", 2),
-    "stopped": ("○ stopped", "yellow", 3),
-}
+_B_A = {"failed": ("✗ failed", "bold red", 0), "running": ("● running", "bold green", 1)}
+_B_B = {"ok": ("✓ ok", "green", 2), "stopped": ("○ stopped", "yellow", 3)}
+_STATE_BADGE: dict[str, tuple[str, str, int]] = {**_B_A, **_B_B}
 
 
 def _int(val: object) -> int:
@@ -109,9 +105,8 @@ def _unit_detail(unit: JobSpec | ServiceSpec, doc: dict[str, Any]) -> Text:
         pfx = [(f"({consec}x) ", "bold red")] if consec > 1 else []
         return Text.assemble(*pfx, (printable(" ".join(tail.split())), "red"))
     if st == "running":
-        if isinstance(unit, ServiceSpec):
-            return Text("listening" if unit.emit == "messages" else "supervising", style="dim")
-        return Text("busy", style="dim")
+        msg = ("listening" if unit.emit == "messages" else "supervising") if isinstance(unit, ServiceSpec) else "busy"
+        return Text(msg, style="dim")
     if st == "ok":
         s = doc["last_run"] if isinstance(doc.get("last_run"), dict) else {}
         if isinstance(unit, JobSpec) and unit.ingest:
@@ -121,19 +116,12 @@ def _unit_detail(unit: JobSpec | ServiceSpec, doc: dict[str, Any]) -> Text:
             total = _int(s.get("records"))
             rec_lbl = f"{total} record{'' if total == 1 else 's'}"
             body = (f"{diffs} · {rec_lbl}", "green") if diffs else (f"{rec_lbl} unchanged", "")
-            out = Text.assemble((pfx_s, "dim"), body)
-            if s.get("incomplete") is True:
-                out.append(" · incomplete", style="yellow")
-            out.append(dur, style="dim")
-            return out
+            inc = [(" · incomplete", "yellow")] if s.get("incomplete") is True else []
+            return Text.assemble((pfx_s, "dim"), body, *inc, (dur, "dim"))
         return Text.assemble((_ok_label(s), ""), (dur, "dim"))
     if isinstance(unit, JobSpec):
-        h = (
-            f"→ {unit.ingest} ({unit.mode})"
-            if unit.ingest
-            else (f"action · keep {unit.action_keep}" if unit.action_keep else "")
-        )
-        return Text(h or "ready", style="dim")
+        act = f"action · keep {unit.action_keep}" if unit.action_keep else "ready"
+        return Text(f"→ {unit.ingest} ({unit.mode})" if unit.ingest else act, style="dim")
     return Text("stopped" if st == "stopped" else "ready", style="dim")
 
 
@@ -150,9 +138,10 @@ def _make_table(first_col: str, second_col: str, cols: int) -> Table:
     return table
 
 
-def _add_rows(
-    table: Table, items: list[tuple[Any, str, JobSpec | ServiceSpec, dict[str, Any]]], instant: datetime
-) -> None:
+type _Entry = tuple[Any, str, JobSpec | ServiceSpec, dict[str, Any]]
+
+
+def _add_rows(table: Table, items: list[_Entry], instant: datetime) -> None:
     for _, name, unit, doc in items:
         st = str(doc.get("status", "idle"))
         lbl, style, _ = _STATE_BADGE.get(st, ("· idle", "dim", 4))
@@ -178,8 +167,8 @@ def render_dashboard(store: Store, *, now: datetime | None = None, max_rows: int
     with suppress(Error):
         events_seq = records.latest_event_seq(store)
 
-    svc_entries: list[tuple[Any, str, JobSpec | ServiceSpec, dict[str, Any]]] = []
-    job_entries: list[tuple[Any, str, JobSpec | ServiceSpec, dict[str, Any]]] = []
+    svc_entries: list[_Entry] = []
+    job_entries: list[_Entry] = []
     disabled = 0
     for kind, group in (("service", cfg.services), ("job", cfg.jobs)):
         for idx, (name, unit) in enumerate(group.items()):
@@ -191,22 +180,17 @@ def render_dashboard(store: Store, *, now: datetime | None = None, max_rows: int
             except Error as err:
                 doc = {"status": "failed", "error": str(err)}
             rank = _STATE_BADGE.get(str(doc.get("status", "idle")), ("", "", 4))[2]
-            if kind == "job":
-                job_entries.append(((rank, _neg_ts(doc), idx), name, unit, doc))
-            else:
-                svc_entries.append(((rank, idx), name, unit, doc))
+            key = (rank, _neg_ts(doc), idx) if kind == "job" else (rank, idx)
+            (job_entries if kind == "job" else svc_entries).append((key, name, unit, doc))
     svc_entries.sort(key=lambda item: item[0])
     job_entries.sort(key=lambda item: item[0])
 
     all_docs = [d for _, _, _, d in (*svc_entries, *job_entries)]
-    n_fail = sum(1 for d in all_docs if d.get("status") == "failed")
-    n_run = sum(1 for d in all_docs if d.get("status") == "running")
-    n_ok = sum(1 for d in all_docs if d.get("status") == "ok")
+    n_fail, n_run, n_ok = (sum(d.get("status") == s for d in all_docs) for s in ("failed", "running", "ok"))
     chips = [(f"{n_fail} failed", "bold red")] if n_fail else [("All healthy", "green")]
-    chips.extend([*(([(f"{n_run} running", "green")]) if n_run else ()), (f"{n_ok} ok", "dim")])
-    chips.extend([(f"{events_seq} event{'' if events_seq == 1 else 's'}", "dim")])
-    if disabled:
-        chips.append((f"{disabled} disabled", "dim"))
+    chips += [*([(f"{n_run} running", "green")] if n_run else ()), (f"{n_ok} ok", "dim")]
+    chips += [(f"{events_seq} event{'' if events_seq == 1 else 's'}", "dim")]
+    chips += [(f"{disabled} disabled", "dim")] if disabled else []
     summary = Text(" · ", style="dim").join(Text(txt, style=st_style) for txt, st_style in chips)
     summary.no_wrap, summary.overflow = True, "ellipsis"
 
@@ -249,9 +233,6 @@ def tick(
     res = {"brain": config.load(store).name, "time": now_utc(instant), "built": built["written"] if built else 0}
     b_ok = built is None or bool(built["ok"])
     return {**res, "jobs_ran": job_res["ran"], "ok": b_ok and bool(job_res["ok"])}
-
-
-_DEFAULT_TICK = tick
 
 
 class DaemonStream:
@@ -303,12 +284,11 @@ class DaemonStream:
                     self.store, self.unit.name, self.cmd, run_id, now_iso, trigger=self.kind, unit_env=self.unit.env
                 )
                 dn, pipe = subprocess.DEVNULL, subprocess.PIPE
-                with (
-                    tempfile.TemporaryFile(mode="w+b") as err_f,
-                    subprocess.Popen(  # noqa: S603
-                        argv, cwd=self.store.root, env=env, stdin=dn, stdout=pipe, stderr=err_f, start_new_session=True
-                    ) as proc,
-                ):
+                with subprocess.Popen(  # noqa: S603
+                    argv, cwd=self.store.root, env=env, stdin=dn, stdout=pipe, stderr=pipe, start_new_session=True
+                ) as proc:
+                    err_stop = threading.Event()
+                    err_t, err_buf = query.drain_tail(cast("IO[bytes]", proc.stderr), 65536, err_stop)
                     try:
                         with self._lock:
                             self.proc, stopping = proc, self.stop_event.is_set()
@@ -317,11 +297,8 @@ class DaemonStream:
                             continue
                         self._mark("running", now_iso, last_start=now_iso)
                         overflow_err = ""
-                        while (
-                            proc.stdout
-                            and not self.stop_event.is_set()
-                            and (ln := proc.stdout.readline(models.MAX_BATCH + 1))
-                        ):
+                        out_s = proc.stdout
+                        while out_s and not self.stop_event.is_set() and (ln := out_s.readline(models.MAX_BATCH + 1)):
                             if len(ln) > models.MAX_BATCH:
                                 overflow_err = f"output line exceeds {models.MAX_BATCH} bytes"
                                 sys.stderr.write(f"bf: {label}: {overflow_err}\n")
@@ -331,11 +308,8 @@ class DaemonStream:
                                 continue
                             try:
                                 if isinstance(parsed := decode(stripped, label), dict):
-                                    ev_k = (
-                                        "service.message"
-                                        if self.emit == "messages"
-                                        else str(parsed.get("kind") or "service.event")
-                                    )
+                                    p_kind = str(parsed.get("kind") or "service.event")
+                                    ev_k = "service.message" if self.emit == "messages" else p_kind
                                     records.append_event(self.store, ev_k, self.unit.name, dict(parsed), dedupe=True)
                                     self.wake_event.set()
                             except Error as err:
@@ -346,15 +320,16 @@ class DaemonStream:
                     except BaseException:
                         jobs.stop_proc(proc)
                         raise
-                    err_f.seek(max(0, err_f.seek(0, os.SEEK_END) - 65536))
-                    err_txt = err_f.read().decode("utf-8", "replace").strip()
+                    finally:
+                        err_stop.set()
+                        err_t.join(timeout=2)
+                    err_txt = bytes(err_buf).decode("utf-8", "replace").strip()
                 if self.stop_event.is_set():
                     self._mark("stopped", (t_stop := now_utc()), last_end=t_stop)
                     break
                 rc = (rc or 1) if overflow_err else rc
-                err_msg = overflow_err or (
-                    "" if rc == 0 else models.redact_secrets(err_txt or f"exit code {rc}")[-1024:]
-                )
+                tail_err = "" if rc == 0 else models.redact_secrets(err_txt or f"exit code {rc}")[-1024:]
+                err_msg = overflow_err or tail_err
                 dur_ms = self._record(run_id, now_iso, t0, rc, err_msg, err_txt)
                 healthy = not overflow_err and (rc == 0 or dur_ms >= 30_000)
             except models.FAILURES as err:
@@ -377,12 +352,7 @@ def _safe_tick(
     store: Store, *, rebuild_notes: bool, fallback: dict[str, Any], stop_event: threading.Event
 ) -> tuple[dict[str, Any], bool]:
     try:
-        res = (
-            _DEFAULT_TICK(store, rebuild_notes=rebuild_notes, stop_event=stop_event)
-            if tick is _DEFAULT_TICK
-            else tick(store, rebuild_notes=rebuild_notes)
-        )
-        return res, True
+        return tick(store, rebuild_notes=rebuild_notes, stop_event=stop_event), True
     except (*models.FAILURES, RuntimeError, ValueError, KeyError, TypeError) as err:
         msg = printable(failure(err)) if isinstance(err, models.FAILURES) else type(err).__name__
         sys.stderr.write(f"bf: watch: {msg}\n")
@@ -400,8 +370,8 @@ def serve(store: Store, *, json_stream: bool = False, stop_event: threading.Even
     use_tui, emit_json = not json_stream and is_tty, json_stream or not is_tty
     con = Console(no_color=bool(os.environ.get("NO_COLOR", "")), highlight=False, emoji=False)
     live = Live(console=con, auto_refresh=False) if use_tui else None
-    empty = {"brain": cfg.name, "time": now_utc(), "built": 0, "jobs_ran": 0, "ok": True}
-    last_summary, authored_pfx, root_pfx = empty, tuple(f"{f}/" for f in models.AUTHORED), f"{store.root}/"
+    last_summary = {"brain": cfg.name, "time": now_utc(), "built": 0, "jobs_ran": 0, "ok": True}
+    authored_pfx, root_pfx = tuple(f"{f}/" for f in models.AUTHORED), f"{store.root}/"
 
     def reconcile_config() -> None:
         nonlocal cfg
@@ -450,8 +420,9 @@ def serve(store: Store, *, json_stream: bool = False, stop_event: threading.Even
             return "note"
         if rel in {"bf.yaml", ".bf/events.jsonl"}:
             return "config" if rel == "bf.yaml" else "wake"
-        is_bf_json = len(parts) == 2 and parts[0] == ".bf" and parts[1].endswith(".json")
-        return ("ui" if not parts[1].endswith(".context.json") else "") if is_bf_json else ""
+        if len(parts) == 2 and parts[0] == ".bf" and (p1 := parts[1]).endswith(".json"):
+            return "" if p1.endswith(".context.json") else "ui"
+        return ""
 
     def watch_files() -> None:
         w_kw: dict[str, Any] = {"watch_filter": lambda _, p: bool(_classify(p)), "debounce": cfg.watch.debounce_ms}
@@ -471,26 +442,32 @@ def serve(store: Store, *, json_stream: bool = False, stop_event: threading.Even
         nonlocal last_summary
         first = True
         while not stop_ev.is_set():
+            wake_event.clear()
             if cfg_dirty.is_set():
                 cfg_dirty.clear()
                 reconcile_config()
             if dirty := note_dirty.is_set():
                 note_dirty.clear()
-            t_kw = {"rebuild_notes": first or dirty, "fallback": last_summary, "stop_event": stop_ev}
-            last_summary, tick_ok = _safe_tick(store, **t_kw)
+            last_summary, tick_ok = _safe_tick(
+                store, rebuild_notes=first or dirty, fallback=last_summary, stop_event=stop_ev
+            )
             if not tick_ok and dirty:
                 note_dirty.set()
             if emit_json and (first or last_summary["built"] or last_summary["jobs_ran"] or not last_summary["ok"]):
                 emit_line(last_summary)
             first = False if tick_ok else first
             ui_event.set()
-            wake_event.wait(timeout=cfg.watch.interval)
-            wake_event.clear()
+            if not stop_ev.is_set():
+                wake_event.wait(timeout=cfg.watch.interval)
 
     tick_thread: threading.Thread | None = None
     on_main = threading.current_thread() is threading.main_thread()
-    on_term = lambda *_a: (stop_ev.set(), wake_event.set(), ui_event.set())  # noqa: E731
-    prev_term = signal.signal(signal.SIGTERM, on_term) if on_main else None
+
+    def _on_term(*_a: object) -> None:
+        for ev in (stop_ev, wake_event, ui_event):
+            ev.set()
+
+    prev_term = signal.signal(signal.SIGTERM, _on_term) if on_main else None
     try:
         reconcile_config()
         threading.Thread(target=watch_files, name="bf-watchfiles", daemon=True).start()
@@ -508,11 +485,9 @@ def serve(store: Store, *, json_stream: bool = False, stop_event: threading.Even
                 if not stop_ev.is_set():
                     refresh_tui()
     finally:
-        for ev in (stop_ev, wake_event, ui_event):
-            ev.set()
+        _on_term()
         with reconcile_lock:
-            active_daemons = list(daemons.values())
-            daemons.clear()
+            active_daemons, _ = list(daemons.values()), daemons.clear()
         for _, u_stop, _ in active_daemons:
             u_stop.set()
         if tick_thread is not None and tick_thread.is_alive():

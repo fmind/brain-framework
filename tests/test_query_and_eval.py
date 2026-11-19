@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,15 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
     setext_sec = query.read_target(brain, "concepts/setext.md#setext-section")
     assert "Setext body." in setext_sec["text"]
     assert "Tail body." not in setext_sec["text"]
+
+    # Spaceless ATX heading and reference-link heading extract accurately!
+    brain.write(
+        "concepts/ref-head.md",
+        b"---\ntype: guide\nstatus: stable\n---\n##Spaceless\n\nBody1.\n\n## [MCP][m]\n\nBody2.\n\n[m]: https://example.com\n",
+    )
+    engine.build(brain)
+    assert "Body1." in query.read_target(brain, "concepts/ref-head.md#spaceless")["text"]
+    assert "Body2." in query.read_target(brain, "concepts/ref-head.md#mcp")["text"]
 
     for blocked in ("logs/events.log", "Logs/events.log", "LOGS", ".vale.ini"):
         with pytest.raises(InputError, match="private or runtime paths"):
@@ -241,7 +251,7 @@ def test_query_rg_jq_streaming_and_limits(brain: Store, monkeypatch: pytest.Monk
         query.search_rg(brain, "durable")
 
 
-def test_evaluate_passes_and_reports_failures(brain: Store) -> None:
+def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write(
         "evals/suite.json",
         json.dumps(
@@ -316,3 +326,176 @@ def test_evaluate_passes_and_reports_failures(brain: Store) -> None:
 
     with pytest.raises(InputError, match="no eval file matching"):
         query.evaluate(brain, target="nonexistent-suite")
+
+    # Corrupt stored JSON raises Error (not InputError) in query_jq; script shims preserve HOME/XDG/MISE while keeping $ENV/env empty and stripping secrets; rg exit 1 with stderr fails closed / falls back!
+    brain.write("memories/corrupt/bad.json", b"{corrupt\n")
+    with pytest.raises(Error, match="parse error:") as exc_info:
+        query.query_jq(brain, ".ref", scope="corrupt")
+    assert not isinstance(exc_info.value, InputError)
+    brain.delete("memories/corrupt/bad.json")
+
+    records.ingest(
+        brain, "items", json.dumps([{"id": "alias-1", "title": "Alias item", "aliases": ["legacy:alias-1"]}]).encode()
+    )
+    target_mem = brain.root / records.record_file("items", "alias-1")
+    shim_bin = tmp_path / "shim-bin"
+    shim_bin.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "bf-home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "bf-xdg"))
+    monkeypatch.setenv("MISE_DATA_DIR", str(tmp_path / "bf-mise"))
+    monkeypatch.setenv("GITHUB_TOKEN", "secret-tok")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(tmp_path / "evil-rg"))
+    real_jq = query.resolve_tool("jq")
+    wrap_jq = shim_bin / "jq"
+    wrap_jq.write_text(
+        '#!/bin/sh\n[ -n "$HOME" ] && [ -n "$XDG_DATA_HOME" ] && [ -n "$MISE_DATA_DIR" ]'
+        ' && [ -z "${GITHUB_TOKEN:-}" ] && [ -z "${RIPGREP_CONFIG_PATH:-}" ] || exit 2\n'
+        f'exec "{real_jq}" "$@"\n'
+    )
+    wrap_jq.chmod(0o755)
+    pass_rg = shim_bin / "rg-ok"
+    pass_rg.write_text(
+        '#!/bin/sh\n[ -n "$HOME" ] && [ -n "$XDG_DATA_HOME" ] && [ -n "$MISE_DATA_DIR" ]'
+        ' && [ -z "${GITHUB_TOKEN:-}" ] && [ -z "${RIPGREP_CONFIG_PATH:-}" ] || exit 2\n'
+        f'printf \'{{"type":"match","data":{{"path":{{"text":"{target_mem}"}},'
+        '"lines":{"text":"Alias item"},"submatches":[{"start":0}]}}\\n\'\n'
+    )
+    pass_rg.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda n: str(wrap_jq) if n == "jq" else str(pass_rg) if n == "rg" else None)
+    assert query.query_jq(brain, "[$ENV, env]", limit=1)["items"] == [[{}, {}]]
+    assert query.search_rg(brain, "Alias")["items"][0]["path"] == records.record_file("items", "alias-1")
+
+    fail_rg = shim_bin / "rg"
+    fail_rg.write_text("#!/bin/sh\necho 'mise ERROR: missing HOME' >&2\nexit 1\n")
+    fail_rg.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda n: str(fail_rg) if n == "rg" else None)
+    with pytest.raises(Error, match="rg failed: mise ERROR: missing HOME") as rg_exc:
+        query.search_rg(brain, "durable")
+    assert not isinstance(rg_exc.value, InputError)
+    with pytest.raises(Error, match="rg failed: mise ERROR: missing HOME"):
+        query.search_rg(brain, "durable", scope="nonexistent-scope")
+    alias_hit = query.find_by_alias(brain, "legacy:alias-1")
+    assert alias_hit is not None
+    assert alias_hit[0] == records.record_file("items", "alias-1")
+
+    # `resolve_tool` unwraps `mise` shims to the underlying executable, and `drain_tail` bounds memory:
+    mise_dir = tmp_path / "fake-mise"
+    mise_dir.mkdir()
+    fake_mise = mise_dir / "mise"
+    fake_mise.write_text(f'#!/bin/sh\nif [ "$1" = "which" ] && [ "$2" = "jq" ]; then echo "{real_jq}"; fi\n')
+    fake_mise.chmod(0o755)
+    mise_shim = mise_dir / "jq"
+    mise_shim.symlink_to(fake_mise)
+    monkeypatch.setattr(shutil, "which", lambda n: str(mise_shim) if n == "jq" else None)
+    assert query.resolve_tool("jq") == real_jq
+    assert set(query.safe_env(real_jq)) == {"LC_ALL", "LANG"}
+    assert "HOME" in query.safe_env(str(mise_shim))
+
+    import io
+    import subprocess
+
+    tail_t, tail_buf = query.drain_tail(io.BytesIO(b"a" * 20000 + b"TAIL"), 16)
+    tail_t.join(timeout=2)
+    assert bytes(tail_buf) == b"aaaaaaaaaaaaTAIL"
+
+    # Real pipe `drain_tail` captures `< 8192` bytes and exits cleanly on `stop` even if a grandchild holds stderr!
+    import threading
+
+    stop_err = threading.Event()
+    with subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)']); sys.stderr.write('boom\\n'); sys.stderr.flush()",
+        ],
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    ) as gc_proc:
+        assert gc_proc.stderr is not None
+        gt, gbuf = query.drain_tail(gc_proc.stderr, 64, stop_err)
+        gc_proc.wait(timeout=5)
+        stop_err.set()
+        gt.join(timeout=2)
+        assert not gt.is_alive()
+        assert b"boom" in bytes(gbuf)
+        query.stop_proc(gc_proc)
+
+    # Failing `jq` wrapper shim (exit 1) maps to `Error` (exit 1), not `InputError` (exit 2):
+    fail_jq = shim_bin / "jq-fail"
+    fail_jq.write_text("#!/bin/sh\necho 'mise ERROR: boom' >&2\nexit 1\n")
+    fail_jq.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda n: str(fail_jq) if n == "jq" else None)
+    with pytest.raises(Error, match="jq failed: mise ERROR: boom") as jq_exc:
+        query.query_jq(brain, ".ref")
+    assert not isinstance(jq_exc.value, InputError)
+
+    monkeypatch.setattr(
+        subprocess, "run", lambda *_a, **_kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(["rg"], 5))
+    )
+    monkeypatch.setattr(shutil, "which", lambda n: str(fail_rg) if n == "rg" else None)
+    with pytest.raises(Error, match="rg timed out after 5s"):
+        query.search_rg(brain, "durable", scope="nonexistent-scope")
+    monkeypatch.undo()
+
+    # `rg` exit 127 (wrapper/exec failure) maps to `Error` (exit 1), not `InputError` (exit 2):
+    rc127_rg = shim_bin / "rg-127"
+    rc127_rg.write_text("#!/bin/sh\necho 'not found' >&2\nexit 127\n")
+    rc127_rg.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda n: str(rc127_rg) if n == "rg" else None)
+    with pytest.raises(Error, match="rg failed: not found") as rc127_exc:
+        query.search_rg(brain, "durable")
+    assert not isinstance(rc127_exc.value, InputError)
+    monkeypatch.undo()
+
+    # `drain_tail` uses `select.poll()` and handles fds >= 1024 (`FD_SETSIZE`) cleanly:
+    import fcntl
+    import os
+    import resource
+
+    r_fd, w_fd = os.pipe()
+    high_fd = -1
+    try:
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft > 1030:
+            high_fd = fcntl.fcntl(r_fd, fcntl.F_DUPFD, 1025)
+            os.close(r_fd)
+            r_fd = -1
+            with os.fdopen(high_fd, "rb", buffering=0) as high_stream:
+                high_fd = -1
+                ht, hbuf = query.drain_tail(high_stream, 64)
+                os.write(w_fd, b"hello-high-fd")
+                os.close(w_fd)
+                w_fd = -1
+                ht.join(timeout=2)
+                assert bytes(hbuf) == b"hello-high-fd"
+    finally:
+        for fd_i in (r_fd, w_fd, high_fd):
+            if fd_i >= 0:
+                os.close(fd_i)
+
+    # `resolve_tool` invalidates stale cached paths, skips negative-caching failed `mise which`, and respects shim env:
+    cache_dir = tmp_path / "cache-mise"
+    cache_dir.mkdir()
+    target_a = cache_dir / "jq-a"
+    target_a.write_text(f'#!/bin/sh\nexec "{real_jq}" "$@"\n')
+    target_a.chmod(0o755)
+    target_b = cache_dir / "jq-b"
+    target_b.write_text(f'#!/bin/sh\nexec "{real_jq}" "$@"\n')
+    target_b.chmod(0o755)
+    dyn_mise = cache_dir / "mise"
+    dyn_mise.write_text(
+        f'#!/bin/sh\nif [ -f "{target_a}" ]; then printf "%s\\n" "{target_a}"; exit 0; fi\n'
+        f'if [ -f "{target_b}" ]; then printf "%s\\n" "{target_b}"; exit 0; fi\nexit 1\n'
+    )
+    dyn_mise.chmod(0o755)
+    dyn_shim = cache_dir / "jq"
+    dyn_shim.symlink_to(dyn_mise)
+    monkeypatch.setattr(shutil, "which", lambda n: str(dyn_shim) if n == "jq" else None)
+    assert query.resolve_tool("jq") == str(target_a)
+    target_a.unlink()
+    assert query.resolve_tool("jq") == str(target_b)
+    target_b.unlink()
+    assert query.resolve_tool("jq") == str(dyn_shim)
+    target_b.write_text(f'#!/bin/sh\nexec "{real_jq}" "$@"\n')
+    target_b.chmod(0o755)
+    assert query.resolve_tool("jq") == str(target_b)

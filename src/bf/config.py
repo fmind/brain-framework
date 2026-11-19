@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal, cast
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -29,7 +29,10 @@ LIBYAML = (
     "uv tool install --reinstall --python 3.14 brain-framework"
 )
 _FLOAT_RE = r"^(?:[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$"
-_NULL_BOOL = (("null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]), ("bool", r"^(?i:true|false)$", list("tTfF")))
+_NULL_BOOL = (
+    ("null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]),
+    ("bool", r"^(?:true|True|TRUE|false|False|FALSE)$", list("tTfF")),
+)
 _INT_SPEC = ("int", r"^(?:[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+)$", list("-+0123456789"))
 _CORE = (*_NULL_BOOL, _INT_SPEC, ("float", _FLOAT_RE, list("-+.0123456789")))
 _ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -285,31 +288,24 @@ def _parse_job(name: str, raw: dict[str, object], base_env: dict[str, str]) -> J
     if inp:
         relative(inp)
     raw_ing = raw.get("ingest")
-    mode: Literal["upsert", "snapshot"] = "upsert"
     if isinstance(raw_ing, dict):
         ingest = str(raw_ing["source"])
-        if raw_ing.get("mode") == "snapshot":
-            mode = "snapshot"
+        mode: Literal["upsert", "snapshot"] = "snapshot" if raw_ing.get("mode") == "snapshot" else "upsert"
         allow_removal = bool(raw_ing.get("allow_removal", False))
     else:
-        ingest, allow_removal = str(raw_ing or ""), False
+        ingest, mode, allow_removal = str(raw_ing or ""), "upsert", False
     if ingest in models.RESERVED_SOURCES:
         raise Error(f"bf.yaml jobs.{name}.ingest: source {ingest!r} is reserved")
-    raw_act = raw.get("action")
-    action_keep = int(cast("int", raw_act["keep"])) if isinstance(raw_act, dict) else 0
+    action_keep = int(cast("int", raw_act["keep"])) if isinstance(raw_act := raw.get("action"), dict) else 0
     sched, every, cron = _parse_schedule(raw.get("schedule"), f"bf.yaml jobs.{name}.schedule")
     hooks = (str(raw["hook"]),) if isinstance(raw.get("hook"), str) else _str_tuple(raw.get("hook"))
     lb = models.parse_duration(raw.get("lookback", 86400), f"bf.yaml jobs.{name}.lookback")
     ov = models.parse_duration(raw.get("overlap", 0), f"bf.yaml jobs.{name}.overlap", allow_zero=True)
     to = models.parse_duration(raw.get("timeout", 300), f"bf.yaml jobs.{name}.timeout", maximum=86_400)
-    io_kw: dict[str, Any] = {"input": inp, "ingest": ingest, "mode": mode, "allow_removal": allow_removal}
-    evs = _parse_events(raw.get("events"))
-    trig_kw: dict[str, Any] = {"schedule": sched, "every": every, "cron": cron, "events": evs, "hooks": hooks}
-    lim_kw: dict[str, Any] = {"lookback": lb, "overlap": ov, "timeout": to}
     en, req, env = _unit_meta(raw, "job", name, base_env)
-    return JobSpec(
-        name=name, run=run, **io_kw, action_keep=action_keep, **trig_kw, **lim_kw, enabled=en, requires=req, env=env
-    )
+    ev = _parse_events(raw.get("events"))
+    a = (name, run, inp, ingest, mode, allow_removal, action_keep, sched, every, cron, ev, hooks, lb, ov, to, en, req)
+    return JobSpec(*a, env)
 
 
 def _parse_service(name: str, raw: dict[str, object], base_env: dict[str, str]) -> ServiceSpec:
@@ -329,18 +325,14 @@ def load(store: Store) -> Config:
     models.check_version(raw, "bf.yaml")
     if problems := validate_instance(_brain_validator(), raw, "bf.yaml"):
         raise Error("; ".join(problems))
-    rb = raw.get("brains")
-    brains = {
-        str(a): models.clean(str(t), f"bf.yaml brains.{a}") for a, t in (rb.items() if isinstance(rb, dict) else ())
-    }
+    rb = raw.get("brains") if isinstance(raw.get("brains"), dict) else {}
+    brains = {str(a): models.clean(str(t), f"bf.yaml brains.{a}") for a, t in cast("dict[str, object]", rb).items()}
     tz = _check_tz(str(raw.get("timezone") or "UTC"), "bf.yaml timezone")
     base_env = _parse_env_map(raw.get("env"), "bf.yaml env")
-
-    def sec(k: str) -> dict[str, dict[str, object]]:
-        return cast("dict[str, dict[str, object]]", raw[k]) if isinstance(raw.get(k), dict) else {}
-
-    jobs = {str(k): _parse_job(str(k), v, base_env) for k, v in sec("jobs").items()}
-    services = {str(k): _parse_service(str(k), v, base_env) for k, v in sec("services").items()}
+    raw_jobs = cast("dict[str, dict[str, object]]", raw["jobs"]) if isinstance(raw.get("jobs"), dict) else {}
+    raw_svcs = cast("dict[str, dict[str, object]]", raw["services"]) if isinstance(raw.get("services"), dict) else {}
+    jobs = {str(k): _parse_job(str(k), v, base_env) for k, v in raw_jobs.items()}
+    services = {str(k): _parse_service(str(k), v, base_env) for k, v in raw_svcs.items()}
     all_names = (*jobs, *services)
     if "events" in all_names:
         raise Error("bf.yaml: unit name 'events' is reserved")
@@ -349,7 +341,7 @@ def load(store: Store) -> Config:
         raise Error(f"bf.yaml: unit name {dup!r} is declared in multiple sections")
     w_spec = _parse_watch(cast("dict[str, object]", rw) if isinstance(rw := raw.get("watch"), dict) else {})
     if len(_LOADED) >= 64:
-        _LOADED.clear()
+        _LOADED.pop(next(iter(_LOADED)))
     _LOADED[key] = cfg = Config(str(raw["name"]), brains, tz, base_env, jobs, services, w_spec)
     return cfg
 
@@ -389,10 +381,10 @@ def select(value: str = "") -> Store:
             return _open_brain(env_brain)
         except Error:
             if models.NAME_RE.fullmatch(env_brain) and (nearest := inside_brain()) is not None:
+                near_name = ""
                 with suppress(Error):
-                    if env_brain == load(nearest).name:
-                        return nearest
-                if env_brain == nearest.root.name:
+                    near_name = load(nearest).name
+                if env_brain in {near_name, nearest.root.name}:
                     return nearest
             raise
     if nearest := inside_brain():

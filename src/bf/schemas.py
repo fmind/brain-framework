@@ -9,7 +9,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.protocols import Validator
 
-from bf.models import DURATION_PAT, DURATION_ZERO_PAT, FORMAT, MAX_SCHEMA, NAME, Error, decode, digest
+from bf.models import DURATION_PAT, DURATION_ZERO_PAT, FORMAT, MAX_SCHEMA, NAME, Error, decode, digest, encode
 from bf.storage import Store
 
 Kind = Literal["brain", "record", "concepts", "evals"]
@@ -35,12 +35,8 @@ def _i(min_val: int = 0, max_val: int | None = None) -> dict[str, Any]:
 
 
 def _arr(items: dict[str, Any], *, max_items: int = 0, min_items: int = 0, unique: bool = False) -> dict[str, Any]:
-    out: dict[str, Any] = {"type": "array", "items": items}
-    if min_items:
-        out["minItems"] = min_items
-    if max_items:
-        out["maxItems"] = max_items
-    return {**out, "uniqueItems": True} if unique else out
+    extra = {k: v for k, v in (("minItems", min_items), ("maxItems", max_items), ("uniqueItems", unique)) if v}
+    return {"type": "array", "items": items, **extra}
 
 
 def _opt(schema: dict[str, Any]) -> dict[str, Any]:
@@ -94,10 +90,8 @@ _INGEST_PROPS = {"source": _NAME_REF, "mode": _enum("upsert", "snapshot"), "allo
 _EV_MATCH_PROPS = {"kind": _s(128, min_len=1), "source": _s(128, min_len=1), "filter": _s(2048, min_len=1)}
 _ARGV_DEF = {"title": "Argv", **_arr(_s(4096, min_len=1), min_items=1, max_items=64)}
 _DEFS_A = {"Action": _obj({"keep": _i(1, 1000)}, req=("keep",), title="Action"), "Argv": _ARGV_DEF}
-_DEFS_B = {
-    "EventMatch": _obj(_EV_MATCH_PROPS, title="EventMatch"),
-    "Ingest": _obj(_INGEST_PROPS, req=("source",), title="Ingest"),
-}
+_EV_DEF, _ING_DEF = _obj(_EV_MATCH_PROPS, title="EventMatch"), _obj(_INGEST_PROPS, req=("source",), title="Ingest")
+_DEFS_B = {"EventMatch": _EV_DEF, "Ingest": _ING_DEF}
 _JOB_DEF = {**_obj(_JOB_PROPS, req=("run",), title="Job"), "not": {"required": ["ingest", "action"]}}
 _BRAIN_DEFS = {**_DEFS_A, **_DEFS_B, "Job": _JOB_DEF, "Service": _obj(_SVC_PROPS, req=("run",), title="Service")}
 _BRAIN_BODY = {**_obj(_BRAIN_PROPS, req=("version", "name")), "$defs": _BRAIN_DEFS}
@@ -128,12 +122,8 @@ _META_DEF = _obj(extra=_s(4096), title="Meta", names=r"^[A-Za-z_][A-Za-z0-9_.-]*
 _RD_A = {"Meta": _META_DEF, "Heading": _obj(_HEAD_PROPS, req=("id", "title", "level", "meta"), title="Heading")}
 _RD_B = {"Link": _obj(_LINK_PROPS, req=("to", "kind", "anchor", "meta", "section"), title="Link")}
 _RD_C = {"Element": _obj(_ELEM_PROPS, req=("tag", "id", "text", "section", "meta"), title="Element")}
-_REC_DEFS = {
-    **_RD_A,
-    **_RD_B,
-    **_RD_C,
-    "Task": _obj(_TASK_PROPS, req=("text", "done", "section", "meta"), title="Task"),
-}
+_RD_D = {"Task": _obj(_TASK_PROPS, req=("text", "done", "section", "meta"), title="Task")}
+_REC_DEFS = {**_RD_A, **_RD_B, **_RD_C, **_RD_D}
 _REC_DESC = "Unified JSON record schema enforced on compiled Markdown notes and ingested sensor records in memories/."
 _REC_REQ = ("id", "ref", "source", "kind", "title")
 RECORD_SCHEMA = _doc("record", "Record", _REC_DESC, {**_obj(_REC_PROPS, req=_REC_REQ, extra=True), "$defs": _REC_DEFS})
@@ -169,10 +159,8 @@ def compile_schema(raw: object, label: str) -> Validator:
     try:
         Draft202012Validator.check_schema(raw)
     except SchemaError as error:
-        loc = ".".join(str(part) for part in error.schema_path)
-        raise Error(
-            f"{label}: invalid JSON Schema{f' at {loc}' if loc else ''} ({error.validator or 'schema'})"
-        ) from error
+        loc, v = ".".join(str(part) for part in error.schema_path), error.validator or "schema"
+        raise Error(f"{label}: invalid JSON Schema{f' at {loc}' if loc else ''} ({v})") from error
     return Draft202012Validator(raw)
 
 
@@ -182,22 +170,17 @@ _VALIDATORS: dict[str, Validator] = {}
 def load_validator(store: Store, path: str, fallback: dict[str, Any] | None = None) -> Validator | None:
     """Load and compile `path` from `store`, falling back to `fallback` when the file is absent."""
     try:
-        raw = store.read(path, MAX_SCHEMA)
+        raw: bytes | None = store.read(path, MAX_SCHEMA)
     except FileNotFoundError:
         if fallback is None:
             return None
-        key = f"fallback:{id(fallback)}"
-        if (cached := _VALIDATORS.get(key)) is None:
-            _VALIDATORS[key] = cached = compile_schema(fallback, path)
-        return cached
-    key = digest(raw)
-    if (cached := _VALIDATORS.get(key)) is not None:
-        return cached
-    compiled = compile_schema(decode(raw, path), path)
-    if len(_VALIDATORS) >= 64:
-        _VALIDATORS.clear()
-    _VALIDATORS[key] = compiled
-    return compiled
+        raw = None
+    key = f"fallback:{digest(encode(fallback))}" if raw is None else digest(raw)
+    if (cached := _VALIDATORS.get(key)) is None:
+        if len(_VALIDATORS) >= 64:
+            _VALIDATORS.pop(next(iter(_VALIDATORS)))
+        _VALIDATORS[key] = cached = compile_schema(fallback if raw is None else decode(raw, path), path)
+    return cached
 
 
 def _describe_error(error: ValidationError) -> str:
@@ -219,10 +202,8 @@ def _describe_error(error: ValidationError) -> str:
 
 def validate_instance(validator: Validator, instance: object, label: str) -> list[str]:
     """Validate `instance` and return up to 5 sanitized diagnostic strings without echoing values."""
-    errors = sorted(
-        validator.iter_errors(instance), key=lambda item: ([str(p) for p in item.absolute_path], str(item.validator))
-    )
-    if not errors:
+    errs = sorted(validator.iter_errors(instance), key=lambda e: ([str(p) for p in e.absolute_path], str(e.validator)))
+    if not errs:
         return []
-    messages = list(dict.fromkeys(f"{label}: {_describe_error(err)}" for err in errors))
+    messages = list(dict.fromkeys(f"{label}: {_describe_error(err)}" for err in errs))
     return [*messages[:5], f"{label}: and {len(messages) - 5} more schema errors"] if len(messages) > 5 else messages

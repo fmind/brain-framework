@@ -92,6 +92,31 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     dangling.symlink_to(tmp_path / "missing-target")
     with pytest.raises(Error, match="not a directory"):
         engine.init_brain(dangling)
+    empty_real = tmp_path / "empty-real"
+    empty_real.mkdir()
+    sym_dir = tmp_path / "sym-empty-dir"
+    sym_dir.symlink_to(empty_real)
+    with pytest.raises(Error, match="not a directory"):
+        engine.init_brain(sym_dir)
+
+    # `load_or_compile_note` hits cache for same-brain `bf:///` frontmatter links and bypasses for uppercase `BF://<host>`!
+    store.write(
+        "concepts/norm-uri.md", b"---\ntype: guide\nstatus: stable\nlinks:\n  - bf:///concepts/welcome.md\n---\n# N\n"
+    )
+    store.write(
+        "concepts/up-uri.md",
+        b"---\ntype: guide\nstatus: stable\nlinks:\n  - BF://brain-123-my-brain/concepts/welcome.md\n---\n# U\n",
+    )
+    engine.build(store)
+    _, hit_norm = engine.load_or_compile_note(
+        store, "concepts/norm-uri.md", store.read("concepts/norm-uri.md"), brain_name="brain-123-my-brain"
+    )
+    assert hit_norm is not None
+    comp_up, hit_up = engine.load_or_compile_note(
+        store, "concepts/up-uri.md", store.read("concepts/up-uri.md"), brain_name="renamed"
+    )
+    assert hit_up is None
+    assert comp_up["links"][0]["kind"] == "brain"
 
     # Tampered compiled note JSON with matching `sha256` is still caught by `validate`!
     tampered = json.loads(store.read("memories/concepts/welcome.json"))
@@ -182,6 +207,8 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
                 "links": [
                     {"to": "meetings:decision-1", "kind": "record", "anchor": "", "meta": {}, "section": ""},
                     {"to": "projects:bad", "kind": "note", "anchor": "", "meta": {}, "section": ""},
+                    {"to": "projects/../../etc/passwd", "kind": "note", "anchor": "", "meta": {}, "section": ""},
+                    {"to": "javascript:alert(1)", "kind": "url", "anchor": "", "meta": {}, "section": ""},
                     {"to": "bf://sib/events:ev-1", "kind": "brain", "anchor": "", "meta": {}, "section": ""},
                     {
                         "to": records.record_file("meetings", "decision-1"),
@@ -193,6 +220,12 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
                 ],
                 "relations": [],
             }
+        ).encode(),
+    )
+    brain.write(
+        "memories/wrongkind/k.json",
+        json.dumps(
+            {"id": "k1", "ref": "wrongkind:k1", "source": "wrongkind", "kind": "concept", "title": "Wrong kind"}
         ).encode(),
     )
 
@@ -256,7 +289,10 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
         "memories/relbad/r.json: 'relations' was removed; use 'links'",
         "memories/relbad/r.json: record link 'meetings:decision-1' must use memories/<source>/<sha256>.json",
         "memories/relbad/r.json: note link 'projects:bad' must target projects/, concepts/, or actions/",
+        "memories/relbad/r.json: note link 'projects/../../etc/passwd' must target projects/, concepts/, or actions/",
+        "memories/relbad/r.json: url link 'javascript:alert(1)' must use https://",
         "memories/relbad/r.json: cross-brain link 'bf://sib/events:ev-1' must use bf://<brain>/<path>",
+        "memories/wrongkind/k.json: kind must equal 'memory'",
         "bf.yaml brains.missing-sib:",
         "JSON record links do not support #anchor fragments",
         "missing anchor #missing in actions/2026-11-15_demo/outputs/report.md",
@@ -270,6 +306,12 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
         "broken cross-brain link bf://sib/memories/events/0000000000000000000000000000000000000000000000000000000000000000.json",
     ):
         assert expected in joined, f"missing expected problem {expected!r} in:\n{joined}"
+
+    from bf import markdown as _md
+
+    assert _md.record_link_problem({"kind": "record", "to": "memories/github/foo\\bar.json", "anchor": ""})
+    assert _md.record_link_problem({"kind": "url", "to": "https://example.com\n", "anchor": ""})
+    assert _md.record_link_problem({"kind": "brain", "to": "bf://sib\\x/concepts/a.md", "anchor": ""})
 
 
 def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(brain: Store) -> None:

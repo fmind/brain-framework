@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -34,6 +35,21 @@ def run(
     return result.stdout or ""
 
 
+def _real_binary(tool: str) -> str:
+    found = shutil.which(tool)
+    if not found:
+        raise SystemExit(f"{tool} is required on PATH")
+    resolved = Path(found).resolve()
+    if resolved.name == "mise":
+        out = subprocess.check_output([str(resolved), "which", tool], cwd=ROOT, text=True, timeout=10).strip()  # noqa: S603
+        if not out:
+            raise SystemExit(f"mise which {tool} returned empty output")
+        resolved = Path(out).resolve()
+    if not resolved.is_file():
+        raise SystemExit(f"{tool} resolved to non-file path: {resolved}")
+    return str(resolved)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", default="3.14", help="Interpreter version for the isolated environments.")
@@ -51,6 +67,7 @@ def main() -> None:
     if not scratch.is_absolute():
         scratch = Path.home() / ".cache"
     scratch.mkdir(parents=True, exist_ok=True)
+    real_rg_path, real_jq_path = _real_binary("rg"), _real_binary("jq")
     with tempfile.TemporaryDirectory(prefix="bf-package-", dir=scratch) as temporary:
         root = Path(temporary).resolve()
         for (artifact,) in artifacts:
@@ -175,6 +192,45 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                 or proj["elements"][0]["meta"] != {"confidence": "high"}
             ):
                 raise SystemExit(f"{artifact.name}: compiled package.json missing attr_list metadata: {proj}")
+
+            # Exercise `bf query`, `bf query --jq`, and `bf eval` through wrapper-script and `mise`-style shims on PATH
+            # (catches regressions hidden inside `mise run`, where real ELF binaries precede shims on PATH).
+            for label, mode in (("wrapper", "script"), ("mise-shim", "mise")):
+                shim_dir = home / f"shims-{label}"
+                shim_dir.mkdir()
+                if mode == "script":
+                    for tool, target in (("rg", real_rg_path), ("jq", real_jq_path)):
+                        wrapper = shim_dir / tool
+                        wrapper.write_text(
+                            "#!/bin/sh\n"
+                            '[ -n "${HOME:-}" ] && [ -n "${XDG_CONFIG_HOME:-}" ] && [ -z "${GITHUB_TOKEN:-}" ] || exit 1\n'
+                            f'exec {shlex.quote(target)} "$@"\n'
+                        )
+                        wrapper.chmod(0o755)
+                else:
+                    fake_mise = shim_dir / "mise"
+                    fake_mise.write_text(
+                        "#!/bin/sh\n"
+                        '[ -n "${HOME:-}" ] && [ -z "${GITHUB_TOKEN:-}" ] || exit 1\n'
+                        f'if [ "$1" = "which" ] && [ "$2" = "rg" ]; then printf "%s\\n" {shlex.quote(real_rg_path)}; exit 0; fi\n'
+                        f'if [ "$1" = "which" ] && [ "$2" = "jq" ]; then printf "%s\\n" {shlex.quote(real_jq_path)}; exit 0; fi\n'
+                        "exit 1\n"
+                    )
+                    fake_mise.chmod(0o755)
+                    (shim_dir / "rg").symlink_to(fake_mise)
+                    (shim_dir / "jq").symlink_to(fake_mise)
+                shim_env = {
+                    **env,
+                    "PATH": f"{shim_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+                    "GITHUB_TOKEN": "ghp_secret_leak_test_0123456789",
+                }
+                q_rg = json.loads(run(bf, "query", "welcome", cwd=brain, env=shim_env, capture=True))
+                q_jq = json.loads(
+                    run(bf, "query", "--jq", "[$ENV, env]", "-n", "1", cwd=brain, env=shim_env, capture=True)
+                )
+                q_ev = json.loads(run(bf, "eval", cwd=brain, env=shim_env, capture=True))
+                if q_rg.get("count", 0) < 1 or q_jq.get("items") != [[{}, {}]] or not q_ev.get("ok"):
+                    raise SystemExit(f"{artifact.name} ({label}): shim smoke failed: {q_rg} / {q_jq} / {q_ev}")
 
 
 if __name__ == "__main__":

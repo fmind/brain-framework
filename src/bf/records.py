@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import errno
 import os
 import stat
+from contextlib import suppress
 from datetime import datetime
 from typing import Any, Literal
 
@@ -12,7 +12,7 @@ from bf import config, models
 from bf.markdown import add_link, normalize_tags, parse_link, record_link_problem
 from bf.models import Error, InputError, clean, decode, digest, encode, now_utc
 from bf.schemas import RECORD_SCHEMA, load_validator, validate_instance
-from bf.storage import Store, private_dir, writer
+from bf.storage import Store, open_regular, private_dir, tail_lines, writer
 
 Mode = Literal["upsert", "snapshot"]
 MAX_EVENTS, COMPACT_BYTES = 1000, 8 << 20
@@ -33,32 +33,16 @@ def _forgotten_ids(store: Store, source: str) -> set[str]:
 
 def latest_event_seq(store: Store) -> int:
     """Return the highest `seq` recorded in `.bf/events.jsonl` (`0` when absent or empty)."""
-    state = private_dir(store)
     try:
-        with state.parent("events.jsonl") as (parent, leaf):
-            try:
-                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
-            except OSError as error:
-                if error.errno == errno.ELOOP:
-                    raise Error(".bf/events.jsonl: symlinks are not followed") from error
-                raise
-            with os.fdopen(fd, "rb") as stream:
-                if not stat.S_ISREG((info := os.fstat(stream.fileno())).st_mode):
-                    raise Error(".bf/events.jsonl: expected a regular file")
-                if info.st_size == 0:
-                    return 0
-                for span in (65536, 16 << 20):
-                    off = max(0, info.st_size - span)
-                    stream.seek(off)
-                    tail = stream.read(span)
-                    if off:
-                        tail = tail.split(b"\n", 1)[1] if b"\n" in tail else b""
-                    for ln in reversed(tail.splitlines()):
-                        if stripped := ln.strip():
-                            parsed = decode(stripped, ".bf/events.jsonl", check_duplicates=False)
-                            return s if isinstance(parsed, dict) and type(s := parsed.get("seq")) is int else 0
-                    if off == 0:
-                        break
+        state = private_dir(store, create=False)
+        for span in (65536, 16 << 20):
+            tail, off = state.read_tail("events.jsonl", span, label=".bf/events.jsonl")
+            for ln in reversed(tail.splitlines()):
+                if stripped := ln.strip():
+                    parsed = decode(stripped, ".bf/events.jsonl", check_duplicates=False)
+                    return s if isinstance(parsed, dict) and type(s := parsed.get("seq")) is int else 0
+            if off == 0:
+                break
     except FileNotFoundError:
         return 0
     return 0
@@ -67,7 +51,7 @@ def latest_event_seq(store: Store) -> int:
 def read_events(store: Store, *, after_seq: int = 0) -> tuple[list[dict[str, Any]], int]:
     """Read `.bf/events.jsonl` and return `(events_after_seq, latest_seq)` with cursor reset self-healing."""
     try:
-        raw = private_dir(store).read("events.jsonl", 16 << 20)
+        raw = private_dir(store, create=False).read("events.jsonl", 16 << 20)
     except FileNotFoundError:
         return [], 0
     all_evs: list[dict[str, Any]] = []
@@ -93,14 +77,18 @@ def append_event(
     def write_event() -> dict[str, Any]:
         state = private_dir(store)
         msg_id = (data or {}).get("id")
+        prev_seq = latest_event_seq(store)
         if dedupe and isinstance(msg_id, str) and msg_id:
-            items, prev_seq = read_events(store)
-            for prev in reversed(items):
-                same_src = prev.get("kind") == kind and prev.get("source") == source
-                if same_src and isinstance(pd := prev.get("data"), dict) and pd.get("id") == msg_id:
-                    return prev
-        else:
-            prev_seq = latest_event_seq(store)
+            with suppress(FileNotFoundError):
+                needle = encode(msg_id).rstrip(b"\n")
+                for raw_ln in reversed(state.read("events.jsonl", 16 << 20).splitlines()):
+                    if needle not in raw_ln:
+                        continue
+                    p = decode(raw_ln, ".bf/events.jsonl", check_duplicates=False)
+                    if not isinstance(p, dict) or p.get("kind") != kind or p.get("source") != source:
+                        continue
+                    if isinstance(pd := p.get("data"), dict) and pd.get("id") == msg_id:
+                        return dict(p)
         seq = prev_seq + 1
         event = {"seq": seq, "id": f"evt-{seq}-{os.urandom(4).hex()}", "time": now_utc(now)}
         event.update({"kind": kind, "source": source, "data": dict(data or {})})
@@ -110,31 +98,19 @@ def append_event(
         store.append_log("events", line)
         raw_line = encode(event)
         with state.parent("events.jsonl", create=True) as (parent, leaf):
-            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
-            try:
-                fd = os.open(leaf, flags, 0o600, dir_fd=parent)
-            except OSError as error:
-                if error.errno == errno.ELOOP:
-                    raise Error(".bf/events.jsonl: symlinks are not followed") from error
-                raise
-            with os.fdopen(fd, "wb") as stream:
+            fd = open_regular(parent, leaf, ".bf/events.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "wb", buffering=0) as stream:
                 if not stat.S_ISREG((info := os.fstat(stream.fileno())).st_mode):
                     raise Error(".bf/events.jsonl: expected a regular file")
                 os.fchmod(stream.fileno(), 0o600)
-                stream.write(raw_line)
-                stream.flush()
+                view = memoryview(raw_line)
+                while view:
+                    view = view[stream.write(view) :]
                 size_after = info.st_size + len(raw_line)
         if size_after > COMPACT_BYTES or (seq > MAX_EVENTS and seq % 200 == 0):
             all_lines = state.read("events.jsonl", 32 << 20).splitlines(keepends=True)
             if len(all_lines) > MAX_EVENTS or size_after > COMPACT_BYTES:
-                kept: list[bytes] = []
-                budget = COMPACT_BYTES >> 1
-                for item in reversed(all_lines[-MAX_EVENTS:]):
-                    if len(item) > budget:
-                        break
-                    kept.append(item)
-                    budget -= len(item)
-                kept.reverse()
+                kept = tail_lines(all_lines, MAX_EVENTS, COMPACT_BYTES >> 1)
                 state.write("events.jsonl", b"".join(kept), mode=0o600, durable=False)
         return event
 
@@ -173,12 +149,10 @@ def parse_batch_envelope(data: bytes, label: str = "input") -> tuple[list[dict[s
             if not isinstance(recs, list) or not all(isinstance(item, dict) for item in recs):
                 raise Error(f"{label}.records: expected a JSON array of record objects")
             inc = whole.get("incomplete")
-            if inc is None or inc is False:
-                missed_flag = False
-            elif inc is True:
-                missed_flag = True
-            elif isinstance(inc, dict) and type(missed := inc.get("missed", 0)) is int and missed >= 0:
-                missed_flag = missed > 0
+            if inc is None or isinstance(inc, bool):
+                missed_flag = bool(inc)
+            elif isinstance(inc, dict) and set(inc) == {"missed"} and type(m := inc["missed"]) is int and m >= 0:
+                missed_flag = m > 0
             else:
                 raise Error(f"{label}.incomplete: expected a boolean or {{'missed': non-negative integer}}")
             return [dict(item) for item in recs], missed_flag
@@ -196,9 +170,13 @@ def _normalize_record_links(raw_links: object, label: str, brain_name: str) -> l
     seen: set[tuple[Any, ...]] = set()
     roots = ("projects/", "concepts/", "actions/", "memories/")
 
-    def plink(tgt: str, *, section: str = "", attr_meta: dict[str, str] | None = None, req_uri: bool = True) -> None:
+    def plink(
+        tgt: str, *, section: str = "", attr_meta: dict[str, str] | None = None, req_uri: bool = True, kind: str = ""
+    ) -> None:
         kw = {"section": section, "attr_meta": attr_meta, "relative_base": False, "require_uri": req_uri}
         parsed = parse_link(label, tgt, brain_name, **kw)
+        if kind and parsed["kind"] != kind:
+            raise Error(f"{label}.links: link kind {kind!r} does not match target")
         if prob := record_link_problem(parsed):
             raise Error(f"{label}: {prob}")
         add_link(seen, out, parsed)
@@ -212,21 +190,23 @@ def _normalize_record_links(raw_links: object, label: str, brain_name: str) -> l
                     raise Error(f"{label}.links entries must be nonempty link targets")
                 plink(item, req_uri=True)
             elif isinstance(item, dict) and isinstance(item.get("to"), str):
+                if extra := sorted(set(item) - {"to", "kind", "anchor", "meta", "section"}):
+                    raise Error(f"{label}.links: unknown link keys {', '.join(extra)}; put metadata under 'meta'")
+                for fk in ("kind", "anchor", "section"):
+                    if item.get(fk) is not None and not isinstance(item[fk], str):
+                        raise Error(f"{label}.links: {fk} must be a string")
                 raw_meta = {} if item.get("meta") is None else item["meta"]
                 if not isinstance(raw_meta, dict) or not all(
                     isinstance(k, str) and isinstance(v, str) for k, v in raw_meta.items()
                 ):
                     raise Error(f"{label}.links: link meta must map strings to strings")
-                target, frag, sec = str(item["to"]), item.get("anchor"), item.get("section")
-                if frag is not None and not isinstance(frag, str):
-                    raise Error(f"{label}.links: anchor must be a string")
-                if isinstance(frag, str) and frag:
+                target, frag = str(item["to"]), str(item.get("anchor") or "")
+                if frag:
                     if "#" in target and target.partition("#")[2] != frag:
                         raise Error(f"{label}.links: conflicting #anchor on target")
                     target = target if "#" in target else f"{target}#{frag}"
-                if sec is not None and not isinstance(sec, str):
-                    raise Error(f"{label}.links: section must be a string")
-                plink(target, section=sec or "", attr_meta=raw_meta, req_uri=not target.startswith(roots))
+                sec, kind = str(item.get("section") or ""), str(item.get("kind") or "")
+                plink(target, section=sec, attr_meta=raw_meta, req_uri=not target.startswith(roots), kind=kind)
             else:
                 raise Error(f"{label}.links entries must be target strings or link objects")
 
@@ -247,32 +227,29 @@ def _prepare_record(raw: dict[str, Any], source: str, index: int, brain_name: st
         raise Error(f"{label}.id must contain no whitespace or invisible format characters")
     rec["id"], rec["title"] = rec_id, clean(raw_title, f"{label}.title")
     expected_ref = f"{source}:{rec_id}"
-    if "source" in rec and rec["source"] != source:
-        raise Error(f"{label}.source must match {source!r}")
-    if "ref" in rec and rec["ref"] != expected_ref:
-        raise Error(f"{label}.ref must match {expected_ref!r}")
-    if "kind" in rec and rec["kind"] != "memory":
-        raise Error(f"{label}.kind must equal 'memory'")
+    for k, exp, msg in (
+        ("source", source, f"match {source!r}"),
+        ("ref", expected_ref, f"match {expected_ref!r}"),
+        ("kind", "memory", "equal 'memory'"),
+    ):
+        if k in rec and rec[k] != exp:
+            raise Error(f"{label}.{k} must {msg}")
     rec["source"], rec["ref"], rec["kind"] = source, expected_ref, "memory"
 
-    if "text" in rec and rec["text"] is not None:
-        if not isinstance(rec["text"], str):
-            raise Error(f"{label}.text must be a string")
-        if len(rec["text"]) > 4 << 20:
-            raise Error(f"{label}.text exceeds 4 MiB")
-    else:
+    if (txt := rec.get("text")) is None:
         rec["text"] = ""
+    elif not isinstance(txt, str):
+        raise Error(f"{label}.text must be a string")
+    elif len(txt) > 4 << 20:
+        raise Error(f"{label}.text exceeds 4 MiB")
 
-    rec["tags"] = normalize_tags(rec["tags"], label) if "tags" in rec and rec["tags"] is not None else []
+    rec["tags"] = normalize_tags(rec["tags"], label) if rec.get("tags") is not None else []
     rec["links"] = _normalize_record_links(rec.get("links"), label, brain_name)
 
     if "url" in rec:
         if not isinstance(rec["url"], str):
             raise Error(f"{label}.url must be a string")
-        if rec["url"]:
-            clean(rec["url"], f"{label}.url")
-        else:
-            del rec["url"]
+        clean(rec["url"], f"{label}.url") if rec["url"] else rec.pop("url")
     for tfield in ("time", "updated"):
         if tfield in rec:
             if not isinstance(val := rec[tfield], str):
@@ -309,30 +286,25 @@ def ingest(
     cfg = config.load(store)
     if (base_val := load_validator(store, "schemas/record.json", RECORD_SCHEMA)) is None:
         raise Error("schemas/record.json is unavailable")
-    src_val = load_validator(store, f"schemas/{source}.json")
+    vals = [base_val, *([sv] if (sv := load_validator(store, f"schemas/{source}.json")) is not None else [])]
 
     raw_items, incomplete = parse_batch_envelope(data)
-    prepared: list[tuple[dict[str, Any], bool]] = []
-    seen_ids: set[str] = set()
-    stamp = now_utc(now)
+    prepared, seen_ids, stamp = [], set(), now_utc(now)
     for idx, item in enumerate(raw_items):
         rec, explicit_updated = _prepare_record(item, source, idx, cfg.name)
         if (rec_id := str(rec["id"])) in seen_ids:
             raise Error(f"{source}: duplicate record id {rec_id!r} in input batch")
         seen_ids.add(rec_id)
         cand = rec if explicit_updated else {**rec, "updated": stamp}
-        if errs := validate_instance(base_val, cand, f"{source}[{idx}]"):
-            raise Error("; ".join(errs))
-        if src_val is not None and (errs := validate_instance(src_val, cand, f"{source}[{idx}]")):
-            raise Error("; ".join(errs))
+        for val in vals:
+            if errs := validate_instance(val, cand, f"{source}[{idx}]"):
+                raise Error("; ".join(errs))
         prepared.append((rec, explicit_updated))
 
     def apply() -> dict[str, Any]:
         forgotten = _forgotten_ids(store, source)
         existing_paths = {p for p in store.files(f"memories/{source}") if not p.endswith("/.forgotten")}
-
-        to_write: dict[str, dict[str, Any]] = {}
-        kept_paths: set[str] = set()
+        to_write, kept_paths = {}, set()
         added = updated_count = unchanged = skipped_forgotten = 0
         for rec, explicit_updated in prepared:
             if (rec_id := str(rec["id"])) in forgotten:
@@ -342,8 +314,7 @@ def ingest(
             kept_paths.add(target_path)
             stamped = rec if explicit_updated else {**rec, "updated": stamp}
             if target_path not in existing_paths:
-                to_write[target_path] = stamped
-                added += 1
+                to_write[target_path], added = stamped, added + 1
                 continue
             old_raw = decode(store.read(target_path), target_path, check_duplicates=False)
             old_rec = dict(old_raw) if isinstance(old_raw, dict) else {}
@@ -351,17 +322,15 @@ def ingest(
             if cmp_rec == rec:
                 unchanged += 1
             else:
-                to_write[target_path] = stamped
-                updated_count += 1
+                to_write[target_path], updated_count = stamped, updated_count + 1
 
         snap_complete = mode == "snapshot" and not incomplete
         if snap_complete:
             to_delete = [p for p in existing_paths if p not in kept_paths]
         else:
             to_delete = [p for fid in forgotten if (p := record_file(source, fid)) in existing_paths]
-        removed = len(to_delete)
-        existing_n = len(existing_paths)
-        surviving = len(kept_paths) if snap_complete else existing_n + added - len(to_delete)
+        removed, existing_n = len(to_delete), len(existing_paths)
+        surviving = len(kept_paths) if snap_complete else existing_n + added - removed
         too_many = surviving == 0 or (existing_n >= 10 and removed * 2 > existing_n)
         if snap_complete and existing_paths and not allow_removal and too_many:
             raise Error(f"{source}: snapshot would remove {removed} of {existing_n} records; pass --allow-removal")
@@ -369,15 +338,14 @@ def ingest(
             for path, payload in sorted(to_write.items()):
                 store.write(path, encode(payload))
             for path in sorted(to_delete):
-                if store.exists(path):
+                with suppress(FileNotFoundError):
                     store.delete(path)
             if added or updated_count or removed:
                 ev_payload = {"records": surviving, "added": added, "updated": updated_count, "removed": removed}
                 append_event(store, "records.ingested", source, ev_payload, locked=True, now=now)
-        c1 = {"records": surviving, "added": added, "updated": updated_count}
-        c2 = {"unchanged": unchanged, "removed": removed, "forgotten": skipped_forgotten}
-        head = {"brain": cfg.name, "source": source, "mode": mode}
-        return {**head, **c1, **c2, "incomplete": incomplete, "dry_run": dry_run}
+        c1 = {"brain": cfg.name, "source": source, "mode": mode, "records": surviving, "added": added}
+        c2 = {"updated": updated_count, "unchanged": unchanged, "removed": removed, "forgotten": skipped_forgotten}
+        return {**c1, **c2, "incomplete": incomplete, "dry_run": dry_run}
 
     if dry_run:
         return apply()

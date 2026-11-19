@@ -59,4 +59,4 @@ Authored notes follow **two link conventions** so Markdown links work in editors
 
 ## Tracked actions and user schemas
 
-Author dated task workspaces directly at `actions/YYYY-MM-DD_<slug>/ACTION.md` (with `inputs/` and `outputs/`) and compile them with `bf build`. Mark finished actions `status: stable` to clear them from `bf review`'s active inbox. Customize `schemas/concepts.json`, `schemas/record.json`, or any `schemas/<source>.json` file to enforce your brain's ontology during `bf build`, `bf ingest`, and `bf validate`.
+Author dated task workspaces directly at `actions/YYYY-MM-DD_<slug>/ACTION.md` (with `inputs/` and `outputs/`) and compile them with `bf build`. Mark finished actions `status: stable` to clear them from `bf review`'s active inbox. Customize `schemas/concepts.json`, `schemas/record.json`, or any `schemas/<source>.json` file to enforce your brain's ontology during `bf ingest` and `bf validate`.

@@ -16,6 +16,7 @@ from bf.storage import Store
 
 def test_mcp_server_exposes_read_only_tools_and_redacts_brain_root(brain: Store) -> None:
     decl_sib = brain.root.parent / "declared-sib"
+    missing_sib = brain.root.parent / "missing-rel-sib"
     engine.init_brain(decl_sib, name="declared-sib")
     brain.write("bf.yaml", f"version: {FORMAT}\nname: fixture\nbrains:\n  decl: {decl_sib}\n".encode())
     srv = mcp.server(brain)
@@ -61,18 +62,46 @@ def test_mcp_server_exposes_read_only_tools_and_redacts_brain_root(brain: Store)
             assert isinstance(b_blk := bad_res.content[0], TextContent)
             assert "not declared in bf.yaml brains:" in b_blk.text
 
+        brain.write(
+            "bf.yaml",
+            f"version: {FORMAT}\nname: fixture\nbrains:\n  decl: {decl_sib}\n  absent: ../missing-rel-sib\n".encode(),
+        )
         encoded_root = quote(str(brain.root), safe="")
+        low_encoded_root = encoded_root.lower()
         brain.write(
             "concepts/uri.md",
-            f'---\ntype: guide\nstatus: stable\nsummary: "file://{brain.root}/secret file:////{brain.root}/four {encoded_root} {decl_sib}"\n---\n# U\n'.encode(),
+            (
+                "---\ntype: guide\nstatus: stable\n"
+                f'summary: "file://{brain.root}/secret file:////{brain.root}/four file://localhost{brain.root}/lh '
+                f"file://LOCALHOST{brain.root}/ulh file%3a%2f%2flocalhost{low_encoded_root}/elh "
+                f"https://example.com{brain.root}/web file%3A%2F%2F%2F{encoded_root}/enc {low_encoded_root} "
+                f'{decl_sib} {missing_sib}"\n---\n# U\n'
+            ).encode(),
         )
         engine.build(brain)
         uri_res = call_json(await srv.call_tool("bf_read", {"target": "concepts/uri.md"}))
         summary = uri_res["record"]["summary"]
         assert "file://<brain>/secret" in summary
         assert "file://<brain>/four" in summary
+        assert "file://<brain>/lh" in summary
+        assert "file://<brain>/ulh" in summary
+        assert "https://example.com<brain>/web" in summary
+        assert str(brain.root) not in summary
         assert encoded_root not in summary
+        assert low_encoded_root not in summary
         assert str(decl_sib) not in summary
+        assert str(missing_sib) not in summary
+
+        # Redactor stays linear (`O(N)`) on large alphanumeric payloads (no ReDoS):
+        import time
+
+        big_blob = "a" * 100_000
+        brain.write("concepts/blob.md", f"---\ntype: guide\nstatus: stable\n---\n# Blob\n\n{big_blob}\n".encode())
+        engine.build(brain)
+        t0 = time.monotonic()
+        blob_res = call_json(await srv.call_tool("bf_read", {"target": "concepts/blob.md"}))
+        assert time.monotonic() - t0 < 2.0
+        assert len(blob_res["record"]["text"]) > 100_000
 
         # Declared cross-brain `bf://decl/...` succeeds while undeclared sibling fails closed!
         decl_res = call_json(await srv.call_tool("bf_read", {"target": "bf://decl/concepts/welcome.md"}))
