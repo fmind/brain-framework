@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bf import cli, engine, jobs, query, records, watch
+from bf import cli, engine, loops, query, records, watch
 from bf.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,11 +53,11 @@ def test_context_hub_walkthrough(tmp_path: Path) -> None:
         b"---\n\n"
         b"# New website\n\n"
         b"## Decision {#decision owner=product}\n\n"
-        b"Start with a single product page. Evidence: [Workspace brief](../memories/workspace/29a8825bd242f14386ee528d76e0e8f1e38f3c8c4047d7b2d6df7493368a17d0.json){rel=cites}.\n"
+        b"Start with a single product page. Evidence: [Workspace brief](workspace:brief){rel=cites}.\n"
         b"{: #single-page confidence=high}\n\n"
         b"## Launch review {#launch-review gate=accessibility}\n\n"
-        b"Hold public launch: [implementation](../memories/github/da31012c40330e7e21538e7dd57503b16e8a0839159e96137090cccc9910b171.json){rel=implements} and "
-        b"[preview](../memories/gcloud/aee50b18a03c89e4883a5acadf5c8614dd7fd2f111c3b616e1a8d6427edc3e3f.json){rel=verifies} are ready, but [review](../memories/jira/c97ace4c8fef2cee8fa0f3c9f52aab18dbd4f42438afe362ffb8f75ce4c04b84.json){rel=blocks} blocks.\n\n"
+        b"Hold public launch: [implementation](github:implementation){rel=implements} and "
+        b"[preview](gcloud:deployment){rel=verifies} are ready, but [review](jira:review){rel=blocks} blocks.\n\n"
         b"## Next actions\n\n"
         b"- [ ] Run the keyboard navigation check.\n"
         b"  {: #task-a11y priority=p1}\n",
@@ -66,7 +66,7 @@ def test_context_hub_walkthrough(tmp_path: Path) -> None:
     assert engine.validate(store)["ok"]
     rev_before = engine.review(store, now=now)
     assert rev_before["stale"] == []
-    assert rev_before["tasks_open"] == 1
+    assert rev_before["total_tasks_open"] == 1
 
     jq_res = query.query_jq(store, ".source", limit=20)
     assert dict(Counter(jq_res["items"])) == {"gcloud": 1, "github": 1, "jira": 1, "projects": 1, "workspace": 1}
@@ -112,7 +112,7 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     assert val["ok"], val["problems"]
     assert query.evaluate(store)["ok"]
     rev = engine.review(store, now=datetime(2026, 10, 1, 12, 0, tzinfo=UTC))
-    assert len(rev["actions"]) == 2
+    assert len(rev["actions_open"]) == 2
     edges = query.query_jq(
         store,
         'select(.kind == "project" or .kind == "concept" or .kind == "action") | .links[]? | select(.meta.rel != null)',
@@ -120,14 +120,14 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     )
     assert edges["count"] >= 2
 
-    # Exercise `routines/weekly-review.py` (`action:`), `services/local.py` (`send` + `listen --once`),
-    # and reactive `jobs.assistant` (`input: prompts/digest.md` on stdin + `{{context}}` JSON)!
-    wr = jobs.run_jobs(store, ("weekly-review",))
+    # Exercise `routines/weekly-review.py` (`action:`), `loops/local.py` (`send` + `listen --once`),
+    # and reactive `loops.assistant` (`input: prompts/digest.md` on stdin + `{{context}}` JSON)!
+    wr = loops.run_loops(store, ("weekly-review",))
     assert wr["ok"], wr
     assert engine.validate(store)["ok"]
     local_state = b_root / ".bf" / "local"
     send_res = subprocess.run(  # noqa: S603
-        [sys.executable, str(b_root / "services" / "local.py"), "send"],
+        [sys.executable, str(b_root / "loops" / "local.py"), "send"],
         cwd=b_root,
         input=json.dumps({"id": "out-0", "text": "Retention review ready"}) + "\n",
         env={**os.environ, "BF_STATE_DIR": str(local_state)},
@@ -146,7 +146,7 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     sym_state.mkdir(mode=0o700)
     (sym_state / "outbox.jsonl").symlink_to(tmp_path / "target.jsonl")
     sym_send = subprocess.run(  # noqa: S603
-        [sys.executable, str(b_root / "services" / "local.py"), "send"],
+        [sys.executable, str(b_root / "loops" / "local.py"), "send"],
         input='{"text": "hi"}\n',
         env={**os.environ, "BF_STATE_DIR": str(sym_state)},
         capture_output=True,
@@ -160,7 +160,7 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     loose_state.mkdir()
     loose_state.chmod(0o755)
     loose_send = subprocess.run(  # noqa: S603
-        [sys.executable, str(b_root / "services" / "local.py"), "send"],
+        [sys.executable, str(b_root / "loops" / "local.py"), "send"],
         input='{"text": "hi"}\n',
         env={**os.environ, "BF_STATE_DIR": str(loose_state)},
         capture_output=True,
@@ -174,7 +174,7 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     (local_state / "inbox.offset").write_text("99\n")
     (local_state / "inbox.jsonl").write_text("not-json\n" + json.dumps({"id": "in-1", "text": "status?"}) + "\n")
     listen = subprocess.run(  # noqa: S603
-        [sys.executable, str(b_root / "services" / "local.py"), "listen", "--once"],
+        [sys.executable, str(b_root / "loops" / "local.py"), "listen", "--once"],
         cwd=b_root,
         env={**os.environ, "BF_STATE_DIR": str(local_state)},
         capture_output=True,
@@ -182,14 +182,14 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
         timeout=15,
         check=True,
     )
-    records.append_event(store, "service.message", "local", json.loads(listen.stdout.strip()))
+    records.append_event(store, "loop.message", "local", json.loads(listen.stdout.strip()))
     (b_root / "routines" / "fake_harness.py").write_text(
         "import json, pathlib, subprocess, sys\n"
         "ctx = json.loads(pathlib.Path(sys.argv[1].removeprefix('Context file: ')).read_text())\n"
         "prompt_stdin = sys.stdin.read()\n"
         "assert 'Digest prompt' in prompt_stdin and pathlib.Path(ctx['input']).name == 'digest.md'\n"
         "msg = {'text': 'Digest from ' + pathlib.Path(ctx['input']).name}\n"
-        f"subprocess.run([{sys.executable!r}, 'services/local.py', 'send'], input=json.dumps(msg).encode(), check=True)\n"
+        f"subprocess.run([{sys.executable!r}, 'loops/local.py', 'send'], input=json.dumps(msg).encode(), check=True)\n"
     )
     bf_txt = store.read("bf.yaml").decode()
     bf_txt = bf_txt.replace(
@@ -199,7 +199,7 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     bf_txt = bf_txt.replace("source: local\n    enabled: false", "source: local\n    enabled: true")
     store.write("bf.yaml", bf_txt.encode())
     tick_res = watch.tick(store)
-    assert tick_res["jobs_ran"] == 3
+    assert tick_res["loops_ran"] == 3
     assert tick_res["ok"]
     assert "Digest from digest.md" in (local_state / "outbox.jsonl").read_text()
     assert engine.validate(store)["ok"]
@@ -480,8 +480,8 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert ghist_big.returncode != 0
     assert "exceeds 4096 bytes" in ghist_big.stderr
 
-    # `examples/brain/services/local.py`: refuses symlinked `.bf` without `BF_BRAIN`, and handles empty `inbox.jsonl` truncation without dropping subsequent messages!
-    local_svc = ROOT / "examples" / "brain" / "services" / "local.py"
+    # `examples/brain/loops/local.py`: refuses symlinked `.bf` without `BF_BRAIN`, and handles empty `inbox.jsonl` truncation without dropping subsequent messages!
+    local_svc = ROOT / "examples" / "brain" / "loops" / "local.py"
     svc_tmp = tmp_path / "svc-sec"
     svc_tmp.mkdir()
     outside_dir = tmp_path / "svc-outside"

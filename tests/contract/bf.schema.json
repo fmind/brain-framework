@@ -35,11 +35,42 @@
       "title": "Ingest",
       "type": "object"
     },
-    "Job": {
+    "Loop": {
       "additionalProperties": false,
-      "not": { "required": ["ingest", "action"] },
+      "allOf": [
+        { "not": { "required": ["ingest", "action"] } },
+        {
+          "if": { "properties": { "emit": { "not": { "const": false } } }, "required": ["emit"] },
+          "then": { "not": { "anyOf": [{ "required": ["ingest"] }, { "required": ["action"] }] } }
+        },
+        {
+          "if": { "properties": { "daemon": { "const": true } }, "required": ["daemon"] },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["schedule"] },
+                { "required": ["events"] },
+                { "required": ["hook"] },
+                { "required": ["input"] },
+                { "required": ["ingest"] },
+                { "required": ["action"] },
+                { "required": ["lookback"] },
+                { "required": ["overlap"] },
+                { "required": ["timeout"] }
+              ]
+            }
+          }
+        }
+      ],
       "properties": {
         "action": { "$ref": "#/$defs/Action" },
+        "daemon": { "type": "boolean" },
+        "emit": {
+          "anyOf": [
+            { "type": "boolean" },
+            { "maxLength": 128, "minLength": 1, "pattern": "^[a-z][a-z0-9._-]{0,127}$", "type": "string" }
+          ]
+        },
         "enabled": { "type": "boolean" },
         "env": {
           "additionalProperties": { "maxLength": 4096, "type": "string" },
@@ -84,8 +115,23 @@
         "run": { "$ref": "#/$defs/Argv" },
         "schedule": {
           "anyOf": [
-            { "maximum": 315576000, "minimum": 1, "type": "integer" },
-            { "maxLength": 128, "minLength": 1, "type": "string" }
+            {
+              "anyOf": [
+                { "maximum": 315576000, "minimum": 1, "type": "integer" },
+                { "maxLength": 128, "minLength": 1, "type": "string" }
+              ]
+            },
+            {
+              "items": {
+                "anyOf": [
+                  { "maximum": 315576000, "minimum": 1, "type": "integer" },
+                  { "maxLength": 128, "minLength": 1, "type": "string" }
+                ]
+              },
+              "maxItems": 16,
+              "minItems": 1,
+              "type": "array"
+            }
           ]
         },
         "timeout": {
@@ -96,36 +142,14 @@
         }
       },
       "required": ["run"],
-      "title": "Job",
-      "type": "object"
-    },
-    "Service": {
-      "additionalProperties": false,
-      "properties": {
-        "emit": { "enum": ["none", "events", "messages"], "type": "string" },
-        "enabled": { "type": "boolean" },
-        "env": {
-          "additionalProperties": { "maxLength": 4096, "type": "string" },
-          "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]*$" },
-          "type": "object"
-        },
-        "requires": {
-          "items": { "maxLength": 256, "minLength": 1, "type": "string" },
-          "maxItems": 32,
-          "type": "array",
-          "uniqueItems": true
-        },
-        "run": { "$ref": "#/$defs/Argv" }
-      },
-      "required": ["run"],
-      "title": "Service",
+      "title": "Loop",
       "type": "object"
     }
   },
   "$id": "https://fmind.github.io/brain-framework/bf.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Brain Framework configuration and orchestration (bf.yaml).",
+  "description": "Brain Framework configuration and loop orchestration (bf.yaml).",
   "properties": {
     "brains": {
       "additionalProperties": { "maxLength": 4096, "minLength": 1, "type": "string" },
@@ -137,8 +161,8 @@
       "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]*$" },
       "type": ["object", "null"]
     },
-    "jobs": {
-      "additionalProperties": { "$ref": "#/$defs/Job" },
+    "loops": {
+      "additionalProperties": { "$ref": "#/$defs/Loop" },
       "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,63}$" },
       "type": ["object", "null"]
     },
@@ -147,16 +171,12 @@
       "pattern": "^[a-z][a-z0-9-]{0,63}$",
       "type": "string"
     },
-    "services": {
-      "additionalProperties": { "$ref": "#/$defs/Service" },
-      "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,63}$" },
-      "type": ["object", "null"]
-    },
     "timezone": { "maxLength": 128, "minLength": 1, "type": "string" },
-    "version": { "const": 14, "description": "Brain configuration format version.", "type": "integer" },
+    "version": { "const": 15, "description": "Brain configuration format version.", "type": "integer" },
     "watch": {
       "additionalProperties": false,
       "properties": {
+        "concurrency": { "maximum": 32, "minimum": 1, "type": "integer" },
         "debounce": {
           "anyOf": [
             { "maximum": 60, "minimum": 0.05, "type": "number" },

@@ -1,59 +1,63 @@
 # Reference
 
-Complete contract lookup for Brain Framework (`bf`), flat brain layout, `bf.yaml` (`version: 14`), pure JSON `memories/**/*.json` schemas, `.bf/`, `structlog` JSON logs, and exit codes.
+Complete contract lookup for Brain Framework (`bf`), flat brain layout, `bf.yaml` (`version: 15`), pure JSON `memories/**/*.json` schemas, `.bf/`, plain JSON line logs, and exit codes.
 
 ## CLI commands
 
-Every command writes one compact UTF-8 JSON object to `stdout` (except `bf --version`, `--help`, `bf mcp`, and live `bf watch`) and single-line `bf: ...` diagnostics to `stderr`. `--brain PATH` may appear before or after any subcommand except `bf init`.
+Every command writes one compact UTF-8 JSON object to `stdout` (except `bf --version`, `--help`, `bf mcp`, `--format jsonl|tsv`, and live `bf watch`) and single-line `bf: ...` diagnostics to `stderr`. `--brain PATH` may appear before or after any subcommand except `bf init` and `bf schema`.
 
 - `bf --version`: print the installed package version.
-- `bf init PATH [--name NAME]`: scaffold a flat `version: 14` brain with `bf.yaml`, `.gitignore`, `AGENTS.md`, `concepts/welcome.md`, `docs/index.md`, `evals/smoke.yaml`, `schemas/{bf.schema.json,record.json,concepts.json,evals.json}`, `skills/bf/SKILL.md` (`.agents/skills/bf`), and `memories/concepts/welcome.json`.
-- `bf build [--brain PATH]`: compile `projects/**/*.md`, `concepts/**/*.md`, and `actions/*/ACTION.md` into `memories/{projects,concepts,actions}/<slug>.json`, pruning deleted notes.
-- `bf ingest SOURCE [--input FILE] [--mode upsert|snapshot] [--allow-removal] [--dry-run] [--brain PATH]`: validate records against `schemas/record.json` + optional `schemas/<source>.json` and write `memories/<source>/<sha256(id)>.json` (rejects interactive TTY stdin when `--input -`).
-- `bf validate [--brain PATH]`: read-only check of `bf.yaml`, `schemas/*.json`, OKF notes, compiled-note sync, `memories/**/*.json`, `evals/*.{yaml,yml,json}`, and local/`bf://` links.
-- `bf review [--brain PATH]`: read-only report of `stale` notes (`newer_evidence`, `due`, `future_updated`), open `draft` `actions`, and `tasks_open` (exits `1` if `problems` is non-empty).
-- `bf read TARGET [--brain PATH]`: resolve an OKF note path (with optional `#anchor`), `source:id` record, JSON memory path, or cross-brain `bf://<host>/<path>?...#<anchor>`.
-- `bf query [PATTERN] [--jq EXPR] [-s/--scope PATH] [-n/--limit N] [--brain PATH]`: run `rg` (`--limit` `1..500`, default `20`) or `jq` (`--limit` `1..5000`, default `20`) over `memories/**/*.json` (`truncated: true` when matches exceed `--limit`).
-- `bf eval [SUITE] [--brain PATH]`: run deterministic query checks in `evals/*.{yaml,yml,json}`.
-- `bf run [JOB ...] [--due | --hook pre-commit|pre-push] [--dry-run] [--brain PATH] [-- EXTRA_ARGS...]`: execute named jobs, rebuild dirty notes and run due/event jobs (`--due`), or run Git hooks (`--hook`); requires one selector (`-- EXTRA_ARGS...` applies to a single `JOB` or `--hook`).
-- `bf status [--check] [--brain PATH]`: inspect `"inside_brain"`, `counts`, `attention`, `events_seq`, `jobs`, and `services` (`--check` exits `1` on failed units or missing `requires` binaries).
-- `bf watch [--json] [--brain PATH]`: run the operational `watchfiles` supervisor and instant Rich TUI dashboard (auto-emits `structlog` JSON tick lines when non-TTY or `--json`).
-- `bf mcp [--brain PATH]`: run the read-only `stdio` MCP server (`bf_status`, `bf_review`, `bf_read`, `bf_query` `1..200`, `bf_validate`; cross-brain links require `bf.yaml` `brains:`).
+- `bf init PATH [--name NAME]`: scaffold a minimal `version: 15` brain (`bf.yaml`, `.gitignore`, `AGENTS.md`, `concepts/welcome.md`, `evals/smoke.yaml`, `schemas/concepts.json`, `skills/bf/SKILL.md` linked at `.agents/skills/bf`, and compiled `memories/concepts/welcome.json`).
+- `bf build [--force] [--brain PATH]`: compile `projects/**/*.md`, `concepts/**/*.md`, and `actions/*/ACTION.md` into `memories/{projects,concepts,actions}/<slug>.json` and sync `.bf/index.jsonl`.
+- `bf ingest SOURCE [--input FILE] [--mode upsert|snapshot] [--allow-removal] [--dry-run] [--brain PATH]`: validate records against the bundled `record` schema + optional `schemas/<source>.json` and write `memories/<source>/<sha256(id)>.json` (rejects interactive TTY stdin when `--input -`).
+- `bf read TARGET [--outline | --lines START[:COUNT] | --raw | --full] [--fields F,...] [--max-bytes N] [--brain PATH]`: resolve an OKF note (or `#anchor`, `START:` reads to EOF), `source:id`, JSON memory path, alias, or cross-brain `bf://<host>/<path>`.
+- `bf query [PATTERN] [--jq EXPR] [--kind note|memory] [-s/--scope PATH] [--source NAME] [--fields F,...] [-n/--limit N] [--format json|jsonl|tsv] [--brain PATH]`: run `rg`, `jq`, or combined `rg` + `jq` over `memories/**/*.json` (`--limit` `1..5000`, default `20`).
+- `bf validate [--limit N] [--all] [--strict] [--force] [--brain PATH]`: check `bf.yaml`, `.env`, `schemas/*.json`, OKF notes, compiled-note sync, `memories/**/*.json`, `evals/`, and links without compiling notes or mutating `memories/` (updates `.bf/cache/state.json` when writable; `--limit` default `50`; snapshot/forgotten missing targets warn unless `--strict`).
+- `bf review [--limit N] [--all] [--fields F,...] [--format json|jsonl|tsv] [--brain PATH]`: report `stale` notes (`newer_evidence`, `due`, `future_updated`), open `draft` `actions_open`, and `total_tasks_open` via `.bf/index.jsonl` (`--limit` default `20`; `jsonl`/`tsv` rows include `"section": "stale"|"action_open"` unless omitted by `--fields`).
+- `bf eval [TARGET] [--brain PATH]`: run deterministic query checks in `evals/*.{yaml,yml,json}`.
+- `bf check [--strict] [--force] [--brain PATH]`: run incremental `build`, `validate`, and `eval` in one pass.
+- `bf new concept|project|action SLUG [--title TITLE] [--type TYPE] [--status STATUS] [--brain PATH]`: scaffold a valid note via `Store` and rebuild compiled memories.
+- `bf schema [bf|record|concepts|evals]`: print one or all bundled Draft 2020-12 JSON Schemas (no brain required).
+- `bf run [LOOP ...] [--due | --hook pre-commit|pre-push] [--dry-run] [--brain PATH] [-- EXTRA_ARGS...]`: execute named cycle loops, rebuild dirty notes and run due/event loops concurrently up to `watch.concurrency` (`--due`), or run sequential Git hooks (`--hook`).
+- `bf emit KIND [--source NAME] [--data JSON] [--dedupe] [--brain PATH]`: append a custom event directly to `.bf/events.jsonl` and `logs/events.log`.
+- `bf status [--all] [--fields F,...] [--check] [--brain PATH]`: inspect `"inside_brain"`, compact `counts` (`notes`, `records`, `sources`, `loops`), failing `attention` loops, `orphaned_states`, and optional `loops` (`--all`).
+- `bf watch [--json] [--brain PATH]`: run the `watchfiles` supervisor, daemon loops, non-blocking bounded worker pool, and Rich TUI dashboard (auto-emits JSON tick lines when non-TTY or `--json`).
+- `bf mcp [--brain PATH]`: run the strictly read-only `stdio` MCP server (`bf_status`, `bf_review`, `bf_read`, `bf_query` `1..200`, `bf_validate`; never mutates brain files; cross-brain links require `bf.yaml` `brains:`).
 
 Brain selection resolves `--brain PATH` -> `BF_BRAIN` -> nearest enclosing `bf.yaml` -> `DEFAULT_BRAIN_PATH` (zero global config).
 
 ## Exit codes
 
-- `0`: success (`ok: true` on `bf build`, `bf validate`, `bf review`, `bf eval`, `bf run`, `bf status --check`).
-- `1`: validation failure, failed job/eval, missing/corrupt files, schema violation, or lock contention.
-- `2`: invalid CLI flags, conflicting selectors, TTY stdin on `bf ingest`, or malformed argument syntax (`bf: invalid input: ...`).
+- `0`: success (`ok: true` on `build`, `query`, `validate`, `review`, `eval`, `check`, `new`, `run`, `status --check`, `emit`).
+- `1`: validation failure, failed loop/eval, missing/corrupt files, schema violation, or lock contention.
+- `2`: invalid CLI flags, conflicting selectors, running a `daemon: true` loop via `bf run`, TTY stdin on `bf ingest`, or malformed argument syntax (`bf: invalid input: ...`).
 - `130`: interrupted (`SIGINT`).
 
 ## Flat brain layout
 
-`projects/`, `concepts/`, `actions/`, `memories/`, `evals/`, `docs/`, `skills/`, `schemas/`, optional operational folders created as needed (`sensors/`, `routines/`, `services/`, `prompts/`, `settings/`), optional gitignored `.env`, plus private `logs/` (`0700`: `0600` `*.log` JSON lines via `structlog`) and `.bf/` (`0700`: `write.lock`, `events.jsonl`, `<unit>.json`, `<unit>.context.json`).
+`projects/`, `concepts/`, `actions/`, `memories/`, `evals/`, `skills/`, `schemas/` (`concepts.json` + optional `<source>.json`), optional operational folders created as needed (`sensors/`, `routines/`, `loops/`, `prompts/`, `settings/`, `docs/`), optional gitignored `.env`, plus private `logs/` (`0700`: `0600` plain JSON line `*.log`) and `.bf/` (`0700`: `write.lock`, `events.jsonl`, `index.jsonl`, `cache/state.json`, `<loop>.json`, `<loop>.context.json`).
 
 ## `bf.yaml` schema {#bf-yaml-schema}
 
 Published at [`bf.schema.json`](https://fmind.github.io/brain-framework/bf.schema.json):
 
 ```yaml
-version: 14
+version: 15
 name: my-brain
 brains:
   team-brain: ../team-brain
 timezone: UTC
 env: {}
-jobs: {}
-services: {}
+loops: {}
 watch:
   interval: 5s
   debounce: 300ms
+  concurrency: 4
 ```
 
 ## Published JSON Schemas
 
-- [`bf.schema.json`](https://fmind.github.io/brain-framework/bf.schema.json): `schemas/bf.schema.json` / `bf.yaml` (`Config`).
-- [`record.schema.json`](https://fmind.github.io/brain-framework/record.schema.json): `schemas/record.json` (`Record` — frontmatter + `headings`, keyed `attrs`, `elements`, `links`, `tasks`, `text`, `sha256`).
+- [`bf.schema.json`](https://fmind.github.io/brain-framework/bf.schema.json): `bf.yaml` (`Config` — unified `loops:` and `watch`).
+- [`record.schema.json`](https://fmind.github.io/brain-framework/record.schema.json): `memories/**/*.json` (`Record` — frontmatter + `headings`, keyed `attrs`, `elements`, `links`, `tasks`, `text`, `sha256`).
 - [`concepts.schema.json`](https://fmind.github.io/brain-framework/concepts.schema.json): `schemas/concepts.json` (`Concept` — user-defined concept metadata).
-- [`evals.schema.json`](https://fmind.github.io/brain-framework/evals.schema.json): `schemas/evals.json` (`Eval` — `evals/*.yaml` deterministic checks).
+- [`evals.schema.json`](https://fmind.github.io/brain-framework/evals.schema.json): `evals/*.yaml` (`Eval` — deterministic checks).

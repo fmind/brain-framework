@@ -69,7 +69,7 @@ def test_compile_note_extracts_frontmatter_headings_keyed_attrs_and_unescapes_ht
         b"[^1]: Footnote citing [evidence](../memories/demo/e8bd59a71e7e467bb66d5c98314e26f78547a7dd6aba8980cf2e4edd046a4851.json){rel=cites}.\n"
     )
     compiled = markdown.compile_note("concepts/protocol.md", raw, brain_name="demo-brain")
-    assert compiled["id"] == "concepts/protocol.md"
+    assert "id" not in compiled
     assert compiled["ref"] == "concepts/protocol.md"
     assert compiled["source"] == "concepts"
     assert compiled["kind"] == "concept"
@@ -83,7 +83,7 @@ def test_compile_note_extracts_frontmatter_headings_keyed_attrs_and_unescapes_ht
     assert "↩" not in compiled["text"]
 
     headings = {h["id"]: h for h in compiled["headings"]}
-    assert headings["agent-protocol"]["level"] == 1
+    assert headings["agent-protocol"] == {"id": "agent-protocol", "title": "Agent Protocol", "level": 1}
     assert headings["mcp"] == {
         "id": "mcp",
         "title": "MCP",
@@ -97,7 +97,7 @@ def test_compile_note_extracts_frontmatter_headings_keyed_attrs_and_unescapes_ht
     assert compiled["attrs"]["def-mcp"] == {"scope": "local"}
     assert compiled["attrs"]["t1"] == {"due": "2026-12-01"}
 
-    links = {(lnk["to"], lnk["anchor"]): lnk for lnk in compiled["links"]}
+    links = {(lnk["to"], lnk.get("anchor", "")): lnk for lnk in compiled["links"]}
     assert links[("projects/launch.md", "")]["kind"] == "note"
     assert (
         links[("memories/jira/6e727f27acc6af6f2cd2f6f2bc2eb801d4b22cfe3d43e5eb35404d0f6ac70fe4.json", "")]["kind"]
@@ -109,16 +109,12 @@ def test_compile_note_extracts_frontmatter_headings_keyed_attrs_and_unescapes_ht
     assert links[("https://github.com/example/agent-protocol", "")] == {
         "to": "https://github.com/example/agent-protocol",
         "kind": "url",
-        "anchor": "",
         "meta": {"rel": "depends-on"},
-        "section": "",
     }
     assert links[("urn:gcp:folder:123456789", "")] == {
         "to": "urn:gcp:folder:123456789",
         "kind": "url",
-        "anchor": "",
         "meta": {"rel": "part-of"},
-        "section": "",
     }
     assert links[("concepts/aaif.md", "mcp")] == {
         "to": "concepts/aaif.md",
@@ -130,7 +126,6 @@ def test_compile_note_extracts_frontmatter_headings_keyed_attrs_and_unescapes_ht
     assert links[("memories/demo/e8bd59a71e7e467bb66d5c98314e26f78547a7dd6aba8980cf2e4edd046a4851.json", "")] == {
         "to": "memories/demo/e8bd59a71e7e467bb66d5c98314e26f78547a7dd6aba8980cf2e4edd046a4851.json",
         "kind": "record",
-        "anchor": "",
         "meta": {"rel": "cites"},
         "section": "agent-protocol",
     }
@@ -143,7 +138,7 @@ def test_compile_note_extracts_frontmatter_headings_keyed_attrs_and_unescapes_ht
 
     assert compiled["tasks"] == [
         {"id": "t1", "text": "Open task", "done": False, "section": "mcp", "meta": {"due": "2026-12-01"}},
-        {"text": "Finished task", "done": True, "section": "mcp", "meta": {}},
+        {"text": "Finished task", "done": True, "section": "mcp"},
     ]
 
 
@@ -177,11 +172,10 @@ def test_compile_note_supports_dprint_single_line_block_attrs_and_link_ids() -> 
         }
     ]
     assert compiled["links"] == [
-        {"to": "concepts/prior.md", "kind": "note", "anchor": "", "meta": {"rel": "supersedes"}, "section": ""},
+        {"to": "concepts/prior.md", "kind": "note", "meta": {"rel": "supersedes"}},
         {
             "to": "memories/demo/e8bd59a71e7e467bb66d5c98314e26f78547a7dd6aba8980cf2e4edd046a4851.json",
             "kind": "record",
-            "anchor": "",
             "meta": {"rel": "cites"},
             "section": "single-line-attrs",
         },
@@ -208,7 +202,9 @@ def test_compile_note_supports_dprint_single_line_block_attrs_and_link_ids() -> 
         },
         {"id": "loose-2", "text": "Rotate keys", "done": True, "section": "loose-tasks", "meta": {"priority": "p1"}},
     ]
-    assert [el for el in loose["elements"] if el["tag"] == "p"] == []
+    assert "elements" not in loose
+    assert "tags" not in loose
+    assert "links" not in loose
 
 
 def test_compile_note_fallbacks_and_custom_user_metadata() -> None:
@@ -249,14 +245,14 @@ def test_compile_note_fallbacks_and_custom_user_metadata() -> None:
             b"---\nlinks:\n  - to: https://example.com\n    extra: 1\n---\n# Hi\n",
             "frontmatter links must be a list",
         ),
-        ("concepts/relfm.md", b"---\nlinks: [projects/launch.md]\n---\n# Hi\n", "links must use bf://"),
         ("concepts/badrel.md", b"---\nrelations: []\n---\n# Hi\n", "'relations' was removed; use 'links'"),
-        ("concepts/badfmrec.md", b"---\nlinks: ['bf://demo/jira:WEB-1']\n---\n# Hi\n", "legacy record reference"),
-        ("concepts/legacylnk.md", b"# Hi\n\nSee [ev](demo:ev-1).\n", "unsupported link scheme demo:"),
+        ("concepts/badrecfm.md", b"---\nlinks: [concepts:welcome]\n---\n# Hi\n", "must use memories/"),
+        ("concepts/badprosebf.md", b"# Hi\n\nSee [bad](bf:///concepts:welcome).\n", "must use memories/"),
+        ("concepts/badrecid.md", b"# Hi\n\nSee [bad](bf:///jira:).\n", "invalid record reference"),
         (
-            "concepts/prosebf.md",
-            b"# Hi\n\nSee [same](bf:///concepts/aaif.md).\n",
-            "use a relative path in Markdown prose",
+            "concepts/badhttpsfrag.md",
+            b"# Hi\n\nSee [bad](doc:HTTPS://example.com/spec#).\n",
+            "invalid record reference",
         ),
         ("concepts/duphid.md", b"## A {#dup}\n\n## B {#dup}\n", "duplicate anchor #dup"),
     ],
@@ -296,10 +292,8 @@ def test_parse_link_variants_and_rejections() -> None:
     )
     assert jq_frag["anchor"] == 'select(.status=="stable")'
 
-    with pytest.raises(Error, match="legacy record reference in bf:// URI"):
-        markdown.parse_link("projects/web.md", "bf://my-brain/jira:WEB-1", "my-brain")
-    bf_self_rec = markdown.parse_link("projects/web.md", "bf://my-brain/jira:WEB-1", "my-brain", allow_record_ref=True)
-    assert (bf_self_rec["to"], bf_self_rec["kind"]) == ("jira:WEB-1", "record")
+    bf_self_rec = markdown.parse_link("projects/web.md", "bf://my-brain/jira:WEB-1", "my-brain")
+    assert (bf_self_rec["to"], bf_self_rec["kind"]) == (markdown.record_path("jira:WEB-1"), "record")
 
     bf_other = markdown.parse_link("projects/web.md", "bf://team-brain/actions/2026-11-15_sync#done", "my-brain")
     assert bf_other["to"] == "bf://team-brain/actions/2026-11-15_sync/ACTION.md"
@@ -313,11 +307,15 @@ def test_parse_link_variants_and_rejections() -> None:
     )
     assert (ext_url["kind"], ext_url["meta"]) == ("url", {"rel": "ref"})
 
-    http_rec = markdown.parse_link("projects/web.md", "doc:https://example.com/spec", "my-brain", allow_record_ref=True)
-    assert (http_rec["to"], http_rec["kind"]) == ("doc:https://example.com/spec", "record")
+    http_rec = markdown.parse_link("projects/web.md", "doc:https://example.com/spec", "my-brain")
+    assert (http_rec["to"], http_rec["kind"]) == (markdown.record_path("doc:https://example.com/spec"), "record")
 
-    rec_meta = markdown.parse_link("projects/web.md", "jira:WEB-1?role=blocker#top", "my-brain", allow_record_ref=True)
-    assert (rec_meta["to"], rec_meta["anchor"], rec_meta["meta"]) == ("jira:WEB-1", "top", {"role": "blocker"})
+    rec_meta = markdown.parse_link("projects/web.md", "jira:WEB-1?role=blocker#top", "my-brain")
+    assert (rec_meta["to"], rec_meta["anchor"], rec_meta["meta"]) == (
+        markdown.record_path("jira:WEB-1"),
+        "top",
+        {"role": "blocker"},
+    )
 
     env_ex = markdown.parse_link("projects/web.md", "../.env.example", "my-brain")
     assert (env_ex["to"], env_ex["kind"]) == (".env.example", "note")
@@ -357,7 +355,7 @@ def test_parse_link_variants_and_rejections() -> None:
         ("concepts/x.md?a=1&a=2", "unique identifiers"),
     ):
         with pytest.raises(Error, match=match):
-            markdown.parse_link("projects/web.md", bad_target, "my-brain", allow_record_ref=True)
+            markdown.parse_link("projects/web.md", bad_target, "my-brain")
 
     with pytest.raises(Error, match="control characters"):
         markdown.parse_link("projects/web.md", "concepts/x.md", "my-brain", section="bad\nsec")
@@ -389,3 +387,103 @@ def test_anchor_ids_handles_frontmatter_and_rejects_bad_files() -> None:
     sliced = markdown.extract_section(tricky, "setext-id", comp)
     assert "After hr." in sliced["text"]
     assert "Tail." not in sliced["text"]
+
+
+def test_unified_links_compact_schema_and_reading_helpers() -> None:
+    import subprocess
+    import sys
+
+    from bf import schemas
+
+    raw = (
+        b"---\n"
+        b"links:\n"
+        b"  - projects/launch.md\n"
+        b"  - jira:WEB-1?rel=tracks\n"
+        b"  - bf://work/jira:WEB-2\n"
+        b"---\n\n"
+        b"# Unified\n\n"
+        b"See [same](bf:///concepts/other.md#sec), [rec](jira:WEB-3?rel=cites), "
+        b"[urlrec](doc:HTTPS://example.com/spec#v2).\n"
+    )
+    compiled = markdown.compile_note("concepts/unified.md", raw, brain_name="demo")
+    val = schemas.compile_schema(schemas.RECORD_SCHEMA, "record.json")
+    assert schemas.validate_instance(val, compiled, "concepts/unified.md") == []
+    assert {(lnk["kind"], lnk["to"], lnk.get("anchor", "")) for lnk in compiled["links"]} == {
+        ("note", "projects/launch.md", ""),
+        ("record", markdown.record_path("jira:WEB-1"), ""),
+        ("brain", f"bf://work/{markdown.record_path('jira:WEB-2')}", ""),
+        ("note", "concepts/other.md", "sec"),
+        ("record", markdown.record_path("jira:WEB-3"), ""),
+        ("record", markdown.record_path("doc:HTTPS://example.com/spec"), "v2"),
+    }
+
+    assert markdown.is_record_ref("jira:WEB-1")
+    assert not markdown.is_record_ref("concepts:welcome")
+    assert not markdown.is_record_ref("jira:bad id")
+    w1_path = markdown.record_path("jira:WEB-1")
+    assert w1_path is not None
+    assert markdown.record_link_problem({"kind": "record", "to": w1_path}) == ""
+    assert markdown.record_link_problem({"kind": "brain", "to": f"bf://work/{w1_path}"}) == ""
+    assert "must use memories/" in markdown.record_link_problem({"kind": "record", "to": "jira:WEB-1"})
+    assert "must use memories/" in markdown.record_link_problem({"kind": "record", "to": "concepts:welcome"})
+    assert "#anchor" in markdown.record_link_problem({"kind": "record", "to": w1_path, "anchor": "frag"})
+
+    # Percent-encoded sensor record IDs and HTTP record IDs with query strings hash verbatim in bare and bf:// forms.
+    pct_ref = "local-docs:docs/My%20Report.pdf"
+    pct_expected = markdown.record_path(pct_ref)
+    assert pct_expected is not None
+    assert markdown.parse_link("concepts/a.md", pct_ref, "b")["to"] == pct_expected
+    pct_q = markdown.parse_link("concepts/a.md", f"{pct_ref}?rel=cites", "b")
+    assert pct_q["to"] == pct_expected
+    assert pct_q["meta"] == {"rel": "cites"}
+    pct_bf = markdown.parse_link("concepts/a.md", f"bf:///{pct_ref}?rel=cites", "b")
+    assert pct_bf["to"] == pct_expected
+    assert pct_bf["meta"] == {"rel": "cites"}
+    http_ref = "web:https://example.com/p?a=1&b=2"
+    http_expected = markdown.record_path(http_ref)
+    assert http_expected is not None
+    assert markdown.parse_link("concepts/a.md", http_ref, "b")["to"] == http_expected
+    assert markdown.parse_link("concepts/a.md", f"bf:///{http_ref}", "b")["to"] == http_expected
+
+    assert markdown.parse_line_spec("3") == (3, 1)
+    assert markdown.parse_line_spec("2:") == (2, None)
+    assert markdown.parse_line_spec("2:5") == (2, 5)
+    for bad_spec in ("0", "1:2:3", "1:-2", "abc"):
+        with pytest.raises(Error):
+            markdown.parse_line_spec(bad_spec)
+    with pytest.raises(Error):
+        markdown.slice_lines("a\nb", start=0)
+
+    sl = markdown.slice_lines("a\nb\nc\nd", start=2, count=2)
+    assert sl == {"total_lines": 4, "start": 2, "count": 2, "content": "b\nc"}
+    assert markdown.slice_lines("a\nb\nc", start=2, count=None) == {
+        "total_lines": 3,
+        "start": 2,
+        "count": 2,
+        "content": "b\nc",
+    }
+    assert markdown.slice_lines("a\nb", start=1, count=0) == {"total_lines": 2, "start": 1, "count": 0, "content": ""}
+    assert markdown.slice_lines("a\nb", start=9, count=2) == {"total_lines": 2, "start": 9, "count": 0, "content": ""}
+    outline = markdown.note_outline(compiled)
+    assert outline["links_count"] == 6
+    assert outline["tasks_open"] == 0
+    assert "text" not in outline
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, bf.markdown; "
+                "bf.markdown.parse_link('concepts/a.md', 'jira:WEB-1', 'b'); "
+                "bf.markdown.slice_lines('a\\nb', 1, 1); "
+                "assert 'markdown' not in sys.modules"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr

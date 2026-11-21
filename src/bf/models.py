@@ -8,11 +8,9 @@ import math
 import re
 from datetime import UTC, date, datetime
 
-import structlog
-
-FORMAT = 14
+FORMAT = 15
 AUTHORED = ("projects", "concepts", "actions")
-_RES_EXTRA = ("memories", "notes", "record", "logs", "evals", "bf", "services")
+_RES_EXTRA = ("memories", "notes", "record", "logs", "evals", "bf", "loops")
 RESERVED_SOURCES = frozenset((*AUTHORED, *_RES_EXTRA))
 MAX_FILE = 64 << 20
 MAX_BATCH = 16 << 20
@@ -21,6 +19,8 @@ MAX_SCHEMA = 1 << 20
 MAX_FILES = 100_000
 NAME = r"^[a-z][a-z0-9-]{0,63}$"
 NAME_RE = re.compile(NAME)
+EVENT_KIND_PAT = r"^[a-z][a-z0-9._-]{0,127}$"
+EVENT_KIND_RE = re.compile(EVENT_KIND_PAT)
 DURATION_PAT = r"^(?:[0-9]+(?:\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$"
 DURATION_ZERO_PAT = r"^(?:0|(?:[0-9]+(?:\.[0-9]+)?(?:ms|s|m|h|d|w|y))+)$"
 DURATION_RE = re.compile(DURATION_PAT)
@@ -28,9 +28,9 @@ _DURATION_PART_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)(ms|s|m|h|d|w|y)")
 _DURATION_UNITS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "w": 604800.0, "y": 31_557_600.0}
 
 _FORMAT = (
-    r"\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064"
-    r"\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3"
-    r"\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f"
+    r"\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f"
+    r"\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a"
+    r"\U000e0001\U000e0020-\U000e007f"
 )
 _INVISIBLE = re.compile(f"[{_FORMAT}]")
 _SEPARATORS = r"\u2028\u2029"
@@ -41,10 +41,11 @@ _TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _PEM_TAG = r"[A-Z0-9 ]{0,32}PRIVATE KEY-----"
 _PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,16384}}"
 _KV_KEY = (
-    r"(?i:(?<![A-Za-z0-9])(?:password|passwd|(?:client[_-]?)?secret(?:[_-]?access[_-]?key|[_-]?key)?"
-    r"|private[_-]?key|api[_-]?key|(?:access|refresh|auth|api|session|id|bot|private)[_-]?token))"
+    r"(?i:(?<![A-Za-z0-9])(?:password|passwd|(?:client[_-]?)?secret"
+    r"(?:[_-]?access[_-]?key|[_-]?key)?|private[_-]?key|api[_-]?key"
+    r"|(?:access|refresh|auth|api|session|id|bot|private|gh|github|oauth|bearer)[_-]?token))"
 )
-_KV_VAL = r'(?:\\?"[^"\r\n]{1,512}"|\\?\'[^\'\r\n]{1,512}\'|[^\s"\',;}{\]]{1,512})'
+_KV_VAL = r'(?:\\?"[^"\r\n]{1,8192}"?|\\?\'[^\'\r\n]{1,8192}\'?|[^\s"\',;}{\]]{1,8192})'
 _SECRET_RE = re.compile(
     r"(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{8,}|\bauthorization\s*[:=]\s*basic\s+[A-Za-z0-9+/=-]{8,})"
     r"|(?<=://)[^/\s:@]{1,64}:[^/\s@]{1,128}(?=@)"
@@ -53,9 +54,32 @@ _SECRET_RE = re.compile(
 )
 
 
+_KV_KEY_RE = re.compile(rf"(?:{_KV_KEY}|(?i:(?<![A-Za-z0-9])(?:proxy[_-]?)?authorization))$")
+
+
 def redact_secrets(text: str) -> str:
     """Scrub common bearer/API tokens, private keys, and URL credentials before persisting diagnostics."""
     return _SECRET_RE.sub("[REDACTED]", text)
+
+
+def redact_value(val: object) -> object:
+    """Recursively redact secrets in strings and values under secret-named dict keys."""
+    if isinstance(val, str):
+        return redact_secrets(val)
+    if isinstance(val, list):
+        return [redact_value(x) for x in val]
+    if isinstance(val, dict):
+        out: dict[object, object] = {}
+        for k, v in val.items():
+            rk, sec = redact_secrets(k) if isinstance(k, str) else k, isinstance(k, str) and bool(_KV_KEY_RE.search(k))
+            if sec and isinstance(v, str) and v:
+                out[rk] = "[REDACTED]"
+            elif sec and isinstance(v, list) and v and all(isinstance(x, str) for x in v):
+                out[rk] = ["[REDACTED]" for _ in v]
+            else:
+                out[rk] = redact_value(v)
+        return out
+    return val
 
 
 class Error(Exception):
@@ -198,10 +222,9 @@ def normalize_time(value: str, label: str = "timestamp") -> str:
     if parsed.tzinfo is None:
         raise Error(f"{label} requires a timezone offset or Z")
     try:
-        utc = parsed.astimezone(UTC)
+        return parsed.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
     except (ValueError, OverflowError) as error:
         raise Error(f"{label} is outside the supported UTC range") from error
-    return utc.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def now_utc(now: datetime | None = None) -> str:
@@ -209,25 +232,22 @@ def now_utc(now: datetime | None = None) -> str:
     return instant.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-_JSON_LOG = structlog.processors.JSONRenderer(serializer=lambda obj, **_: terminal(obj).decode("utf-8").rstrip("\n"))
-
-
 def log_line(message: str, *, severity: str = "INFO", time_iso: str = "", **fields: object) -> bytes:
-    """Render one structured UTF-8 JSON log line (`time`, `severity`, `message`) via `structlog`."""
+    """Render one structured UTF-8 JSON log line (`time`, `severity`, `message`)."""
     payload = {"time": time_iso or now_utc(), "severity": severity.upper(), "message": message}
-    rendered = _JSON_LOG(None, severity.lower(), {**payload, **{k: v for k, v in fields.items() if v is not None}})
-    text = rendered.decode("utf-8") if isinstance(rendered, bytes) else rendered
-    return f"{text}\n".encode()
+    return terminal({**payload, **{k: v for k, v in fields.items() if v is not None}})
 
 
 def failure(error: BaseException) -> str:
     """Format an unexpected error without exposing raw payloads."""
     if isinstance(error, Error):
         return str(error)
-    if isinstance(error, UnicodeDecodeError):
-        return "a file is not valid UTF-8; run bf validate to locate it"
     if isinstance(error, UnicodeError):
-        return "arguments and terminal locale must use UTF-8"
+        return (
+            "a file is not valid UTF-8; run bf validate to locate it"
+            if isinstance(error, UnicodeDecodeError)
+            else "arguments and terminal locale must use UTF-8"
+        )
     if isinstance(error, OSError):
         extra = f" ({error.strerror})" if error.strerror else ""
         return f"inaccessible file or directory{extra}; check permissions and path"

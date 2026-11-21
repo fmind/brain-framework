@@ -67,9 +67,13 @@ def _values(schema: dict) -> set[str] | None:
     return None
 
 
-def _breaks(old: dict, new: dict, old_root: dict, new_root: dict, path: str, *, reply: bool) -> list[str]:
+def _breaks(old: dict | bool, new: dict | bool, old_root: dict, new_root: dict, path: str, *, reply: bool) -> list[str]:
     """Where `new` breaks what `old` promised: a file loses an accepted form, a reply loses a field or returns a value
     that its readers, validating with `old`, reject."""
+    if isinstance(old, bool) or isinstance(new, bool):
+        if old == new or (not reply and new is True) or (reply and new is False):
+            return []
+        return [f"{path}: boolean schema changed"]
     old, new = _resolve(old, old_root), _resolve(new, new_root)
     # A value that gains alternatives, such as a map made nullable, with only annotations beside them, keeps a file's
     # promises when one alternative keeps them all, and a reply's only when every alternative does.
@@ -362,3 +366,7 @@ def test_files_keep_every_accepted_bound_pattern_and_condition() -> None:
 )
 def test_listed_values_widen_files_and_narrow_replies(old: dict, new: dict, *, reply: bool, broken: bool) -> None:
     assert bool(_breaks(old, new, old, new, "value", reply=reply)) is broken
+    assert _breaks(True, False, {}, {}, "p", reply=False) == ["p: boolean schema changed"]
+    assert _breaks(False, True, {}, {}, "p", reply=False) == []
+    assert _breaks(False, True, {}, {}, "p", reply=True) == ["p: boolean schema changed"]
+    assert _breaks(True, False, {}, {}, "p", reply=True) == []

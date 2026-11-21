@@ -3,7 +3,7 @@
 import os
 import sys
 
-__version__ = "29.0.1"
+__version__ = "30.0.0"
 
 
 def main() -> None:
@@ -14,6 +14,8 @@ def main() -> None:
         try:
             sys.stdout.buffer.write(f"{__version__}\n".encode())
             sys.stdout.flush()
+        except BrokenPipeError:
+            return
         except OSError:
             pass
         else:

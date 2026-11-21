@@ -138,11 +138,21 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             if init_reply.get("brain") != "brain":
                 raise SystemExit(f"{artifact.name}: unexpected bf init reply: {init_reply}")
             starter_yaml = (brain / "bf.yaml").read_text()
-            if "version: 14" not in starter_yaml:
+            if "version: 15" not in starter_yaml or "loops:" not in starter_yaml:
                 raise SystemExit(f"{artifact.name}: unexpected starter bf.yaml: {starter_yaml}")
-            for schema_file in ("bf.schema.json", "record.json", "concepts.json", "evals.json"):
-                if not (brain / "schemas" / schema_file).is_file():
-                    raise SystemExit(f"{artifact.name}: missing starter schemas/{schema_file}")
+            if not (brain / "schemas" / "concepts.json").is_file():
+                raise SystemExit(f"{artifact.name}: missing starter schemas/concepts.json")
+            for retired in ("schemas/bf.schema.json", "schemas/record.json", "schemas/evals.json", "docs/index.md"):
+                if (brain / retired).exists():
+                    raise SystemExit(f"{artifact.name}: unexpected retired starter file {retired}")
+            schema_reply = json.loads(run(bf, "schema", "bf", cwd=home, env=env, capture=True))
+            if schema_reply.get("title") != "Config":
+                raise SystemExit(f"{artifact.name}: unexpected bf schema bf reply: {schema_reply}")
+            new_reply = json.loads(
+                run(bf, "new", "concept", "pkg-note", "--title", "Package note", cwd=brain, env=env, capture=True)
+            )
+            if not new_reply.get("ok") or new_reply.get("path") != "concepts/pkg-note.md":
+                raise SystemExit(f"{artifact.name}: unexpected bf new reply: {new_reply}")
 
             sample_records = json.dumps(
                 [
@@ -172,13 +182,23 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             val_reply = json.loads(run(bf, "validate", cwd=brain, env=env, capture=True))
             rev_reply = json.loads(run(bf, "review", cwd=brain, env=env, capture=True))
             eval_reply = json.loads(run(bf, "eval", cwd=brain, env=env, capture=True))
+            check_reply = json.loads(run(bf, "check", cwd=brain, env=env, capture=True))
+            emit_reply = json.loads(
+                run(bf, "emit", "pkg.smoke", "--data", '{"id":"s1"}', cwd=brain, env=env, capture=True)
+            )
+            status_reply = json.loads(run(bf, "status", cwd=brain, env=env, capture=True))
+            run_reply = json.loads(run(bf, "run", "--dry-run", "build", cwd=brain, env=env, capture=True))
             read_reply = json.loads(run(bf, "read", "bf:///projects/package.md#next", cwd=brain, env=env, capture=True))
             if (
                 build_reply.get("problems")
                 or not val_reply.get("ok")
-                or rev_reply.get("tasks_open") != 1
+                or rev_reply.get("total_tasks_open") != 1
                 or not eval_reply.get("ok")
-                or "Inspect the compiled note record" not in read_reply.get("text", "")
+                or not check_reply.get("ok")
+                or not emit_reply.get("ok")
+                or not status_reply.get("inside_brain")
+                or not run_reply.get("ok")
+                or "Inspect the compiled note record" not in read_reply.get("markdown", "")
             ):
                 raise SystemExit(
                     f"{artifact.name}: smoke check failed: {build_reply} / {val_reply} / {rev_reply} / {eval_reply}"

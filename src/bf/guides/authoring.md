@@ -1,6 +1,6 @@
 # Authoring
 
-Humans write plain Markdown in `projects/` (volatile TODOs and active initiatives), `concepts/` (durable knowledge), and `actions/YYYY-MM-DD_topic/ACTION.md` (dated task workspaces). `bf build` parses every note with [Python-Markdown](https://python-markdown.github.io/) (`extra`, `toc`, `admonition`, `sane_lists`) and writes individual JSON files to `memories/{concepts,projects,actions}/<slug>.json`, validated by `schemas/record.json`, `schemas/concepts.json`, and optional `schemas/<source>.json`.
+Humans write plain Markdown in `projects/` (volatile TODOs and active initiatives), `concepts/` (durable knowledge), and `actions/YYYY-MM-DD_topic/ACTION.md` (dated task workspaces). Scaffold new notes cleanly with `bf new concept|project|action <slug>`. `bf build` parses every note with [Python-Markdown](https://python-markdown.github.io/) (`extra`, `toc`, `admonition`, `sane_lists`) and writes individual JSON files to `memories/{concepts,projects,actions}/<slug>.json`, validated by the bundled `record` schema, `schemas/concepts.json`, and optional `schemas/<source>.json`.
 
 ## OKF YAML frontmatter
 
@@ -51,12 +51,12 @@ MCP Transport
 
 ## Connect notes and records {#connect-notes-and-records}
 
-Authored notes follow **two link conventions** so Markdown links work in editors/GitHub while frontmatter links stay canonical URIs:
+Authored notes and sensor JSON share one normalized `links` list (`note`, `record`, `brain`, `url`):
 
-- **Markdown prose (relative paths + cross-brain/external URLs)**: link to local notes (`../concepts/aaif.md#mcp`, `aaif.md`, `#mcp`) and sensor memories (`../memories/github-issues/7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451.json`) with relative paths, and use `bf://<brain>/...` or external URLs when crossing brains or linking outside the brain.
-- **Note frontmatter & sensor JSON (`links`, `sources`)**: requires `bf://` or external URLs — same-brain `bf:///concepts/aaif.md?rel=project-of#mcp` and `bf:///memories/<source>/<sha256>.json`, cross-brain `bf://team-brain/concepts/aaif.md#mcp` (resolved via `brains:` in `bf.yaml`, `../team-brain`, or `~/team-brain`), or `{to, meta}` objects (`{to: "https://example.org/repo", meta: {rel: depends-on}}`) when attaching metadata to external URLs or URNs.
-- **External URIs**: `https://`, `http://`, `mailto:`, and `urn:` keep `kind: "url"`. Legacy `source:id` (`github-issues:7`) and 2-slash `bf://concepts/...` links are rejected in authored notes and sensor JSON, and JSON records do not support `#anchor` fragments (`bf read "github-issues:7" | jq ...` still reads and filters records on the CLI and MCP).
+- **Markdown prose**: link to local notes (`../concepts/aaif.md#mcp`, `aaif.md`, `#mcp`), sensor records by `source:id` (`[Issue 7](github-issues:7){rel=cites}`) or memory path (`../memories/<source>/<sha256>.json`), sibling brains (`bf://team-brain/concepts/aaif.md#mcp`), or external URLs.
+- **Note frontmatter (`links`, `sources`) & sensor JSON (`links`)**: note frontmatter accepts `bf:///...`, `bf://<brain>/...`, `source:id`, relative paths, external URLs (`https://`, `http://`, `mailto:`, `urn:`), or `{to, meta}` objects (and folds `sources[].resource` into `links`). Sensor JSON `links` accepts brain-root paths (`projects/...`, `concepts/...`, `actions/...`, `memories/...`), `source:id`, `bf://`, external URLs, or `{to, meta}` objects. Every stored `kind: "record"` link normalizes to canonical `memories/<source>/<sha256>.json`; legacy `relations` is rejected by schema and runtime.
+- **Validation**: `bf validate` is read-only and checks every schema, compiled-note sync, note link, `#anchor`, and cross-brain target; missing targets in snapshot-ingested sources or `.forgotten` emit warnings (`ok: true` unless `--strict`). JSON records do not support `#anchor` fragments.
 
 ## Tracked actions and user schemas
 
-Author dated task workspaces directly at `actions/YYYY-MM-DD_<slug>/ACTION.md` (with `inputs/` and `outputs/`) and compile them with `bf build`. Mark finished actions `status: stable` to clear them from `bf review`'s active inbox. Customize `schemas/concepts.json`, `schemas/record.json`, or any `schemas/<source>.json` file to enforce your brain's ontology during `bf ingest` and `bf validate`.
+Create dated task workspaces with `bf new action <slug>` (`actions/YYYY-MM-DD_<slug>/ACTION.md`) and mark finished actions `status: stable` to clear them from `bf review`'s active inbox. Customize `schemas/concepts.json` or add any `schemas/<source>.json` file to enforce your brain's ontology during `bf ingest` and `bf validate` (inspect defaults via `bf schema`).

@@ -21,9 +21,7 @@ def main() -> None:
         ROOT / "docs" / f"{'bf' if kind == 'brain' else kind}.schema.json": schema for kind, schema in schemas.items()
     }
     for example in ("brain", "context-hub"):
-        for kind, schema in schemas.items():
-            name = "bf.schema.json" if kind == "brain" else f"{kind}.json"
-            documents[ROOT / "examples" / example / "schemas" / name] = schema
+        documents[ROOT / "examples" / example / "schemas" / "concepts.json"] = schemas["concepts"]
     store = Store(ROOT)
     obsolete_roots = (
         (ROOT / "docs").glob("*.schema.json"),

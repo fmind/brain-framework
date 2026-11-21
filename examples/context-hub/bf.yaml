@@ -1,7 +1,7 @@
 # https://fmind.github.io/brain-framework/reference/
-version: 14
+version: 15
 name: context-demo
-jobs:
+loops:
   build:
     run: [bf, build]
     hook: pre-commit

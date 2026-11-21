@@ -1,6 +1,6 @@
 # Example sensors
 
-Five standalone Python 3.11+ standard-library sensors showcasing popular CLI tools and circular harness telemetry. Copy the scripts you need into your brain's `sensors/` directory and declare them under `jobs:` in `bf.yaml` (or pipe stdout directly into `bf ingest SOURCE`).
+Five standalone Python 3.11+ standard-library sensors showcasing popular CLI tools and circular harness telemetry. Copy the scripts you need into your brain's `sensors/` directory and declare them under `loops:` in `bf.yaml` (or pipe stdout directly into `bf ingest SOURCE`).
 
 | Sensor                                           | Arguments                                  | Saves                                                                              |
 | ------------------------------------------------ | ------------------------------------------ | ---------------------------------------------------------------------------------- |
@@ -11,7 +11,7 @@ Five standalone Python 3.11+ standard-library sensors showcasing popular CLI too
 | `agent-telemetry.py`                             | `HARNESS ROOT START END`                   | Circular telemetry sensor turning local coding-agent JSON/JSONL logs into records. |
 | [Four-tool demo](../context-hub/sensors/demo.py) | `TOOL END`                                 | Offline fixture records for the [four-tool walkthrough](../context-hub/README.md). |
 
-## Run manually or schedule as a `bf.yaml` job
+## Run manually or schedule as a `bf.yaml` loop
 
 ```bash
 mkdir -p sensors
@@ -21,8 +21,8 @@ cp /path/to/brain-framework/examples/sensors/agent-telemetry.py sensors/
 python3 sensors/agent-telemetry.py claude ~/.claude/projects 2026-11-01T00:00:00Z 2026-11-15T23:59:59Z \
   | bf ingest agent-telemetry --dry-run
 
-# Or declare in bf.yaml jobs:
-# jobs:
+# Or declare in bf.yaml loops:
+# loops:
 #   agent-telemetry:
 #     run: [python3, sensors/agent-telemetry.py, claude, "{{home}}/.claude/projects", "{{start}}", "{{end}}"]
 #     ingest: agent-telemetry
@@ -33,7 +33,7 @@ Use `--mode upsert` (the default) for windowed feeds (`git-history.py`, `github-
 
 ## Enforce per-sensor JSON Schemas
 
-Every ingested record is validated against `schemas/record.json` and stored at `memories/<source>/<sha256(id)>.json`. Drop an optional `schemas/<source>.json` file into your brain's `schemas/` directory to enforce domain fields, types, or enums before `bf ingest` writes records.
+Every ingested record is validated against the bundled `record` schema (`bf schema record`, optionally overridden by `schemas/record.json`) and stored at `memories/<source>/<sha256(id)>.json`. Drop an optional `schemas/<source>.json` file into your brain's `schemas/` directory to enforce domain fields, types, or enums before `bf ingest` writes records.
 
 ## Provider safety and failure rules
 

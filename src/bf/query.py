@@ -2,168 +2,35 @@
 
 from __future__ import annotations
 
-import os
-import select
-import shutil
-import signal
+import re
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import IO, Any, cast
-from urllib.parse import quote
+from typing import IO, Any, TypedDict, Unpack, cast
+from urllib.parse import quote, urlsplit
 
-from bf import config, engine, markdown, records
-from bf.config import yaml_object
-from bf.models import AUTHORED, MAX_BATCH, MAX_NOTE, Error, InputError, check_version, clean, decode, encode
-from bf.schemas import EVALS_SCHEMA, load_validator, validate_instance
+from bf import models
+from bf.models import AUTHORED, MAX_BATCH, MAX_NOTE, Error, InputError, clean, decode, encode, terminal
+from bf.proc import drain_tail as drain_tail
+from bf.proc import resolve_tool as resolve_tool
+from bf.proc import safe_env as safe_env
+from bf.proc import stop_proc as stop_proc
+from bf.proc import stream_proc
 from bf.storage import Store, relative
 
 JQ_PRELUDE = (
     'def modulemeta: error("disabled"); def modulemeta($m): error("disabled"); '
     "def get_jq_origin: null; def get_prog_origin: null; def get_search_list: []; def env: {}; {} as $ENV |"
 )
-_SHIM_A = ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
-_SHIM_B = ("MISE_DATA_DIR", "MISE_CONFIG_DIR", "MISE_CACHE_DIR", "MISE_STATE_DIR", "MISE_TRUSTED_CONFIG_PATHS")
-_SHIM_ENV = (*_SHIM_A, *_SHIM_B)
-_TOOL_CACHE: dict[tuple[str, ...], str] = {}
+_NS_A = ("ref", "source", "kind", "title", "status", "updated", "text", "sha256", "id")
+_NOTE_STRUCT = frozenset((*_NS_A, "headings", "links", "elements", "tasks", "attrs"))
+_HEAD_RE = re.compile(r"(?m)^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+\{[^}]*\})?[ \t]*$")
 
 
-def _is_shim(path: str) -> bool:
-    with suppress(OSError):
-        p = Path(path)
-        if p.resolve().name == "mise":
-            return True
-        with p.open("rb") as handle:
-            return handle.read(2) == b"#!"
-    return False
-
-
-def resolve_tool(name: str) -> str:
-    """Resolve `name` on PATH, unwrapping `mise` shims to the underlying executable."""
-    if not (found := shutil.which(name)):
-        raise Error(f"{name} is required on PATH; install it with mise install")
-    key = (name, found, *(os.environ.get(k, "") for k in _SHIM_ENV))
-    if (cached := _TOOL_CACHE.get(key)) is not None and Path(cached).is_file():
-        return cached
-    target, is_mise = found, False
-    with suppress(OSError, subprocess.SubprocessError):
-        if is_mise := (real := Path(found).resolve()).name == "mise":
-            kw: dict[str, Any] = {"stdin": subprocess.DEVNULL, "capture_output": True, "text": True, "cwd": "/"}
-            proc = subprocess.run([str(real), "which", name], **kw, env=safe_env(found), timeout=5, check=False)  # noqa: S603
-            cand = proc.stdout.strip() if proc.returncode == 0 else ""
-            if cand and (cp := Path(cand)).is_absolute() and cp.is_file():
-                target = cand
-    if not is_mise or target != found:
-        if len(_TOOL_CACHE) >= 32:
-            _TOOL_CACHE.pop(next(iter(_TOOL_CACHE)))
-        _TOOL_CACHE[key] = target
-    return target
-
-
-def safe_env(binary: str = "") -> dict[str, str]:
-    """Return a locale-only env for native binaries, or minimal non-secret shim vars for wrapper scripts."""
-    base = {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"}
-    return {**{k: v for k in _SHIM_ENV if (v := os.environ.get(k))}, **base} if binary and _is_shim(binary) else base
-
-
-def drain_tail(
-    stream: IO[bytes], limit: int, stop: threading.Event | None = None
-) -> tuple[threading.Thread, bytearray]:
-    """Drain `stream` in a daemon thread while retaining at most the last `limit` bytes in memory."""
-    buf, fd, poller = bytearray(), None, None
-    with suppress(OSError, ValueError):
-        fd, poller = stream.fileno(), select.poll()
-        poller.register(fd, select.POLLIN)
-
-    def _read() -> None:
-        with suppress(OSError, ValueError):
-            while True:
-                if fd is not None and poller is not None:
-                    done = bool(stop and stop.is_set())
-                    if not poller.poll(0 if done else 200):
-                        if done:
-                            break
-                        continue
-                    chunk = os.read(fd, 8192)
-                else:
-                    chunk = stream.read(8192)
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                if len(buf) > limit * 2:
-                    del buf[:-limit]
-            if len(buf) > limit:
-                del buf[:-limit]
-
-    thread = threading.Thread(target=_read, daemon=True)
-    thread.start()
-    return thread, buf
-
-
-def _rg_fail(rc: int, err_bytes: bytes) -> None:
-    if rc not in {0, 1} or (rc == 1 and err_bytes.strip()):
-        err_txt = err_bytes.decode("utf-8", "replace").strip()
-        msg = f"rg failed: {err_txt.splitlines()[-1] if err_txt else 'invalid regex pattern'}"
-        raise InputError(msg) if rc == 2 else Error(msg)
-
-
-def stop_proc(proc: subprocess.Popen[bytes], wait: float = 2.0) -> int:
-    """Terminate a subprocess process group (`SIGTERM`, then `SIGKILL` after `wait`s)."""
-    with suppress(OSError):
-        os.killpg(proc.pid, signal.SIGTERM)
-    try:
-        return proc.wait(timeout=wait)
-    except subprocess.TimeoutExpired:
-        with suppress(OSError):
-            os.killpg(proc.pid, signal.SIGKILL)
-        with suppress(OSError, subprocess.TimeoutExpired):
-            return proc.wait(timeout=2)
-        return -1 if proc.returncode is None else proc.returncode
-
-
-type _OutReader = Callable[[IO[bytes]], bool]
-type _InFeed = Callable[[IO[bytes], threading.Event], None]
-
-
-def _stream_proc(cmd: list[str], binary: str, rd: _OutReader, fd: _InFeed | None = None) -> tuple[int, bytes, bool]:
-    timed_out, stop_feed, err_stop, pipe = threading.Event(), threading.Event(), threading.Event(), subprocess.PIPE
-    stdin_mode = pipe if fd is not None else subprocess.DEVNULL
-    with subprocess.Popen(  # noqa: S603
-        cmd, stdin=stdin_mode, stdout=pipe, stderr=pipe, cwd="/", env=safe_env(binary), start_new_session=True
-    ) as proc:
-        err_t, err_buf = drain_tail(cast("IO[bytes]", proc.stderr), 8192, err_stop)
-
-        def _timeout() -> None:
-            if proc.poll() is None:
-                timed_out.set()
-                with suppress(OSError):
-                    os.killpg(proc.pid, signal.SIGKILL)
-
-        timer = threading.Timer(30.0, _timeout)
-        timer.daemon = True
-        timer.start()
-        feeder: threading.Thread | None = None
-        if fd is not None:
-            feeder = threading.Thread(target=fd, args=(cast("IO[bytes]", proc.stdin), stop_feed), daemon=True)
-            feeder.start()
-        eof = False
-        try:
-            eof = rd(cast("IO[bytes]", proc.stdout))
-        finally:
-            stop_feed.set()
-            try:
-                rc = proc.wait(timeout=5) if eof else stop_proc(proc, wait=5.0)
-            except subprocess.TimeoutExpired:
-                rc = stop_proc(proc, wait=0.0)
-            finally:
-                timer.cancel()
-                err_stop.set()
-            if feeder is not None:
-                feeder.join(timeout=5)
-            err_t.join(timeout=2)
-        return rc, bytes(err_buf), timed_out.is_set()
+def _mod(name: str) -> Any:
+    return __import__(f"bf.{name}", fromlist=[name])
 
 
 def _decode_obj(store: Store, path: str, *, check_duplicates: bool = True) -> dict[str, Any]:
@@ -179,118 +46,153 @@ def _as_input[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         raise InputError(str(error)) from error
 
 
-def _resolve_scope(store: Store, scope: str) -> tuple[str | None, str | None]:
-    """Return `(single_file, directory)` in `memories/` after `O_NOFOLLOW` confinement checks."""
-    if not (stripped := scope.strip()):
-        return None, ("memories" if store.is_dir("memories") else None)
-    cleaned = stripped.rstrip("/")
-    _as_input(relative, cleaned)
-    if markdown.okf_role(cleaned) is not None:
-        comp = markdown.compiled_note_path(cleaned)
-        return (comp if store.exists(comp) else None), None
-    if cleaned.endswith(".json") and cleaned.startswith("memories/"):
-        return (cleaned if store.exists(cleaned) else None), None
-    sub = cleaned if cleaned == "memories" or cleaned.startswith("memories/") else f"memories/{cleaned}"
-    _as_input(relative, sub)
-    return None, (sub if store.is_dir(sub) else None)
-
-
-def _rg_snippet(data: dict[str, Any], width: int = 240) -> str:
-    raw = str(l_obj.get("text", "")) if isinstance(l_obj := data.get("lines"), dict) else ""
-    text, subs = raw.strip(), data.get("submatches")
-    b0 = subs[0].get("start") if isinstance(subs, list) and subs and isinstance(subs[0], dict) else 0
-    if len(text) > width and type(b0) is int and b0 > 0:
-        pos = max(0, len(raw.encode("utf-8")[:b0].decode("utf-8", "ignore")) - (len(raw) - len(raw.lstrip())))
-        if pos > width // 3:
-            start = min(pos - width // 3, len(text) - width)
-            return text[start : start + width]
-    return text[:width]
-
-
 def _mem_rel(store: Store, raw_path: str) -> str | None:
     with suppress(ValueError):
         rel = Path(raw_path).resolve().relative_to(store.root).as_posix()
-        if rel.startswith("memories/") and rel.endswith(".json"):
-            return rel
+        return rel if rel.startswith("memories/") and rel.endswith(".json") else None
     return None
 
 
-def search_rg(store: Store, pattern: str, *, scope: str = "", limit: int = 20) -> dict[str, Any]:
-    """Run lexical search over pure JSON memories via `rg --json --no-config --no-ignore --no-follow`."""
-    cfg = config.load(store)
-    _as_input(clean, pattern, "query")
-    if limit < 1 or limit > 500:
-        raise InputError("limit must be between 1 and 500")
-    single_file, sub_dir = _resolve_scope(store, scope)
-    target_rel, rg_bin = single_file or sub_dir, resolve_tool("rg")
-    if target_rel is None:
-        r_kw: dict[str, Any] = {"input": b"", "capture_output": True, "cwd": "/", "env": safe_env(rg_bin), "timeout": 5}
+def _target_scope(store: Store, scope: str, kind: str, source: str) -> tuple[list[str], str]:
+    md = _mod("markdown")
+
+    def ok(s: str) -> bool:
+        return (kind != "note" or s in AUTHORED) and (kind != "memory" or s not in AUTHORED) and source in ("", s)
+
+    if stripped := scope.strip():
+        _as_input(relative, cl := stripped.rstrip("/"))
+        if md.okf_role(cl) is not None:
+            return ([cp] if ok(cl.split("/")[0]) and store.exists(cp := md.compiled_note_path(cl)) else []), ""
+        if cl.endswith(".json") and cl.startswith("memories/"):
+            return ([cl] if ok(cl.split("/")[1]) and store.exists(cl) else []), ""
+        _as_input(relative, sub := cl if cl == "memories" or cl.startswith("memories/") else f"memories/{cl}")
+        if sub != "memories":
+            if not ok(sub_s := sub.split("/")[1]):
+                return [], ""
+            if store.is_dir(sub):
+                return [sub], ""
+            b = f"memories/{sub_s}"
+            hits = [p for p in store.files(b) if p.endswith(".json") and p.startswith(sub)] if store.is_dir(b) else []
+            return hits, ""
+    if not store.is_dir("memories"):
+        return [], ""
+    if source:
+        return ([f"memories/{source}"] if ok(source) and store.is_dir(f"memories/{source}") else []), ""
+    if kind == "note":
+        return [f"memories/{d}" for d in sorted(AUTHORED) if store.is_dir(f"memories/{d}")], ""
+    return ["memories"], ("memory" if kind == "memory" else "")
+
+
+def _extract_snippet(rec: dict[str, Any], pattern: str, data: dict[str, Any], width: int = 240) -> tuple[str, str]:
+    s0 = subs[0] if isinstance(subs := data.get("submatches"), list) and subs and isinstance(subs[0], dict) else {}
+    mt = s0["match"].get("text") if isinstance(s0.get("match"), dict) else None
+    rx: re.Pattern[str] | None = None
+    with suppress(re.error):
+        rx = re.compile(re.escape(mt) if isinstance(mt, str) and mt else pattern, re.IGNORECASE)
+
+    def center(raw: str, pat: re.Pattern[str] | None = rx) -> str:
+        if len(flat := re.sub(r"\s+", " ", raw).strip()) <= width:
+            return flat
+        pos = m.start() if pat and (m := pat.search(flat)) else 0
+        i0 = 0 if pos <= width // 3 else min(pos - width // 3, len(flat) - width)
+        return flat[i0 : i0 + width]
+
+    if rx is not None:
+        for key, tf, af in (("headings", "title", "id"), ("elements", "text", "section"), ("tasks", "text", "section")):
+            for it in rec.get(key) or ():
+                if isinstance(it, dict) and rx.search(t := str(it.get(tf) or "")):
+                    return center(t), str(it.get(af) or it.get("id") or "")
+        if isinstance(txt := rec.get("text"), str) and (m := rx.search(txt)):
+            anc, cur = "", 0
+            for h in rec.get("headings") or ():
+                if isinstance(h, dict) and (t0 := h.get("title")) and 0 <= (ix := txt.find(str(t0), cur)) <= m.start():
+                    anc, cur = str(h.get("id") or ""), ix + len(str(t0))
+            if not anc and (hms := _HEAD_RE.findall(txt[: m.start()])):
+                anc = re.sub(r"[^a-z0-9]+", "-", hms[-1].lower()).strip("-")
+            return center(txt), anc
+        pri = ("title", "summary", "description")
+        st: list[tuple[str, Any]] = [(k, rec[k]) for k in pri if k in rec]
+        st.extend((k, v) for k, v in rec.items() if k not in {"sha256", "kind", "source", *pri})
+        while st:
+            fk, val = st.pop(0)
+            if isinstance(val, str) and rx.search(val):
+                ttl = str(rec.get("title") or "")
+                snip = f"{ttl} ({val})" if fk in {"id", "ref"} and ttl else val
+                return center(snip, None if fk in {"id", "ref"} else rx), ""
+            if isinstance(val, (list, dict)):
+                st.extend(((fk, x) for x in val) if isinstance(val, list) else val.items())
+    return center(str(rec.get("title") or rec.get("text") or rec.get("summary") or rec.get("ref") or "")), ""
+
+
+def _rg_scan(
+    store: Store, pattern: str, targets: list[str], mem_f: str, limit: int | None, *, with_rows: bool = True
+) -> tuple[list[str], list[dict[str, Any]], bool]:
+    rg_bin = resolve_tool("rg")
+
+    def fail(rc: int, err_b: bytes) -> None:
+        if rc not in {0, 1} or (rc == 1 and err_b.strip()):
+            et = err_b.decode("utf-8", "replace").strip()
+            msg = f"rg failed: {et.splitlines()[-1] if et else 'invalid regex pattern'}"
+            raise InputError(msg) if rc == 2 else Error(msg)
+
+    if not targets:
         try:
-            chk = subprocess.run([rg_bin, "--no-config", "-e", pattern], **r_kw, check=False)  # noqa: S603
-        except subprocess.TimeoutExpired as error:
-            raise Error("rg timed out after 5s") from error
-        _rg_fail(chk.returncode, chk.stderr)
-        return {"brain": cfg.name, "engine": "rg", "query": pattern, "count": 0, "truncated": False, "items": []}
-    cmd = [rg_bin, "--json", "--no-config", "--no-ignore", "--no-follow", "--max-count", "1", "-i"]
-    if sub_dir is not None:
-        cmd.extend(["--glob", "*.json"])
-    cmd.extend(["--max-filesize", "64M", "-e", pattern, str(store.root / target_rel)])
-    matched_paths, snippets = [], {}
+            kw: dict[str, Any] = {"input": b"", "capture_output": True, "cwd": "/", "env": safe_env(rg_bin)}
+            chk = subprocess.run([rg_bin, "--no-config", "-e", pattern], **kw, timeout=5, check=False)  # noqa: S603
+        except subprocess.TimeoutExpired as e:
+            raise Error("rg timed out after 5s") from e
+        fail(chk.returncode, chk.stderr)
+        return [], [], False
+    ex = ["--glob", "!projects/**", "--glob", "!concepts/**", "--glob", "!actions/**"] if mem_f == "memory" else []
+    gl = ["--glob", "*.json", *ex] if any(store.is_dir(t) for t in targets) else []
+    flags = ["--json", "--no-config", "--no-ignore", "--no-follow", "--max-count", "1", "-i"]
+    cmd = [rg_bin, *flags, *gl, "--max-filesize", "64M", "-e", pattern, *(str(store.root / t) for t in targets)]
+    mdata: dict[str, dict[str, Any]] = {}
 
     def read_rg(stdout: IO[bytes]) -> bool:
-        for raw_line in stdout:
-            if not (stripped := raw_line.strip()):
+        for ln in stdout:
+            if not (s := ln.strip()) or not isinstance(ev := decode(s, "rg output", check_duplicates=False), dict):
                 continue
-            ev = decode(stripped, "rg output", check_duplicates=False)
-            if not isinstance(ev, dict) or ev.get("type") != "match" or not isinstance(data := ev.get("data"), dict):
+            if ev.get("type") != "match" or not isinstance(d := ev.get("data"), dict):
                 continue
-            raw_path = data["path"].get("text") if isinstance(data.get("path"), dict) else None
-            if isinstance(raw_path, str) and (rel := _mem_rel(store, raw_path)) and rel not in snippets:
-                matched_paths.append(rel)
-                snippets[rel] = _rg_snippet(data)
-                if len(matched_paths) > limit:
+            rp = d["path"].get("text") if isinstance(d.get("path"), dict) else None
+            if isinstance(rp, str) and (rel := _mem_rel(store, rp)) and rel not in mdata:
+                if mem_f == "memory" and rel.split("/")[1] in AUTHORED:
+                    continue
+                mdata[rel] = d
+                if limit is not None and len(mdata) > limit:
                     return False
         return True
 
-    rc, err_bytes, timed_out = _stream_proc(cmd, rg_bin, read_rg)
-    if not (truncated := len(matched_paths) > limit):
+    rc, err_bytes, timed_out = stream_proc(cmd, rg_bin, read_rg)
+    if not (trunc := limit is not None and len(mdata) > limit):
         if timed_out:
             raise Error("rg timed out after 30s")
-        _rg_fail(rc, err_bytes)
-    items = []
-    for p in matched_paths[:limit]:
-        r = _decode_obj(store, p, check_duplicates=False)
-        item = {"ref": r.get("ref", p), "source": r.get("source", ""), "kind": r.get("kind", "memory")}
-        items.append({**item, "title": r.get("title", ""), "path": p, "snippet": snippets.get(p, "")})
-    head = {"brain": cfg.name, "engine": "rg", "query": pattern, "count": len(items)}
-    return {**head, "truncated": truncated, "items": items}
+        fail(rc, err_bytes)
+    kept = list(mdata)[:limit]
+    if not with_rows:
+        return kept, [], trunc
+    rows = []
+    for p in kept:
+        snip, anc = _extract_snippet(r := _decode_obj(store, p, check_duplicates=False), pattern, mdata[p])
+        row = {"ref": r.get("ref", p), "source": r.get("source", ""), "kind": r.get("kind", "memory")}
+        row |= {"title": r.get("title", ""), "path": p, "snippet": snip, **({"anchor": anc} if anc else {})}
+        rows.append(row)
+    return kept, rows, trunc
 
 
-def query_jq(store: Store, expr: str, *, scope: str = "", limit: int = 20) -> dict[str, Any]:
-    """Filter pure JSON memory records by streaming confined files directly into isolated `jq -c`."""
-    cfg = config.load(store)
-    _as_input(clean, expr, "jq filter")
-    if limit < 1 or limit > 5000:
-        raise InputError("limit must be between 1 and 5000")
-    single_file, sub_dir = _resolve_scope(store, scope)
-    jq_bin = resolve_tool("jq")
-    jq_cmd = [jq_bin, "-L", "/dev/null", "-c", "--", f"{JQ_PRELUDE}\n{expr}"]
-    feeder_err: list[Error | OSError] = []
-    out: list[Any] = []
+def _run_jq_stream(blobs: Any, expr: str, limit: int) -> tuple[list[Any], bool]:
+    jq_bin, feeder_err, out = resolve_tool("jq"), [], []
 
     def feed_jq(stdin: IO[bytes], stop: threading.Event) -> None:
         try:
-            blobs: Any = ((single_file, store.read(single_file)),) if single_file is not None else ()
-            blobs = store.iter_read_files(sub_dir, suffix=".json") if single_file is None and sub_dir else blobs
-            for _, data in blobs:
+            for data in blobs:
                 if stop.is_set():
                     break
                 stdin.write(data if data.endswith(b"\n") else data + b"\n")
             stdin.flush()
-        except BrokenPipeError:
-            pass
         except (Error, OSError) as error:
-            if not stop.is_set():
+            if not isinstance(error, BrokenPipeError) and not stop.is_set():
                 feeder_err.append(error)
         finally:
             with suppress(OSError):
@@ -306,8 +208,9 @@ def query_jq(store: Store, expr: str, *, scope: str = "", limit: int = 20) -> di
                     return False
         return True
 
-    rc, err_bytes, timed_out = _stream_proc(jq_cmd, jq_bin, read_jq, feed_jq)
-    if not (truncated := len(out) > limit):
+    cmd = [jq_bin, "-L", "/dev/null", "-c", "--", f"{JQ_PRELUDE}\n{expr}"]
+    rc, err_bytes, timed_out = stream_proc(cmd, jq_bin, read_jq, feed_jq)
+    if not (trunc := len(out) > limit):
         if timed_out:
             raise Error("jq timed out after 30s")
         if feeder_err:
@@ -316,101 +219,253 @@ def query_jq(store: Store, expr: str, *, scope: str = "", limit: int = 20) -> di
             err = err_bytes.decode("utf-8", "replace").strip()
             msg = f"jq failed: {err.splitlines()[-1] if err else 'jq filter failed'}"
             raise InputError(msg) if rc == 3 or (rc == 5 and "parse error:" not in err) else Error(msg)
-    items = out[:limit]
-    head = {"brain": cfg.name, "engine": "jq", "query": expr, "count": len(items)}
-    return {**head, "truncated": truncated, "items": items}
+    return out[:limit], trunc
 
 
-def find_by_alias(store: Store, identity: str) -> tuple[str, dict[str, Any]] | None:
+def query(
+    store: Store,
+    pattern: str | None = None,
+    *,
+    jq_expr: str | None = None,
+    scope: str = "",
+    kind: str = "",
+    source: str = "",
+    fields: Sequence[str] | str | None = None,
+    limit: int = 20,
+    read_only: bool = False,
+) -> dict[str, Any]:
+    """Query compiled notes and sensor memories via `rg`, `jq`, or combined `rg` + `jq`."""
+    eng, cfg_m = _mod("engine"), _mod("config")
+    if scope and not scope.strip():
+        raise InputError("scope must be nonempty")
+    if pattern is None and jq_expr is None and not (kind or scope.strip() or source):
+        raise InputError("pass QUERY, --jq FILTER, or a filter (--kind, --scope, --source)")
+    for lbl, val in (("query", pattern), ("jq filter", jq_expr)):
+        if val is not None:
+            _as_input(clean, val, lbl)
+    if limit < 1 or limit > 5000:
+        raise InputError("limit must be between 1 and 5000")
+    if kind not in {"", "note", "memory"}:
+        raise InputError("kind must be 'note' or 'memory'")
+    if source and not models.NAME_RE.fullmatch(source):
+        raise InputError("source must use lowercase letters, digits, and hyphens")
+    wanted, cfg = eng.parse_fields(fields), cfg_m.load(store)
+    if not read_only and kind in {"", "note"} and source in ("", *AUTHORED):
+        with suppress(Error, OSError):
+            eng.sync_notes(store)
+    targets, mem_f = _target_scope(store, scope, kind, source)
+    extra: dict[str, Any] = {}
+    expr = jq_expr if jq_expr is not None else "."
+    if pattern is not None and jq_expr is None:
+        eng_n, q_s = "rg", pattern
+        _, items, trunc = _rg_scan(store, pattern, targets, mem_f, limit)
+    elif pattern is not None:
+        eng_n, q_s, extra = "rg+jq", pattern, {"jq": expr}
+        hits = _rg_scan(store, pattern, targets, mem_f, None, with_rows=False)[0]
+        items, trunc = _run_jq_stream((store.read(p) for p in hits), expr, limit)
+    else:
+        eng_n, q_s = "jq", expr
+        skip_dirs = AUTHORED if mem_f == "memory" else ()
+        it = (
+            (
+                [("", store.read(t))]
+                if t.endswith(".json")
+                else store.iter_read_files(t, suffix=".json", skip_dirs=skip_dirs)
+            )
+            for t in targets
+        )
+        items, trunc = _run_jq_stream((d for g in it for _, d in g), expr, limit)
+    if wanted is not None:
+        items = [{k: x[k] for k in wanted if k in x} if isinstance(x, dict) else x for x in items]
+    hdr = {"ok": True, "brain": cfg.name, "engine": eng_n, "query": q_s, **extra}
+    return {**hdr, "count": len(items), "truncated": trunc, "items": items}
+
+
+class _QueryOpts(TypedDict, total=False):
+    scope: str
+    kind: str
+    source: str
+    fields: Sequence[str] | str | None
+    limit: int
+    read_only: bool
+
+
+def search_rg(store: Store, pattern: str, **opts: Unpack[_QueryOpts]) -> dict[str, Any]:
+    """Run lexical search over pure JSON memories via `rg`."""
+    return query(store, pattern, **opts)
+
+
+def query_jq(store: Store, expr: str, **opts: Unpack[_QueryOpts]) -> dict[str, Any]:
+    """Filter pure JSON memory records via isolated `jq -c`."""
+    return query(store, None, jq_expr=expr, **opts)
+
+
+def find_by_alias(store: Store, identity: str, *, read_only: bool = False) -> tuple[str, dict[str, Any]] | None:
     """Locate a stored JSON memory whose `entity` or `aliases` equals `identity`, preferring authored notes."""
-
-    def match_paths(paths: list[str]) -> tuple[str, dict[str, Any]] | None:
-        for path in paths:
-            with suppress(Error):
-                parsed = _decode_obj(store, path, check_duplicates=False)
-                aliases = parsed.get("aliases")
-                if parsed.get("entity") == identity or (isinstance(aliases, list) and identity in aliases):
-                    return path, parsed
-        return None
-
-    authored = sorted(p for d in AUTHORED for p in store.files(f"memories/{d}") if p.endswith(".json"))
-    if (found := match_paths(authored)) is not None or not store.is_dir("memories"):
-        return found
-    rg: str | None = None
-    with suppress(Error):
-        rg = resolve_tool("rg")
-    if rg and '"' not in identity and "\\" not in identity:
-        flags = ("-l", "-F", "--no-config", "--no-ignore", "--no-follow", "--glob", "*.json", "--")
-        rkw: dict[str, Any] = {"stdin": subprocess.DEVNULL, "capture_output": True, "text": True, "cwd": "/"}
-        cmd = [rg, *flags, identity, str(store.root / "memories")]
-        try:
-            proc = subprocess.run(cmd, **rkw, env=safe_env(rg), timeout=15, check=False)  # noqa: S603
-        except subprocess.TimeoutExpired as error:
-            raise Error("rg alias lookup timed out") from error
-        if proc.returncode == 0 or (proc.returncode == 1 and not proc.stderr.strip()):
-            rels = (_mem_rel(store, ln) for ln in proc.stdout.splitlines())
-            return match_paths(sorted({r for r in rels if r and r.split("/")[1] not in AUTHORED}))
-    return match_paths([p for p in store.files("memories") if p.endswith(".json") and p.split("/")[1] not in AUTHORED])
+    idx = _mod("engine").load_index(store, read_only=read_only)
+    hits = [
+        e for e in idx if e.get("entity") == identity or (isinstance(al := e.get("aliases"), list) and identity in al)
+    ]
+    hits.sort(key=lambda e: (str(e.get("source", "")) not in AUTHORED, str(e.get("path", ""))))
+    for hit in hits:
+        with suppress(Error):
+            return (mp := str(hit["path"])), _decode_obj(store, mp, check_duplicates=False)
+    return None
 
 
-def read_target(store: Store, raw_target: str, *, declared_brains_only: bool = False) -> dict[str, Any]:
+def _raw_record_alias(raw_target: str, brain_name: str, md: Any) -> str:
+    bare = raw_target.partition("#")[0].partition("?")[0]
+    if bare.lower().startswith("bf://"):
+        uri = urlsplit(bare)
+        if uri.netloc not in {"", brain_name}:
+            return ""
+        bare = uri.path.lstrip("/")
+    return bare if md.is_record_ref(bare) else ""
+
+
+def _cap_json_bytes(out: dict[str, Any], max_bytes: int) -> dict[str, Any]:
+    if len(terminal(out)) <= max_bytes:
+        return out
+    cand = {**out, "truncated": True}
+    for key in ("text", "content", "markdown"):
+        if isinstance(val := cand.get(key), str) and val:
+            lo, hi, best = 0, len(val), ""
+            while lo <= hi:
+                cand[key] = val[: (mid := (lo + hi) // 2)]
+                if len(terminal(cand)) <= max_bytes:
+                    best, lo = val[:mid], mid + 1
+                else:
+                    hi = mid - 1
+            cand[key] = best
+            if len(terminal(cand)) <= max_bytes:
+                return cand
+    bulky = ("elements", "headings", "links", "tasks", "meta", "record", "text", "content", "markdown")
+    keep_last = ("updated", "status", "title", "kind", "brain", "ref")
+    extra = [k for k in cand if k not in {*bulky, *keep_last, "truncated"}]
+    for drop in (*bulky, *extra, *keep_last):
+        if len(terminal(cand)) <= max_bytes:
+            break
+        cand.pop(drop, None)
+    if len(terminal(cand)) > max_bytes:
+        raise InputError(f"max-bytes {max_bytes} too small")
+    return cand
+
+
+def read_target(
+    store: Store,
+    raw_target: str,
+    *,
+    declared_brains_only: bool = False,
+    outline: bool = False,
+    lines: str | None = None,
+    fields: Sequence[str] | str | None = None,
+    max_bytes: int | None = None,
+    raw: bool = False,
+    full: bool = False,
+    read_only: bool = False,
+) -> dict[str, Any]:
     """Read an OKF note, `note#anchor` section, `source:id` record, JSON memory, or `bf://` URI."""
-    cfg = config.load(store)
+    cfg_m, eng, md = _mod("config"), _mod("engine"), _mod("markdown")
+    wanted, line_spec = eng.parse_fields(fields), (md.parse_line_spec(lines) if lines is not None else None)
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 1):
+        raise InputError("max_bytes must be at least 1")
+    if sum((bool(outline), line_spec is not None, bool(raw), bool(full))) > 1:
+        raise InputError("--outline, --lines, --raw, and --full are mutually exclusive")
     if not (target := raw_target.strip()):
         raise InputError("target is required; use bf status for brain overview")
-    parsed_link = _as_input(markdown.parse_link, "<read>", target, cfg.name, relative_base=False, allow_record_ref=True)
-    kind, to, anchor = str(parsed_link["kind"]), str(parsed_link["to"]), str(parsed_link["anchor"])
+    cfg = cfg_m.load(store)
+    p_lk = _as_input(md.parse_link, "<read>", target, cfg.name, relative_base=False)
+    kind, to, anchor = str(p_lk["kind"]), str(p_lk["to"]), str(p_lk["anchor"])
     if kind == "brain":
         host, _, rest = to.removeprefix("bf://").partition("/")
-        q_rest = quote(rest, safe="/:@")
-        sub = f"bf:///{q_rest}#{quote(anchor, safe='')}" if anchor else f"bf:///{q_rest}"
-        sib = config.resolve_brain(store, cfg, host, declared_only=declared_brains_only)
-        return read_target(sib, sub, declared_brains_only=declared_brains_only)
+        uri = urlsplit(target.partition("#")[0]) if target.lower().startswith("bf://") else None
+        raw_r = uri.path.lstrip("/") if uri else ""
+        http_q = uri.query if uri and raw_r.partition(":")[2].lower().startswith(("https://", "http://")) else ""
+        fwd = (f"{raw_r}?{http_q}" if http_q else raw_r) if uri and md.is_record_ref(raw_r) else quote(rest, safe="/:@")
+        sub = f"bf:///{fwd}" + (f"#{quote(anchor, safe='')}" if anchor else "")
+        sib = cfg_m.resolve_brain(store, cfg, host, declared_only=declared_brains_only)
+        r_a: dict[str, Any] = {"declared_brains_only": declared_brains_only, "outline": outline, "lines": lines}
+        r_b: dict[str, Any] = {"fields": fields, "max_bytes": max_bytes, "raw": raw, "full": full}
+        return read_target(sib, sub, **r_a, **r_b, read_only=read_only)
 
-    def render_record(hit_path: str, hit_rec: dict[str, Any], def_ref: str, def_kind: str = "record") -> dict[str, Any]:
-        ref_s = str(hit_rec.get("ref", def_ref))
-        return {"brain": cfg.name, "kind": def_kind, "ref": ref_s, "path": hit_path, "record": hit_rec}
+    def rec_out(hp: str, hr: dict[str, Any], dr: str) -> dict[str, Any]:
+        if outline or line_spec is not None or raw:
+            raise InputError("--outline, --lines, and --raw apply only to Markdown notes")
+        hdr = {"brain": cfg.name, "kind": str(hr.get("kind", "record")), "ref": str(hr.get("ref", dr))}
+        return {**hdr, "path": hp, "record": hr}
 
     if kind == "url":
-        if hit := find_by_alias(store, to) or (find_by_alias(store, to[4:]) if to[:4] == "urn:" else None):
-            return render_record(hit[0], hit[1], to)
-        raise InputError("external URLs are not read offline; pass a note path, source:id, or bf:// URI")
-    if anchor and (kind == "record" or to.endswith(".json")):
+        hit = find_by_alias(store, to, read_only=read_only) or (
+            find_by_alias(store, to[4:], read_only=read_only) if to[:4] == "urn:" else None
+        )
+        if hit is None:
+            raise InputError("external URLs are not read offline; pass a note path, source:id, or bf:// URI")
+        out = rec_out(hit[0], hit[1], to)
+    elif anchor and (kind == "record" or to.endswith(".json")):
         raise InputError("JSON records do not support #fragments; pipe bf read into jq")
-    if any(part.startswith(".") for part in to.split("/")) or to.split("/")[0].lower() == "logs":
+    elif any(part.startswith(".") for part in to.split("/")) or to.split("/")[0].lower() == "logs":
         raise InputError(f"{to}: private or runtime paths are not readable via bf read")
-    if to.startswith("memories/") and to.endswith(".json"):
+    elif (is_mem := to.startswith("memories/") and to.endswith(".json")) or kind == "record":
+        if not read_only and is_mem and to.split("/")[1] in AUTHORED:
+            with suppress(Error, OSError):
+                eng.sync_notes(store)
+        alias_key = _raw_record_alias(target, cfg.name, md)
+        hit = (
+            (to, _decode_obj(store, to))
+            if store.exists(to)
+            else (find_by_alias(store, alias_key, read_only=read_only) if alias_key else None)
+        )
+        if hit is None:
+            raise Error(f"record {alias_key or to} not found")
+        out = rec_out(hit[0], hit[1], alias_key or to)
+    else:
         if not store.exists(to):
-            raise Error(f"record {to} not found")
-        rec = _decode_obj(store, to)
-        return render_record(to, rec, str(rec.get("ref", to)), str(rec.get("kind", "record")))
-    if kind == "record":
-        src, _, rec_id = to.partition(":")
-        cand = records.record_file(src, rec_id)
-        if (hit := (cand, _decode_obj(store, cand)) if store.exists(cand) else find_by_alias(store, to)) is None:
-            raise Error(f"record {to} not found")
-        return render_record(hit[0], hit[1], to)
-    if not store.exists(to):
-        raise Error(f"note {to} not found")
-    raw_bytes = store.read(to, MAX_NOTE)
-    text = raw_bytes.decode("utf-8").removeprefix("\ufeff")
-    if markdown.okf_role(to) is not None:
-        compiled, _ = engine.load_or_compile_note(store, to, raw_bytes, brain_name=cfg.name)
+            raise Error(f"note {to} not found")
+        text = (raw_bytes := store.read(to, MAX_NOTE)).decode("utf-8").removeprefix("\ufeff")
+        is_okf = md.okf_role(to) is not None
+        comp, disk_b = eng.load_or_compile_note(store, to, raw_bytes, brain_name=cfg.name) if is_okf else ({}, b"")
+        if not read_only and is_okf and disk_b is None:
+            with suppress(Error, OSError):
+                eng.sync_notes(store)
+        base_n = {"brain": cfg.name, "kind": comp["kind"] if is_okf else "file", "ref": to}
         if anchor:
-            return {"brain": cfg.name, "kind": "section", "ref": to, **markdown.extract_section(text, anchor, compiled)}
-        return {"brain": cfg.name, "kind": compiled["kind"], "ref": to, "record": compiled, "markdown": text}
-    return {"brain": cfg.name, "kind": "file", "ref": to, "text": text}
+            if not is_okf:
+                raise Error(f"{to}: missing anchor #{anchor}")
+            if outline or line_spec is not None or raw or full:
+                raise InputError("--outline, --lines, --raw, and --full cannot be combined with #anchor")
+            sec = md.extract_section(text, anchor, comp)
+            if "heading" in sec and "text" in sec:
+                hd = sec["heading"]
+                sec = {"anchor": sec["anchor"], "heading": hd, "title": hd["title"], "markdown": sec["text"]}
+            out = {"brain": cfg.name, "kind": "section", "ref": to, **sec}
+        elif (outline or full) and not is_okf:
+            raise InputError("--outline and --full apply only to OKF notes")
+        elif outline:
+            out = {"brain": cfg.name, **md.note_outline(comp)}
+        elif line_spec is not None:
+            out = {**base_n, **md.slice_lines(text, *line_spec)}
+        elif raw or not is_okf:
+            out = {**base_n, ("markdown" if raw else "text"): text}
+        elif full:
+            out = {**base_n, "path": md.compiled_note_path(to), "record": comp}
+        else:
+            meta = {k: v for k, v in comp.items() if k not in _NOTE_STRUCT}
+            u_d = {"status": str(comp.get("status") or ""), "updated": str(comp.get("updated") or ""), "meta": meta}
+            b_d = {k: list(comp.get(k) or ()) for k in ("headings", "tasks", "links")}
+            out = {**base_n, "title": comp["title"], **u_d, **b_d, "text": comp["text"]}
+    proj = {k: out[k] for k in wanted if k in out} if wanted is not None else out
+    return _cap_json_bytes(proj, max_bytes) if max_bytes is not None else proj
 
 
 def load_eval_doc(store: Store, path: str, val: Any, problems: list[str]) -> dict[str, Any] | None:
     """Read, version-check, and schema-validate one `evals/*.{yaml,yml,json}` suite."""
     try:
         raw_bytes = store.read(path, 1 << 20)
-        doc = decode(raw_bytes, path) if path.endswith(".json") else yaml_object(raw_bytes, path)
+        doc = decode(raw_bytes, path) if path.endswith(".json") else _mod("config").yaml_object(raw_bytes, path)
         if not isinstance(doc, dict):
             raise Error(f"{path}: expected a mapping")
-        check_version(doc, path)
-        if val is not None and (errs := validate_instance(val, doc, path)):
+        models.check_version(doc, path)
+        if val is not None and (errs := _mod("schemas").validate_instance(val, doc, path)):
             problems.extend(errs)
             return None
         return doc
@@ -421,38 +476,36 @@ def load_eval_doc(store: Store, path: str, val: Any, problems: list[str]) -> dic
 
 def evaluate(store: Store, target: str = "") -> dict[str, Any]:
     """Run deterministic query evaluations in `evals/*.yaml` and `evals/*.json`."""
-    cfg, val = config.load(store), load_validator(store, "schemas/evals.json", EVALS_SCHEMA)
+    cfg_m, sch_m = _mod("config"), _mod("schemas")
+    cfg, val = cfg_m.load(store), sch_m.load_validator(store, "schemas/evals.json", sch_m.EVALS_SCHEMA)
     problems, results, passed, failed = [], [], 0, 0
     cand_files = [p for p in store.files("evals", skipped=problems) if p.endswith((".yaml", ".yml", ".json"))]
-    if wanted := target.strip():
-        cand_files = [p for p in cand_files if p == wanted or PurePosixPath(p).stem == wanted]
-        if not cand_files:
-            raise InputError(f"no eval file matching {wanted!r}")
-
+    if (w := target.strip()) and not (
+        cand_files := [p for p in cand_files if w in {p, PurePosixPath(p).name, PurePosixPath(p).stem}]
+    ):
+        raise Error(f"no eval file matching {w!r}")
     for path in cand_files:
         if (doc := load_eval_doc(store, path, val, problems)) is None:
             continue
-        for case in cases if isinstance(cases := doc.get("cases"), list) else []:
+        for case in doc["cases"] if isinstance(doc.get("cases"), list) else []:
             if not isinstance(case, dict):
                 continue
             name, eng = str(case["name"]), str(case.get("engine") or "rg")
-            q_str, sc = str(case["query"]), str(case.get("scope") or "")
-            reasons: list[str] = []
+            q_str, sc, reasons = str(case["query"]), str(case.get("scope") or ""), []
             try:
-                if eng == "rg":
-                    items = search_rg(store, q_str, scope=sc, limit=200)["items"]
-                elif eng == "jq":
-                    items = query_jq(store, q_str, scope=sc, limit=500)["items"]
+                if eng in {"rg", "jq"}:
+                    fn = search_rg if eng == "rg" else query_jq
+                    items = fn(store, q_str, scope=sc, limit=200 if eng == "rg" else 500)["items"]
                 elif eng == "read":
                     items = [read_target(store, q_str)]
                 else:
                     raise Error(f"{path}: unsupported eval engine {eng!r}")
                 refs = {str(it.get("ref", "")) for it in items if isinstance(it, dict)}
-                rendered = encode(items).decode("utf-8").lower()
+                rnd = encode(items).decode("utf-8").lower()
                 reasons.extend(f"missing expected ref {r}" for r in (case.get("expect_refs") or []) if r not in refs)
                 reasons.extend(f"matched forbidden ref {b}" for b in (case.get("forbid_refs") or []) if b in refs)
-                exp_txt = case.get("expect_text") or []
-                reasons.extend(f"missing expected text {s!r}" for s in exp_txt if str(s).lower() not in rendered)
+                et = case.get("expect_text") or ()
+                reasons.extend(f"missing expected text {s!r}" for s in et if str(s).lower() not in rnd)
                 if "min_count" in case and len(items) < int(case["min_count"]):
                     reasons.append(f"count {len(items)} < min_count {case['min_count']}")
                 if "max_count" in case and len(items) > int(case["max_count"]):
@@ -461,11 +514,8 @@ def evaluate(store: Store, target: str = "") -> dict[str, Any]:
                     reasons.append("items did not match expect_equals")
             except Error as error:
                 reasons.append(str(error))
-
-            ok = not reasons
-            passed, failed = passed + int(ok), failed + int(not ok)
-            row: dict[str, Any] = {"file": path, "name": name, "engine": eng, "ok": ok}
+            passed, failed = passed + int(not reasons), failed + int(bool(reasons))
+            row = {"file": path, "name": name, "engine": eng, "ok": not reasons}
             results.append({**row, **({"reasons": reasons} if reasons else {})})
-
-    ok_all = failed == 0 and not problems
-    return {"brain": cfg.name, "ok": ok_all, "passed": passed, "failed": failed, "cases": results, "problems": problems}
+    res_a = {"brain": cfg.name, "ok": failed == 0 and not problems, "passed": passed, "failed": failed}
+    return {**res_a, "cases": results, "problems": problems}

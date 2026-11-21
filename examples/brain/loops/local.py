@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal local JSONL inbox/outbox service (`listen [--once]` and `send`) for `services:` and `jobs:`."""
+"""Minimal local JSONL inbox/outbox service (`listen [--once]` and `send`) for `loops:`."""
 
 from __future__ import annotations
 
@@ -167,7 +167,7 @@ def _drain(dir_fd: int) -> None:
 
 def main(argv: list[str]) -> int:
     mode = argv[1] if len(argv) > 1 else ""
-    svc_state = os.environ.get("BF_STATE_DIR") if os.environ.get("BF_TRIGGER") in {None, "service"} else None
+    svc_state = os.environ.get("BF_STATE_DIR") if os.environ.get("BF_TRIGGER") in {None, "daemon"} else None
     dir_fd = _open_state_dir(Path(svc_state or ".bf/local"))
     try:
         if mode == "send":

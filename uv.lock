@@ -35,7 +35,7 @@ wheels = [
 
 [[package]]
 name = "brain-framework"
-version = "29.0.1"
+version = "30.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },
@@ -44,7 +44,6 @@ dependencies = [
     { name = "mcp" },
     { name = "pyyaml" },
     { name = "rich" },
-    { name = "structlog" },
     { name = "watchfiles" },
 ]
 
@@ -69,7 +68,6 @@ requires-dist = [
     { name = "mcp", specifier = ">=2.1.1,<3" },
     { name = "pyyaml", specifier = ">=6.0.3,<7" },
     { name = "rich", specifier = ">=15.0.0,<16" },
-    { name = "structlog", specifier = ">=25.0.0,<27" },
     { name = "watchfiles", specifier = ">=1.1.0,<2" },
 ]
 
@@ -1009,15 +1007,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/48/bb/3d8757f21e9a53d9035c9eb039a777047139a16bfdbedfc7a58241c3d914/starlette-1.10.0.tar.gz", hash = "sha256:b8399098d4c1e3522734f7235dc79b1fc967f96cf139c81e0fa30479e0685f9b", size = 2734356, upload-time = "2026-10-24T15:04:12.342Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/2e/947cfe02def9371c07cd5bf5b6b61c829e9aecb9904db02a66cfafbc1eec/starlette-1.10.0-py3-none-any.whl", hash = "sha256:478c0ab3b4ced6e82719849c118fa406f0278a3499c1a898cd15cd31bdc38ce4", size = 80571, upload-time = "2026-10-24T15:04:10.371Z" },
-]
-
-[[package]]
-name = "structlog"
-version = "26.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/5e/89/b4a0bcfdf4f71a3dea31379f095929613d7e4528a0996bca6aa964cd0dca/structlog-26.1.0.tar.gz", hash = "sha256:f63a716cbd1b1291cf7661de7794b455acfa4c43c5bcf1630e6ad5ddc1adb3b7", size = 1459881, upload-time = "2026-06-06T07:33:39.348Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a9/18/489c97b834dfff9cf2fc2507cede4bcd4b11e67f84bc462acd1992496f86/structlog-26.1.0-py3-none-any.whl", hash = "sha256:e081a26d6c373e6d201eca24eede26d8ffab07f88f477822e679183428d3d91e", size = 73764, upload-time = "2026-06-06T07:33:38.046Z" },
 ]
 
 [[package]]

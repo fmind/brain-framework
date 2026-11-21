@@ -9,7 +9,7 @@
         "tag": { "maxLength": 64, "minLength": 1, "type": "string" },
         "text": { "maxLength": 16384, "type": "string" }
       },
-      "required": ["tag", "id", "text", "section", "meta"],
+      "required": ["tag"],
       "title": "Element",
       "type": "object"
     },
@@ -21,7 +21,7 @@
         "meta": { "$ref": "#/$defs/Meta" },
         "title": { "maxLength": 4096, "type": "string" }
       },
-      "required": ["id", "title", "level", "meta"],
+      "required": ["id", "title", "level"],
       "title": "Heading",
       "type": "object"
     },
@@ -32,9 +32,14 @@
         "kind": { "enum": ["note", "record", "brain", "url"], "type": "string" },
         "meta": { "$ref": "#/$defs/Meta" },
         "section": { "maxLength": 256, "type": "string" },
-        "to": { "maxLength": 8192, "minLength": 1, "type": "string" }
+        "to": {
+          "description": "Note path, memories/<source>/<sha256>.json, bf:// URI, or URL.",
+          "maxLength": 8192,
+          "minLength": 1,
+          "type": "string"
+        }
       },
-      "required": ["to", "kind", "anchor", "meta", "section"],
+      "required": ["to", "kind"],
       "title": "Link",
       "type": "object"
     },
@@ -53,7 +58,7 @@
         "section": { "maxLength": 256, "type": "string" },
         "text": { "maxLength": 4096, "minLength": 1, "type": "string" }
       },
-      "required": ["text", "done", "section", "meta"],
+      "required": ["text", "done"],
       "title": "Task",
       "type": "object"
     }
@@ -62,6 +67,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": true,
   "description": "Unified JSON record schema enforced on compiled Markdown notes and ingested sensor records in memories/.",
+  "if": { "properties": { "kind": { "const": "memory" } }, "required": ["kind"] },
   "properties": {
     "aliases": { "items": { "maxLength": 1024, "minLength": 1, "type": "string" }, "maxItems": 200, "type": "array" },
     "attributes": { "type": "object" },
@@ -72,20 +78,32 @@
     },
     "description": { "maxLength": 16384, "type": "string" },
     "elements": { "items": { "$ref": "#/$defs/Element" }, "type": "array" },
+    "entity": { "maxLength": 4096, "minLength": 1, "type": "string" },
     "headings": { "items": { "$ref": "#/$defs/Heading" }, "type": "array" },
     "id": { "maxLength": 4096, "minLength": 1, "type": "string" },
     "kind": { "enum": ["project", "concept", "action", "memory"], "type": "string" },
     "links": { "items": { "$ref": "#/$defs/Link" }, "maxItems": 2000, "type": "array" },
     "ref": { "maxLength": 4200, "minLength": 1, "type": "string" },
+    "relations": false,
     "sha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
     "source": { "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
+    "sources": {
+      "items": {
+        "additionalProperties": true,
+        "properties": { "resource": { "maxLength": 8192, "minLength": 1, "type": "string" } },
+        "required": ["resource"],
+        "type": "object"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
     "stale_after": {
       "anyOf": [
         { "maximum": 36500, "minimum": 1, "type": "integer" },
         { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" },
         {
           "minLength": 10,
-          "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$",
+          "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$",
           "type": "string"
         }
       ]
@@ -101,18 +119,19 @@
     "tasks": { "items": { "$ref": "#/$defs/Task" }, "type": "array" },
     "text": { "maxLength": 4194304, "type": "string" },
     "time": {
-      "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
+      "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
       "type": "string"
     },
     "title": { "maxLength": 4096, "minLength": 1, "type": "string" },
     "type": { "maxLength": 128, "minLength": 1, "type": "string" },
     "updated": {
-      "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$",
+      "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$",
       "type": "string"
     },
     "url": { "maxLength": 8192, "type": "string" }
   },
-  "required": ["id", "ref", "source", "kind", "title"],
+  "required": ["ref", "source", "kind", "title"],
+  "then": { "required": ["id"] },
   "title": "Record",
   "type": "object"
 }

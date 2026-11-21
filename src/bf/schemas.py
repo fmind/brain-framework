@@ -3,27 +3,32 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Literal
+import threading
+from typing import TYPE_CHECKING, Any, Literal
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError, ValidationError
-from jsonschema.protocols import Validator
-
-from bf.models import DURATION_PAT, DURATION_ZERO_PAT, FORMAT, MAX_SCHEMA, NAME, Error, decode, digest, encode
+from bf import models
+from bf.models import Error, InputError, decode, digest, encode
 from bf.storage import Store
 
+if TYPE_CHECKING:
+    from jsonschema.exceptions import ValidationError
+    from jsonschema.protocols import Validator
+
 Kind = Literal["brain", "record", "concepts", "evals"]
-_DRAFT = "https://json-schema.org/draft/2020-12/schema"
-_BASE = "https://fmind.github.io/brain-framework"
+_DRAFT, _BASE = "https://json-schema.org/draft/2020-12/schema", "https://fmind.github.io/brain-framework"
+_CAL_DATE = (
+    r"[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])"
+    r"|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))"
+)
 _TS_HMS = r"[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})"
-_ISO_DT = rf"^(?:[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}(?:T{_TS_HMS})?)?$"
-_BOOL: dict[str, Any] = {"type": "boolean"}
-_NAME_REF: dict[str, Any] = {"type": "string", "pattern": NAME}
+_ISO_DT = rf"^(?:{_CAL_DATE}(?:T{_TS_HMS})?)?$"
+_OPT_TS = rf"^(?:{_CAL_DATE}T{_TS_HMS})?$"
+_BOOL, _NAME_REF = {"type": "boolean"}, {"type": "string", "pattern": models.NAME}
 
 
-def _s(max_len: int = 4096, *, min_len: int = 0, pat: str = "") -> dict[str, Any]:
-    out: dict[str, Any] = {"type": "string", "maxLength": max_len}
-    return {**out, **({"minLength": min_len} if min_len else {}), **({"pattern": pat} if pat else {})}
+def _s(max_len: int = 4096, min_len: int = 0, pat: str = "") -> dict[str, Any]:
+    ex = {k: v for k, v in (("minLength", min_len), ("pattern", pat)) if v}
+    return {"type": "string", "maxLength": max_len, **ex}
 
 
 def _enum(*values: str) -> dict[str, Any]:
@@ -35,8 +40,8 @@ def _i(min_val: int = 0, max_val: int | None = None) -> dict[str, Any]:
 
 
 def _arr(items: dict[str, Any], *, max_items: int = 0, min_items: int = 0, unique: bool = False) -> dict[str, Any]:
-    extra = {k: v for k, v in (("minItems", min_items), ("maxItems", max_items), ("uniqueItems", unique)) if v}
-    return {"type": "array", "items": items, **extra}
+    ex = {k: v for k, v in (("minItems", min_items), ("maxItems", max_items), ("uniqueItems", unique)) if v}
+    return {"type": "array", "items": items, **ex}
 
 
 def _opt(schema: dict[str, Any]) -> dict[str, Any]:
@@ -45,10 +50,8 @@ def _opt(schema: dict[str, Any]) -> dict[str, Any]:
 
 def _obj(props: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
     out: dict[str, Any] = {"type": "object", "additionalProperties": kw.get("extra", False)}
-    if kw.get("title"):
-        out["title"] = kw["title"]
-    if kw.get("req"):
-        out["required"] = list(kw["req"])
+    ex = (("title", kw.get("title")), ("required", list(kw["req"]) if kw.get("req") else None))
+    out.update({k: v for k, v in ex if v})
     if kw.get("names"):
         out["propertyNames"] = {"pattern": kw["names"]}
     return {**out, "properties": props} if props is not None else out
@@ -58,93 +61,162 @@ def _doc(slug: str, title: str, desc: str, body: dict[str, Any]) -> dict[str, An
     return {"$schema": _DRAFT, "$id": f"{_BASE}/{slug}.schema.json", "title": title, "description": desc, **body}
 
 
-_DURATION = {"anyOf": [_i(1, 315576000), _s(32, pat=DURATION_PAT)]}
-_OVERLAP = {"anyOf": [_i(0, 315576000), _s(32, pat=DURATION_ZERO_PAT)]}
-_TIMEOUT = {"anyOf": [_i(1, 86400), _s(32, pat=DURATION_PAT)]}
-_WATCH_INTERVAL = {"anyOf": [{"type": "number", "minimum": 0.5, "maximum": 3600}, _s(32, pat=DURATION_PAT)]}
-_DEBOUNCE = {"anyOf": [{"type": "number", "minimum": 0.05, "maximum": 60}, _s(32, pat=DURATION_PAT)]}
-_REQUIRES = _arr(_s(256, min_len=1), max_items=32, unique=True)
+_DUR_S = _s(32, pat=models.DURATION_PAT)
+_DURATION = {"anyOf": [_i(1, 315576000), _DUR_S]}
+_OVERLAP = {"anyOf": [_i(0, 315576000), _s(32, pat=models.DURATION_ZERO_PAT)]}
+_TIMEOUT = {"anyOf": [_i(1, 86400), _DUR_S]}
+_WI = {"anyOf": [{"type": "number", "minimum": 0.5, "maximum": 3600}, _DUR_S]}
+_WD = {"anyOf": [{"type": "number", "minimum": 0.05, "maximum": 60}, _DUR_S]}
 _ENV_MAP = _obj(extra=_s(4096), names=r"^[A-Z_][A-Z0-9_]*$")
 _TAG_ITEMS = _arr(_s(128, min_len=1, pat=r"^[^/\\\s]+$"), max_items=200, unique=True)
-_HOOK_ENUM = _enum("pre-commit", "pre-push")
-_ARGV_REF = {"$ref": "#/$defs/Argv"}
-_META_REF = {"$ref": "#/$defs/Meta"}
-_WATCH_PROPS = {"interval": _WATCH_INTERVAL, "debounce": _DEBOUNCE}
-_SCHEDULE = {"anyOf": [_i(1, 315576000), _s(128, min_len=1)]}
-_UNIT_BASE = {"enabled": _BOOL, "requires": _REQUIRES, "env": _ENV_MAP}
-_JOB_IO = {"run": _ARGV_REF, "input": _s(1024, min_len=1), "ingest": {"anyOf": [_NAME_REF, {"$ref": "#/$defs/Ingest"}]}}
-_JOB_OUT = {"action": {"$ref": "#/$defs/Action"}, "schedule": _SCHEDULE}
+_HOOK_ENUM, _ARGV_REF, _META_REF = _enum("pre-commit", "pre-push"), {"$ref": "#/$defs/Argv"}, {"$ref": "#/$defs/Meta"}
+_UNIT_BASE = {"enabled": _BOOL, "requires": _arr(_s(256, min_len=1), max_items=32, unique=True), "env": _ENV_MAP}
+_SCHED_ITEM = {"anyOf": [_i(1, 315576000), _s(128, min_len=1)]}
+_SCHED_ANY = {"anyOf": [_SCHED_ITEM, _arr(_SCHED_ITEM, min_items=1, max_items=16)]}
 _HOOK_ANY = {"anyOf": [_HOOK_ENUM, _arr(_HOOK_ENUM, min_items=1, max_items=2, unique=True)]}
-_JOB_TRIG = {"events": _arr({"$ref": "#/$defs/EventMatch"}, min_items=1, max_items=32), "hook": _HOOK_ANY}
-_JOB_TIMES = {"lookback": _DURATION, "overlap": _OVERLAP, "timeout": _TIMEOUT}
-_JOB_PROPS: dict[str, Any] = {**_JOB_IO, **_JOB_OUT, **_JOB_TRIG, **_JOB_TIMES, **_UNIT_BASE}
-_SVC_PROPS = {"run": _ARGV_REF, "emit": _enum("none", "events", "messages"), **_UNIT_BASE}
-_VER_PROP = {"type": "integer", "const": FORMAT, "description": "Brain configuration format version."}
-_NAME_PROP = {**_NAME_REF, "description": "Stable lowercase identifier for this brain."}
-_BRAIN_HEAD: dict[str, Any] = {"version": _VER_PROP, "name": _NAME_PROP, "timezone": _s(128, min_len=1)}
-_BRAIN_HEAD["brains"] = _opt(_obj(extra=_s(4096, min_len=1), names=NAME))
-_U_KINDS = (("jobs", "Job"), ("services", "Service"))
-_BRAIN_UNITS = {k: _opt(_obj(extra={"$ref": f"#/$defs/{t}"}, names=NAME)) for k, t in _U_KINDS}
-_BRAIN_PROPS: dict[str, Any] = {**_BRAIN_HEAD, "env": _opt(_ENV_MAP), **_BRAIN_UNITS, "watch": _opt(_obj(_WATCH_PROPS))}
+_EMIT_VAL = {"anyOf": [_BOOL, _s(128, min_len=1, pat=models.EVENT_KIND_PAT)]}
+
+_LOOP_PROPS: dict[str, Any] = {
+    "run": _ARGV_REF,
+    "daemon": _BOOL,
+    "input": _s(1024, min_len=1),
+    "action": {"$ref": "#/$defs/Action"},
+    "ingest": {"anyOf": [_NAME_REF, {"$ref": "#/$defs/Ingest"}]},
+    "emit": _EMIT_VAL,
+    "schedule": _SCHED_ANY,
+    "events": _arr({"$ref": "#/$defs/EventMatch"}, min_items=1, max_items=32),
+    "hook": _HOOK_ANY,
+    "lookback": _DURATION,
+    "overlap": _OVERLAP,
+    "timeout": _TIMEOUT,
+    **_UNIT_BASE,
+}
+_CYCLE_ONLY = ("schedule", "events", "hook", "input", "ingest", "action", "lookback", "overlap", "timeout")
+_EMIT_SET = {"required": ["emit"], "properties": {"emit": {"not": {"const": False}}}}
+_NO_ING_ACT = {"not": {"anyOf": [{"required": ["ingest"]}, {"required": ["action"]}]}}
+_IS_DAEMON = {"required": ["daemon"], "properties": {"daemon": {"const": True}}}
+_NO_CYCLE = {"not": {"anyOf": [{"required": [k]} for k in _CYCLE_ONLY]}}
+_LOOP_RULES = [
+    {"not": {"required": ["ingest", "action"]}},
+    {"if": _EMIT_SET, "then": _NO_ING_ACT},
+    {"if": _IS_DAEMON, "then": _NO_CYCLE},
+]
+_BRAIN_PROPS: dict[str, Any] = {
+    "version": {"type": "integer", "const": models.FORMAT, "description": "Brain configuration format version."},
+    "name": {**_NAME_REF, "description": "Stable lowercase identifier for this brain."},
+    "timezone": _s(128, min_len=1),
+    "brains": _opt(_obj(extra=_s(4096, min_len=1), names=models.NAME)),
+    "env": _opt(_ENV_MAP),
+    "loops": _opt(_obj(extra={"$ref": "#/$defs/Loop"}, names=models.NAME)),
+    "watch": _opt(_obj({"interval": _WI, "debounce": _WD, "concurrency": _i(1, 32)})),
+}
 _INGEST_PROPS = {"source": _NAME_REF, "mode": _enum("upsert", "snapshot"), "allow_removal": _BOOL}
-_EV_MATCH_PROPS = {"kind": _s(128, min_len=1), "source": _s(128, min_len=1), "filter": _s(2048, min_len=1)}
-_ARGV_DEF = {"title": "Argv", **_arr(_s(4096, min_len=1), min_items=1, max_items=64)}
-_DEFS_A = {"Action": _obj({"keep": _i(1, 1000)}, req=("keep",), title="Action"), "Argv": _ARGV_DEF}
-_EV_DEF, _ING_DEF = _obj(_EV_MATCH_PROPS, title="EventMatch"), _obj(_INGEST_PROPS, req=("source",), title="Ingest")
-_DEFS_B = {"EventMatch": _EV_DEF, "Ingest": _ING_DEF}
-_JOB_DEF = {**_obj(_JOB_PROPS, req=("run",), title="Job"), "not": {"required": ["ingest", "action"]}}
-_BRAIN_DEFS = {**_DEFS_A, **_DEFS_B, "Job": _JOB_DEF, "Service": _obj(_SVC_PROPS, req=("run",), title="Service")}
-_BRAIN_BODY = {**_obj(_BRAIN_PROPS, req=("version", "name")), "$defs": _BRAIN_DEFS}
-BRAIN_SCHEMA = _doc("bf", "Config", "Brain Framework configuration and orchestration (bf.yaml).", _BRAIN_BODY)
+_EVENT_PROPS = {"kind": _s(128, min_len=1), "source": _s(128, min_len=1), "filter": _s(2048, min_len=1)}
+_BRAIN_DEFS = {
+    "Action": _obj({"keep": _i(1, 1000)}, req=("keep",), title="Action"),
+    "Argv": {"title": "Argv", **_arr(_s(4096, min_len=1), min_items=1, max_items=64)},
+    "EventMatch": _obj(_EVENT_PROPS, title="EventMatch"),
+    "Ingest": _obj(_INGEST_PROPS, req=("source",), title="Ingest"),
+    "Loop": {**_obj(_LOOP_PROPS, req=("run",), title="Loop"), "allOf": _LOOP_RULES},
+}
+BRAIN_SCHEMA = _doc(
+    "bf",
+    "Config",
+    "Brain Framework configuration and loop orchestration (bf.yaml).",
+    {**_obj(_BRAIN_PROPS, req=("version", "name")), "$defs": _BRAIN_DEFS},
+)
 
-_STALE_ANY = [_i(1, 36500), _s(32, pat=DURATION_PAT), {"type": "string", "minLength": 10, "pattern": _ISO_DT}]
-_REC_PROPS: dict[str, Any] = {"id": _s(4096, min_len=1), "ref": _s(4200, min_len=1), "source": _NAME_REF}
-_REC_PROPS.update({"kind": _enum("project", "concept", "action", "memory"), "title": _s(4096, min_len=1)})
-_REC_PROPS.update({"text": _s(4 << 20), "type": _s(128, min_len=1), "status": _s(128, min_len=1)})
-_OPT_TS = rf"^(?:[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}T{_TS_HMS})?$"
-_REC_PROPS.update({"summary": _s(16384), "description": _s(16384), "url": _s(8192)})
-_REC_PROPS["time"] = {"type": "string", "pattern": _OPT_TS}
-_REC_PROPS.update({"updated": {"type": "string", "pattern": _ISO_DT}, "stale_after": {"anyOf": _STALE_ANY}})
-_REC_PROPS.update({"tags": _TAG_ITEMS, "aliases": _arr(_s(1024, min_len=1), max_items=200)})
-_REC_PROPS.update({"attributes": {"type": "object"}, "headings": _arr({"$ref": "#/$defs/Heading"})})
-_REC_PROPS["links"] = _arr({"$ref": "#/$defs/Link"}, max_items=2000)
-_REC_PROPS.update({"elements": _arr({"$ref": "#/$defs/Element"}), "tasks": _arr({"$ref": "#/$defs/Task"})})
-_REC_PROPS["attrs"] = {"type": "object", "propertyNames": _s(256, min_len=1), "additionalProperties": _META_REF}
-_REC_PROPS["sha256"] = {"type": "string", "pattern": r"^[0-9a-f]{64}$"}
-
-_LINK_PROPS = {"to": _s(8192, min_len=1), "kind": _enum("note", "record", "brain", "url"), "anchor": _s(2048)}
-_LINK_PROPS.update({"meta": _META_REF, "section": _s(256)})
-_ELEM_PROPS = {"tag": _s(64, min_len=1), "id": _s(256), "text": _s(16384), "section": _s(256), "meta": _META_REF}
-_HEAD_PROPS = {"id": _s(256, min_len=1), "title": _s(4096), "level": _i(1, 6), "meta": _META_REF}
-_TASK_PROPS = {"id": _s(256, min_len=1), "text": _s(4096, min_len=1), "done": _BOOL, "section": _s(256)}
-_TASK_PROPS["meta"] = _META_REF
-_META_DEF = _obj(extra=_s(4096), title="Meta", names=r"^[A-Za-z_][A-Za-z0-9_.-]*$")
-_RD_A = {"Meta": _META_DEF, "Heading": _obj(_HEAD_PROPS, req=("id", "title", "level", "meta"), title="Heading")}
-_RD_B = {"Link": _obj(_LINK_PROPS, req=("to", "kind", "anchor", "meta", "section"), title="Link")}
-_RD_C = {"Element": _obj(_ELEM_PROPS, req=("tag", "id", "text", "section", "meta"), title="Element")}
-_RD_D = {"Task": _obj(_TASK_PROPS, req=("text", "done", "section", "meta"), title="Task")}
-_REC_DEFS = {**_RD_A, **_RD_B, **_RD_C, **_RD_D}
-_REC_DESC = "Unified JSON record schema enforced on compiled Markdown notes and ingested sensor records in memories/."
-_REC_REQ = ("id", "ref", "source", "kind", "title")
-RECORD_SCHEMA = _doc("record", "Record", _REC_DESC, {**_obj(_REC_PROPS, req=_REC_REQ, extra=True), "$defs": _REC_DEFS})
-
-_CONCEPT_PROPS: dict[str, Any] = {"type": {"type": "string", "pattern": r"^[a-z][a-z0-9-]{0,63}$"}}
-_CONCEPT_PROPS.update({"status": _enum("draft", "stable", "deprecated"), "summary": _s(16384)})
-_CONCEPT_PROPS.update({"updated": {"type": "string", "pattern": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}, "tags": _TAG_ITEMS})
-_CONCEPT_PROPS["sources"] = _arr(_obj({"resource": _s(8192, min_len=1)}, req=("resource",), extra=True), max_items=200)
-_CONCEPT_DESC = "User-customizable schema enforced on concept records compiled from concepts/ (schemas/concepts.json)."
-CONCEPTS_SCHEMA = _doc("concepts", "Concept", _CONCEPT_DESC, _obj(_CONCEPT_PROPS, req=("type", "status"), extra=True))
-
-_CASE_PROPS: dict[str, Any] = {"name": _s(256, min_len=1), "engine": _enum("rg", "jq", "read")}
-_CASE_PROPS.update({"query": _s(8192, min_len=1), "scope": _s(1024), "expect_refs": _arr(_s(4096, min_len=1))})
-_CASE_PROPS.update({"forbid_refs": _arr(_s(4096, min_len=1)), "expect_text": _arr(_s(4096, min_len=1))})
-_CASE_PROPS.update({"min_count": _i(0), "max_count": _i(0), "expect_equals": {}})
-_EV_CASES = _arr(_obj(_CASE_PROPS, req=("name", "query")), max_items=500)
-_EV_DESC = "Deterministic query evaluations in evals/ (schemas/evals.json)."
-_EVAL_BODY = _obj({"version": {"type": "integer", "const": FORMAT}, "cases": _EV_CASES}, req=("version", "cases"))
-EVALS_SCHEMA = _doc("evals", "Eval", _EV_DESC, _EVAL_BODY)
-_SCHEMAS: dict[Kind, dict[str, Any]] = {"brain": BRAIN_SCHEMA, "record": RECORD_SCHEMA, "concepts": CONCEPTS_SCHEMA}
-_SCHEMAS["evals"] = EVALS_SCHEMA
+_SOURCES_PROP = _arr(_obj({"resource": _s(8192, min_len=1)}, req=("resource",), extra=True), max_items=200)
+_STALE_ANY = [_i(1, 36500), _DUR_S, {"type": "string", "minLength": 10, "pattern": _ISO_DT}]
+_RECORD_PROPS: dict[str, Any] = {
+    **dict.fromkeys(("id", "title", "entity"), _s(4096, min_len=1)),
+    **dict.fromkeys(("type", "status"), _s(128, min_len=1)),
+    **dict.fromkeys(("summary", "description"), _s(16384)),
+    "ref": _s(4200, min_len=1),
+    "source": _NAME_REF,
+    "kind": _enum("project", "concept", "action", "memory"),
+    "text": _s(4 << 20),
+    "url": _s(8192),
+    "time": {"type": "string", "pattern": _OPT_TS},
+    "updated": {"type": "string", "pattern": _ISO_DT},
+    "stale_after": {"anyOf": _STALE_ANY},
+    "tags": _TAG_ITEMS,
+    "sources": _SOURCES_PROP,
+    "aliases": _arr(_s(1024, min_len=1), max_items=200),
+    "attributes": {"type": "object"},
+    "headings": _arr({"$ref": "#/$defs/Heading"}),
+    "links": _arr({"$ref": "#/$defs/Link"}, max_items=2000),
+    **{f"{n.lower()}s": _arr({"$ref": f"#/$defs/{n}"}) for n in ("Element", "Task")},
+    "attrs": {"type": "object", "propertyNames": _s(256, min_len=1), "additionalProperties": _META_REF},
+    "sha256": {"type": "string", "pattern": r"^[0-9a-f]{64}$"},
+    "relations": False,
+}
+_LINK_TO = {**_s(8192, min_len=1), "description": "Note path, memories/<source>/<sha256>.json, bf:// URI, or URL."}
+_LINK_P = {
+    "to": _LINK_TO,
+    "kind": _enum("note", "record", "brain", "url"),
+    "anchor": _s(2048),
+    "meta": _META_REF,
+    "section": _s(256),
+}
+_HEAD_P = {"id": _s(256, min_len=1), "title": _s(4096), "level": _i(1, 6), "meta": _META_REF}
+_ELEM_P = {"tag": _s(64, min_len=1), "id": _s(256), "text": _s(16384), "section": _s(256), "meta": _META_REF}
+_TASK_P = {"id": _s(256, min_len=1), "text": _s(4096, min_len=1), "done": _BOOL, "section": _s(256), "meta": _META_REF}
+_REC_BODY = {
+    **_obj(_RECORD_PROPS, req=("ref", "source", "kind", "title"), extra=True),
+    "if": {"required": ["kind"], "properties": {"kind": {"const": "memory"}}},
+    "then": {"required": ["id"]},
+    "$defs": {
+        "Meta": _obj(extra=_s(4096), title="Meta", names=r"^[A-Za-z_][A-Za-z0-9_.-]*$"),
+        "Heading": _obj(_HEAD_P, req=("id", "title", "level"), title="Heading"),
+        "Link": _obj(_LINK_P, req=("to", "kind"), title="Link"),
+        "Element": _obj(_ELEM_P, req=("tag",), title="Element"),
+        "Task": _obj(_TASK_P, req=("text", "done"), title="Task"),
+    },
+}
+RECORD_SCHEMA = _doc(
+    "record",
+    "Record",
+    "Unified JSON record schema enforced on compiled Markdown notes and ingested sensor records in memories/.",
+    _REC_BODY,
+)
+_CONCEPT_PROPS = {
+    "type": {"type": "string", "pattern": r"^[a-z][a-z0-9-]{0,63}$"},
+    "status": _enum("draft", "stable", "deprecated"),
+    "summary": _s(16384),
+    "updated": {"type": "string", "pattern": rf"^{_CAL_DATE}$"},
+    "tags": _TAG_ITEMS,
+    "sources": _SOURCES_PROP,
+}
+CONCEPTS_SCHEMA = _doc(
+    "concepts",
+    "Concept",
+    "User-customizable schema enforced on concept records compiled from concepts/ (schemas/concepts.json).",
+    _obj(_CONCEPT_PROPS, req=("type", "status"), extra=True),
+)
+_S_ARR = _arr(_s(4096, min_len=1))
+_CASE_PROPS: dict[str, Any] = {
+    "name": _s(256, min_len=1),
+    "engine": _enum("rg", "jq", "read"),
+    "query": _s(8192, min_len=1),
+    "scope": _s(1024),
+    **dict.fromkeys(("expect_refs", "forbid_refs", "expect_text"), _S_ARR),
+    **dict.fromkeys(("min_count", "max_count"), _i(0)),
+    "expect_equals": {},
+}
+_EVAL_PROPS = {
+    "version": {"type": "integer", "const": models.FORMAT},
+    "cases": _arr(_obj(_CASE_PROPS, req=("name", "query")), max_items=500),
+}
+EVALS_SCHEMA = _doc(
+    "evals", "Eval", "Deterministic query evaluations in evals/.", _obj(_EVAL_PROPS, req=("version", "cases"))
+)
+_SCHEMAS: dict[Kind, dict[str, Any]] = {
+    "brain": BRAIN_SCHEMA,
+    "record": RECORD_SCHEMA,
+    "concepts": CONCEPTS_SCHEMA,
+    "evals": EVALS_SCHEMA,
+}
 
 
 def document(kind: Kind) -> dict[str, Any]:
@@ -152,8 +224,40 @@ def document(kind: Kind) -> dict[str, Any]:
     return copy.deepcopy(_SCHEMAS[kind])
 
 
+def get_schema(name: str) -> dict[str, Any]:
+    """Return a deep copy of a built-in schema by CLI name (`bf`, `record`, `concepts`, `evals`)."""
+    key = name.strip().lower().removesuffix(".json").removesuffix(".schema")
+    if (kind := "brain" if key == "bf" else key) not in _SCHEMAS:
+        raise InputError(f"unknown schema {name!r}; choose bf, record, concepts, or evals")
+    return document(kind)
+
+
+def export_schemas() -> dict[str, dict[str, Any]]:
+    """Return all built-in schemas keyed by workspace name (`bf`, `record`, `concepts`, `evals`)."""
+    return {("bf" if k == "brain" else k): document(k) for k in ("brain", "record", "concepts", "evals")}
+
+
+def schema_digest(raw: bytes | dict[str, Any]) -> str:
+    """Return the SHA-256 hex digest of raw schema bytes or a schema mapping."""
+    return digest(raw if isinstance(raw, bytes) else encode(raw))
+
+
+def schemas_digests(store: Store, *, skipped: list[str] | None = None) -> dict[str, str]:
+    """Return `{schema_key: sha256, ..., '__all__': sha256}` across built-in and `schemas/*.json` files."""
+    out = {k: schema_digest(doc) for k, doc in export_schemas().items()}
+    for path in store.files("schemas", skipped=skipped):
+        if path.count("/") == 1 and path.endswith(".json"):
+            stem = path.removeprefix("schemas/").removesuffix(".json")
+            out["bf" if stem == "bf.schema" else stem] = digest(store.read(path, models.MAX_SCHEMA))
+    out["__all__"] = digest(encode(out))
+    return out
+
+
 def compile_schema(raw: object, label: str) -> Validator:
     """Validate that `raw` is a legal Draft 2020-12 JSON Schema object and return its validator."""
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import SchemaError
+
     if not isinstance(raw, dict):
         raise Error(f"{label}: JSON Schema must be a JSON object")
     try:
@@ -165,27 +269,34 @@ def compile_schema(raw: object, label: str) -> Validator:
 
 
 _VALIDATORS: dict[str, Validator] = {}
+_VALIDATORS_LOCK = threading.Lock()
 
 
 def load_validator(store: Store, path: str, fallback: dict[str, Any] | None = None) -> Validator | None:
     """Load and compile `path` from `store`, falling back to `fallback` when the file is absent."""
+    raw: bytes | None = None
     try:
-        raw: bytes | None = store.read(path, MAX_SCHEMA)
+        raw = store.read(path, models.MAX_SCHEMA)
     except FileNotFoundError:
         if fallback is None:
             return None
-        raw = None
     key = f"fallback:{digest(encode(fallback))}" if raw is None else digest(raw)
-    if (cached := _VALIDATORS.get(key)) is None:
-        if len(_VALIDATORS) >= 64:
-            _VALIDATORS.pop(next(iter(_VALIDATORS)))
-        _VALIDATORS[key] = cached = compile_schema(fallback if raw is None else decode(raw, path), path)
+    with _VALIDATORS_LOCK:
+        cached = _VALIDATORS.get(key)
+    if cached is None:
+        compiled = compile_schema(fallback if raw is None else decode(raw, path), path)
+        with _VALIDATORS_LOCK:
+            if len(_VALIDATORS) >= 64:
+                _VALIDATORS.pop(next(iter(_VALIDATORS)))
+            _VALIDATORS[key] = cached = compiled
     return cached
 
 
 def _describe_error(error: ValidationError) -> str:
     loc = ".".join(str(part) for part in error.absolute_path)
     prefix, rule, val = (f"{loc}: " if loc else ""), str(error.validator), error.validator_value
+    if error.schema is False:
+        return f"{prefix}property is forbidden"
     if rule == "required" and isinstance(val, list):
         missing = [k for k in val if not isinstance(error.instance, dict) or k not in error.instance]
         return f"{prefix}missing required {', '.join(repr(k) for k in missing)}"
@@ -194,16 +305,20 @@ def _describe_error(error: ValidationError) -> str:
         return f"{prefix}unknown property {', '.join(repr(k) for k in sorted(set(error.instance) - allowed))}"
     if rule in {"minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems"}:
         return f"{prefix}violates {rule} {val}"
-    t1 = {"type": f"expected type {val}", "enum": f"must be one of {val}", "const": f"must equal {val!r}"}
-    t2 = {"pattern": f"does not match pattern {val}", "uniqueItems": "items must be unique"}
-    table = {**t1, **t2, "propertyNames": "invalid property name", "not": "conflicting properties"}
+    table = {
+        "type": f"expected type {val}",
+        "enum": f"must be one of {val}",
+        "const": f"must equal {val!r}",
+        "pattern": f"does not match pattern {val}",
+        "uniqueItems": "items must be unique",
+        "propertyNames": "invalid property name",
+        "not": "conflicting properties",
+    }
     return f"{prefix}{table.get(rule, f'failed schema rule {rule}')}"
 
 
 def validate_instance(validator: Validator, instance: object, label: str) -> list[str]:
     """Validate `instance` and return up to 5 sanitized diagnostic strings without echoing values."""
     errs = sorted(validator.iter_errors(instance), key=lambda e: ([str(p) for p in e.absolute_path], str(e.validator)))
-    if not errs:
-        return []
-    messages = list(dict.fromkeys(f"{label}: {_describe_error(err)}" for err in errs))
-    return [*messages[:5], f"{label}: and {len(messages) - 5} more schema errors"] if len(messages) > 5 else messages
+    msgs = list(dict.fromkeys(f"{label}: {_describe_error(err)}" for err in errs))
+    return [*msgs[:5], f"{label}: and {len(msgs) - 5} more schema errors"] if len(msgs) > 5 else msgs

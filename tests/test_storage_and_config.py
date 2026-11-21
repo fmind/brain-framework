@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -26,12 +29,19 @@ def test_models_sanitization_json_and_dates() -> None:
     with pytest.raises(Error, match="forbidden control"):
         models.clean_text("bad\x00byte")
 
+    assert models.FORMAT == 15
     assert not models.invisible("plain-ascii")
     assert not models.invisible("éàü")
     assert models.invisible("bidir\u202eattack")
     assert "\\u001b" in models.printable("esc\x1b[31m")
     assert b"\\u202e" in models.terminal({"msg": "rtl\u202e"})
     assert models.terminal({"msg": "ok"}) == b'{"msg":"ok"}\n'
+    line = models.log_line("evt.ok", severity="warn", time_iso="2026-11-15T10:00:00Z", drop=None, msg="rtl\u202e")
+    assert line.endswith(b"\n")
+    assert b"\\u202e" in line
+    log_obj = json.loads(line)
+    assert log_obj == {"time": "2026-11-15T10:00:00Z", "severity": "WARN", "message": "evt.ok", "msg": "rtl\u202e"}
+    assert "drop" not in log_obj
 
     with pytest.raises(Error, match="finite UTF-8"):
         models.encode({"bad": float("nan")})
@@ -100,6 +110,9 @@ def test_check_version_rejects_missing_bool_and_wrong_versions() -> None:
         models.check_version({}, "bf.yaml")
     with pytest.raises(FormatError, match="declares version 11"):
         models.check_version({"version": 11}, "bf.yaml")
+    for legacy in (13, 14):
+        with pytest.raises(FormatError, match=rf"declares version {legacy}"):
+            models.check_version({"version": legacy}, "bf.yaml")
     with pytest.raises(FormatError, match="declares an invalid version"):
         models.check_version({"version": True}, "bf.yaml")
     with pytest.raises(FormatError, match="declares an invalid version"):
@@ -177,12 +190,23 @@ def test_store_containment_symlinks_special_files_and_locks(tmp_path: Path, monk
     assert skipped_file
     assert "expected a directory" in skipped_file[0]
 
-    store.delete("notes/a.txt")
+    store.delete("notes/a.txt", durable=False)
     assert not store.exists("notes/a.txt")
+    store.sync_dirs([])
+    store.sync_dirs(["notes"])
 
     # Scan limits (MAX_FILES and 64-level directory depth).
     store.write("many/f1.txt", b"1", durable=False)
     store.write("many/f2.txt", b"2", durable=False)
+    store.sync_dirs(["many", "many", ""])
+    with pytest.raises(Error, match="symlinks and special files"):
+        store.sync_dirs(["linked-dir"])
+    with pytest.raises(Error, match="expected a directory, found a file"):
+        store.sync_dirs(["plain-file"])
+    with pytest.raises(Error, match="normalized brain-relative path"):
+        store.sync_dirs(["../escape"])
+    with pytest.raises(FileNotFoundError):
+        store.sync_dirs(["missing-dir"])
     monkeypatch.setattr("bf.storage.MAX_FILES", 1)
     with pytest.raises(Error, match="1-entry scan limit"):
         store.files("many")
@@ -343,13 +367,13 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     with pytest.raises(Error, match="percent-encoding"):
         config.resolve_brain(s1, cfg1, "%FF")
 
-    # Jobs, services (`emit: none | events | messages`), humanized durations, cron schedule, env mapping, and .env loading in `bf.yaml`.
+    # Unified loops (cycle + daemon, `emit: true | <kind>`, multi-schedule, humanized durations, cron, env, .env).
     rich_b = tmp_path / "rich"
     rich_b.mkdir()
     (rich_b / "bf.yaml").write_text(
         f"version: {models.FORMAT}\nname: rich\n"
         "timezone: Europe/Paris\nenv:\n  GWS_DIR: '{{home}}/.config/gws'\n  EMPTY_VAR: ''\n"
-        "jobs:\n"
+        "loops:\n"
         "  sync:\n"
         "    run: [echo, hi]\n"
         "    ingest:\n      source: sync-src\n      mode: snapshot\n      allow_removal: true\n"
@@ -359,40 +383,47 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
         "    timeout: 2m\n"
         "    hook: pre-commit\n"
         "    env:\n      EXTRA_VAR: custom\n"
-        "  digest:\n    run: [claude, -p, '{{input}}']\n    input: prompts/digest.md\n    schedule: '0 8 * * *'\n"
+        "  digest:\n"
+        "    run: [claude, -p, '{{input}}']\n"
+        "    input: prompts/digest.md\n"
+        "    schedule:\n      - 1h\n      - '0 8 * * *'\n"
+        "    emit: true\n"
         "  short-ing:\n    run: [echo, '[]']\n    ingest: simple\n"
-        "services:\n"
-        "  chat:\n    run: [echo, listen]\n    emit: messages\n"
-        "  daemon:\n    run: [echo, serve]\n"
-        "watch:\n  interval: 1s\n  debounce: 250ms\n"
+        "  chat:\n    run: [echo, listen]\n    daemon: true\n    emit: loop.message\n"
+        "  daemon:\n    run: [echo, serve]\n    daemon: true\n"
+        "watch:\n  interval: 1s\n  debounce: 250ms\n  concurrency: 8\n"
     )
     rich_store = Store(rich_b)
     rich_cfg = config.load(rich_store)
     assert rich_cfg.timezone == "Europe/Paris"
     assert rich_cfg.env == {"GWS_DIR": "{{home}}/.config/gws", "EMPTY_VAR": ""}
-    assert rich_cfg.jobs["sync"].every == 600
-    assert rich_cfg.jobs["digest"].cron == "0 8 * * *"
-    assert rich_cfg.jobs["sync"].lookback == 172_800
-    assert rich_cfg.jobs["sync"].overlap == 300
-    assert rich_cfg.jobs["sync"].timeout == 120
-    assert (rich_cfg.jobs["sync"].ingest, rich_cfg.jobs["sync"].mode, rich_cfg.jobs["sync"].allow_removal) == (
+    assert rich_cfg.loops["sync"].schedules[0].every == 600
+    assert [(s.every, s.cron) for s in rich_cfg.loops["digest"].schedules] == [(3600, ""), (None, "0 8 * * *")]
+    assert rich_cfg.loops["digest"].emit == "loop.event"
+    assert rich_cfg.loops["sync"].lookback == 172_800
+    assert rich_cfg.loops["sync"].overlap == 300
+    assert rich_cfg.loops["sync"].timeout == 120
+    assert (rich_cfg.loops["sync"].ingest, rich_cfg.loops["sync"].mode, rich_cfg.loops["sync"].allow_removal) == (
         "sync-src",
         "snapshot",
         True,
     )
-    assert rich_cfg.jobs["sync"].hooks == ("pre-commit",)
-    assert rich_cfg.jobs["sync"].env == {"GWS_DIR": "{{home}}/.config/gws", "EMPTY_VAR": "", "EXTRA_VAR": "custom"}
-    assert rich_cfg.jobs["digest"].input == "prompts/digest.md"
-    assert (rich_cfg.jobs["short-ing"].ingest, rich_cfg.jobs["short-ing"].mode) == ("simple", "upsert")
-    assert rich_cfg.services["chat"].emit == "messages"
-    assert rich_cfg.services["chat"].env == {"GWS_DIR": "{{home}}/.config/gws", "EMPTY_VAR": ""}
-    assert rich_cfg.services["daemon"].run == ("echo", "serve")
-    assert rich_cfg.services["daemon"].emit == "none"
-    assert (rich_cfg.watch.interval, rich_cfg.watch.debounce_ms) == (1.0, 250)
+    assert rich_cfg.loops["sync"].hooks == ("pre-commit",)
+    assert rich_cfg.loops["sync"].env == {"EXTRA_VAR": "custom"}
+    assert rich_cfg.loops["digest"].input == "prompts/digest.md"
+    assert (rich_cfg.loops["short-ing"].ingest, rich_cfg.loops["short-ing"].mode) == ("simple", "upsert")
+    assert rich_cfg.loops["chat"].daemon is True
+    assert rich_cfg.loops["chat"].emit == "loop.message"
+    assert rich_cfg.loops["chat"].env == {}
+    assert rich_cfg.loops["daemon"].daemon is True
+    assert rich_cfg.loops["daemon"].run == ("echo", "serve")
+    assert rich_cfg.loops["daemon"].emit == ""
+    assert (rich_cfg.watch.interval, rich_cfg.watch.debounce_ms, rich_cfg.watch.concurrency) == (1.0, 250, 8)
     sec_b = tmp_path / "sec-watch"
     sec_b.mkdir()
     (sec_b / "bf.yaml").write_text(f"version: {models.FORMAT}\nname: sec\nwatch:\n  debounce: 1\n")
     assert config.load(Store(sec_b)).watch.debounce_ms == 1000
+    assert config.load(Store(sec_b)).watch.concurrency == 4
 
     # Optional gitignored `.env` loading + edge cases:
     assert config.load_dotenv(rich_store) == {}
@@ -402,6 +433,7 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
         b'QUOTED="a\\"b\\\\c" # double-quote comment\n'
         b'SLASH="trailing\\\\"\n'
         b"PLAIN=val # inline comment\nEMPTY=\n",
+        mode=0o600,
     )
     assert config.load_dotenv(rich_store) == {
         "API_TOKEN": 'lit"quote',
@@ -410,6 +442,9 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
         "PLAIN": "val",
         "EMPTY": "",
     }
+    rich_store.write(".env", b"PLAIN=val\n", mode=0o644)
+    with pytest.raises(Error, match="mode 600"):
+        config.load_dotenv(rich_store)
     for bad_env_bytes, env_err in (
         (b"\xff\xfe", "not valid UTF-8"),
         (b"NO_EQUALS\n", "invalid environment assignment"),
@@ -420,47 +455,63 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
         (b'MID_QUOTE="a" "b"\n', "unclosed quote"),
         (b"SINGLE_MID='a' 'b'\n", "unclosed quote"),
     ):
-        rich_store.write(".env", bad_env_bytes)
+        rich_store.write(".env", bad_env_bytes, mode=0o600)
         with pytest.raises(Error, match=env_err):
             config.load_dotenv(rich_store)
+    cache_b = tmp_path / "reserved-cache-loop"
+    cache_b.mkdir()
+    (cache_b / "bf.yaml").write_text(f"version: {models.FORMAT}\nname: rc\nloops:\n  cache:\n    run: [echo]\n")
+    with pytest.raises(Error, match="loop name 'cache' is reserved"):
+        config.load(Store(cache_b))
 
     for idx, (bad_yaml, err_match) in enumerate(
         (
             (f"version: {models.FORMAT}\nname: badtz\ntimezone: Not/AZone\n", "unknown IANA timezone"),
             (f"version: {models.FORMAT}\nname: baddef\ndefaults:\n  post: chat\n", "unknown property 'defaults'"),
-            (f"version: {models.FORMAT}\nname: noexec\njobs:\n  j1:\n    schedule: 5m\n", "missing required 'run'"),
+            (f"version: {models.FORMAT}\nname: noexec\nloops:\n  l1:\n    schedule: 5m\n", "missing required 'run'"),
             (
-                f"version: {models.FORMAT}\nname: badcron\njobs:\n  j1:\n    run: [echo]\n    schedule: 'not a cron'\n",
+                f"version: {models.FORMAT}\nname: badcron\nloops:\n  l1:\n    run: [echo]\n    schedule: 'not a cron'\n",
                 "duration .*, @macro, or 5-field cron",
             ),
             (
-                f"version: {models.FORMAT}\nname: resing\njobs:\n  j1:\n    run: [echo]\n    ingest: concepts\n",
+                f"version: {models.FORMAT}\nname: resing\nloops:\n  l1:\n    run: [echo]\n    ingest: concepts\n",
                 "reserved",
             ),
             (
-                f"version: {models.FORMAT}\nname: ingact\njobs:\n  j1:\n    run: [echo]\n    ingest: x\n    action:\n      keep: 1\n",
+                f"version: {models.FORMAT}\nname: ingact\nloops:\n  l1:\n    run: [echo]\n    ingest: x\n    action:\n      keep: 1\n",
                 "conflicting properties",
             ),
             (
-                f"version: {models.FORMAT}\nname: jobch\njobs:\n  j1:\n    run: [echo]\n    channel: c1\n",
-                "unknown property 'channel'",
+                f"version: {models.FORMAT}\nname: ingemit\nloops:\n  l1:\n    run: [echo]\n    ingest: x\n    emit: true\n",
+                "conflicting properties",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: dsched\nloops:\n  l1:\n    run: [echo]\n    daemon: true\n    schedule: 1h\n",
+                "conflicting properties",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: dinp\nloops:\n  l1:\n    run: [echo]\n    daemon: true\n    input: prompts/x.md\n",
+                "conflicting properties",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: legjobs\njobs:\n  j1:\n    run: [echo]\n",
+                "unknown property 'jobs'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: legsvcs\nservices:\n  s1:\n    run: [echo]\n",
+                "unknown property 'services'",
             ),
             (
                 f"version: {models.FORMAT}\nname: badch\nchannels:\n  c1:\n    listen: [echo]\n",
                 "unknown property 'channels'",
             ),
-            (f"version: {models.FORMAT}\nname: nosrv\nservices:\n  s1:\n    enabled: true\n", "missing required 'run'"),
             (
-                f"version: {models.FORMAT}\nname: bademit\nservices:\n  s1:\n    run: [echo]\n    emit: invalid\n",
-                "must be one of",
+                f"version: {models.FORMAT}\nname: bademit\nloops:\n  s1:\n    run: [echo]\n    emit: BAD_KIND\n",
+                "failed schema rule anyOf",
             ),
             (
-                f"version: {models.FORMAT}\nname: dupunit\njobs:\n  u1:\n    run: [echo]\nservices:\n  u1:\n    run: [echo]\n",
-                "declared in multiple sections",
-            ),
-            (
-                f"version: {models.FORMAT}\nname: resev\njobs:\n  events:\n    run: [echo]\n",
-                "unit name 'events' is reserved",
+                f"version: {models.FORMAT}\nname: resev\nloops:\n  events:\n    run: [echo]\n",
+                "loop name 'events' is reserved",
             ),
             (
                 f"version: {models.FORMAT}\nname: resenv\nenv:\n  BF_BRAIN: /x\n",
@@ -468,14 +519,20 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
             ),
             (f"version: {models.FORMAT}\nname: badiv\nwatch:\n  interval: 100ms\n", "between 500ms and 1h"),
             (f"version: {models.FORMAT}\nname: baddeb\nwatch:\n  debounce: 10ms\n", "between 50ms and 60s"),
+            (f"version: {models.FORMAT}\nname: badconc\nwatch:\n  concurrency: 0\n", "violates minimum 1"),
+            (f"version: {models.FORMAT}\nname: badconc2\nwatch:\n  concurrency: 64\n", "violates maximum 32"),
             (f"version: {models.FORMAT}\nname: badenvlist\nenv: [A]\n", "expected type"),
             (f"version: {models.FORMAT}\nname: badenvk\nenv:\n  1BAD: v\n", "does not match pattern"),
             (f"version: {models.FORMAT}\nname: badenvv\nenv:\n  OK_K: 123\n", "expected type string"),
             (
-                f"version: {models.FORMAT}\nname: unsatcron\njobs:\n  j1:\n    run: [echo]\n    schedule: '0 0 31 2 *'\n",
+                f"version: {models.FORMAT}\nname: unsatcron\nloops:\n  l1:\n    run: [echo]\n    schedule: '0 0 31 2 *'\n",
                 "duration .*, @macro, or 5-field cron",
             ),
             (f'version: {models.FORMAT}\nname: ctlbr\nbrains:\n  sib: "/tmp/\\u0007bad"\n', "no control characters"),
+            (
+                f"version: {models.FORMAT}\nname: emact\nloops:\n  a:\n    run: [echo]\n    action:\n      keep: 1\n    emit: true\n",
+                "conflicting properties",
+            ),
         )
     ):
         bad_dir = tmp_path / f"bad-{idx}"
@@ -484,12 +541,36 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
         with pytest.raises(Error, match=err_match):
             config.load(Store(bad_dir))
 
+    # Explicit `emit: false` is allowed standalone and alongside `ingest:` or `action:`.
+    emit_false_dir = tmp_path / "emit-false"
+    emit_false_dir.mkdir()
+    (emit_false_dir / "bf.yaml").write_text(
+        f"version: {models.FORMAT}\nname: ef\nloops:\n"
+        "  a:\n    run: [echo]\n    emit: false\n"
+        "  b:\n    run: [echo]\n    ingest: demo\n    emit: false\n"
+        "  c:\n    run: [echo]\n    action:\n      keep: 2\n    emit: false\n"
+    )
+    ef_cfg = config.load(Store(emit_false_dir))
+    assert ef_cfg.loops["a"].emit == ""
+    assert ef_cfg.loops["b"].emit == ""
+    assert ef_cfg.loops["c"].emit == ""
+
+    # Malformed `.env` key with an unclosed quote fails without echoing the unvalidated pre-`=` text.
+    bad_env_dir = tmp_path / "bad-dotenv-key"
+    bad_env_dir.mkdir()
+    bad_lhs = "https://alice:" + "marker_pw" + "@example.test/?a"
+    (bad_env_dir / ".env").write_text(f'{bad_lhs}="unclosed\n')
+    (bad_env_dir / ".env").chmod(0o600)
+    with pytest.raises(Error, match="invalid environment assignment") as env_exc:
+        config.load_dotenv(Store(bad_env_dir))
+    assert "marker_pw" not in str(env_exc.value)
+
     macro_dir = tmp_path / "macro-brain"
     macro_dir.mkdir()
     (macro_dir / "bf.yaml").write_text(
-        f"version: {models.FORMAT}\nname: macro\njobs:\n  daily:\n    run: [echo]\n    schedule: '@daily'\n"
+        f"version: {models.FORMAT}\nname: macro\nloops:\n  daily:\n    run: [echo]\n    schedule: '@daily'\n"
     )
-    assert config.load(Store(macro_dir)).jobs["daily"].cron == "@daily"
+    assert config.load(Store(macro_dir)).loops["daily"].schedules[0].cron == "@daily"
 
     # Symlinked bf.yaml rejected by inside_brain().
     sym_brain = tmp_path / "sym-brain"
@@ -533,11 +614,73 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     assert skipped_ov
     assert "exceeds 2 bytes" in skipped_ov[0]
     assert list(b1_docs.iter_read_files("sub")) == [("sub/a.json", b'{"a":1}\n')]
-    assert b1_docs.count_files("sub") == 2
-    assert b1_docs.count_files("sub", exclude_suffix=".txt") == 1
     assert tail_lines([b"a\n", b"b\n"], 0, 100) == []
     assert tail_lines([b"a\n", b"b\n"], 2, 0) == []
-    for raw_sec in ("SECRET_KEY=topsecret1", "AWS_SESSION_TOKEN=tok12345", "Authorization: Basic dXNlcjpwYXNz"):
+    long_jwt = "eyJ" + ("a" * 600)
+    for raw_sec in (
+        "SECRET_KEY=topsecret1",
+        "AWS_SESSION_TOKEN=tok12345",
+        "Authorization: Basic dXNlcjpwYXNz",
+        f'access_token="{long_jwt}"',
+    ):
         assert models.redact_secrets(raw_sec) != raw_sec
         assert "[REDACTED]" in models.redact_secrets(raw_sec)
+        assert long_jwt not in models.redact_secrets(raw_sec)
+    red_d = models.redact_value(
+        {
+            "OPENAI_API_KEY": "raw-val",
+            "AWS_SECRET_ACCESS_KEY": "raw-2",
+            "Authorization": "Basic dXNlcjpwYXNz",
+            "GH_TOKEN": "tok-raw",
+            "OAUTH_TOKEN": ["t1", "t2"],
+            "title": "safe",
+        }
+    )
+    assert red_d == {
+        "OPENAI_API_KEY": "[REDACTED]",
+        "AWS_SECRET_ACCESS_KEY": "[REDACTED]",
+        "Authorization": "[REDACTED]",
+        "GH_TOKEN": "[REDACTED]",
+        "OAUTH_TOKEN": ["[REDACTED]", "[REDACTED]"],
+        "title": "safe",
+    }
     assert models.redact_secrets("Error: basic validation failed") == "Error: basic validation failed"
+
+
+def test_dump_yaml_scalars_and_lazy_imports() -> None:
+    tricky_scalars = (
+        "0o755",
+        "0o027",
+        "0o10",
+        "1e5",
+        "1E-3",
+        "-0x10",
+        "0123",
+        "yes",
+        "no",
+        "true",
+        "null",
+        "~",
+        "2026-11-20",
+        "",
+    )
+    for val in tricky_scalars:
+        dumped = config.dump_yaml({"val": val})
+        assert config.yaml_object(dumped) == {"val": val}
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, bf.models, bf.storage, bf.config, bf.schemas, bf.records; "
+                "bad = {'structlog', 'yaml', 'croniter', 'jsonschema', 'markdown'} & sys.modules.keys(); "
+                "assert not bad, bad"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr

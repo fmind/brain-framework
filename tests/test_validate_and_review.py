@@ -20,7 +20,10 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     store = Store(root)
     assert (root / ".agents" / "skills" / "bf").is_symlink()
     assert (root / "memories" / "concepts" / "welcome.json").is_file()
-    assert (root / "docs" / "index.md").is_file()
+    assert not (root / "docs").exists()
+    assert (root / "schemas" / "concepts.json").is_file()
+    for removed_schema in ("bf.schema.json", "record.json", "evals.json"):
+        assert not (root / "schemas" / removed_schema).exists()
     assert (root / "evals" / "smoke.yaml").is_file()
     for folder in ("projects", "concepts", "actions", "memories", "logs", "schemas"):
         assert (root / folder).is_dir()
@@ -38,33 +41,43 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     assert (root / "memories" / "actions" / "2026-11-15_ship-pure-json.json").is_file()
     assert engine.validate(store)["ok"]
 
-    # Compiled-note drift, corruption, missing compiled JSON, and orphans fail `validate`.
+    # `validate` is strictly read-only: it detects unbuilt, orphaned, out-of-sync, and corrupt compiled JSONs without writing!
     raw_welcome = store.read("concepts/welcome.md")
     store.write("concepts/unbuilt.md", b"---\ntype: guide\nstatus: draft\n---\n\n# Unbuilt\n")
-    assert any("missing compiled note for concepts/unbuilt.md" in p for p in engine.validate(store)["problems"])
+    val_unbuilt = engine.validate(store)
+    assert not val_unbuilt["ok"]
+    assert any("missing compiled note for concepts/unbuilt.md" in p for p in val_unbuilt["problems"])
+    assert not store.exists("memories/concepts/unbuilt.json")
     store.delete("concepts/unbuilt.md")
+    assert engine.validate(store)["ok"]
 
     store.write("memories/concepts/orphan.json", b'{"ref":"concepts/orphan.md"}\n')
-    assert any("memories/concepts/orphan.json: orphaned compiled note" in p for p in engine.validate(store)["problems"])
-    store.delete("memories/concepts/orphan.json")
+    val_orphan = engine.validate(store)
+    assert not val_orphan["ok"]
+    assert any("orphaned compiled note" in p for p in val_orphan["problems"])
+    assert store.exists("memories/concepts/orphan.json")
+    engine.build(store)
+    assert not store.exists("memories/concepts/orphan.json")
+    assert engine.validate(store)["ok"]
 
     compiled_bytes = store.read("memories/concepts/welcome.json")
     store.write("concepts/welcome.md", raw_welcome + b"\nEdited without rebuild.\n")
     assert any("out of sync with concepts/welcome.md" in p for p in engine.validate(store)["problems"])
     store.write("memories/concepts/welcome.json", b"{corrupt\n")
-    assert any("memories/concepts/welcome.json: invalid JSON" in p for p in engine.validate(store)["problems"])
+    assert any("invalid JSON" in p for p in engine.validate(store)["problems"])
     store.write("concepts/welcome.md", raw_welcome)
     store.write("memories/concepts/welcome.json", compiled_bytes)
+    assert engine.validate(store)["ok"]
 
+    # Tampered compiled JSON with matching `sha256` is missed by incremental build, caught by validate, and fixed by force=True!
     tampered = json.loads(store.read("memories/actions/2026-11-15_ship-pure-json.json"))
     tampered["title"] = "Tampered Title"
     store.write("memories/actions/2026-11-15_ship-pure-json.json", encode(tampered))
+    assert engine.build(store, incremental=True)["written"] == 0
     assert any(
         "out of sync with actions/2026-11-15_ship-pure-json/ACTION.md" in p for p in engine.validate(store)["problems"]
     )
-    assert engine.build(store, incremental=True)["written"] == 0
-    assert not engine.validate(store)["ok"]
-    assert engine.build(store)["written"] == 1
+    assert engine.build(store, force=True)["written"] == 1
     assert engine.validate(store)["ok"]
 
     # Deleting a note prunes its compiled JSON file on next `bf build`!
@@ -119,13 +132,14 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     assert comp_up["links"][0]["kind"] == "brain"
 
     # Tampered compiled note JSON with matching `sha256` is still caught by `validate`!
-    tampered = json.loads(store.read("memories/concepts/welcome.json"))
+    tampered = json.loads(store.read("memories/concepts/norm-uri.json"))
     tampered["status"] = "invalid-status"
-    store.write("memories/concepts/welcome.json", (json.dumps(tampered) + "\n").encode())
+    store.write("memories/concepts/norm-uri.json", encode(tampered))
     assert any(
-        "memories/concepts/welcome.json" in p or "concepts/welcome.md" in p for p in engine.validate(store)["problems"]
+        "memories/concepts/norm-uri.json" in p or "concepts/norm-uri.md" in p
+        for p in engine.validate(store)["problems"]
     )
-    engine.build(store)
+    engine.build(store, force=True)
     assert engine.validate(store)["ok"]
 
 
@@ -156,8 +170,8 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
         f"version: {FORMAT}\nname: fixture\nbrains:\n  sib: {sib_root}\n  missing-sib: {tmp_path / 'nope'}\n".encode(),
     )
 
-    # Schema, .env, and eval errors (`logs/` holds `structlog` JSON files and is not schema-validated).
-    brain.write(".env", b'BAD_QUOTE="unclosed\\"\n')
+    # Schema, .env, and eval errors (`logs/` holds plain JSON line logs and is not schema-validated).
+    brain.write(".env", b'BAD_QUOTE="unclosed\\"\n', mode=0o600)
     brain.write("schemas/nested/extra.json", b"{}")
     brain.write("schemas/broken.json", b'{"type": "nope"}')
     brain.write("schemas/projects.json", json.dumps({"type": "object", "required": ["owner"]}).encode())
@@ -205,11 +219,11 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
                 "text": "",
                 "tags": [],
                 "links": [
-                    {"to": "meetings:decision-1", "kind": "record", "anchor": "", "meta": {}, "section": ""},
+                    {"to": "concepts:welcome", "kind": "record", "anchor": "", "meta": {}, "section": ""},
                     {"to": "projects:bad", "kind": "note", "anchor": "", "meta": {}, "section": ""},
                     {"to": "projects/../../etc/passwd", "kind": "note", "anchor": "", "meta": {}, "section": ""},
                     {"to": "javascript:alert(1)", "kind": "url", "anchor": "", "meta": {}, "section": ""},
-                    {"to": "bf://sib/events:ev-1", "kind": "brain", "anchor": "", "meta": {}, "section": ""},
+                    {"to": "bf://sib/concepts:bad", "kind": "brain", "anchor": "", "meta": {}, "section": ""},
                     {
                         "to": records.record_file("meetings", "decision-1"),
                         "kind": "record",
@@ -262,7 +276,8 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
         b"- [Corrupt sib heading](bf://sib/concepts/badutf.md#sec)\n",
     )
 
-    report = engine.validate(brain)
+    engine.build(brain)
+    report = engine.validate(brain, all_problems=True)
     assert not report["ok"]
     joined = "\n".join(report["problems"])
     for expected in (
@@ -283,15 +298,15 @@ def test_validate_catches_schema_link_anchor_memory_log_eval_and_cross_brain_err
         "memories/stray.json: memories/ holds <source>/<sha256>.json files",
         "memories/notes/bad.json: invalid or reserved source directory",
         "memories/corrupt/c.json: invalid JSON",
-        "memories/dupes/b.json: duplicate record id 'd1'",
+        "duplicate record id 'd1' in dupes",
         "memories/dupes/a.json: source must equal 'dupes'",
         "memories/dupes/a.json: ref must equal 'dupes:d1'",
         "memories/relbad/r.json: 'relations' was removed; use 'links'",
-        "memories/relbad/r.json: record link 'meetings:decision-1' must use memories/<source>/<sha256>.json",
+        "memories/relbad/r.json: record link 'concepts:welcome' must use memories/<source>/<sha256>.json",
         "memories/relbad/r.json: note link 'projects:bad' must target projects/, concepts/, or actions/",
         "memories/relbad/r.json: note link 'projects/../../etc/passwd' must target projects/, concepts/, or actions/",
         "memories/relbad/r.json: url link 'javascript:alert(1)' must use https://",
-        "memories/relbad/r.json: cross-brain link 'bf://sib/events:ev-1' must use bf://<brain>/<path>",
+        "memories/relbad/r.json: cross-brain link 'bf://sib/concepts:bad' must use bf://<brain>/<path>",
         "memories/wrongkind/k.json: kind must equal 'memory'",
         "bf.yaml brains.missing-sib:",
         "JSON record links do not support #anchor fragments",
@@ -423,8 +438,11 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
     assert rep["ok"] is False
     assert len(rep["problems"]) == 1
     assert "memories/broken/b.json" in rep["problems"][0]
-    assert rep["tasks_open"] == 2
-    assert rep["actions"] == [
+    assert rep["total_tasks_open"] == 2
+    assert rep["total_actions_open"] == 2
+    assert rep["total_stale"] == len(rep["stale"])
+    assert rep["truncated"] is False
+    assert rep["actions_open"] == [
         {
             "ref": "actions/2026-11-10_later/ACTION.md",
             "title": "Later UTC",
@@ -469,3 +487,255 @@ def test_review_computes_newer_evidence_due_future_updated_actions_and_tasks(bra
         "reasons": ["newer_evidence"],
         "newer": ["github:pr-7"],
     }
+
+
+def test_validate_warnings_strict_limit_cache_and_v30_engine_apis(tmp_path: Path) -> None:
+    created = engine.init_brain(tmp_path / "v30")
+    store = Store(Path(created["path"]))
+    now = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+
+    # Snapshot missing target + forgotten target emit warnings (ok=True unless strict=True); unknown source is an error!
+    store.write(
+        "bf.yaml",
+        (
+            f"version: {FORMAT}\nname: v30\nloops:\n"
+            "  snap:\n    run: [echo, ok]\n    ingest:\n      source: snapsrc\n      mode: snapshot\n"
+        ).encode(),
+    )
+    records.ingest(store, "snapsrc", b'[{"id":"kept","title":"Kept"}]\n', now=now)
+    records.ingest(store, "fgsrc", b'[{"id":"gone","title":"Gone"}]\n', now=now)
+    store.write("memories/fgsrc/.forgotten", b"gone\n")
+    store.delete(records.record_file("fgsrc", "gone"))
+    store.write(
+        "concepts/refs.md",
+        b"---\ntype: guide\nstatus: stable\nupdated: 2026-11-10\n---\n\n# Refs\n\n"
+        b"[Snap](snapsrc:missing) [Forgotten](fgsrc:gone) [Unknown](unksrc:missing)\n",
+    )
+    engine.build(store)
+    w_only = engine.validate(store, limit=2)
+    assert not w_only["ok"]
+    assert w_only["summary"]["truncated"] is True
+    assert len(w_only["problems"]) == 2
+    assert w_only["warnings_count"] == 2
+    assert w_only["errors_count"] == 1
+
+    # Remove unknown link: warnings remain -> ok=True unless strict=True!
+    store.write(
+        "concepts/refs.md",
+        b"---\ntype: guide\nstatus: stable\nupdated: 2026-11-10\n---\n\n# Refs\n\n"
+        b"[Snap](snapsrc:missing) [Forgotten](fgsrc:gone)\n",
+    )
+    engine.build(store)
+    ok_warn = engine.validate(store)
+    assert ok_warn["ok"] is True
+    assert ok_warn["warnings_count"] == 2
+    assert not engine.validate(store, strict=True)["ok"]
+    assert (store.root / ".bf" / "cache" / "state.json").is_file()
+    assert engine.validate(store, force=True)["ok"] is True
+    with pytest.raises(InputError):
+        engine.validate(store, limit=0)
+
+    # Review newer[:5] cap, limit/all_items/fields, check_brain, new_note, and index sync!
+    recs = [{"id": f"n{i}", "title": f"N{i}", "updated": "2026-11-19T12:00:00Z"} for i in range(7)]
+    records.ingest(store, "ev", json.dumps(recs).encode(), now=now)
+    links_md = " ".join(f"[N{i}](ev:n{i})" for i in range(7))
+    store.write(
+        "concepts/many.md",
+        f"---\ntype: guide\nstatus: stable\nupdated: 2026-11-10\n---\n# Many\n\n{links_md}\n".encode(),
+    )
+    rev_lim = engine.review(store, now=now, limit=1, fields="ref,reasons,newer,newer_count,truncated")
+    assert rev_lim["total_stale"] >= 1
+    assert rev_lim["stale"][0]["newer_count"] == 7
+    assert rev_lim["stale"][0]["truncated"] is True
+    assert len(rev_lim["stale"][0]["newer"]) == 5
+    with pytest.raises(InputError):
+        engine.review(store, limit=0)
+    with pytest.raises(InputError):
+        engine.review(store, fields=" , ")
+
+    new_act = engine.new_note(store, None, "action", "ship-v30", title="Ship v30", now=now)
+    assert new_act["path"] == "actions/2026-11-20_ship-v30/ACTION.md"
+    assert store.exists(new_act["compiled"])
+    new_con = engine.new_note(store, None, "concept", "arch-note", note_type="architecture", now=now)
+    assert "type: architecture" in store.read(new_con["path"]).decode()
+    with pytest.raises(Error, match="already exists"):
+        engine.new_note(store, None, "action", "ship-v30", now=now)
+    with pytest.raises(InputError):
+        engine.new_note(store, None, "bad", "slug")
+    with pytest.raises(InputError):
+        engine.new_note(store, None, "concept", "BAD SLUG")
+
+    chk = engine.check_brain(store)
+    assert chk["ok"] is True
+    assert chk["build"]["ok"]
+    assert chk["validate"]["ok"]
+    assert chk["eval"]["ok"]
+    assert not engine.check_brain(store, strict=True)["ok"]
+
+
+def test_engine_edge_paths(tmp_path: Path) -> None:
+    sib = engine.init_brain(tmp_path / "sib")
+    sib_store = Store(Path(sib["path"]))
+    records.ingest(sib_store, "ev", b'[{"id":"e1","title":"E1","time":"2026-11-18T10:00:00Z"}]')
+    assert len(engine.load_index(sib_store)) >= 2
+
+    main = engine.init_brain(tmp_path / "main")
+    store = Store(Path(main["path"]))
+    store.write("bf.yaml", f"version: {FORMAT}\nname: main\nbrains:\n  sib: ../sib\n".encode())
+    records.ingest(store, "ev", b'[{"id":"r1","title":"R1","time":"2026-11-18T10:00:00Z"}]')
+    store.write(
+        "concepts/edges.md",
+        b"---\ntype: guide\nstatus: stable\nupdated: 2026-11-10\n---\n# Edges\n\n"
+        b"[Ok](bf://sib/ev:e1) [BadSibRec](bf://sib/ev:e1#a) [BadRec](ev:r1#a) [BadJson](schemas/concepts.json#a)\n",
+    )
+    engine.build(store)
+    store.write("memories/concepts/bad.txt", b"bad\n")
+    store.write("memories/fg/.forgotten", b"\xff\xfe")
+    store.write(".bf/index.jsonl", b"{not-json\n")
+    assert len(engine.load_index(store)) >= 2
+
+    val = engine.validate(store, all_problems=True)
+    assert val["ok"] is False
+    assert any("bad.txt" in p for p in val["problems"])
+    assert any("not valid UTF-8" in p for p in val["problems"])
+    assert any("JSON record links do not support #anchor fragments" in p for p in val["problems"])
+
+    store.write("concepts/bad.md", b"\xff\xfe")
+    val_unreadable = engine.validate(store, all_problems=True)
+    assert any("note is not UTF-8" in p for p in val_unreadable["problems"])
+    store.delete("concepts/bad.md")
+
+
+def test_nested_note_index_validate_review_and_cache_omit_keys(tmp_path: Path) -> None:
+    created = engine.init_brain(tmp_path / "nested-brain")
+    store = Store(Path(created["path"]))
+    now = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+
+    store.write(
+        "projects/sub/roadmap.md",
+        b"---\ntype: project\nstatus: stable\nupdated: 2026-10-01\nstale_after: 14d\n---\n\n# Roadmap\n\n- [ ] Nested task\n",
+    )
+    built = engine.build(store, now=now)
+    assert built["ok"]
+    assert store.exists("memories/projects/sub/roadmap.json")
+
+    idx_paths = {e["path"]: e for e in engine.load_index(store)}
+    assert "memories/projects/sub/roadmap.json" in idx_paths
+    assert idx_paths["memories/projects/sub/roadmap.json"]["ref"] == "projects/sub/roadmap.md"
+
+    val = engine.validate(store)
+    assert val["ok"]
+
+    rev = engine.review(store, now=now)
+    assert rev["total_tasks_open"] == 1
+    stale_by_ref = {item["ref"]: item for item in rev["stale"]}
+    assert "projects/sub/roadmap.md" in stale_by_ref
+    assert "due" in stale_by_ref["projects/sub/roadmap.md"]["reasons"]
+
+    # Compiled note lacking `id` with empty `_OMIT_OPT` keys (`summary`, `aliases`) or non-canonical record link misses cache.
+    mem_path = "memories/projects/sub/roadmap.json"
+    bad_cached = json.loads(store.read(mem_path))
+    bad_cached.update(summary="", aliases=[])
+    store.write(mem_path, encode(bad_cached))
+    _, hit = engine.load_or_compile_note(
+        store, "projects/sub/roadmap.md", store.read("projects/sub/roadmap.md"), brain_name=created["brain"]
+    )
+    assert hit is None
+    assert engine.build(store, incremental=True, now=now)["written"] == 1
+
+    # Stale v14 compiled note with `source:id` in `links` also misses incremental cache and recompiles canonically.
+    store.write(
+        "concepts/rec-link.md",
+        b"---\ntype: guide\nstatus: stable\nupdated: 2026-11-20\n---\n# Rec\n\n[Item](cal:e1)\n",
+    )
+    engine.build(store, now=now)
+    rec_mem = "memories/concepts/rec-link.json"
+    stale_v14 = json.loads(store.read(rec_mem))
+    stale_v14["links"] = [{"to": "cal:e1", "kind": "record"}]
+    store.write(rec_mem, encode(stale_v14))
+    _, hit_v14 = engine.load_or_compile_note(
+        store, "concepts/rec-link.md", store.read("concepts/rec-link.md"), brain_name=created["brain"]
+    )
+    assert hit_v14 is None
+    assert engine.build(store, incremental=True, now=now)["written"] == 1
+
+    # `sync_notes()` omits `notes.built` events while `build()` emits them.
+    seq_before_sync = records.latest_event_seq(store)
+    store.write(
+        "concepts/rec-link.md",
+        b"---\ntype: guide\nstatus: stable\nupdated: 2026-11-20\n---\n# Rec Updated\n\n[Item](cal:e1)\n",
+    )
+    assert engine.sync_notes(store, now=now)["written"] == 1
+    assert records.latest_event_seq(store) == seq_before_sync
+    store.write(
+        "concepts/rec-link.md",
+        b"---\ntype: guide\nstatus: stable\nupdated: 2026-11-20\n---\n# Rec Built\n\n[Item](cal:e1)\n",
+    )
+    assert engine.build(store, now=now)["written"] == 1
+    assert records.latest_event_seq(store) == seq_before_sync + 1
+
+    # Read-only `.bf/` never fails `load_index(store)` when saving cache/index.
+    bf_dir = store.root / ".bf"
+    (bf_dir / "index.jsonl").unlink()
+    bf_dir.chmod(0o500)
+    try:
+        ro_idx = engine.load_index(store)
+        assert any(e["path"] == mem_path for e in ro_idx)
+    finally:
+        bf_dir.chmod(0o700)
+
+    # Incremental `.bf/cache/state.json` & `.bf/index.jsonl` invalidation, coherence, and malformed-note guards:
+    inv_root = tmp_path / "cache-inv"
+    engine.init_brain(inv_root, name="cache-inv")
+    inv_store = Store(inv_root)
+    records.ingest(
+        inv_store, "src1", json.dumps([{"id": "r1", "title": "Rec1", "aliases": ["urn:demo:r1"]}]).encode(), now=now
+    )
+    assert engine.validate(inv_store)["ok"] is True
+    # Adding a source schema immediately invalidates `clean_records`.
+    inv_store.write("schemas/src1.json", json.dumps({"type": "object", "required": ["owner"]}).encode())
+    assert not engine.validate(inv_store)["ok"]
+    inv_store.delete("schemas/src1.json")
+    assert engine.validate(inv_store)["ok"] is True
+    # Poisoned `clean_records` cache entry is bypassed by `force=True`.
+    r1_path = records.record_file("src1", "r1")
+    r1_doc = json.loads(inv_store.read(r1_path))
+    r1_doc["relations"] = []
+    inv_store.write(r1_path, encode(r1_doc))
+    st_json = json.loads((inv_root / ".bf" / "cache" / "state.json").read_text())
+    r1_st = inv_store.stat(r1_path)
+    st_json["validate"]["clean_records"][r1_path] = [r1_st.st_ino, r1_st.st_ctime_ns, r1_st.st_mtime_ns, r1_st.st_size]
+    (inv_root / ".bf" / "cache" / "state.json").write_text(json.dumps(st_json))
+    assert not engine.validate(inv_store, force=True)["ok"]
+    r1_doc.pop("relations")
+    inv_store.write(r1_path, encode(r1_doc))
+    # Changing `bf.yaml` `name:` invalidates `clean_notes`, and wrong-version cache recovers cleanly.
+    inv_store.write("bf.yaml", f"version: {FORMAT}\nname: cache-inv-2\n".encode())
+    assert engine.validate(inv_store)["ok"] is True
+    (inv_root / ".bf" / "cache" / "state.json").write_text(json.dumps({"version": 999}))
+    assert engine.validate(inv_store)["ok"] is True
+    # `validate()` preserves concurrent `index_stats` in `.bf/cache/state.json`.
+    engine.load_index(inv_store)
+    before_idx_stats = json.loads((inv_root / ".bf" / "cache" / "state.json").read_text())["index_stats"]
+    assert engine.validate(inv_store)["ok"] is True
+    assert json.loads((inv_root / ".bf" / "cache" / "state.json").read_text())["index_stats"] == before_idx_stats
+    # Deleting a sensor record evicts it from `load_index()` and `find_by_alias()`; `read_only=True` preserves disk index.
+    from bf import query as qmod
+
+    assert qmod.find_by_alias(inv_store, "urn:demo:r1") is not None
+    raw_idx_before = (inv_root / ".bf" / "index.jsonl").read_bytes()
+    inv_store.delete(r1_path)
+    ro_entries = engine.load_index(inv_store, read_only=True)
+    assert all(e["path"] != r1_path for e in ro_entries)
+    assert (inv_root / ".bf" / "index.jsonl").read_bytes() == raw_idx_before
+    assert qmod.find_by_alias(inv_store, "urn:demo:r1") is None
+    assert all(e["path"] != r1_path for e in engine.load_index(inv_store))
+    # Malformed compiled note does not crash `review(read_only=True)` with KeyError.
+    inv_store.write("memories/concepts/corrupt.json", b'{"kind":"concept"}\n')
+    assert engine.review(inv_store, read_only=True)["ok"] is True
+    inv_store.delete("memories/concepts/corrupt.json")
+    # `new_note()` surfaces `build()` problems via `ok=False` when another note is broken.
+    inv_store.write("concepts/prebroken.md", b"---\nid: bad\n---\n# Bad\n")
+    new_res = engine.new_note(inv_store, None, "concept", "valid-peer", title="Valid Peer", now=now)
+    assert new_res["ok"] is False
+    assert new_res["problems"]

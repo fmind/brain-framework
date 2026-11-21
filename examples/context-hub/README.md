@@ -4,7 +4,7 @@ Answer one question across Google Workspace, Jira, GitHub, and Google Cloud fixt
 
 | Path                      | Purpose                                                                                              |
 | ------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `bf.yaml`                 | YAML configuration (`version: 14`, `name: context-demo`).                                            |
+| `bf.yaml`                 | YAML configuration (`version: 15`, `name: context-demo`).                                            |
 | `schemas/jira.json`       | Per-source JSON Schema enforcing `type`, `status`, and `links` on `memories/jira/*.json`.            |
 | `fixtures/*.json`         | Offline JSON fixtures for `workspace`, `jira`, `github`, `gcloud`, plus `jira-done.json`.            |
 | `projects/new-website.md` | Authoritative Markdown project note with `attr_list` metadata on headings, links, blocks, and tasks. |
@@ -68,12 +68,12 @@ summary: Launch a product website that explains the product before signup.
 
 ## Decision {#decision owner=product}
 
-Start with a single product page: visitors need a clear explanation before signing up. Evidence: [Workspace brief](../memories/workspace/29a8825bd242f14386ee528d76e0e8f1e38f3c8c4047d7b2d6df7493368a17d0.json){rel=cites}.
+Start with a single product page: visitors need a clear explanation before signing up. Evidence: [Workspace brief](workspace:brief){rel=cites}.
 {: #single-page confidence=high}
 
 ## Launch review {#launch-review gate=accessibility}
 
-Hold public launch. The [implementation](../memories/github/da31012c40330e7e21538e7dd57503b16e8a0839159e96137090cccc9910b171.json){rel=implements} is merged and the [preview](../memories/gcloud/aee50b18a03c89e4883a5acadf5c8614dd7fd2f111c3b616e1a8d6427edc3e3f.json){rel=verifies} is healthy, but the [launch review](../memories/jira/c97ace4c8fef2cee8fa0f3c9f52aab18dbd4f42438afe362ffb8f75ce4c04b84.json){rel=blocks} still blocks launch on keyboard navigation.
+Hold public launch. The [implementation](github:implementation){rel=implements} is merged and the [preview](gcloud:deployment){rel=verifies} is healthy, but the [launch review](jira:review){rel=blocks} still blocks launch on keyboard navigation.
 
 ## Next actions
 
@@ -85,7 +85,7 @@ bf validate
 bf review
 ```
 
-Because `updated: 2026-09-27` is newer than the `2026-09-21..26` evidence timestamps, `bf review` reports `"stale":[]` and `"tasks_open":1`.
+Because `updated: 2026-09-27` is newer than the `2026-09-21..26` evidence timestamps, `bf review` reports `"stale":[]` and `"total_tasks_open":1`.
 
 ## 4. Detect upstream evidence changes with `bf review`
 

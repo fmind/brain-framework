@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -62,26 +62,21 @@ def tail_lines(lines: list[bytes], max_lines: int, budget: int) -> list[bytes]:
     return kept
 
 
-def _read_fd(fd: int, name: str, limit: int) -> bytes:
+def _read_fd(fd: int, name: str, limit: int, *, private: bool = False) -> bytes:
     try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
+        if not stat.S_ISREG((info := os.fstat(fd)).st_mode):
             raise Error(f"{name}: expected a regular file")
-        chunks: list[bytes] = []
-        total, remaining = 0, limit + 1
-        while remaining > 0:
-            cap = max(info.st_size - total + 1, 4096) if info.st_size >= total else 4096
-            if not (chunk := os.read(fd, min(remaining, cap))):
-                break
+        if private and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
+            raise Error(f"{name} must be owned by you with mode 600")
+        chunks, total = [], 0
+        while total <= limit and (chunk := os.read(fd, min(limit + 1 - total, max(info.st_size - total + 1, 4096)))):
             chunks.append(chunk)
             total += len(chunk)
-            remaining -= len(chunk)
     finally:
         os.close(fd)
-    data = chunks[0] if len(chunks) == 1 else b"".join(chunks)
-    if len(data) > limit:
+    if total > limit:
         raise Error(f"{name}: file exceeds {limit} bytes")
-    return data
+    return chunks[0] if len(chunks) == 1 else b"".join(chunks)
 
 
 def _atomic_replace(parent: int, temporary: str, leaf: str, name: str, *, durable: bool = True) -> None:
@@ -105,12 +100,10 @@ class Store:
         if not stat.S_ISDIR(info.st_mode):
             raise Error("brain must be a directory")
 
-    @contextmanager
-    def parent(self, name: str, *, create: bool = False) -> Generator[tuple[int, str]]:
-        parts = relative(name)
+    def _open_dir(self, parts: tuple[str, ...], *, create: bool = False) -> int:
         fd = os.open(self.root, _DIR)
         try:
-            for number, part in enumerate(parts[:-1], 1):
+            for number, part in enumerate(parts, 1):
                 if create:
                     with suppress(FileExistsError):
                         os.mkdir(part, 0o755, dir_fd=fd)
@@ -126,15 +119,34 @@ class Store:
                     raise Error(f"{loc}: expected a directory; symlinks and special files are not followed") from error
                 os.close(fd)
                 fd = child
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    @contextmanager
+    def parent(self, name: str, *, create: bool = False) -> Generator[tuple[int, str]]:
+        parts = relative(name)
+        fd = self._open_dir(parts[:-1], create=create)
+        try:
             yield fd, parts[-1]
         finally:
             os.close(fd)
 
-    def read(self, name: str, limit: int = MAX_FILE) -> bytes:
+    def sync_dirs(self, dirs: Iterable[str]) -> None:
+        """Fsync each unique brain-relative directory without following symlinks."""
+        for directory in sorted(set(dirs)):
+            fd = self._open_dir(() if directory == "" else relative(directory))
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+    def read(self, name: str, limit: int = MAX_FILE, *, private: bool = False) -> bytes:
         """Read up to `limit` bytes from a regular file without following symlinks."""
         with self.parent(name) as (parent, leaf):
             fd = open_regular(parent, leaf, name)
-        return _read_fd(fd, name, limit)
+        return _read_fd(fd, name, limit, private=private)
 
     def write(self, name: str, data: bytes, *, mode: int = 0o644, durable: bool = True) -> None:
         """Write `data` to a temporary sibling and replace `name` atomically."""
@@ -161,19 +173,23 @@ class Store:
             if durable:
                 os.fsync(parent)
 
-    def exists(self, name: str) -> bool:
+    def _is(self, name: str, pred: Any) -> bool:
         with suppress(Error, OSError):
-            return stat.S_ISREG(self.mode(name))
+            return bool(pred(self.mode(name)))
         return False
+
+    def exists(self, name: str) -> bool:
+        return self._is(name, stat.S_ISREG)
 
     def is_dir(self, name: str) -> bool:
-        with suppress(Error, OSError):
-            return stat.S_ISDIR(self.mode(name))
-        return False
+        return self._is(name, stat.S_ISDIR)
+
+    def stat(self, name: str) -> os.stat_result:
+        with self.parent(name) as (parent, leaf):
+            return os.stat(leaf, dir_fd=parent, follow_symlinks=False)
 
     def mode(self, name: str) -> int:
-        with self.parent(name) as (parent, leaf):
-            return os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode
+        return self.stat(name).st_mode
 
     def walk(
         self,
@@ -182,9 +198,10 @@ class Store:
         suffix: str = "",
         limit: int | None = None,
         skipped: list[str] | None = None,
-        **opts: Any,
+        ordered: bool = True,
+        skip_dirs: Iterable[str] = (),
     ) -> Generator[tuple[str, bytes | None]]:
-        ordered, skip_dirs, visited = bool(opts.get("ordered", True)), frozenset(opts.get("skip_dirs", ())), 0
+        skip_set, visited = frozenset(skip_dirs), 0
         relative(directory)
 
         def record_skip(path: str, message: str, err: Exception | None = None) -> None:
@@ -203,17 +220,15 @@ class Store:
                     continue
                 if (visited := visited + 1) > MAX_FILES:
                     raise Error(f"{directory} exceeds the {MAX_FILES:,}-entry scan limit")
-                shown = _shown(entry.name)
-                path = f"{prefix}/{shown or entry.name}"
-                if shown is not None:
-                    record_skip(path, UNNAMED)
+                if (shown := _shown(entry.name)) is not None:
+                    record_skip(f"{prefix}/{shown}", UNNAMED)
                     continue
-                opened, ready, data = None, False, None
+                path, opened, ready, data = f"{prefix}/{entry.name}", None, False, None
                 try:
                     if entry.is_symlink():
                         record_skip(path, LINKED)
                     elif entry.is_dir(follow_symlinks=False):
-                        if prefix == directory and entry.name in skip_dirs:
+                        if prefix == directory and entry.name in skip_set:
                             continue
                         opened = os.open(entry.name, _DIR, dir_fd=fd)
                     elif not entry.is_file(follow_symlinks=False):
@@ -242,25 +257,19 @@ class Store:
                 elif ready:
                     yield path, data
 
-        fd = os.open(self.root, _DIR)
         try:
-            prefix: list[str] = []
-            for part in relative(directory):
-                prefix.append(part)
-                key = "/".join(prefix)
-                try:
-                    info = os.stat(part, dir_fd=fd, follow_symlinks=False)
-                    child = os.open(part, _DIR, dir_fd=fd) if stat.S_ISDIR(info.st_mode) else None
-                except FileNotFoundError:
-                    return
-                except PermissionError as error:
-                    record_skip(key, "permission denied", error)
-                    return
-                if child is None:
-                    record_skip(key, LINKED if stat.S_ISLNK(info.st_mode) else "expected a directory")
-                    return
-                os.close(fd)
-                fd = child
+            fd = self._open_dir(relative(directory))
+        except FileNotFoundError:
+            return
+        except PermissionError as error:
+            record_skip(directory, "permission denied", error)
+            return
+        except Error as error:
+            if skipped is None:
+                raise
+            skipped.append(str(error))
+            return
+        try:
             yield from visit(fd, directory)
         finally:
             os.close(fd)
@@ -270,15 +279,22 @@ class Store:
         return sorted(p for p, _ in self.walk(directory, skipped=skipped, ordered=False))
 
     def iter_read_files(
-        self, directory: str, *, suffix: str = ".json", limit: int = MAX_FILE, **opts: Any
+        self,
+        directory: str,
+        *,
+        suffix: str = ".json",
+        limit: int = MAX_FILE,
+        skipped: list[str] | None = None,
+        ordered: bool = True,
+        skip_dirs: Iterable[str] = (),
     ) -> Generator[tuple[str, bytes]]:
         """Yield matching `(path, bytes)` recursively below `directory` in a streaming `O_NOFOLLOW` scan."""
-        return ((p, d) for p, d in self.walk(directory, suffix=suffix, limit=limit, **opts) if d is not None)
-
-    def count_files(self, directory: str, *, exclude_suffix: str = "") -> int:
-        """Count regular files recursively below `directory` without sorting paths."""
-        return sum(
-            1 for p, _ in self.walk(directory, ordered=False) if not (exclude_suffix and p.endswith(exclude_suffix))
+        return (
+            (p, d)
+            for p, d in self.walk(
+                directory, suffix=suffix, limit=limit, skipped=skipped, ordered=ordered, skip_dirs=skip_dirs
+            )
+            if d is not None
         )
 
     def read_tail(self, name: str, span: int, *, label: str = "") -> tuple[bytes, int]:
@@ -332,12 +348,12 @@ def private_dir(store: Store, *parts: str, create: bool = True) -> Store:
                     raise
                 if error.errno in {errno.ELOOP, errno.ENOTDIR}:
                     raise Error("state directory must be a real directory without symlinks") from error
-                extra = f" ({error.strerror})" if error.strerror else ""
-                raise Error(f"state directory {part} is inaccessible{extra}") from error
+                raise Error(
+                    f"state directory {part} is inaccessible{f' ({error.strerror})' if error.strerror else ''}"
+                ) from error
             os.close(fd)
             fd = child
-            info = os.fstat(fd)
-            if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            if (info := os.fstat(fd)).st_uid != os.geteuid() or info.st_mode & 0o077:
                 raise Error(f"state directory {'/'.join(target)} must be owned by you with mode 700")
     finally:
         os.close(fd)
