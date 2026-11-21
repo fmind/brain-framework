@@ -138,11 +138,15 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             if init_reply.get("brain") != "brain":
                 raise SystemExit(f"{artifact.name}: unexpected bf init reply: {init_reply}")
             starter_yaml = (brain / "bf.yaml").read_text()
-            if "version: 15" not in starter_yaml or "loops:" not in starter_yaml:
+            if "version: 16" not in starter_yaml or "loops:" not in starter_yaml:
                 raise SystemExit(f"{artifact.name}: unexpected starter bf.yaml: {starter_yaml}")
-            if not (brain / "schemas" / "concepts.json").is_file():
-                raise SystemExit(f"{artifact.name}: missing starter schemas/concepts.json")
-            for retired in ("schemas/bf.schema.json", "schemas/record.json", "schemas/evals.json", "docs/index.md"):
+            for retired in (
+                "schemas/bf.schema.json",
+                "schemas/record.json",
+                "schemas/concepts.json",
+                "schemas/evals.json",
+                "docs/index.md",
+            ):
                 if (brain / retired).exists():
                     raise SystemExit(f"{artifact.name}: unexpected retired starter file {retired}")
             schema_reply = json.loads(run(bf, "schema", "bf", cwd=home, env=env, capture=True))
@@ -179,9 +183,9 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                 "- [ ] Inspect the compiled note record.\n"
             )
             build_reply = json.loads(run(bf, "build", cwd=brain, env=env, capture=True))
-            val_reply = json.loads(run(bf, "validate", cwd=brain, env=env, capture=True))
+            val_reply = json.loads(run(bf, "check", "--validate", cwd=brain, env=env, capture=True))
             rev_reply = json.loads(run(bf, "review", cwd=brain, env=env, capture=True))
-            eval_reply = json.loads(run(bf, "eval", cwd=brain, env=env, capture=True))
+            eval_reply = json.loads(run(bf, "check", "--eval", cwd=brain, env=env, capture=True))
             check_reply = json.loads(run(bf, "check", cwd=brain, env=env, capture=True))
             emit_reply = json.loads(
                 run(bf, "emit", "pkg.smoke", "--data", '{"id":"s1"}', cwd=brain, env=env, capture=True)
@@ -198,7 +202,7 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                 or not emit_reply.get("ok")
                 or not status_reply.get("inside_brain")
                 or not run_reply.get("ok")
-                or "Inspect the compiled note record" not in read_reply.get("markdown", "")
+                or "Inspect the compiled note record" not in read_reply.get("text", "")
             ):
                 raise SystemExit(
                     f"{artifact.name}: smoke check failed: {build_reply} / {val_reply} / {rev_reply} / {eval_reply}"
@@ -206,14 +210,15 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             proj = json.loads((brain / "memories/projects/package.json").read_text())
             if (
                 proj["headings"][1]["meta"] != {"owner": "alice"}
-                or proj["attrs"].get("next") != {"owner": "alice"}
-                or proj["attrs"].get("decision-1") != {"confidence": "high"}
+                or proj["anchors"].get("next") != {"owner": "alice"}
+                or proj["anchors"].get("decision-1") != {"confidence": "high"}
+                or "package-check" in proj["anchors"]
                 or proj["links"][0]["meta"] != {"rel": "cites"}
                 or proj["elements"][0]["meta"] != {"confidence": "high"}
             ):
                 raise SystemExit(f"{artifact.name}: compiled package.json missing attr_list metadata: {proj}")
 
-            # Exercise `bf query`, `bf query --jq`, and `bf eval` through wrapper-script and `mise`-style shims on PATH
+            # Exercise `bf query`, `bf query --jq`, and `bf check --eval` through wrapper-script and `mise`-style shims on PATH
             # (catches regressions hidden inside `mise run`, where real ELF binaries precede shims on PATH).
             for label, mode in (("wrapper", "script"), ("mise-shim", "mise")):
                 shim_dir = home / f"shims-{label}"
@@ -248,7 +253,7 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                 q_jq = json.loads(
                     run(bf, "query", "--jq", "[$ENV, env]", "-n", "1", cwd=brain, env=shim_env, capture=True)
                 )
-                q_ev = json.loads(run(bf, "eval", cwd=brain, env=shim_env, capture=True))
+                q_ev = json.loads(run(bf, "check", "--eval", cwd=brain, env=shim_env, capture=True))
                 if q_rg.get("count", 0) < 1 or q_jq.get("items") != [[{}, {}]] or not q_ev.get("ok"):
                     raise SystemExit(f"{artifact.name} ({label}): shim smoke failed: {q_rg} / {q_jq} / {q_ev}")
 

@@ -120,10 +120,11 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     )
     assert edges["count"] >= 2
 
-    # Exercise `routines/weekly-review.py` (`action:`), `loops/local.py` (`send` + `listen --once`),
-    # and reactive `loops.assistant` (`input: prompts/digest.md` on stdin + `{{context}}` JSON)!
+    # Exercise `routines/weekly-review.py` (`ingest: snapshot` -> `memories/weekly-review/`), `loops/local.py` (`send` + `listen --once`),
+    # and reactive `loops.assistant` (passing `prompts/digest.md` as an arg + `{{context}}` JSON)!
     wr = loops.run_loops(store, ("weekly-review",))
     assert wr["ok"], wr
+    assert wr["results"][0]["summary"]["records"] == 1
     assert engine.validate(store)["ok"]
     local_state = b_root / ".bf" / "local"
     send_res = subprocess.run(  # noqa: S603
@@ -185,18 +186,17 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     records.append_event(store, "loop.message", "local", json.loads(listen.stdout.strip()))
     (b_root / "routines" / "fake_harness.py").write_text(
         "import json, pathlib, subprocess, sys\n"
-        "ctx = json.loads(pathlib.Path(sys.argv[1].removeprefix('Context file: ')).read_text())\n"
-        "prompt_stdin = sys.stdin.read()\n"
-        "assert 'Digest prompt' in prompt_stdin and pathlib.Path(ctx['input']).name == 'digest.md'\n"
-        "msg = {'text': 'Digest from ' + pathlib.Path(ctx['input']).name}\n"
+        "prompt_path, ctx_path = sys.argv[1], sys.argv[2]\n"
+        "ctx = json.loads(pathlib.Path(ctx_path).read_text())\n"
+        "assert 'Digest prompt' in pathlib.Path(prompt_path).read_text() and ctx['events']\n"
+        "msg = {'text': 'Digest from ' + pathlib.Path(prompt_path).name}\n"
         f"subprocess.run([{sys.executable!r}, 'loops/local.py', 'send'], input=json.dumps(msg).encode(), check=True)\n"
     )
     bf_txt = store.read("bf.yaml").decode()
     bf_txt = bf_txt.replace(
-        'run: [claude, -p, "Context file: {{context}}"]',
-        f'run: [{sys.executable!r}, routines/fake_harness.py, "Context file: {{{{context}}}}"]',
+        'run: [claude, -p, "Prompt: prompts/digest.md Context: {{context}}"]\n    enabled: false',
+        f'run: [{sys.executable!r}, routines/fake_harness.py, prompts/digest.md, "{{{{context}}}}"]\n    enabled: true',
     )
-    bf_txt = bf_txt.replace("source: local\n    enabled: false", "source: local\n    enabled: true")
     store.write("bf.yaml", bf_txt.encode())
     tick_res = watch.tick(store)
     assert tick_res["loops_ran"] == 3

@@ -143,9 +143,9 @@ Overview = [
 Guides = [
   { "getting-started.md" = "Create a brain, ingest a record, write a Markdown decision with attr_list metadata and bf:// links, and query pure JSON records with rg and jq." },
   { "authoring.md" = "Write OKF Markdown with Python-Markdown attr_list metadata, connect notes and brains with bf:// URLs, and enforce user JSON Schemas in schemas/." },
-  { "retrieval.md" = "Orient with bf status and bf review, resolve bf:// URLs with bf read, and query pure JSON records in memories/ with rg, jq, bf eval, and bf mcp." },
+  { "retrieval.md" = "Orient with bf status and bf review, resolve bf:// URLs with bf read, and query pure JSON records in memories/ with rg, jq, bf check, and bf mcp." },
   { "operations.md" = "Orchestrate unified loops and concurrent bf watch in bf.yaml, ingest sensor records atomically, run Git hooks, and enforce security boundaries." },
 ]
 Reference = [
-  { "reference.md" = "Complete contract lookup for bf CLI commands, exit codes, flat brain layout, bf.yaml v15, and published JSON Schemas." },
+  { "reference.md" = "Complete contract lookup for bf CLI commands, exit codes, flat brain layout, bf.yaml v16, and published JSON Schemas." },
 ]

@@ -19,8 +19,8 @@ def test_schemas_compile_and_describe_all_validation_rules(brain: Store, tmp_pat
         doc = schemas.document(kind)
         assert doc["$schema"].endswith("2020-12/schema")
 
-    assert schemas.BRAIN_SCHEMA["properties"]["version"]["const"] == 15
-    assert schemas.EVALS_SCHEMA["properties"]["version"]["const"] == 15
+    assert schemas.BRAIN_SCHEMA["properties"]["version"]["const"] == 16
+    assert schemas.EVALS_SCHEMA["properties"]["version"]["const"] == 1
     assert schemas.get_schema("bf") == schemas.document("brain")
     assert schemas.get_schema("record.schema.json") == schemas.document("record")
     assert schemas.get_schema("concepts.json") == schemas.document("concepts")
@@ -32,7 +32,7 @@ def test_schemas_compile_and_describe_all_validation_rules(brain: Store, tmp_pat
     assert "__all__" in base_digests
     assert len(base_digests["record"]) == 64
     assert schemas.schema_digest(schemas.RECORD_SCHEMA) == base_digests["record"]
-    assert schemas.schema_digest(brain.read("schemas/concepts.json")) == base_digests["concepts"]
+    assert schemas.schema_digest(schemas.CONCEPTS_SCHEMA) == base_digests["concepts"]
     fresh_dir = tmp_path / "fresh-schemas"
     fresh_dir.mkdir()
     assert schemas.schemas_digests(Store(fresh_dir))["record"] == schemas.schema_digest(schemas.RECORD_SCHEMA)
@@ -56,10 +56,6 @@ def test_schemas_compile_and_describe_all_validation_rules(brain: Store, tmp_pat
     assert any(
         "missing required 'id'" in e
         for e in schemas.validate_instance(rec_val, {**compact_note, "kind": "memory"}, "mem")
-    )
-    assert any(
-        "property is forbidden" in e
-        for e in schemas.validate_instance(rec_val, {**compact_note, "relations": []}, "note")
     )
     for bad_dt in ("2026-02-31", "2026-04-31", "2026-13-01", "2026-00-10"):
         assert schemas.validate_instance(rec_val, {**compact_note, "updated": bad_dt}, "note")
@@ -313,7 +309,6 @@ def test_ingest_pure_json_forgotten_incomplete_snapshot_and_events(brain: Store)
             Error,
             "section must be",
         ),
-        ("valid", "upsert", b'[{"id":"1","title":"t","relations":[]}]', Error, "'relations' was removed; use 'links'"),
         ("valid", "upsert", b'[{"id":"1","title":"t","links":["not-a-link"]}]', Error, "links must use bf://"),
         ("valid", "upsert", b'[{"id":"1","title":"t","links":["concepts:welcome"]}]', Error, "must use memories/"),
         (

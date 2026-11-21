@@ -91,11 +91,12 @@ def test_compile_note_extracts_frontmatter_headings_keyed_attrs_and_unescapes_ht
         "meta": {"class": "protocol", "update-date": "2026-11-15", "creator": "Anthropic"},
     }
 
-    # Keyed attr_list map (`attrs`) contains headings, blocks, definitions, and tasks by #id!
-    assert compiled["attrs"]["mcp"] == {"class": "protocol", "update-date": "2026-11-15", "creator": "Anthropic"}
-    assert compiled["attrs"]["lead"] == {"confidence": "high", "class": "featured"}
-    assert compiled["attrs"]["def-mcp"] == {"scope": "local"}
-    assert compiled["attrs"]["t1"] == {"due": "2026-12-01"}
+    # Keyed attr_list map (`anchors`) contains only #ids with non-empty metadata (never plain headings).
+    assert "agent-protocol" not in compiled["anchors"]
+    assert compiled["anchors"]["mcp"] == {"class": "protocol", "update-date": "2026-11-15", "creator": "Anthropic"}
+    assert compiled["anchors"]["lead"] == {"confidence": "high", "class": "featured"}
+    assert compiled["anchors"]["def-mcp"] == {"scope": "local"}
+    assert compiled["anchors"]["t1"] == {"due": "2026-12-01"}
 
     links = {(lnk["to"], lnk.get("anchor", "")): lnk for lnk in compiled["links"]}
     assert links[("projects/launch.md", "")]["kind"] == "note"
@@ -159,9 +160,10 @@ def test_compile_note_supports_dprint_single_line_block_attrs_and_link_ids() -> 
     compiled = markdown.compile_note("concepts/dprint.md", raw, brain_name="b")
     assert "{: #para-1" not in compiled["text"]
     assert "{: #task-ship" not in compiled["text"]
-    assert compiled["attrs"]["para-1"] == {"role": "principle"}
-    assert compiled["attrs"]["lnk-1"] == {"rel": "cites"}
-    assert compiled["attrs"]["task-ship"] == {"priority": "p0"}
+    assert "single-line-attrs" not in compiled["anchors"]
+    assert compiled["anchors"]["para-1"] == {"role": "principle"}
+    assert compiled["anchors"]["lnk-1"] == {"rel": "cites"}
+    assert compiled["anchors"]["task-ship"] == {"priority": "p0"}
     assert compiled["tasks"] == [
         {
             "id": "task-ship",
@@ -174,6 +176,7 @@ def test_compile_note_supports_dprint_single_line_block_attrs_and_link_ids() -> 
     assert compiled["links"] == [
         {"to": "concepts/prior.md", "kind": "note", "meta": {"rel": "supersedes"}},
         {
+            "id": "lnk-1",
             "to": "memories/demo/e8bd59a71e7e467bb66d5c98314e26f78547a7dd6aba8980cf2e4edd046a4851.json",
             "kind": "record",
             "meta": {"rel": "cites"},
@@ -181,6 +184,7 @@ def test_compile_note_supports_dprint_single_line_block_attrs_and_link_ids() -> 
         },
     ]
     assert markdown.anchor_ids("concepts/dprint.md", raw) >= {"single-line-attrs", "para-1", "lnk-1", "task-ship"}
+    assert markdown.compiled_anchors(compiled) >= {"single-line-attrs", "para-1", "lnk-1", "task-ship"}
 
     # Loose task list items (blank lines between items -> `<p>` inside `<li>`) preserve `{: #id key=val}` without duplicate `<p>` elements!
     loose = markdown.compile_note(
@@ -190,8 +194,8 @@ def test_compile_note_supports_dprint_single_line_block_attrs_and_link_ids() -> 
         b"- [x] Rotate keys {: #loose-2 priority=p1}\n",
         brain_name="b",
     )
-    assert loose["attrs"]["loose-1"] == {"owner": "sec"}
-    assert loose["attrs"]["loose-2"] == {"priority": "p1"}
+    assert loose["anchors"]["loose-1"] == {"owner": "sec"}
+    assert loose["anchors"]["loose-2"] == {"priority": "p1"}
     assert loose["tasks"] == [
         {
             "id": "loose-1",
@@ -245,7 +249,6 @@ def test_compile_note_fallbacks_and_custom_user_metadata() -> None:
             b"---\nlinks:\n  - to: https://example.com\n    extra: 1\n---\n# Hi\n",
             "frontmatter links must be a list",
         ),
-        ("concepts/badrel.md", b"---\nrelations: []\n---\n# Hi\n", "'relations' was removed; use 'links'"),
         ("concepts/badrecfm.md", b"---\nlinks: [concepts:welcome]\n---\n# Hi\n", "must use memories/"),
         ("concepts/badprosebf.md", b"# Hi\n\nSee [bad](bf:///concepts:welcome).\n", "must use memories/"),
         ("concepts/badrecid.md", b"# Hi\n\nSee [bad](bf:///jira:).\n", "invalid record reference"),
@@ -456,15 +459,15 @@ def test_unified_links_compact_schema_and_reading_helpers() -> None:
         markdown.slice_lines("a\nb", start=0)
 
     sl = markdown.slice_lines("a\nb\nc\nd", start=2, count=2)
-    assert sl == {"total_lines": 4, "start": 2, "count": 2, "content": "b\nc"}
+    assert sl == {"total_lines": 4, "start": 2, "count": 2, "text": "b\nc"}
     assert markdown.slice_lines("a\nb\nc", start=2, count=None) == {
         "total_lines": 3,
         "start": 2,
         "count": 2,
-        "content": "b\nc",
+        "text": "b\nc",
     }
-    assert markdown.slice_lines("a\nb", start=1, count=0) == {"total_lines": 2, "start": 1, "count": 0, "content": ""}
-    assert markdown.slice_lines("a\nb", start=9, count=2) == {"total_lines": 2, "start": 9, "count": 0, "content": ""}
+    assert markdown.slice_lines("a\nb", start=1, count=0) == {"total_lines": 2, "start": 1, "count": 0, "text": ""}
+    assert markdown.slice_lines("a\nb", start=9, count=2) == {"total_lines": 2, "start": 9, "count": 0, "text": ""}
     outline = markdown.note_outline(compiled)
     assert outline["links_count"] == 6
     assert outline["tasks_open"] == 0

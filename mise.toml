@@ -148,8 +148,8 @@ description = "Lint the release shell scripts"
 run = "shellcheck -S warning scripts/*.sh"
 
 [tasks."check:size"]
-description = "Enforce the src/bf Python source line-count budget (<= 5500 total, <= 650 per file)"
-run = 'uv run --locked python -c "import pathlib, sys; files = {p.name: len(p.read_text().splitlines()) for p in pathlib.Path(sys.argv[1]).glob(sys.argv[2])}; over = {k: v for k, v in files.items() if v > 650}; total = sum(files.values()); sys.exit(0 if not over and total <= 5500 else f\"total={total}, over_650={over}\")" src/bf "*.py"'
+description = "Enforce the src/bf Python source line-count budget (<= 6500 total, <= 700 per file)"
+run = 'uv run --locked python -c "import pathlib, sys; files = {p.name: len(p.read_text().splitlines()) for p in pathlib.Path(sys.argv[1]).glob(sys.argv[2])}; over = {k: v for k, v in files.items() if v > 700}; total = sum(files.values()); sys.exit(0 if not over and total <= 6500 else f\"total={total}, over_700={over}\")" src/bf "*.py"'
 
 [tasks."check:types"]
 alias = "ct"

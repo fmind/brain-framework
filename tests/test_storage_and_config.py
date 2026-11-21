@@ -29,7 +29,7 @@ def test_models_sanitization_json_and_dates() -> None:
     with pytest.raises(Error, match="forbidden control"):
         models.clean_text("bad\x00byte")
 
-    assert models.FORMAT == 15
+    assert models.FORMAT == 16
     assert not models.invisible("plain-ascii")
     assert not models.invisible("éàü")
     assert models.invisible("bidir\u202eattack")
@@ -110,7 +110,7 @@ def test_check_version_rejects_missing_bool_and_wrong_versions() -> None:
         models.check_version({}, "bf.yaml")
     with pytest.raises(FormatError, match="declares version 11"):
         models.check_version({"version": 11}, "bf.yaml")
-    for legacy in (13, 14):
+    for legacy in (13, 14, 15):
         with pytest.raises(FormatError, match=rf"declares version {legacy}"):
             models.check_version({"version": legacy}, "bf.yaml")
     with pytest.raises(FormatError, match="declares an invalid version"):
@@ -367,63 +367,66 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     with pytest.raises(Error, match="percent-encoding"):
         config.resolve_brain(s1, cfg1, "%FF")
 
-    # Unified loops (cycle + daemon, `emit: true | <kind>`, multi-schedule, humanized durations, cron, env, .env).
+    # Unified loops (`description`, `on: daemon` | `{schedules, events, hooks}`, `window: {backfill, overlap}`, `ingest`, `emit`, env, .env).
     rich_b = tmp_path / "rich"
     rich_b.mkdir()
     (rich_b / "bf.yaml").write_text(
-        f"version: {models.FORMAT}\nname: rich\n"
+        f"version: {models.FORMAT}\nname: rich\ndescription: Rich test brain.\n"
         "timezone: Europe/Paris\nenv:\n  GWS_DIR: '{{home}}/.config/gws'\n  EMPTY_VAR: ''\n"
         "loops:\n"
         "  sync:\n"
+        "    description: Sync records.\n"
+        "    on:\n      schedules: 10m\n      hooks: pre-commit\n      events: records.ingested\n"
+        "    window:\n      backfill: 2d\n      overlap: 5m\n"
         "    run: [echo, hi]\n"
-        "    ingest:\n      source: sync-src\n      mode: snapshot\n      allow_removal: true\n"
-        "    schedule: 10m\n"
-        "    lookback: 2d\n"
-        "    overlap: 5m\n"
+        "    ingest:\n      source: sync-src\n      mode: snapshot\n"
         "    timeout: 2m\n"
-        "    hook: pre-commit\n"
         "    env:\n      EXTRA_VAR: custom\n"
         "  digest:\n"
-        "    run: [claude, -p, '{{input}}']\n"
-        "    input: prompts/digest.md\n"
-        "    schedule:\n      - 1h\n      - '0 8 * * *'\n"
-        "    emit: true\n"
-        "  short-ing:\n    run: [echo, '[]']\n    ingest: simple\n"
-        "  chat:\n    run: [echo, listen]\n    daemon: true\n    emit: loop.message\n"
-        "  daemon:\n    run: [echo, serve]\n    daemon: true\n"
-        "watch:\n  interval: 1s\n  debounce: 250ms\n  concurrency: 8\n"
+        "    on:\n      schedules:\n        - 1h\n        - '0 8 * * *'\n"
+        "      events:\n        kind: loop.message\n        source: chat\n"
+        "    run: [claude, -p, prompts/digest.md]\n"
+        "    emit: loop.event\n"
+        "  short-ing:\n    run: [echo, '[]']\n    ingest: upsert\n"
+        "  short-snap:\n    run: [echo, '[]']\n    ingest: snapshot\n"
+        "  chat:\n    on: daemon\n    run: [echo, listen]\n    emit: loop.message\n"
+        "  daemon:\n    on: daemon\n    run: [echo, serve]\n"
+        "watch:\n  interval: 1s\n  concurrency: 8\n"
     )
     rich_store = Store(rich_b)
     rich_cfg = config.load(rich_store)
+    assert rich_cfg.description == "Rich test brain."
     assert rich_cfg.timezone == "Europe/Paris"
     assert rich_cfg.env == {"GWS_DIR": "{{home}}/.config/gws", "EMPTY_VAR": ""}
+    assert rich_cfg.loops["sync"].description == "Sync records."
     assert rich_cfg.loops["sync"].schedules[0].every == 600
+    assert rich_cfg.loops["sync"].events == (config.EventMatch(kind="records.ingested"),)
     assert [(s.every, s.cron) for s in rich_cfg.loops["digest"].schedules] == [(3600, ""), (None, "0 8 * * *")]
     assert rich_cfg.loops["digest"].emit == "loop.event"
-    assert rich_cfg.loops["sync"].lookback == 172_800
+    assert rich_cfg.loops["sync"].backfill == 172_800
     assert rich_cfg.loops["sync"].overlap == 300
     assert rich_cfg.loops["sync"].timeout == 120
-    assert (rich_cfg.loops["sync"].ingest, rich_cfg.loops["sync"].mode, rich_cfg.loops["sync"].allow_removal) == (
-        "sync-src",
-        "snapshot",
-        True,
-    )
+    assert (rich_cfg.loops["sync"].ingest, rich_cfg.loops["sync"].mode) == ("sync-src", "snapshot")
     assert rich_cfg.loops["sync"].hooks == ("pre-commit",)
     assert rich_cfg.loops["sync"].env == {"EXTRA_VAR": "custom"}
-    assert rich_cfg.loops["digest"].input == "prompts/digest.md"
-    assert (rich_cfg.loops["short-ing"].ingest, rich_cfg.loops["short-ing"].mode) == ("simple", "upsert")
+    assert (rich_cfg.loops["short-ing"].ingest, rich_cfg.loops["short-ing"].mode) == ("short-ing", "upsert")
+    assert (rich_cfg.loops["short-snap"].ingest, rich_cfg.loops["short-snap"].mode) == ("short-snap", "snapshot")
     assert rich_cfg.loops["chat"].daemon is True
     assert rich_cfg.loops["chat"].emit == "loop.message"
     assert rich_cfg.loops["chat"].env == {}
     assert rich_cfg.loops["daemon"].daemon is True
     assert rich_cfg.loops["daemon"].run == ("echo", "serve")
     assert rich_cfg.loops["daemon"].emit == ""
-    assert (rich_cfg.watch.interval, rich_cfg.watch.debounce_ms, rich_cfg.watch.concurrency) == (1.0, 250, 8)
+    assert (rich_cfg.watch.interval, rich_cfg.watch.concurrency) == (1.0, 8)
     sec_b = tmp_path / "sec-watch"
     sec_b.mkdir()
-    (sec_b / "bf.yaml").write_text(f"version: {models.FORMAT}\nname: sec\nwatch:\n  debounce: 1\n")
-    assert config.load(Store(sec_b)).watch.debounce_ms == 1000
-    assert config.load(Store(sec_b)).watch.concurrency == 4
+    (sec_b / "bf.yaml").write_text(
+        f"version: {models.FORMAT}\nname: sec\nwatch:\n  interval: 2\nloops:\n"
+        "  hk:\n    on:\n      hooks: [pre-commit, pre-push]\n    run: [echo]\n"
+    )
+    sec_cfg = config.load(Store(sec_b))
+    assert (sec_cfg.watch.interval, sec_cfg.watch.concurrency) == (2.0, 4)
+    assert sec_cfg.loops["hk"].hooks == ("pre-commit", "pre-push")
 
     # Optional gitignored `.env` loading + edge cases:
     assert config.load_dotenv(rich_store) == {}
@@ -461,37 +464,92 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     cache_b = tmp_path / "reserved-cache-loop"
     cache_b.mkdir()
     (cache_b / "bf.yaml").write_text(f"version: {models.FORMAT}\nname: rc\nloops:\n  cache:\n    run: [echo]\n")
-    with pytest.raises(Error, match="loop name 'cache' is reserved"):
+    with pytest.raises(Error, match="reserved"):
         config.load(Store(cache_b))
 
     for idx, (bad_yaml, err_match) in enumerate(
         (
             (f"version: {models.FORMAT}\nname: badtz\ntimezone: Not/AZone\n", "unknown IANA timezone"),
             (f"version: {models.FORMAT}\nname: baddef\ndefaults:\n  post: chat\n", "unknown property 'defaults'"),
-            (f"version: {models.FORMAT}\nname: noexec\nloops:\n  l1:\n    schedule: 5m\n", "missing required 'run'"),
             (
-                f"version: {models.FORMAT}\nname: badcron\nloops:\n  l1:\n    run: [echo]\n    schedule: 'not a cron'\n",
+                f"version: {models.FORMAT}\nname: noexec\nloops:\n  l1:\n    on:\n      schedules: 5m\n",
+                "missing required 'run'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: badcron\nloops:\n  l1:\n    on:\n      schedules: 'not a cron'\n    run: [echo]\n",
                 "duration .*, @macro, or 5-field cron",
             ),
             (
-                f"version: {models.FORMAT}\nname: resing\nloops:\n  l1:\n    run: [echo]\n    ingest: concepts\n",
+                f"version: {models.FORMAT}\nname: singon\nloops:\n  l1:\n    on:\n      schedule: 5m\n    run: [echo]\n",
+                "unknown property 'schedule'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: singhk\nloops:\n  l1:\n    on:\n      hook: pre-commit\n    run: [echo]\n",
+                "unknown property 'hook'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: resing\nloops:\n  l1:\n    run: [echo]\n    ingest:\n      source: concepts\n",
                 "reserved",
             ),
             (
-                f"version: {models.FORMAT}\nname: ingact\nloops:\n  l1:\n    run: [echo]\n    ingest: x\n    action:\n      keep: 1\n",
+                f"version: {models.FORMAT}\nname: resing2\nloops:\n  concepts:\n    run: [echo]\n    ingest: upsert\n",
+                "reserved",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: ingact\nloops:\n  l1:\n    run: [echo]\n    action:\n      keep: 1\n",
+                "unknown property 'action'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: ingemit\nloops:\n  l1:\n    run: [echo]\n    ingest: upsert\n    emit: loop.event\n",
                 "conflicting properties",
             ),
             (
-                f"version: {models.FORMAT}\nname: ingemit\nloops:\n  l1:\n    run: [echo]\n    ingest: x\n    emit: true\n",
+                f"version: {models.FORMAT}\nname: dwin\nloops:\n  l1:\n    on: daemon\n    window:\n      backfill: 1h\n    run: [echo]\n",
                 "conflicting properties",
             ),
             (
-                f"version: {models.FORMAT}\nname: dsched\nloops:\n  l1:\n    run: [echo]\n    daemon: true\n    schedule: 1h\n",
+                f"version: {models.FORMAT}\nname: ding\nloops:\n  l1:\n    on: daemon\n    ingest: upsert\n    run: [echo]\n",
                 "conflicting properties",
             ),
             (
-                f"version: {models.FORMAT}\nname: dinp\nloops:\n  l1:\n    run: [echo]\n    daemon: true\n    input: prompts/x.md\n",
+                f"version: {models.FORMAT}\nname: dto\nloops:\n  l1:\n    on: daemon\n    timeout: 1m\n    run: [echo]\n",
                 "conflicting properties",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: emptyon\nloops:\n  l1:\n    on: {{}}\n    run: [echo]\n",
+                "violates minProperties 1",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: emptyev\nloops:\n  l1:\n    on:\n      events:\n        - {{}}\n    run: [echo]\n",
+                "violates minProperties 1",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: emptywin\nloops:\n  l1:\n    window: {{}}\n    run: [echo]\n",
+                "violates minProperties 1",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: leginp\nloops:\n  l1:\n    input: prompts/x.md\n    run: [echo]\n",
+                "unknown property 'input'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: legdaemon\nloops:\n  l1:\n    daemon: true\n    run: [echo]\n",
+                "unknown property 'daemon'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: leglook\nloops:\n  l1:\n    lookback: 1d\n    run: [echo]\n",
+                "unknown property 'lookback'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: legsched\nloops:\n  l1:\n    schedule: 1h\n    run: [echo]\n",
+                "unknown property 'schedule'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: legingstr\nloops:\n  l1:\n    ingest: custom-source\n    run: [echo]\n",
+                "failed schema rule anyOf",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: legrem\nloops:\n  l1:\n    run: [echo]\n    ingest:\n      source: x\n      allow_removal: true\n",
+                "unknown property 'allow_removal'",
             ),
             (
                 f"version: {models.FORMAT}\nname: legjobs\njobs:\n  j1:\n    run: [echo]\n",
@@ -507,32 +565,37 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
             ),
             (
                 f"version: {models.FORMAT}\nname: bademit\nloops:\n  s1:\n    run: [echo]\n    emit: BAD_KIND\n",
-                "failed schema rule anyOf",
+                "does not match pattern",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: boolemit1\nloops:\n  s1:\n    run: [echo]\n    emit: true\n",
+                "expected type string",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: boolemit2\nloops:\n  s1:\n    run: [echo]\n    emit: false\n",
+                "expected type string",
             ),
             (
                 f"version: {models.FORMAT}\nname: resev\nloops:\n  events:\n    run: [echo]\n",
-                "loop name 'events' is reserved",
+                "reserved",
             ),
             (
                 f"version: {models.FORMAT}\nname: resenv\nenv:\n  BF_BRAIN: /x\n",
                 "cannot override reserved",
             ),
             (f"version: {models.FORMAT}\nname: badiv\nwatch:\n  interval: 100ms\n", "between 500ms and 1h"),
-            (f"version: {models.FORMAT}\nname: baddeb\nwatch:\n  debounce: 10ms\n", "between 50ms and 60s"),
+            (f"version: {models.FORMAT}\nname: baddeb\nwatch:\n  debounce: 300ms\n", "unknown property 'debounce'"),
             (f"version: {models.FORMAT}\nname: badconc\nwatch:\n  concurrency: 0\n", "violates minimum 1"),
             (f"version: {models.FORMAT}\nname: badconc2\nwatch:\n  concurrency: 64\n", "violates maximum 32"),
             (f"version: {models.FORMAT}\nname: badenvlist\nenv: [A]\n", "expected type"),
             (f"version: {models.FORMAT}\nname: badenvk\nenv:\n  1BAD: v\n", "does not match pattern"),
             (f"version: {models.FORMAT}\nname: badenvv\nenv:\n  OK_K: 123\n", "expected type string"),
             (
-                f"version: {models.FORMAT}\nname: unsatcron\nloops:\n  l1:\n    run: [echo]\n    schedule: '0 0 31 2 *'\n",
+                f"version: {models.FORMAT}\nname: unsatcron\nloops:\n  l1:\n    on:\n      schedules: '0 0 31 2 *'\n    run: [echo]\n",
                 "duration .*, @macro, or 5-field cron",
             ),
             (f'version: {models.FORMAT}\nname: ctlbr\nbrains:\n  sib: "/tmp/\\u0007bad"\n', "no control characters"),
-            (
-                f"version: {models.FORMAT}\nname: emact\nloops:\n  a:\n    run: [echo]\n    action:\n      keep: 1\n    emit: true\n",
-                "conflicting properties",
-            ),
+            (f'version: {models.FORMAT}\nname: ctldesc\ndescription: "bad\\u0000desc"\n', "forbidden control"),
         )
     ):
         bad_dir = tmp_path / f"bad-{idx}"
@@ -540,20 +603,6 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
         (bad_dir / "bf.yaml").write_text(bad_yaml)
         with pytest.raises(Error, match=err_match):
             config.load(Store(bad_dir))
-
-    # Explicit `emit: false` is allowed standalone and alongside `ingest:` or `action:`.
-    emit_false_dir = tmp_path / "emit-false"
-    emit_false_dir.mkdir()
-    (emit_false_dir / "bf.yaml").write_text(
-        f"version: {models.FORMAT}\nname: ef\nloops:\n"
-        "  a:\n    run: [echo]\n    emit: false\n"
-        "  b:\n    run: [echo]\n    ingest: demo\n    emit: false\n"
-        "  c:\n    run: [echo]\n    action:\n      keep: 2\n    emit: false\n"
-    )
-    ef_cfg = config.load(Store(emit_false_dir))
-    assert ef_cfg.loops["a"].emit == ""
-    assert ef_cfg.loops["b"].emit == ""
-    assert ef_cfg.loops["c"].emit == ""
 
     # Malformed `.env` key with an unclosed quote fails without echoing the unvalidated pre-`=` text.
     bad_env_dir = tmp_path / "bad-dotenv-key"
@@ -568,7 +617,7 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     macro_dir = tmp_path / "macro-brain"
     macro_dir.mkdir()
     (macro_dir / "bf.yaml").write_text(
-        f"version: {models.FORMAT}\nname: macro\nloops:\n  daily:\n    run: [echo]\n    schedule: '@daily'\n"
+        f"version: {models.FORMAT}\nname: macro\nloops:\n  daily:\n    on:\n      schedules: '@daily'\n    run: [echo]\n"
     )
     assert config.load(Store(macro_dir)).loops["daily"].schedules[0].cron == "@daily"
 

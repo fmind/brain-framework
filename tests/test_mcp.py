@@ -26,7 +26,7 @@ def test_mcp_server_exposes_read_only_tools_and_redacts_brain_root(brain: Store)
     async def exercise() -> None:
         tools = await srv.list_tools()
         names = {t.name for t in tools}
-        assert names == {"bf_status", "bf_review", "bf_read", "bf_query", "bf_validate"}
+        assert names == {"bf_status", "bf_review", "bf_read", "bf_query", "bf_check"}
 
         def call_json(res: object) -> dict:
             assert isinstance(res, CallToolResult)
@@ -52,16 +52,23 @@ def test_mcp_server_exposes_read_only_tools_and_redacts_brain_root(brain: Store)
         )
         assert rv["total_tasks_open"] == 1
 
-        val = call_json(await srv.call_tool("bf_validate", {"limit": 10, "strict": True}))
+        val = call_json(await srv.call_tool("bf_check", {"limit": 10, "strict": True, "include_eval": True}))
         assert val["ok"] is True
+        assert val["validate"]["ok"] is True
+        assert val["eval"]["ok"] is True
 
         rd = call_json(await srv.call_tool("bf_read", {"target": "bf:///projects/offline.md#decision"}))
-        assert "Decision" in rd["markdown"]
+        assert "Decision" in rd["text"]
+        rd_raw = call_json(await srv.call_tool("bf_read", {"target": "projects/offline.md", "raw": True}))
+        assert "# Offline retrieval" in rd_raw["text"]
+        rd_full = call_json(await srv.call_tool("bf_read", {"target": "projects/offline.md", "full": True}))
+        assert rd_full["record"]["ref"] == "projects/offline.md"
         rd_out = call_json(await srv.call_tool("bf_read", {"target": "projects/offline.md", "outline": True}))
         assert "headings" in rd_out
         assert "text" not in rd_out
         rd_ln = call_json(await srv.call_tool("bf_read", {"target": "projects/offline.md", "lines": "1:2"}))
         assert rd_ln["count"] == 2
+        assert "text" in rd_ln
         rd_cap = call_json(
             await srv.call_tool(
                 "bf_read", {"target": "projects/offline.md", "fields": ["ref", "text"], "max_bytes": 90}
@@ -71,14 +78,21 @@ def test_mcp_server_exposes_read_only_tools_and_redacts_brain_root(brain: Store)
 
         rg = call_json(
             await srv.call_tool(
-                "bf_query", {"q": "durable", "mode": "rg", "kind": "note", "fields": ["ref", "path"], "limit": 5.0}
+                "bf_query", {"pattern": "durable", "kind": "note", "fields": ["ref", "path"], "limit": 5.0}
             )
         )
         assert rg["count"] >= 1
         assert rg["items"][0]["path"].startswith("memories/")
 
-        jq_res = call_json(await srv.call_tool("bf_query", {"q": 'select(.kind=="project") | .ref', "mode": "jq"}))
+        jq_res = call_json(await srv.call_tool("bf_query", {"jq": 'select(.kind=="project") | .ref'}))
         assert jq_res["items"] == ["projects/offline.md"]
+
+        comb_res = call_json(await srv.call_tool("bf_query", {"pattern": "durable", "jq": ".ref", "kind": "note"}))
+        assert comb_res["engine"] == "rg+jq"
+        assert "projects/offline.md" in comb_res["items"]
+
+        filt_res = call_json(await srv.call_tool("bf_query", {"kind": "note", "scope": "projects", "fields": ["ref"]}))
+        assert filt_res["items"] == [{"ref": "projects/offline.md"}]
 
         # Reject undeclared uppercase/percent-encoded external bf:// hosts and redact file:// brain URIs!
         for bad_uri in ("BF://undeclared/concepts/x.md", "bf://%2Ftmp/concepts/x.md"):
@@ -132,11 +146,11 @@ def test_mcp_server_exposes_read_only_tools_and_redacts_brain_root(brain: Store)
         # Declared cross-brain `bf://decl/...` succeeds while undeclared sibling fails closed!
         decl_res = call_json(await srv.call_tool("bf_read", {"target": "bf://decl/concepts/welcome.md"}))
         assert decl_res["brain"] == "declared-sib"
-        jq_err = await srv.call_tool("bf_query", {"q": 'modulemeta("foo")', "mode": "jq"})
+        jq_err = await srv.call_tool("bf_query", {"jq": 'modulemeta("foo")'})
         assert isinstance(jq_err, CallToolResult)
         assert jq_err.is_error is True
 
-        # `bf_validate` fails closed on undeclared sibling bf:// hosts instead of probing them on disk.
+        # `bf_check` fails closed on undeclared sibling bf:// hosts instead of probing them on disk.
         sib_dir = brain.root.parent / "undeclared-sib"
         engine.init_brain(sib_dir, name="undeclared-sib")
         brain.write(
@@ -144,9 +158,9 @@ def test_mcp_server_exposes_read_only_tools_and_redacts_brain_root(brain: Store)
             b"---\ntype: guide\nstatus: stable\n---\n# Ext\n\n[s](bf://undeclared-sib/concepts/welcome.md)\n",
         )
         engine.build(brain)
-        val_undecl = call_json(await srv.call_tool("bf_validate", {}))
+        val_undecl = call_json(await srv.call_tool("bf_check", {}))
         assert not val_undecl["ok"]
-        assert any("not declared in bf.yaml brains:" in p for p in val_undecl["problems"])
+        assert any("not declared in bf.yaml brains:" in p for p in val_undecl["validate"]["problems"])
 
         # Errors return `is_error=True` with sanitized text without leaking local filesystem root!
         err_res = await srv.call_tool("bf_read", {"target": "concepts/missing.md"})
@@ -173,18 +187,50 @@ def test_mcp_annotations_schema_and_home_redaction(
     async def check() -> None:
         srv = mcp.server(brain)
         tools = await srv.list_tools()
-        assert {t.name for t in tools} == {"bf_status", "bf_review", "bf_read", "bf_query", "bf_validate"}
+        assert {t.name for t in tools} == {"bf_status", "bf_review", "bf_read", "bf_query", "bf_check"}
         for t in tools:
             assert t.annotations is not None
             assert t.annotations.read_only_hint is True
             assert t.annotations.destructive_hint is False
             assert t.input_schema.get("additionalProperties") is False
 
-        # Reject bad limit bounds cleanly without crashing server, and redact $HOME as `~`.
+        # Reject bad limit bounds and removed `source`/`q` arguments cleanly without crashing server, and redact $HOME as `~`.
         with pytest.raises(ToolError, match="greater than or equal to 1"):
-            await srv.call_tool("bf_query", {"q": "x", "limit": 0})
+            await srv.call_tool("bf_query", {"pattern": "x", "limit": 0})
         with pytest.raises(ToolError, match="less than or equal to 200"):
-            await srv.call_tool("bf_query", {"q": "x", "limit": 201})
+            await srv.call_tool("bf_query", {"pattern": "x", "limit": 201})
+        with pytest.raises(ToolError, match="Extra inputs are not permitted"):
+            await srv.call_tool("bf_query", {"pattern": "x", "source": "concepts"})
+
+        # `bf_check(include_eval=True)` enforces `declared_brains_only=True` on `engine: read` eval cases.
+        secret_sib = brain.root.parent / "undeclared-sib"
+        engine.init_brain(secret_sib, name="undeclared-sib")
+        (secret_sib / "concepts" / "secret.md").write_text(
+            "---\ntype: guide\nstatus: stable\n---\n\n# Secret\n\nUNDECLARED_CANARY_999\n"
+        )
+        engine.build(Store(secret_sib))
+        brain.write(
+            "evals/cross.yaml",
+            (
+                b"version: 1\n"
+                b"cases:\n"
+                b"  - name: undeclared-read\n"
+                b"    engine: read\n"
+                b"    query: bf://undeclared-sib/concepts/secret.md\n"
+            ),
+        )
+        chk_res = await srv.call_tool("bf_check", {"include_eval": True})
+        assert isinstance(chk_res, CallToolResult)
+        chk_blk = chk_res.content[0]
+        assert isinstance(chk_blk, TextContent)
+        assert "UNDECLARED_CANARY_999" not in chk_blk.text
+        chk_data = json.loads(chk_blk.text)
+        assert chk_data["ok"] is False
+        assert any(
+            c["name"] == "undeclared-read" and not c["ok"] and any("not declared in bf.yaml" in r for r in c["reasons"])
+            for c in chk_data["eval"]["cases"]
+        )
+        brain.delete("evals/cross.yaml")
 
         fake_home = tmp_path / "home-user"
         fake_home.mkdir()
@@ -213,9 +259,9 @@ def test_mcp_annotations_schema_and_home_redaction(
         )
         engine.build(brain)
         for tool_name, args in (
-            ("bf_validate", {}),
+            ("bf_check", {}),
             ("bf_read", {"target": "concepts/canary.md"}),
-            ("bf_query", {"q": "Broken", "mode": "rg"}),
+            ("bf_query", {"pattern": "Broken"}),
             ("bf_read", {"target": f"concepts/{canary_tok}.md"}),
         ):
             r = await srv.call_tool(tool_name, args)
@@ -252,9 +298,9 @@ def test_mcp_annotations_schema_and_home_redaction(
         await ro_srv.call_tool("bf_status", {})
         await ro_srv.call_tool("bf_review", {})
         await ro_srv.call_tool("bf_read", {"target": "concepts/unbuilt.md"})
-        await ro_srv.call_tool("bf_query", {"q": "welcome", "mode": "rg"})
-        await ro_srv.call_tool("bf_query", {"q": ".ref", "mode": "jq"})
-        ro_val = await ro_srv.call_tool("bf_validate", {})
+        await ro_srv.call_tool("bf_query", {"pattern": "welcome"})
+        await ro_srv.call_tool("bf_query", {"jq": ".ref"})
+        ro_val = await ro_srv.call_tool("bf_check", {"include_eval": True})
         assert isinstance(ro_val, CallToolResult)
         assert isinstance(rv_blk := ro_val.content[0], TextContent)
         assert json.loads(rv_blk.text)["ok"] is False  # detects unbuilt note without writing!

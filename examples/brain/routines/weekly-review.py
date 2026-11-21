@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate an OKF weekly-review action Markdown summary from pure JSON memories."""
+"""Generate a weekly-review summary memory record from pure JSON memories."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ AUTHORED = {"projects", "concepts", "actions"}
 def main() -> int:
     root = Path(os.environ.get("BF_BRAIN", ".")).resolve()
     memories = root / "memories"
-    today = datetime.now(UTC).date().isoformat()
+    now = datetime.now(UTC)
+    today = now.date().isoformat()
     notes = records = 0
     open_tasks: list[str] = []
 
@@ -37,22 +38,27 @@ def main() -> int:
                     for task in (doc.get("tasks") or ())
                     if isinstance(task, dict) and not task.get("done") and task.get("text")
                 )
-            else:
+            elif rel[0] != "weekly-review":
                 records += 1
 
     task_lines = "\n".join(open_tasks) if open_tasks else "- None."
-    report = (
-        f"---\ntype: action\nstatus: draft\nupdated: {today}\n"
-        f"summary: Weekly summary of compiled notes, sensor records, and open tasks.\n---\n\n"
-        f"# Weekly review\n\n"
-        f"## Summary {{#summary}}\n\n"
+    body = (
+        f"## Summary\n\n"
         f"- Compiled notes: {notes}\n"
         f"- Sensor records: {records}\n"
         f"- Open tasks: {len(open_tasks)}\n\n"
-        f"## Open tasks {{#open-tasks}}\n\n"
+        f"## Open tasks\n\n"
         f"{task_lines}\n"
     )
-    sys.stdout.write(report)
+    record = {
+        "id": f"weekly-review-{today}",
+        "title": f"Weekly review ({today})",
+        "summary": f"{notes} notes, {records} records, {len(open_tasks)} open tasks.",
+        "time": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "text": body,
+        "attributes": {"notes": notes, "records": records, "open_tasks": len(open_tasks)},
+    }
+    sys.stdout.write(json.dumps([record], ensure_ascii=False) + "\n")
     return 0
 
 

@@ -5,19 +5,46 @@
   "description": "Deterministic query evaluations in evals/.",
   "properties": {
     "cases": {
+      "description": "Deterministic query test cases.",
       "items": {
         "additionalProperties": false,
         "properties": {
-          "engine": { "enum": ["rg", "jq", "read"], "type": "string" },
-          "expect_equals": {},
-          "expect_refs": { "items": { "maxLength": 4096, "minLength": 1, "type": "string" }, "type": "array" },
-          "expect_text": { "items": { "maxLength": 4096, "minLength": 1, "type": "string" }, "type": "array" },
-          "forbid_refs": { "items": { "maxLength": 4096, "minLength": 1, "type": "string" }, "type": "array" },
-          "max_count": { "minimum": 0, "type": "integer" },
-          "min_count": { "minimum": 0, "type": "integer" },
-          "name": { "maxLength": 256, "minLength": 1, "type": "string" },
-          "query": { "maxLength": 8192, "minLength": 1, "type": "string" },
-          "scope": { "maxLength": 1024, "type": "string" }
+          "engine": {
+            "default": "rg",
+            "description": "Retrieval engine for this case.",
+            "enum": ["rg", "jq", "read"],
+            "type": "string"
+          },
+          "expect_equals": { "description": "Exact JSON value expected from the query items list." },
+          "expect_refs": {
+            "description": "Refs that must appear in results.",
+            "items": { "maxLength": 4096, "minLength": 1, "type": "string" },
+            "type": "array"
+          },
+          "expect_text": {
+            "description": "Case-insensitive substrings that must appear in results.",
+            "items": { "maxLength": 4096, "minLength": 1, "type": "string" },
+            "type": "array"
+          },
+          "forbid_refs": {
+            "description": "Refs that must not appear in results.",
+            "items": { "maxLength": 4096, "minLength": 1, "type": "string" },
+            "type": "array"
+          },
+          "max_count": { "description": "Maximum expected result count.", "minimum": 0, "type": "integer" },
+          "min_count": { "description": "Minimum expected result count.", "minimum": 0, "type": "integer" },
+          "name": { "description": "Unique eval case name.", "maxLength": 256, "minLength": 1, "type": "string" },
+          "query": {
+            "description": "Search regex, jq filter, or bf read target.",
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "scope": {
+            "description": "Optional note, source, or memories/ path restriction.",
+            "maxLength": 1024,
+            "type": "string"
+          }
         },
         "required": ["name", "query"],
         "type": "object"
@@ -25,7 +52,7 @@
       "maxItems": 500,
       "type": "array"
     },
-    "version": { "const": 15, "type": "integer" }
+    "version": { "const": 1, "description": "Eval suite format version.", "type": "integer" }
   },
   "required": ["version", "cases"],
   "title": "Eval",

@@ -72,7 +72,7 @@ def test_cli_commands_and_exit_codes(
 
     # Pre- and post-subcommand `--brain`, conflicts, empty `--brain`, and `--brain` on `init`.
     assert cli.run(["--brain", str(target), "read", "bf:///concepts/welcome.md#conventions"]) == 0
-    assert "attr_list" in json.loads(capsys.readouterr().out)["markdown"]
+    assert "attr_list" in json.loads(capsys.readouterr().out)["text"]
     assert (
         cli.run(
             [
@@ -113,7 +113,7 @@ def test_cli_commands_and_exit_codes(
     assert cli.run(["query", "--sql", "SELECT 1", "--brain", str(target)]) == 2
     capsys.readouterr()
     assert cli.run(["query", "--brain", str(target)]) == 2
-    assert "pass QUERY, --jq FILTER" in capsys.readouterr().err
+    assert "pass PATTERN, --jq EXPR" in capsys.readouterr().err
     assert cli.run(["query", "Conventions", "--jq", ".ref", "--brain", str(target)]) == 0
     assert "concepts/welcome.md" in json.loads(capsys.readouterr().out)["items"]
     assert cli.run(["review", "--brain", str(target), "--", "extra"]) == 2
@@ -143,8 +143,14 @@ def test_cli_commands_and_exit_codes(
     assert cli.run(["mcp", "--brain", str(target), "--port", "9000"]) == 2
     capsys.readouterr()
 
-    assert cli.run(["eval", "--brain", str(target)]) == 0
+    assert cli.run(["check", "--eval", "--brain", str(target)]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert cli.run(["validate", "--brain", str(target)]) == 2
+    capsys.readouterr()
+    assert cli.run(["eval", "--brain", str(target)]) == 2
+    capsys.readouterr()
+    assert cli.run(["query", "Conventions", "--source", "concepts", "--brain", str(target)]) == 2
+    capsys.readouterr()
 
     assert cli.run(["status", "--check", "--brain", str(target)]) == 0
     st_out = json.loads(capsys.readouterr().out)
@@ -215,19 +221,19 @@ def test_cli_commands_and_exit_codes(
     assert cli.run(["build", "--brain", str(target)]) == 0
     assert json.loads(capsys.readouterr().out)["notes"] == 2
 
-    assert cli.run(["validate", "--brain", str(target)]) == 0
+    assert cli.run(["check", "--validate", "--brain", str(target)]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
-    assert cli.run(["review", "--brain", str(target)]) == 0
+    assert cli.run(["review", "-n", "10", "--brain", str(target)]) == 0
     rv_ok = json.loads(capsys.readouterr().out)
     assert rv_ok["ok"] is True
     assert rv_ok["brain"] == "cli-demo"
 
-    # Broken note makes `build`, `validate`, and `review` exit 1 while still emitting compact JSON.
+    # Broken note makes `build`, `check`, and `review` exit 1 while still emitting compact JSON.
     (target / "concepts" / "broken.md").write_text("---\nid: forbidden\n---\n# Bad\n")
     assert cli.run(["build", "--brain", str(target)]) == 1
     assert json.loads(capsys.readouterr().out)["problems"]
-    assert cli.run(["validate", "--brain", str(target)]) == 1
+    assert cli.run(["check", "--validate", "--brain", str(target)]) == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False
     assert cli.run(["review", "--brain", str(target)]) == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False
@@ -278,6 +284,11 @@ def test_cli_format15_commands_and_flags(
     capsys.readouterr()
     assert cli.run(["init", str(tmp_path / "empty-name"), "--name", ""]) == 2
     capsys.readouterr()
+    assert cli.run(["init", str(tmp_path / "bool-name"), "--name", "true", "--description", "Custom desc."]) == 0
+    assert json.loads(capsys.readouterr().out)["brain"] == "true"
+    assert "Custom desc." in (tmp_path / "bool-name" / "bf.yaml").read_text()
+    assert cli.run(["init", str(tmp_path / "bad-desc"), "--description", "x" * 1025]) == 2
+    capsys.readouterr()
 
     b = tmp_path / "f15"
     assert cli.run(["init", str(b), "--name", "f15"]) == 0
@@ -323,9 +334,9 @@ def test_cli_format15_commands_and_flags(
     assert rd_out["headings"]
     assert "text" not in rd_out
     assert cli.run(["read", "concepts/topic-a.md", "--lines", "1:3", "--brain", str(b)]) == 0
-    assert "type: architecture" in json.loads(capsys.readouterr().out)["content"]
+    assert "type: architecture" in json.loads(capsys.readouterr().out)["text"]
     assert cli.run(["read", "concepts/topic-a.md", "--raw", "--brain", str(b)]) == 0
-    assert "# Topic A" in json.loads(capsys.readouterr().out)["markdown"]
+    assert "# Topic A" in json.loads(capsys.readouterr().out)["text"]
     assert (
         cli.run(
             ["read", "concepts/topic-a.md", "--full", "--fields", "ref,kind", "--max-bytes", "500", "--brain", str(b)]
@@ -361,10 +372,26 @@ def test_cli_format15_commands_and_flags(
     rev_proj = [ln.split("\t") for ln in capsys.readouterr().out.splitlines() if ln.strip()]
     assert all(len(row) == 2 for row in rev_proj)
 
-    assert cli.run(["eval", "smoke.yaml", "--brain", str(b)]) == 0
+    assert cli.run(["check", "--eval", "smoke.yaml", "--brain", str(b)]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
-    assert cli.run(["validate", "--limit", "10", "--all", "--strict", "--force", "--brain", str(b)]) == 0
+    assert cli.run(["check", "--validate", "-n", "10", "--all", "--strict", "--force", "--brain", str(b)]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert cli.run(["check", "--eval", "--validate", "--brain", str(b)]) == 2
+    capsys.readouterr()
+    assert cli.run(["check", "smoke.yaml", "--validate", "--brain", str(b)]) == 2
+    capsys.readouterr()
+    for bad_check in (
+        ["check", "--no-build"],
+        ["check", "--no-eval"],
+        ["check", ""],
+        ["check", "--eval", "   "],
+        ["check", "--eval", "-n", "0"],
+        ["check", "--eval", "--all"],
+        ["check", "--eval", "--strict"],
+        ["check", "--eval", "--force"],
+    ):
+        assert cli.run([*bad_check, "--brain", str(b)]) == 2
+        capsys.readouterr()
     assert cli.run(["status", "--all", "--check", "--fields", "brain", "--brain", str(b)]) == 0
     assert json.loads(capsys.readouterr().out) == {"brain": "f15"}
     assert cli.run(["check", "--strict", "--force", "--brain", str(b)]) == 0
@@ -409,6 +436,68 @@ def test_cli_format15_commands_and_flags(
         assert cap.err.startswith("bf: ")
         assert "broken.md" in cap.err
     (b / "concepts" / "broken.md").unlink()
+
+    # `bf status --prune` and `bf run --reset`:
+    (b / ".bf" / "orphan-loop.json").write_text('{"name":"orphan-loop","status":"failed"}\n')
+    (b / ".bf" / "orphan-loop.json").chmod(0o600)
+    (b / ".bf" / "ctx-only.context.json").write_text('{"loop":"ctx-only"}\n')
+    (b / ".bf" / "ctx-only.context.json").chmod(0o600)
+    (b / ".bf" / "index.jsonl").write_text("{}\n")
+    (b / ".bf" / "index.jsonl").chmod(0o600)
+    (b / ".bf" / "cache" / "state.json").parent.mkdir(parents=True, exist_ok=True)
+    (b / ".bf" / "cache" / "state.json").write_text("{}\n")
+    (b / ".bf" / "cache" / "state.json").chmod(0o600)
+    (b / ".bf" / "cache" / "index").mkdir(parents=True, exist_ok=True)
+    (b / ".bf" / "cache" / "index" / "gone.json").write_text('{"version":16,"entries":{},"stats":{}}\n')
+    (b / ".bf" / "cache" / "index" / "gone.json").chmod(0o600)
+    (b / ".bf" / "cache" / "validate").mkdir(parents=True, exist_ok=True)
+    (b / ".bf" / "cache" / "validate" / "gone.json").write_text('{"version":16,"clean":{}}\n')
+    (b / ".bf" / "cache" / "validate" / "gone.json").chmod(0o600)
+    # Invalid `--fields` fails exit 2 before `--prune` mutates disk!
+    assert cli.run(["status", "--prune", "--fields", "", "--brain", str(b)]) == 2
+    capsys.readouterr()
+    assert (b / ".bf" / "orphan-loop.json").exists()
+    # Invalid `bf check -n 0` fails exit 2 before `build()` mutates disk!
+    (b / "concepts" / "unbuilt.md").write_text("---\ntype: guide\nstatus: stable\n---\n# Unbuilt\n")
+    assert cli.run(["check", "-n", "0", "--brain", str(b)]) == 2
+    capsys.readouterr()
+    assert not (b / "memories" / "concepts" / "unbuilt.json").exists()
+    (b / "concepts" / "unbuilt.md").unlink()
+    assert cli.run(["status", "--prune", "--brain", str(b)]) == 0
+    pruned_out = json.loads(capsys.readouterr().out)
+    assert {
+        "orphan-loop",
+        "ctx-only",
+        "cache/index/gone",
+        "cache/validate/gone",
+        ".bf/index.jsonl",
+        ".bf/cache/state.json",
+    } <= set(pruned_out["pruned"])
+    assert pruned_out["orphaned_states"] == []
+    assert not (b / ".bf" / "ctx-only.context.json").exists()
+    assert not (b / ".bf" / "index.jsonl").exists()
+    assert not (b / ".bf" / "cache" / "state.json").exists()
+
+    (b / ".bf" / "miss.json").write_text('{"name":"miss","status":"failed","consecutive_failures":2}\n')
+    (b / ".bf" / "miss.json").chmod(0o600)
+    assert cli.run(["run", "--reset", "miss", "--brain", str(b)]) == 0
+    assert json.loads(capsys.readouterr().out)["reset"] == ["miss"]
+    assert not (b / ".bf" / "miss.json").exists()
+    assert cli.run(["run", "--reset", "miss", "--dry-run", "--brain", str(b)]) == 2
+    capsys.readouterr()
+    assert cli.run(["run", "--reset", "--brain", str(b)]) == 2
+    capsys.readouterr()
+    assert cli.run(["run", "--reset", "no-such", "--brain", str(b)]) == 2
+    capsys.readouterr()
+
+    # Outdated `skills/bf/SKILL.md` sets `skill_outdated` and fails `status --check` / `check --strict`.
+    orig_skill = (b / "skills" / "bf" / "SKILL.md").read_bytes()
+    (b / "skills" / "bf" / "SKILL.md").write_text("stale skill\n")
+    assert cli.run(["status", "--check", "--brain", str(b)]) == 1
+    sk_st = json.loads(capsys.readouterr().out)
+    assert sk_st["skill_outdated"] is True
+    assert any("skills/bf/SKILL.md" in p for p in sk_st["problems"])
+    (b / "skills" / "bf" / "SKILL.md").write_bytes(orig_skill)
 
     # Subcommand `--help` includes descriptive flag help text.
     with pytest.raises(SystemExit) as help_exc:

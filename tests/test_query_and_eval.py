@@ -1,4 +1,4 @@
-"""Tests for `bf read`, `bf query` (`rg`, `jq`), and `bf eval`."""
+"""Tests for `bf read`, `bf query` (`rg`, `jq`), and `bf check` evals."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from bf import engine, query, records
-from bf.models import FORMAT, Error, InputError
+from bf.models import EVAL_FORMAT, FORMAT, Error, InputError
 from bf.storage import Store
 
 
@@ -22,9 +22,9 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
     sec = query.read_target(brain, "bf:///projects/offline.md?rel=cites#decision")
     assert sec["kind"] == "section"
     assert sec["title"] == "Decision"
-    assert "## Decision" in sec["markdown"]
-    assert "## Next actions" not in sec["markdown"]
-    assert "text" not in sec
+    assert "## Decision" in sec["text"]
+    assert "## Next actions" not in sec["text"]
+    assert "markdown" not in sec
     assert "record" not in sec
 
     blk = query.read_target(brain, "projects/offline#summary")
@@ -50,8 +50,8 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
     )
     engine.build(brain)
     fenced_sec = query.read_target(brain, "concepts/fenced.md#cmd-flag")
-    assert "## not a heading" in fenced_sec["markdown"]
-    assert "## Next" not in fenced_sec["markdown"]
+    assert "## not a heading" in fenced_sec["text"]
+    assert "## Next" not in fenced_sec["text"]
 
     # Prefix-overlapping `#id`, explicit `#other` on same title, and duplicate auto-slug `#notes_1` resolve accurately!
     brain.write(
@@ -65,12 +65,12 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
         b"## Notes\n\nSecond notes.\n",
     )
     engine.build(brain)
-    assert "Right singular." in query.read_target(brain, "concepts/collisions.md#decision")["markdown"]
-    assert "Wrong plural." not in query.read_target(brain, "concepts/collisions.md#decision")["markdown"]
-    assert "Right summary." in query.read_target(brain, "concepts/collisions.md#summary")["markdown"]
-    assert "Wrong intro." not in query.read_target(brain, "concepts/collisions.md#summary")["markdown"]
-    assert "Second notes." in query.read_target(brain, "concepts/collisions.md#notes_1")["markdown"]
-    assert "First notes." not in query.read_target(brain, "concepts/collisions.md#notes_1")["markdown"]
+    assert "Right singular." in query.read_target(brain, "concepts/collisions.md#decision")["text"]
+    assert "Wrong plural." not in query.read_target(brain, "concepts/collisions.md#decision")["text"]
+    assert "Right summary." in query.read_target(brain, "concepts/collisions.md#summary")["text"]
+    assert "Wrong intro." not in query.read_target(brain, "concepts/collisions.md#summary")["text"]
+    assert "Second notes." in query.read_target(brain, "concepts/collisions.md#notes_1")["text"]
+    assert "First notes." not in query.read_target(brain, "concepts/collisions.md#notes_1")["text"]
 
     # Auto-anchored headings with underscores, inline emphasis, HTML entities, and Setext underlines slice cleanly!
     brain.write(
@@ -82,11 +82,11 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
     )
     engine.build(brain)
     inline_sec = query.read_target(brain, "concepts/setext.md#cost_benefit-risk")
-    assert "Inline body." in inline_sec["markdown"]
-    assert "Setext body." not in inline_sec["markdown"]
+    assert "Inline body." in inline_sec["text"]
+    assert "Setext body." not in inline_sec["text"]
     setext_sec = query.read_target(brain, "concepts/setext.md#setext-section")
-    assert "Setext body." in setext_sec["markdown"]
-    assert "Tail body." not in setext_sec["markdown"]
+    assert "Setext body." in setext_sec["text"]
+    assert "Tail body." not in setext_sec["text"]
 
     # Spaceless ATX heading and reference-link heading extract accurately!
     brain.write(
@@ -94,8 +94,8 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
         b"---\ntype: guide\nstatus: stable\n---\n##Spaceless\n\nBody1.\n\n## [MCP][m]\n\nBody2.\n\n[m]: https://example.com\n",
     )
     engine.build(brain)
-    assert "Body1." in query.read_target(brain, "concepts/ref-head.md#spaceless")["markdown"]
-    assert "Body2." in query.read_target(brain, "concepts/ref-head.md#mcp")["markdown"]
+    assert "Body1." in query.read_target(brain, "concepts/ref-head.md#spaceless")["text"]
+    assert "Body2." in query.read_target(brain, "concepts/ref-head.md#mcp")["text"]
 
     for blocked in ("logs/events.log", "Logs/events.log", "LOGS", ".vale.ini"):
         with pytest.raises(InputError, match="private or runtime paths"):
@@ -149,7 +149,7 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
 
     cross = query.read_target(brain, "bf://sib/concepts/topic#core")
     assert cross["brain"] == "sib"
-    assert "Hello sib." in cross["markdown"]
+    assert "Hello sib." in cross["text"]
 
     # Cross-brain percent-encoded paths (`%25`), percent-encoded & HTTP `source:id`, and JSON reads without fragment!
     sib.write("docs/100%25.md", b"# Literal Percent\n")
@@ -269,7 +269,7 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
         "evals/suite.json",
         json.dumps(
             {
-                "version": FORMAT,
+                "version": EVAL_FORMAT,
                 "cases": [
                     {
                         "name": "rg-offline",
@@ -307,7 +307,7 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
     # Failing eval file reports structured failure reasons without raising (including expect_text against empty items!).
     brain.write(
         "evals/failing.yaml",
-        f"version: {FORMAT}\n"
+        f"version: {EVAL_FORMAT}\n"
         "cases:\n"
         "  - name: bad-case\n"
         "    engine: rg\n"
@@ -325,7 +325,7 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
         "    query: concepts/nonexistent.md\n".encode(),
     )
     brain.write("evals/broken.yaml", b"version: 99\ncases: []\n")
-    brain.write("evals/badschema.yaml", f"version: {FORMAT}\ncases: not-a-list\n".encode())
+    brain.write("evals/badschema.yaml", f"version: {EVAL_FORMAT}\ncases: not-a-list\n".encode())
     brain.write("evals/scalar.json", b"123\n")
     fail_res = query.evaluate(brain, target="failing")
     assert not fail_res["ok"]
@@ -524,10 +524,10 @@ def test_read_modes_and_query_format15(brain: Store) -> None:
     lns = query.read_target(brain, "projects/offline.md", lines="1:3")
     assert lns["start"] == 1
     assert lns["count"] == 3
-    assert "content" in lns
+    assert "text" in lns
     raw = query.read_target(brain, "projects/offline.md", raw=True)
-    assert "markdown" in raw
-    assert "text" not in raw
+    assert "text" in raw
+    assert "markdown" not in raw
     assert "record" not in raw
     full = query.read_target(brain, "projects/offline.md", full=True, fields=["ref", "record"])
     assert set(full) == {"ref", "record"}
@@ -562,7 +562,7 @@ def test_read_modes_and_query_format15(brain: Store) -> None:
     miss = query.query(brain, "zzz-never-zzz", jq_expr=".ref")
     assert miss["engine"] == "rg+jq"
     assert miss["items"] == []
-    mem_only = query.query(brain, "decision", kind="memory", source="meetings", fields="ref,kind")
+    mem_only = query.query(brain, "decision", kind="memory", scope="meetings", fields="ref,kind")
     assert mem_only["items"]
     assert all(it["kind"] == "memory" for it in mem_only["items"])
     idx_q = query.query_jq(brain, 'select(.kind == "concept") | .ref', kind="note")
@@ -570,7 +570,7 @@ def test_read_modes_and_query_format15(brain: Store) -> None:
     for bad_q in (
         lambda: query.query(brain),
         lambda: query.query(brain, "x", kind="bad"),
-        lambda: query.query(brain, "x", source="BAD!"),
+        lambda: query.query(brain, "x", scope="../escape"),
         lambda: query.query(brain, "x", limit=5001),
     ):
         with pytest.raises(InputError):
@@ -598,14 +598,14 @@ def test_read_modes_and_query_format15(brain: Store) -> None:
     assert query.query(brain, "durable", jq_expr=".ref", limit=1)["truncated"] is True
     brain.write(
         "evals/badengine.yaml",
-        f"version: {FORMAT}\ncases:\n  - name: bad-eng\n    engine: nope\n    query: x\n".encode(),
+        f"version: {EVAL_FORMAT}\ncases:\n  - name: bad-eng\n    engine: nope\n    query: x\n".encode(),
     )
     ev_bad = query.evaluate(brain, target="badengine")
     assert not ev_bad["ok"]
     assert ev_bad["problems"]
     brain.write(
         "evals/eqfail.yaml",
-        f"version: {FORMAT}\ncases:\n"
+        f"version: {EVAL_FORMAT}\ncases:\n"
         "  - name: eq-fail\n    engine: jq\n    query: '.ref'\n    expect_equals: [nope]\n".encode(),
     )
     ev_eq = query.evaluate(brain, target="eqfail")
@@ -751,7 +751,7 @@ def test_query_autosync_index_guard_readonly_and_max_bytes(tmp_path: Path, monke
     st.write("schemas/evals.json", b'{"type": "object"}\n')
     st.write(
         "evals/custom.yaml",
-        f'version: {FORMAT}\ncases:\n  - "not-a-dict"\n  - name: bad-eng\n    engine: nope\n    query: x\n'.encode(),
+        f'version: {EVAL_FORMAT}\ncases:\n  - "not-a-dict"\n  - name: bad-eng\n    engine: nope\n    query: x\n'.encode(),
     )
     custom_ev = query.evaluate(st, target="custom")
     assert custom_ev["failed"] == 1

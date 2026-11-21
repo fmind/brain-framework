@@ -219,8 +219,6 @@ def _prepare_record(raw: dict[str, Any], source: str, index: int, brain_name: st
     from bf.markdown import normalize_tags
 
     label, rec = f"{source}[{index}]", dict(raw)
-    if "relations" in rec:
-        raise Error(f"{label}: 'relations' was removed; use 'links'")
     if not isinstance(raw_id := rec.get("id"), str):
         raise Error(f"{label}: missing required string 'id'")
     if not isinstance(raw_title := rec.get("title"), str):

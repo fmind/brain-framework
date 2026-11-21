@@ -24,9 +24,10 @@ python3 sensors/agent-telemetry.py claude ~/.claude/projects 2026-11-01T00:00:00
 # Or declare in bf.yaml loops:
 # loops:
 #   agent-telemetry:
+#     on:
+#       schedules: 1h
 #     run: [python3, sensors/agent-telemetry.py, claude, "{{home}}/.claude/projects", "{{start}}", "{{end}}"]
-#     ingest: agent-telemetry
-#     schedule: 1h
+#     ingest: upsert
 ```
 
 Use `--mode upsert` (the default) for windowed feeds (`git-history.py`, `github-issues.py`, `gmail-headers.py`, `agent-telemetry.py`) and `--mode snapshot` for complete catalogs (`local-documents.py`). See [Operations](../../docs/operations.md) and [Reference](../../docs/reference.md).

@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from bf import models
 from bf.models import Error
 from bf.schemas import BRAIN_SCHEMA, compile_schema, validate_instance
-from bf.storage import Store, expand, relative
+from bf.storage import Store, expand
 
 if TYPE_CHECKING:
     import yaml
@@ -59,17 +59,15 @@ class ScheduleSpec:
 class LoopSpec:
     name: str
     run: tuple[str, ...] = ()
+    description: str = ""
     daemon: bool = False
-    input: str = ""
     ingest: str = ""
     mode: Literal["upsert", "snapshot"] = "upsert"
-    allow_removal: bool = False
-    action_keep: int = 0
     emit: str = ""
     schedules: tuple[ScheduleSpec, ...] = ()
     events: tuple[EventMatch, ...] = ()
     hooks: tuple[str, ...] = ()
-    lookback: int = 86400
+    backfill: int = 86400
     overlap: int = 0
     timeout: int = 300
     enabled: bool = True
@@ -80,13 +78,13 @@ class LoopSpec:
 @dataclass(frozen=True)
 class WatchSpec:
     interval: float = 5.0
-    debounce_ms: int = 300
     concurrency: int = 4
 
 
 @dataclass(frozen=True)
 class Config:
     name: str
+    description: str = ""
     brains: dict[str, str] = field(default_factory=dict)
     timezone: str = "UTC"
     env: dict[str, str] = field(default_factory=dict)
@@ -202,8 +200,16 @@ def _check_tz(tz: str, label: str) -> str:
 
 
 def _parse_events(raw: object) -> tuple[EventMatch, ...]:
-    items = (x for x in raw if isinstance(x, dict)) if isinstance(raw, list) else ()
-    return tuple(EventMatch(str(x.get("kind", "")), str(x.get("source", "")), str(x.get("filter", ""))) for x in items)
+    if raw is None:
+        return ()
+    items = raw if isinstance(raw, list) else [raw]
+    return tuple(
+        EventMatch(kind=x)
+        if isinstance(x, str)
+        else EventMatch(str(x.get("kind", "")), str(x.get("source", "")), str(x.get("filter", "")))
+        for x in items
+        if isinstance(x, (str, dict))
+    )
 
 
 def _str_tuple(raw: object) -> tuple[str, ...]:
@@ -260,15 +266,12 @@ def load_dotenv(store: Store) -> dict[str, str]:
 
 def _parse_watch(raw: dict[str, object]) -> WatchSpec:
     iv = models.parse_duration_seconds(raw.get("interval", 5.0), "bf.yaml watch.interval")
-    deb = round(models.parse_duration_seconds(raw.get("debounce", 0.3), "bf.yaml watch.debounce") * 1000)
     conc = raw.get("concurrency", 4)
     if not 0.5 <= iv <= 3600.0:
         raise Error("bf.yaml watch.interval must be between 500ms and 1h")
-    if not 50 <= deb <= 60_000:
-        raise Error("bf.yaml watch.debounce must be between 50ms and 60s")
     if type(conc) is not int or not 1 <= conc <= 32:
         raise Error("bf.yaml watch.concurrency must be an integer between 1 and 32")
-    return WatchSpec(iv, deb, conc)
+    return WatchSpec(iv, conc)
 
 
 def prev_cron(expr: str, when: datetime) -> datetime:
@@ -302,38 +305,37 @@ def _parse_schedules(raw_sched: object, label: str) -> tuple[ScheduleSpec, ...]:
 def _parse_loop(name: str, raw: dict[str, object]) -> LoopSpec:
     label = f"bf.yaml loops.{name}"
     run = _str_tuple(raw.get("run"))
-    daemon = bool(raw.get("daemon"))
-    input_rel = str(raw.get("input", ""))
-    if input_rel:
-        relative(input_rel)
+    desc = models.clean_text(str(raw.get("description") or ""), f"{label}.description")
+    raw_on = raw.get("on")
+    daemon = raw_on == "daemon"
+    trig = raw_on if isinstance(raw_on, dict) else {}
     raw_ing = raw.get("ingest")
-    ingest = str(raw_ing["source"] if isinstance(raw_ing, dict) else (raw_ing or ""))
+    if isinstance(raw_ing, str):
+        ingest, mode = name, cast("Literal['upsert', 'snapshot']", raw_ing)
+    elif isinstance(raw_ing, dict):
+        ingest = str(raw_ing["source"])
+        mode = "snapshot" if raw_ing.get("mode") == "snapshot" else "upsert"
+    else:
+        ingest, mode = "", "upsert"
     if ingest in models.RESERVED_SOURCES:
         raise Error(f"{label}.ingest: source {ingest!r} is reserved")
-    mode: Literal["upsert", "snapshot"] = (
-        "snapshot" if isinstance(raw_ing, dict) and raw_ing.get("mode") == "snapshot" else "upsert"
-    )
-    allow_removal = isinstance(raw_ing, dict) and bool(raw_ing.get("allow_removal"))
-    action_keep = int(cast("int", raw_act["keep"])) if isinstance(raw_act := raw.get("action"), dict) else 0
-    raw_emit = raw.get("emit", False)
-    emit = "loop.event" if raw_emit is True else ("" if raw_emit is False else str(raw_emit))
-    schedules = _parse_schedules(raw.get("schedule"), f"{label}.schedule")
-    hooks = (str(raw["hook"]),) if isinstance(raw.get("hook"), str) else _str_tuple(raw.get("hook"))
+    emit = str(raw.get("emit") or "")
+    schedules = _parse_schedules(trig.get("schedules"), f"{label}.on.schedules")
+    hooks = (str(trig["hooks"]),) if isinstance(trig.get("hooks"), str) else _str_tuple(trig.get("hooks"))
+    win = w if isinstance(w := raw.get("window"), dict) else {}
     return LoopSpec(
         name=name,
         run=run,
+        description=desc,
         daemon=daemon,
-        input=input_rel,
         ingest=ingest,
         mode=mode,
-        allow_removal=allow_removal,
-        action_keep=action_keep,
         emit=emit,
         schedules=schedules,
-        events=_parse_events(raw.get("events")),
+        events=_parse_events(trig.get("events")),
         hooks=hooks,
-        lookback=models.parse_duration(raw.get("lookback", 86400), f"{label}.lookback"),
-        overlap=models.parse_duration(raw.get("overlap", 0), f"{label}.overlap", allow_zero=True),
+        backfill=models.parse_duration(win.get("backfill", 86400), f"{label}.window.backfill"),
+        overlap=models.parse_duration(win.get("overlap", 0), f"{label}.window.overlap", allow_zero=True),
         timeout=models.parse_duration(raw.get("timeout", 300), f"{label}.timeout", maximum=86_400),
         enabled=bool(raw.get("enabled", True)),
         requires=_str_tuple(raw.get("requires")),
@@ -344,16 +346,15 @@ def _parse_loop(name: str, raw: dict[str, object]) -> LoopSpec:
 def _parse_config(raw: dict[str, object]) -> Config:
     if problems := validate_instance(_brain_validator(), raw, "bf.yaml"):
         raise Error("; ".join(problems))
+    desc = models.clean_text(str(raw.get("description") or ""), "bf.yaml description")
     raw_brains = rb if isinstance(rb := raw.get("brains"), dict) else {}
     brains = {str(a): models.clean(str(t), f"bf.yaml brains.{a}") for a, t in raw_brains.items()}
     tz = _check_tz(str(raw.get("timezone") or "UTC"), "bf.yaml timezone")
     base_env = _parse_env_map(raw.get("env"), "bf.yaml env")
     raw_loops = rl if isinstance(rl := raw.get("loops"), dict) else {}
     loops = {str(k): _parse_loop(str(k), v) for k, v in raw_loops.items() if isinstance(v, dict)}
-    if bad := sorted({"events", "cache"} & set(loops)):
-        raise Error(f"bf.yaml: loop name {bad[0]!r} is reserved")
     watch_cfg = _parse_watch(rw if isinstance(rw := raw.get("watch"), dict) else {})
-    return Config(str(raw["name"]), brains, tz, base_env, loops, watch_cfg)
+    return Config(str(raw["name"]), desc, brains, tz, base_env, loops, watch_cfg)
 
 
 def load(store: Store) -> Config:

@@ -17,7 +17,7 @@ cd ~/brain
 bf check
 ```
 
-`bf init` creates a minimal flat layout (`projects/`, `concepts/`, `actions/`, `memories/`, `logs/`, `evals/`, `skills/bf/SKILL.md`, `schemas/concepts.json`, linking `.agents/skills/bf`, with operational folders like `sensors/`, `routines/`, `loops/`, `prompts/`, `settings/`, and `docs/` added as needed) and compiles `concepts/welcome.md` into `memories/concepts/welcome.json` plus `.bf/index.jsonl`. Core schemas (`bf`, `record`, `concepts`, `evals`) ship inside `bf` and print anytime with `bf schema`.
+`bf init` creates a minimal flat layout (`projects/`, `concepts/`, `actions/`, `memories/`, `logs/`, `evals/`, `skills/bf/SKILL.md` linked at `.agents/skills/bf`, with optional `schemas/`, `sensors/`, `routines/`, `loops/`, `prompts/`, `settings/`, and `docs/` added as needed) and compiles `concepts/welcome.md` into `memories/concepts/welcome.json` plus `.bf/cache/index/`. Core schemas (`bf`, `record`, `concepts`, `evals`) ship inside `bf` and print anytime with `bf schema`.
 
 ## Ingest evidence and author a Markdown note
 
@@ -61,7 +61,7 @@ bf check
 bf query "product page" --fields ref,title,snippet
 
 # Filter heading and keyed attr_list metadata (jq)
-bf query --jq 'select(.attrs.decision.owner == "product") | {ref, title, attrs}'
+bf query --jq 'select(.anchors.decision.owner == "product") | {ref, title, anchors}'
 
 # Read outline, exact section, line slice, or sensor record
 bf read projects/new-website.md --outline

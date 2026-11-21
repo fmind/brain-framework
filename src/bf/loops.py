@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from bf import config, engine, models, proc, query, records
 from bf.config import Config, EventMatch, LoopSpec
-from bf.models import AUTHORED, MAX_BATCH, MAX_NOTE, Error, InputError, decode, encode, now_utc
+from bf.models import AUTHORED, MAX_BATCH, Error, InputError, decode, encode, now_utc
 from bf.proc import exec_argv as exec_argv
 from bf.storage import Store, private_dir, relative, writer
 
@@ -166,7 +166,6 @@ def prepare_unit(
     start_iso: str,
     *,
     trigger: str = "manual",
-    input_rel: str = "",
     end_iso: str = "",
     events: Sequence[dict[str, Any]] = (),
     stdin_text: str = "",
@@ -174,21 +173,16 @@ def prepare_unit(
     unit_env: Mapping[str, str] | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Expand `{{...}}` placeholders, write `.bf/<name>.context.json`, and build layered `env`."""
-    effective_end, bf_dir, input_abs = end_iso or start_iso, private_dir(store), ""
-    if input_rel:
-        relative(input_rel)
-        if not store.exists(input_rel):
-            raise Error(f"{name}: input file {input_rel} does not exist")
-        input_abs = str(store.root / input_rel)
-    ctx_path = f"{name}.context.json"
+    effective_end, bf_dir = end_iso or start_iso, private_dir(store)
+    ctx_path, state_dir = f"{name}.context.json", str(bf_dir.root / name)
     ctx_a = {"run": run_id, "kind": trigger, "loop": name, "events": list(events), "stdin": stdin_text}
-    bf_dir.write(ctx_path, encode({**ctx_a, "start": start_iso, "end": effective_end, "input": input_abs}), mode=0o600)
+    bf_dir.write(ctx_path, encode({**ctx_a, "start": start_iso, "end": effective_end}), mode=0o600)
     home_str = os.environ.get("HOME", "")
     with suppress(RuntimeError):
         home_str = str(Path.home())
-    env_map = {"{{brain}}": str(store.root), "{{home}}": home_str, "{{state}}": str(bf_dir.root)}
+    env_map = {"{{brain}}": str(store.root), "{{home}}": home_str, "{{state}}": state_dir}
     toks = {**env_map, "{{run}}": run_id, "{{start}}": start_iso, "{{end}}": effective_end}
-    toks |= {"{{input}}": input_abs, "{{context}}": str(bf_dir.root / ctx_path)}
+    toks["{{context}}"] = str(bf_dir.root / ctx_path)
 
     def _sub(text: str, table: Mapping[str, str]) -> str:
         return re.sub(r"\{\{[a-z]+\}\}", lambda m: table.get(m[0], m[0]), text)
@@ -202,38 +196,16 @@ def prepare_unit(
             raise Error(f"{name}: command {argv[0]} does not exist inside brain")
         argv[0] = str(store.root.joinpath(*parts))
 
-    # Precedence: host allowlist < bf.yaml env: < .env < loops.<name>.env: < protected BF_*.
+    # Precedence: host allowlist < bf.yaml env: < loops.<name>.env: < .env < protected BF_*.
     def _expand(mapping: Mapping[str, str] | None) -> dict[str, str]:
         return {k: _sub(v, env_map) for k, v in (mapping or {}).items()}
 
     keys = (*_ENV_ALLOWLIST, *(_GIT_HOOK_ENV if trigger == "hook" else ()))
     env: dict[str, str] = {key: val for key in keys if (val := os.environ.get(key))}
-    env |= _expand(base_env) | config.load_dotenv(store) | _expand(unit_env)
+    env |= _expand(base_env) | _expand(unit_env) | config.load_dotenv(store)
     bf_env = {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8", "BF_BRAIN": str(store.root), "BF_TRIGGER": trigger}
-    bf_env |= {"BF_STATE_DIR": str(bf_dir.root / name), "BF_START": start_iso, "BF_END": effective_end}
+    bf_env |= {"BF_STATE_DIR": state_dir, "BF_START": start_iso, "BF_END": effective_end}
     return argv, {**env, **bf_env}
-
-
-def _save_report_action(store: Store, name: str, out_bytes: bytes, keep: int, instant: datetime) -> str:
-    from bf import markdown
-
-    cfg = config.load(store)
-    day = instant.astimezone(ZoneInfo(cfg.timezone)).date().isoformat()
-    rel = f"actions/{day}_{name}-{os.urandom(4).hex()}/ACTION.md"
-    compiled = markdown.compile_note(rel, out_bytes, brain_name=cfg.name)
-    pat = re.compile(rf"^actions/\d{{4}}-\d{{2}}-\d{{2}}_{re.escape(name)}-[0-9a-f]{{8}}/ACTION\.md$")
-    with writer(store):
-        store.write(rel, out_bytes)
-        store.write(markdown.compiled_note_path(rel), encode(compiled))
-        by_t = lambda p: (p == rel, p[:18], store.stat(p).st_mtime_ns, p)  # noqa: E731
-        old_list = sorted((p for p in store.files("actions") if pat.fullmatch(p)), key=by_t)
-        for old in old_list[:-keep] if keep > 0 else ():
-            store.delete(old)
-            with suppress(FileNotFoundError):
-                store.delete(markdown.compiled_note_path(old))
-            with suppress(OSError), store.parent(old.rsplit("/", 1)[0]) as (pfd, leaf):
-                os.rmdir(leaf, dir_fd=pfd)
-    return rel
 
 
 def parse_emitted_event(raw_line: bytes, default_kind: str, label: str) -> tuple[str, dict[str, Any]]:
@@ -329,8 +301,7 @@ def _bf_error_summary(run_argv: Sequence[str], out_bytes: bytes) -> str:
         probs = next((p for s in subs if isinstance(s, dict) and not s.get("ok") and (p := s.get("problems"))), None)
         if isinstance(probs, list) and probs:
             return "; ".join(str(p) for p in probs[:3])
-        ev_failed = res.get("failed", 0) if cmd == "eval" else (res.get("eval") or {}).get("failed", 0)
-        if ev_failed:
+        if ev_failed := (res.get("eval") or {}).get("failed", 0):
             return f"{ev_failed} eval case(s) failed"
     return ""
 
@@ -349,20 +320,20 @@ def execute_one_loop(
     stop_event: threading.Event | None = None,
     base_env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Execute one triggered `LoopSpec`, handling `ingest`/`action`/`emit` and recording `.bf/` + `logs/`."""
+    """Execute one triggered `LoopSpec`, handling `ingest`/`emit` and recording `.bf/` + `logs/`."""
     instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
     started_iso, run_id = now_utc(instant), f"{loop.name}-{int(instant.timestamp())}-{os.urandom(3).hex()}"
     state_doc = load_unit_state(store, loop.name)
     last_ok = _sched_anchor(state_doc) if trigger == "schedule" else str(state_doc.get("last_success") or "")
     last_dt = _parse_dt(last_ok)
-    win_start = (last_dt or instant) - timedelta(seconds=loop.overlap if last_dt else loop.lookback)
+    win_start = (last_dt or instant) - timedelta(seconds=loop.overlap if last_dt else loop.backfill)
     if missing := check_requires(loop.requires, f"loops.{loop.name}"):
         raise Error("; ".join(missing))
     if dry_run:
         return {"loop": loop.name, "run": run_id, "status": "dry_run", "trigger": trigger}
 
     t0, summary, err_msg, err_txt = time.monotonic(), {}, "", ""
-    p_a: dict[str, Any] = {"end_iso": started_iso, "input_rel": loop.input, "trigger": trigger, "events": events}
+    p_a: dict[str, Any] = {"end_iso": started_iso, "trigger": trigger, "events": events}
     b_env = config.load(store).env if base_env is None else base_env
     p_b: dict[str, Any] = {
         "stdin_text": stdin_bytes.decode("utf-8", "replace"),
@@ -371,11 +342,11 @@ def execute_one_loop(
     }
     argv, env = prepare_unit(store, loop.name, loop.run, run_id, now_utc(win_start), **p_a, **p_b)
     argv = [*argv, *extra_args]
-    proc_stdin, recorded = stdin_bytes or (store.read(loop.input, MAX_NOTE) if loop.input else b""), False
+    recorded = False
     mark_unit_state(store, loop.name, status="running", updated=started_iso, last_start=started_iso)
     try:
         code, out_bytes, err_txt = exec_argv(
-            argv, cwd=store.root, env=env, timeout=loop.timeout, stdin_bytes=proc_stdin, stop_event=stop_event
+            argv, cwd=store.root, env=env, timeout=loop.timeout, stdin_bytes=stdin_bytes, stop_event=stop_event
         )
         if stop_event is not None and stop_event.is_set() and code == 130:
             dur_ms = max(0, int((time.monotonic() - t0) * 1000))
@@ -386,12 +357,7 @@ def execute_one_loop(
         else:
             try:
                 if loop.ingest:
-                    summary = records.ingest(
-                        store, loop.ingest, out_bytes, mode=loop.mode, allow_removal=loop.allow_removal, now=now
-                    )
-                elif loop.action_keep and out_bytes.strip():
-                    act_t = datetime.now(UTC) if now is None else instant
-                    summary = {"action": _save_report_action(store, loop.name, out_bytes, loop.action_keep, act_t)}
+                    summary = records.ingest(store, loop.ingest, out_bytes, mode=loop.mode, now=now)
                 elif loop.emit and out_bytes.strip():
                     summary = {"emitted": emit_output_events(store, loop.name, loop.emit, out_bytes, now=now)}
                 elif len(out_bytes) <= 65536 and out_bytes.decode("utf-8", "replace").strip().startswith("{"):
@@ -568,10 +534,41 @@ def _log_error_fallback(store: Store, name: str) -> str:
     return "last run failed"
 
 
+def reset_loops(store: Store, names: Sequence[str]) -> dict[str, Any]:
+    """Reset `.bf/<loop>.json` and `.bf/<loop>.context.json` state for named loops back to idle."""
+    cfg = config.load(store)
+    if not names:
+        raise InputError("--reset requires one or more loop names")
+    if bad := next((w for w in names if w not in cfg.loops), ""):
+        raise InputError(f"unknown loop {bad!r} in bf.yaml")
+    unique_names = list(dict.fromkeys(names))
+    reset_done: list[str] = []
+    with suppress(FileNotFoundError), writer(store):
+        bf_dir = private_dir(store, create=False)
+        for name in unique_names:
+            removed_any = False
+            for leaf in (f"{name}.json", f"{name}.context.json"):
+                if bf_dir.exists(leaf):
+                    bf_dir.delete(leaf, durable=False)
+                    removed_any = True
+            if removed_any:
+                reset_done.append(name)
+        if reset_done:
+            store.sync_dirs([".bf"])
+    return {"ok": True, "brain": cfg.name, "reset": reset_done}
+
+
 def status_summary(
-    store: Store, *, check: bool = False, all_units: bool = False, fields: Sequence[str] | str | None = None
+    store: Store,
+    *,
+    check: bool = False,
+    all_units: bool = False,
+    fields: Sequence[str] | str | None = None,
+    prune: bool = False,
 ) -> dict[str, Any]:
     """Return compact counts, failing attention loops, orphaned `.bf/` states, and optional `loops`."""
+    from bf import index
+
     wanted, cfg, problems, attention, loops_out = engine.parse_fields(fields), config.load(store), [], [], {}
     for name, loop in cfg.loops.items():
         doc = load_unit_state(store, name)
@@ -587,38 +584,86 @@ def status_summary(
                 att = {"kind": "loop", "mode": mode, "name": name, "status": st, "failed": st == "failed"}
                 attention.append({**att, "consecutive_failures": consec, **({"error": err} if err else {})})
         lr = doc.get("last_run") if isinstance(doc.get("last_run"), dict) and doc.get("last_run") else None
-        extra_i = {
-            k: v for k, v in (("ingest_mode", loop.mode if loop.ingest else ""), ("last_run", lr), ("error", err)) if v
-        }
+        extra_pairs = (
+            ("description", loop.description),
+            ("ingest_mode", loop.mode if loop.ingest else ""),
+            ("last_run", lr),
+            ("error", err),
+        )
+        extra_i = {k: v for k, v in extra_pairs if v}
         base_i = {"enabled": loop.enabled, "mode": mode, "status": st, "last_success": doc.get("last_success", "")}
         loops_out[name] = {**base_i, "consecutive_failures": consec, **extra_i}
 
-    events_seq, known_units, orphaned_states = records.latest_event_seq(store), set(cfg.loops), []
+    events_seq, known_units, orphaned_states, orphaned_contexts = (
+        records.latest_event_seq(store),
+        set(cfg.loops),
+        [],
+        [],
+    )
     with suppress(FileNotFoundError):
         private_dir(store, create=False)
-        for p, _ in store.walk(".bf", ordered=True):
-            is_st = p.count("/") == 1 and p.endswith(".json") and not p.endswith(".context.json")
-            if is_st and (s := p[4:-5]) not in known_units:
+        for p, _ in store.walk(".bf", ordered=True, recursive=False):
+            if p.count("/") != 1 or not p.endswith(".json"):
+                continue
+            if p.endswith(".context.json"):
+                if (s := p[4:-13]) not in known_units:
+                    orphaned_contexts.append(s)
+            elif (s := p[4:-5]) not in known_units:
                 orphaned_states.append(s)
 
-    from bf import markdown
-
-    notes_total = sum(1 for f in AUTHORED for p, _ in store.walk(f, ordered=False) if markdown.okf_role(p) is not None)
+    notes_total = len(index.authored_notes(store))
     rec_total, rec_sources = 0, set()
-    for p, _ in store.walk("memories", ordered=False):
-        if (
-            len(parts := p.split("/")) == 3
-            and p.endswith(".json")
-            and models.NAME_RE.fullmatch(src := parts[1])
-            and src not in models.RESERVED_SOURCES
-        ):
-            rec_total += 1
+    active_mem_sources = set(AUTHORED)
+    for src in index.valid_memory_sources(store):
+        active_mem_sources.add(src)
+        if src in AUTHORED:
+            continue
+        src_count = sum(
+            1 for p, _ in store.walk(f"memories/{src}", ordered=False, recursive=False) if p.endswith(".json")
+        )
+        if src_count:
+            rec_total += src_count
+            if rec_total > models.MAX_TOTAL_FILES:
+                raise Error(f"memories exceeds the {models.MAX_TOTAL_FILES:,}-entry total scan limit")
             rec_sources.add(src)
+
+    pruned: list[str] = []
+    if prune:
+        with writer(store):
+            with suppress(FileNotFoundError):
+                bf_dir = private_dir(store, create=False)
+                for orphan in sorted(set(orphaned_states) | set(orphaned_contexts)):
+                    deleted_any = False
+                    for leaf in (f"{orphan}.json", f"{orphan}.context.json"):
+                        if bf_dir.exists(leaf):
+                            bf_dir.delete(leaf, durable=False)
+                            deleted_any = True
+                    if deleted_any:
+                        pruned.append(orphan)
+                if pruned:
+                    store.sync_dirs([".bf"])
+            pruned.extend(index.prune_cache_shards(store, active_mem_sources, locked=True))
+        orphaned_states = []
+
+    skill_outdated = index.skill_is_outdated(store)
+    if skill_outdated and check:
+        problems.append("skills/bf/SKILL.md: differs from installed bf; refresh from package")
+
     counts = {"notes": notes_total, "records": rec_total, "sources": len(rec_sources), "loops": len(cfg.loops)}
     inside = False
     with suppress(Error):
         inside = config.inside_brain() is not None
-    out_a = {"brain": cfg.name, "ok": not problems, "inside_brain": inside, "events_seq": events_seq, "counts": counts}
-    out_b = {"attention": attention, "orphaned_states": orphaned_states, "problems": problems}
+    desc_d = {"description": cfg.description} if cfg.description else {}
+    skill_d = {"skill_outdated": True} if skill_outdated else {}
+    prune_d = {"pruned": pruned} if prune else {}
+    out_a = {"brain": cfg.name, **desc_d, "ok": not problems, "inside_brain": inside, "events_seq": events_seq}
+    out_b = {
+        "counts": counts,
+        "attention": attention,
+        "orphaned_states": orphaned_states,
+        **skill_d,
+        **prune_d,
+        "problems": problems,
+    }
     out: dict[str, Any] = {**out_a, **out_b, **({"loops": loops_out} if all_units else {})}
     return {k: out[k] for k in wanted if k in out} if wanted is not None else out

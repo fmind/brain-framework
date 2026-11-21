@@ -191,6 +191,99 @@ class Store:
     def mode(self, name: str) -> int:
         return self.stat(name).st_mode
 
+    def _record_skip(self, skipped: list[str] | None, path: str, message: str, err: Exception | None = None) -> None:
+        if skipped is None:
+            raise Error(message) from err
+        skipped.append(f"{path}: {message}")
+
+    def _open_scan_dir(self, directory: str, skipped: list[str] | None) -> int | None:
+        try:
+            return self._open_dir(relative(directory))
+        except FileNotFoundError:
+            return None
+        except PermissionError as error:
+            self._record_skip(skipped, directory, "permission denied", error)
+            return None
+        except Error as error:
+            if skipped is None:
+                raise
+            skipped.append(str(error))
+            return None
+
+    def _walk(
+        self,
+        directory: str,
+        *,
+        suffix: str = "",
+        limit: int | None = None,
+        want_stat: bool = False,
+        skipped: list[str] | None = None,
+        ordered: bool = True,
+        skip_dirs: Iterable[str] = (),
+        recursive: bool = True,
+        max_files: int | None = None,
+    ) -> Generator[tuple[str, Any]]:
+        limit_files = MAX_FILES if max_files is None else max_files
+        skip_set, visited = frozenset(skip_dirs), 0
+        relative(directory)
+
+        def visit(fd: int, prefix: str) -> Generator[tuple[str, Any]]:
+            nonlocal visited
+            if prefix.count("/") > 64:
+                raise Error(f"{prefix}: directory exceeds the 64-level depth limit")
+            with os.scandir(fd) as raw_entries:
+                entries = sorted(raw_entries, key=lambda item: item.name) if ordered else list(raw_entries)
+            for entry in entries:
+                if entry.name.startswith(".write-") and _TEMPORARY.fullmatch(entry.name):
+                    continue
+                if (visited := visited + 1) > limit_files:
+                    raise Error(f"{directory} exceeds the {limit_files:,}-entry scan limit")
+                if (shown := _shown(entry.name)) is not None:
+                    self._record_skip(skipped, f"{prefix}/{shown}", UNNAMED)
+                    continue
+                path, opened, ready, payload = f"{prefix}/{entry.name}", None, False, None
+                try:
+                    if entry.is_symlink():
+                        self._record_skip(skipped, path, LINKED)
+                    elif entry.is_dir(follow_symlinks=False):
+                        if not recursive or (prefix == directory and entry.name in skip_set):
+                            continue
+                        opened = os.open(entry.name, _DIR, dir_fd=fd)
+                    elif not entry.is_file(follow_symlinks=False):
+                        self._record_skip(skipped, path, "special files are not allowed")
+                    else:
+                        if want_stat:
+                            payload = entry.stat(follow_symlinks=False)
+                        elif limit is not None and (not suffix or entry.name.endswith(suffix)):
+                            payload = _read_fd(open_regular(fd, entry.name, path), path, limit)
+                        ready = True
+                except FileNotFoundError:
+                    continue
+                except PermissionError as error:
+                    self._record_skip(skipped, path, "permission denied", error)
+                except Error as error:
+                    if skipped is None:
+                        raise
+                    skipped.append(str(error))
+                except OSError as error:
+                    if error.errno not in {errno.ELOOP, errno.ENOTDIR}:
+                        raise
+                    self._record_skip(skipped, path, LINKED, error)
+                if opened is not None:
+                    try:
+                        yield from visit(opened, path)
+                    finally:
+                        os.close(opened)
+                elif ready:
+                    yield path, payload
+
+        if (fd := self._open_scan_dir(directory, skipped)) is None:
+            return
+        try:
+            yield from visit(fd, directory)
+        finally:
+            os.close(fd)
+
     def walk(
         self,
         directory: str,
@@ -200,79 +293,80 @@ class Store:
         skipped: list[str] | None = None,
         ordered: bool = True,
         skip_dirs: Iterable[str] = (),
+        recursive: bool = True,
+        max_files: int | None = None,
     ) -> Generator[tuple[str, bytes | None]]:
-        skip_set, visited = frozenset(skip_dirs), 0
+        yield from self._walk(
+            directory,
+            suffix=suffix,
+            limit=limit,
+            skipped=skipped,
+            ordered=ordered,
+            skip_dirs=skip_dirs,
+            recursive=recursive,
+            max_files=max_files,
+        )
+
+    def walk_stats(
+        self,
+        directory: str,
+        *,
+        skipped: list[str] | None = None,
+        ordered: bool = False,
+        recursive: bool = True,
+        max_files: int | None = None,
+    ) -> Generator[tuple[str, os.stat_result]]:
+        """Yield `(path, stat_result)` recursively below `directory` using `entry.stat(follow_symlinks=False)`."""
+        yield from self._walk(
+            directory,
+            want_stat=True,
+            skipped=skipped,
+            ordered=ordered,
+            recursive=recursive,
+            max_files=max_files,
+        )
+
+    def subdirs(
+        self, directory: str, *, skipped: list[str] | None = None, max_files: int | None = None
+    ) -> tuple[list[str], list[str]]:
+        """Return `(sorted_subdir_names, sorted_top_file_paths)` directly under `directory` without following links."""
+        dirs: list[str] = []
+        top_files: list[str] = []
+        limit_files = MAX_FILES if max_files is None else max_files
         relative(directory)
-
-        def record_skip(path: str, message: str, err: Exception | None = None) -> None:
-            if skipped is None:
-                raise Error(message) from err
-            skipped.append(f"{path}: {message}")
-
-        def visit(fd: int, prefix: str) -> Generator[tuple[str, bytes | None]]:
-            nonlocal visited
-            if prefix.count("/") > 64:
-                raise Error(f"{prefix}: directory exceeds the 64-level depth limit")
+        if (fd := self._open_scan_dir(directory, skipped)) is None:
+            return dirs, top_files
+        try:
+            visited = 0
+            raw: list[os.DirEntry[str]] = []
             with os.scandir(fd) as raw_entries:
-                entries = sorted(raw_entries, key=lambda item: item.name) if ordered else list(raw_entries)
-            for entry in entries:
-                if entry.name.startswith(".write-") and _TEMPORARY.fullmatch(entry.name):
-                    continue
-                if (visited := visited + 1) > MAX_FILES:
-                    raise Error(f"{directory} exceeds the {MAX_FILES:,}-entry scan limit")
+                for entry in raw_entries:
+                    if entry.name.startswith(".write-") and _TEMPORARY.fullmatch(entry.name):
+                        continue
+                    if (visited := visited + 1) > limit_files:
+                        raise Error(f"{directory} exceeds the {limit_files:,}-entry scan limit")
+                    raw.append(entry)
+            for entry in sorted(raw, key=lambda item: item.name):
                 if (shown := _shown(entry.name)) is not None:
-                    record_skip(f"{prefix}/{shown}", UNNAMED)
+                    self._record_skip(skipped, f"{directory}/{shown}", UNNAMED)
                     continue
-                path, opened, ready, data = f"{prefix}/{entry.name}", None, False, None
+                path = f"{directory}/{entry.name}"
                 try:
                     if entry.is_symlink():
-                        record_skip(path, LINKED)
+                        self._record_skip(skipped, path, LINKED)
                     elif entry.is_dir(follow_symlinks=False):
-                        if prefix == directory and entry.name in skip_set:
-                            continue
-                        opened = os.open(entry.name, _DIR, dir_fd=fd)
-                    elif not entry.is_file(follow_symlinks=False):
-                        record_skip(path, "special files are not allowed")
+                        dirs.append(entry.name)
+                    elif entry.is_file(follow_symlinks=False):
+                        top_files.append(path)
                     else:
-                        if limit is not None and (not suffix or entry.name.endswith(suffix)):
-                            data = _read_fd(open_regular(fd, entry.name, path), path, limit)
-                        ready = True
+                        self._record_skip(skipped, path, "special files are not allowed")
                 except FileNotFoundError:
                     continue
                 except PermissionError as error:
-                    record_skip(path, "permission denied", error)
-                except Error as error:
-                    if skipped is None:
-                        raise
-                    skipped.append(str(error))
-                except OSError as error:
-                    if error.errno not in {errno.ELOOP, errno.ENOTDIR}:
-                        raise
-                    record_skip(path, LINKED, error)
-                if opened is not None:
-                    try:
-                        yield from visit(opened, path)
-                    finally:
-                        os.close(opened)
-                elif ready:
-                    yield path, data
-
-        try:
-            fd = self._open_dir(relative(directory))
-        except FileNotFoundError:
-            return
-        except PermissionError as error:
-            record_skip(directory, "permission denied", error)
-            return
-        except Error as error:
-            if skipped is None:
-                raise
-            skipped.append(str(error))
-            return
-        try:
-            yield from visit(fd, directory)
+                    self._record_skip(skipped, path, "permission denied", error)
         finally:
             os.close(fd)
+        return dirs, top_files
 
     def files(self, directory: str, *, skipped: list[str] | None = None) -> list[str]:
         """List regular files recursively below `directory`, recording bad entries in `skipped`."""
@@ -361,9 +455,9 @@ def private_dir(store: Store, *parts: str, create: bool = True) -> Store:
 
 
 @contextmanager
-def writer(store: Store, wait: float = 10.0, *, busy: str = _WRITE_BUSY) -> Generator[None]:
-    """Hold an exclusive advisory lock on `.bf/write.lock`."""
-    with private_dir(store).parent("write.lock") as (parent, leaf):
+def writer(store: Store, wait: float = 10.0, *, busy: str = _WRITE_BUSY, name: str = "write.lock") -> Generator[None]:
+    """Hold an exclusive advisory lock on `.bf/write.lock` (or `.bf/<name>`)."""
+    with private_dir(store).parent(name) as (parent, leaf):
         fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):

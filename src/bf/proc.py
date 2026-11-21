@@ -122,11 +122,11 @@ def stream_proc(
         try:
             eof = rd(cast("IO[bytes]", proc.stdout))
         finally:
+            timer.cancel()
             stop_fd.set()
             with suppress(subprocess.TimeoutExpired):
                 rc = proc.wait(timeout=5) if eof else None
             rc = stop_proc(proc, wait=0.0 if eof else 5.0) if rc is None else rc
-            timer.cancel()
             err_sp.set()
             if feeder:
                 feeder.join(timeout=5)

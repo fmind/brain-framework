@@ -1,47 +1,56 @@
 # yaml-language-server: $schema=https://fmind.github.io/brain-framework/bf.schema.json
 # https://fmind.github.io/brain-framework/reference/
-version: 15
+version: 16
 name: example
+description: Runnable example brain with offline sensors, routines, hooks, and loops.
 timezone: UTC
 env:
   EXAMPLE_MODE: "local"
 loops:
   demo:
+    description: Snapshot fictional evidence records from the local demo sensor.
+    on:
+      schedules: 1h
     run: [python3, sensors/demo.py, "{{start}}", "{{end}}"]
-    ingest:
-      source: demo
-      mode: snapshot
-    schedule: 1h
+    ingest: snapshot
   build:
-    run: [bf, build]
-    hook: pre-commit
-    events:
-      - kind: records.ingested
+    description: Recompile Markdown notes on pre-commit or after demo ingestion.
+    on:
+      hooks: pre-commit
+      events:
+        kind: records.ingested
         source: demo
+    run: [bf, build]
   weekly-review:
+    description: Save a weekly summary of notes, records, and open tasks into memories/weekly-review/.
+    on:
+      schedules: "0 8 * * 0"
     run: [python3, routines/weekly-review.py]
-    action:
-      keep: 4
-    schedule: "0 8 * * 0"
+    ingest: snapshot
   local:
+    description: Stream local inbox messages as loop.message events.
+    on: daemon
     run: [python3, loops/local.py, listen]
-    daemon: true
     emit: loop.message
     enabled: false
   assistant:
-    run: [claude, -p, "Context file: {{context}}"]
-    input: prompts/digest.md
-    schedule:
-      - 1d
-      - "0 8 * * 1"
-    events:
-      - kind: loop.message
+    description: Run a scheduled or chat-triggered digest assistant.
+    on:
+      schedules:
+        - 1d
+        - "0 8 * * 1"
+      events:
+        kind: loop.message
         source: local
+    window:
+      backfill: 1d
+    run: [claude, -p, "Prompt: prompts/digest.md Context: {{context}}"]
     enabled: false
-  validate:
-    run: [bf, validate]
-    hook: pre-commit
+  check:
+    description: Validate schemas, notes, records, and links before commit.
+    on:
+      hooks: pre-commit
+    run: [bf, check, --validate]
 watch:
   interval: 5s
-  debounce: 300ms
   concurrency: 4

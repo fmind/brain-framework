@@ -19,7 +19,7 @@ from typing import IO, TYPE_CHECKING, Any, cast
 from bf import config, engine, loops, models, proc, records
 from bf.config import LoopSpec
 from bf.models import Error, failure, now_utc, printable
-from bf.storage import Store
+from bf.storage import Store, writer
 
 if TYPE_CHECKING:
     from rich.panel import Panel
@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 Console: Any = None
 watch_fs: Any = None
 
+_DEBOUNCE_MS = 300
+_HEALTHY_SECS = 30.0
 _SKIP_DIRS = frozenset(
     (".git", "memories", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".ty_cache", "site", "dist", "logs")
 )
@@ -85,10 +87,12 @@ def _loop_trigger(loop: LoopSpec) -> tuple[str, str]:
 def _ok_label(s: dict[str, Any]) -> str:
     if "written" in s and "notes" in s:
         return f"{_int(s.get('notes'))} notes ({_int(s.get('written'))} built)"
-    if "notes" in s and "records" in s:
-        return f"valid ({_int(s.get('notes'))} notes, {_int(s.get('records'))} records)"
-    if "passed" in s and "failed" in s:
-        return f"{(p := _int(s.get('passed')))}/{p + _int(s.get('failed'))} passed"
+    v, ev = s.get("validate"), s.get("eval")
+    if isinstance(ev, dict) and "passed" in ev and "failed" in ev:
+        ev_lbl = f"{(p := _int(ev.get('passed')))}/{p + _int(ev.get('failed'))} passed"
+        return f"valid · {ev_lbl}" if isinstance(v, dict) else ev_lbl
+    if isinstance(v, dict) and "notes" in v and "records" in v:
+        return f"valid ({_int(v.get('notes'))} notes, {_int(v.get('records'))} records)"
     if "total_stale" in s or "stale" in s:
         st_l = s.get("stale")
         n_st = _int(s["total_stale"]) if "total_stale" in s else (len(st_l) if isinstance(st_l, list) else 0)
@@ -96,7 +100,7 @@ def _ok_label(s: dict[str, Any]) -> str:
         return f"{n_st} stale · {n_tk} tasks"
     if "emitted" in s:
         return f"{(n := _int(s.get('emitted')))} event{'' if n == 1 else 's'} emitted"
-    return f"→ {printable(act)}" if isinstance(act := s.get("action"), str) and act else "completed"
+    return "completed"
 
 
 def _loop_detail(loop: LoopSpec, doc: dict[str, Any]) -> list[tuple[str, str]]:
@@ -123,12 +127,8 @@ def _loop_detail(loop: LoopSpec, doc: dict[str, Any]) -> list[tuple[str, str]]:
         return [(_ok_label(s), ""), (dur, "dim")]
     if loop.daemon:
         return [("stopped" if st == "stopped" else "ready", "dim")]
-    act = (
-        f"action · keep {loop.action_keep}"
-        if loop.action_keep
-        else (f"emit · {printable(loop.emit)}" if loop.emit else "ready")
-    )
-    return [(f"→ {loop.ingest} ({loop.mode})" if loop.ingest else act, "dim")]
+    idle_lbl = f"emit · {printable(loop.emit)}" if loop.emit else "ready"
+    return [(f"→ {loop.ingest} ({loop.mode})" if loop.ingest else idle_lbl, "dim")]
 
 
 def _neg_ts(doc: dict[str, Any]) -> float:
@@ -237,7 +237,7 @@ def tick(
 
 
 class DaemonStream:
-    """Supervise one long-running `loops.<name>` with `daemon: true`."""
+    """Supervise one long-running `loops.<name>` with `on: daemon`."""
 
     def __init__(
         self,
@@ -264,7 +264,7 @@ class DaemonStream:
         if child is not None and child.poll() is None:
             proc.stop_proc(child)
         if self.thread.is_alive() and threading.current_thread() is not self.thread:
-            self.thread.join(timeout=3)
+            self.thread.join(timeout=6)
 
     def _mark(self, status: str, ts_iso: str, **extra: str) -> None:
         loops.mark_unit_state(self.store, self.unit.name, status=status, updated=ts_iso, **extra)
@@ -302,6 +302,33 @@ class DaemonStream:
                 ) as child:
                     err_stop = threading.Event()
                     err_t, err_buf = proc.drain_tail(cast("IO[bytes]", child.stderr), 65536, err_stop)
+
+                    run_lock, exited = threading.Lock(), threading.Event()
+
+                    def _mark_healthy(
+                        c: subprocess.Popen[bytes] = child,
+                        lk: threading.Lock = run_lock,
+                        ex: threading.Event = exited,
+                    ) -> None:
+                        with lk:
+                            if ex.is_set() or self.stop_event.is_set() or c.poll() is not None:
+                                return
+                            ts = now_utc()
+                            with suppress(Error, OSError):
+                                loops.mark_unit_state(
+                                    self.store,
+                                    self.unit.name,
+                                    status="running",
+                                    updated=ts,
+                                    last_success=ts,
+                                    consecutive_failures=0,
+                                    error="",
+                                )
+                        if self.ui_event is not None:
+                            self.ui_event.set()
+
+                    health_timer = threading.Timer(_HEALTHY_SECS, _mark_healthy)
+                    health_timer.daemon = True
                     try:
                         with self._lock:
                             self.proc, stopping = child, self.stop_event.is_set()
@@ -309,6 +336,7 @@ class DaemonStream:
                             proc.stop_proc(child)
                             continue
                         self._mark("running", now_iso, last_start=now_iso)
+                        health_timer.start()
                         overflow_err, out_s = "", child.stdout
                         while out_s and not self.stop_event.is_set() and (ln := out_s.readline(models.MAX_BATCH + 1)):
                             if len(ln) > models.MAX_BATCH:
@@ -331,6 +359,9 @@ class DaemonStream:
                         proc.stop_proc(child)
                         raise
                     finally:
+                        health_timer.cancel()
+                        with run_lock:
+                            exited.set()
                         err_stop.set()
                         err_t.join(timeout=2)
                     err_txt = bytes(err_buf).decode("utf-8", "replace").strip()
@@ -341,7 +372,7 @@ class DaemonStream:
                 tail_err = "" if rc == 0 else models.redact_secrets(err_txt or f"exit code {rc}")[-1024:]
                 dur_ms = self._record(run_id, now_iso, t0, rc, overflow_err or tail_err, err_txt)
                 # Only sustained uptime resets restart backoff; immediate exit-0 daemons still back off.
-                healthy = not overflow_err and dur_ms >= 30_000
+                healthy = not overflow_err and dur_ms >= int(_HEALTHY_SECS * 1000)
             except models.FAILURES as err:
                 msg = models.redact_secrets(printable(failure(err)))
                 sys.stderr.write(f"bf: {label}: {msg}\n")
@@ -360,6 +391,14 @@ class DaemonStream:
 def serve(store: Store, *, json_stream: bool = False, stop_event: threading.Event | None = None) -> dict[str, Any]:
     """Supervise notes, events, daemon loops, and concurrent cycle loops (`--json` or non-TTY emits JSONL)."""
     cfg = config.load(store)
+    busy = "another bf watch is already running for this brain; stop it before starting a new one"
+    with writer(store, wait=0.0, busy=busy, name="watch.lock"):
+        return _serve_locked(store, cfg, json_stream=json_stream, stop_event=stop_event)
+
+
+def _serve_locked(
+    store: Store, cfg: config.Config, *, json_stream: bool = False, stop_event: threading.Event | None = None
+) -> dict[str, Any]:
     stop_ev = stop_event if stop_event is not None else threading.Event()
     wake_event, ui_event, note_dirty, cfg_dirty = (threading.Event() for _ in range(4))
     reconcile_lock, daemons = threading.Lock(), {}
@@ -440,7 +479,7 @@ def serve(store: Store, *, json_stream: bool = False, stop_event: threading.Even
     def watch_files() -> None:
         if (wf := watch_fs) is None:
             from watchfiles import watch as wf
-        w_kw: dict[str, Any] = {"watch_filter": lambda _, p: bool(_classify(p)), "debounce": cfg.watch.debounce_ms}
+        w_kw: dict[str, Any] = {"watch_filter": lambda _, p: bool(_classify(p)), "debounce": _DEBOUNCE_MS}
         try:
             for changes in wf(store.root, **w_kw, stop_event=stop_ev, raise_interrupt=False):
                 if kinds := {_classify(p) for _, p in changes} - {""}:
@@ -513,16 +552,10 @@ def serve(store: Store, *, json_stream: bool = False, stop_event: threading.Even
                             for rem_it in to_run[idx_i:]:
                                 in_flight.discard(rem_it[0].name)
                         raise
-                b_ok = built is None or bool(built["ok"])
-                ok_t = b_ok and not pre_fails
                 b_cnt = built["written"] if built else 0
-                summary = {
-                    "brain": cur_cfg.name,
-                    "time": now_utc(),
-                    "built": b_cnt,
-                    "loops_ran": len(pre_fails),
-                    "ok": ok_t,
-                }
+                ok_t = (built is None or bool(built["ok"])) and not pre_fails
+                summary = {"brain": cur_cfg.name, "time": now_utc(), "built": b_cnt, "loops_ran": len(pre_fails)}
+                summary["ok"] = ok_t
                 _record_summary(summary, emit=not use_tui and (first or bool(b_cnt) or bool(pre_fails) or not ok_t))
             except (*models.FAILURES, RuntimeError, ValueError, KeyError, TypeError) as err:
                 tick_ok = False

@@ -8,7 +8,8 @@ import math
 import re
 from datetime import UTC, date, datetime
 
-FORMAT = 15
+FORMAT = 16
+EVAL_FORMAT = 1
 AUTHORED = ("projects", "concepts", "actions")
 _RES_EXTRA = ("memories", "notes", "record", "logs", "evals", "bf", "loops")
 RESERVED_SOURCES = frozenset((*AUTHORED, *_RES_EXTRA))
@@ -17,6 +18,7 @@ MAX_BATCH = 16 << 20
 MAX_NOTE = 4 << 20
 MAX_SCHEMA = 1 << 20
 MAX_FILES = 100_000
+MAX_TOTAL_FILES = 1_000_000
 NAME = r"^[a-z][a-z0-9-]{0,63}$"
 NAME_RE = re.compile(NAME)
 EVENT_KIND_PAT = r"^[a-z][a-z0-9._-]{0,127}$"
@@ -101,13 +103,13 @@ class FormatError(Error):
 FAILURES = (Error, OSError, UnicodeError)
 
 
-def check_version(value: dict[str, object], name: str) -> None:
-    """Require `version: FORMAT` before validating fields."""
-    if (found := value.get("version")) == FORMAT and type(found) is int:
+def check_version(value: dict[str, object], name: str, *, expected: int = FORMAT) -> None:
+    """Require `version: expected` before validating fields."""
+    if (found := value.get("version")) == expected and type(found) is int:
         return
     ver = f"version {found}" if type(found) is int and 0 <= found < 1000 else "an invalid version"
     why = "has no version" if "version" not in value else f"declares {ver}"
-    raise FormatError(f"{name} {why}; this release reads version: {FORMAT}")
+    raise FormatError(f"{name} {why}; this release reads version: {expected}")
 
 
 def parse_duration_seconds(
@@ -244,7 +246,7 @@ def failure(error: BaseException) -> str:
         return str(error)
     if isinstance(error, UnicodeError):
         return (
-            "a file is not valid UTF-8; run bf validate to locate it"
+            "a file is not valid UTF-8; run bf check --validate to locate it"
             if isinstance(error, UnicodeDecodeError)
             else "arguments and terminal locale must use UTF-8"
         )

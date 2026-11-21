@@ -1,6 +1,6 @@
 # Runnable example brain
 
-A fictional project, OKF concepts, resumable actions, `attr_list` metadata, user JSON Schemas (`schemas/concepts.json`), deterministic evals (`evals/smoke.yaml`), `/bf` skill (`skills/bf/SKILL.md`), and local `sensors/`, `routines/`, `loops/`, `prompts/`, and unified `loops:` entries demonstrate the end-to-end workflow without credentials or network access.
+A fictional project, OKF concepts, resumable actions, `attr_list` metadata, bundled JSON Schemas (`bf schema`), deterministic evals (`evals/smoke.yaml`), `/bf` skill (`skills/bf/SKILL.md`), and local `sensors/`, `routines/`, `loops/`, `prompts/`, and unified `loops:` entries demonstrate the end-to-end workflow without credentials or network access.
 
 Run on a disposable copy from the repository checkout after `uv sync --locked`:
 
@@ -12,14 +12,12 @@ cd "$bf_demo/brain"
 bf() { uv run --project "$bf_checkout" bf "$@"; }
 
 python3 sensors/demo.py 2026-09-18T09:00:00Z 2026-09-18T10:00:00Z | bf ingest demo
-bf build
-bf validate
-bf eval
+bf check
 bf review
 bf run weekly-review
 ```
 
-`bf validate` returns `"ok":true` (`6` OKF notes, `1` memory record), and `bf build` writes individual JSON files under `memories/{concepts,projects,actions}/*.json` alongside `memories/demo/<sha256>.json`.
+`bf check` returns `"ok":true` (`6` OKF notes, `1` memory record), and `bf build` writes individual JSON files under `memories/{concepts,projects,actions}/*.json` alongside `memories/demo/<sha256>.json`.
 
 ## Query pure JSON records (`bf query`, `rg`, `jq`)
 
@@ -31,7 +29,7 @@ bf query "upstream content can disappear"
 bf query --jq '. as $r | .headings[]? | select(.meta.state == "waiting") | {ref: $r.ref, id, title, meta}'
 
 # Query keyed attr_list map directly
-bf query --jq 'select(.attrs.intention != null) | {ref, intention: .attrs.intention}'
+bf query --jq 'select(.anchors.intention != null) | {ref, intention: .anchors.intention}'
 
 # Find notes citing memories/demo/8e220124401da6e1a0288a86b48eb316d254cd2a9b9399cfc9a07a2fbc0253e8.json with relation metadata via jq
 bf query --jq 'select(.kind != "memory") | .ref as $n | .links[]? | select(.to == "memories/demo/8e220124401da6e1a0288a86b48eb316d254cd2a9b9399cfc9a07a2fbc0253e8.json") | {from_note: $n, rel: .meta.rel, to: .to}'
@@ -44,8 +42,7 @@ bf query --jq 'select(.kind != "memory") | .ref as $n | .links[]? | select(.to =
 ```bash
 bf init "$bf_demo/team" --name example-team
 cp actions/2026-09-25_retention-review/outputs/shared-procedure.md "$bf_demo/team/concepts/selected-evidence.md"
-bf build --brain "$bf_demo/team"
-bf validate --brain "$bf_demo/team"
+bf check --brain "$bf_demo/team"
 ```
 
 Clean up when finished:

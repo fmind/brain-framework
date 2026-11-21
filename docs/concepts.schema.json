@@ -5,6 +5,7 @@
   "description": "User-customizable schema enforced on concept records compiled from concepts/ (schemas/concepts.json).",
   "properties": {
     "sources": {
+      "description": "Supporting evidence sources.",
       "items": {
         "additionalProperties": true,
         "properties": { "resource": { "maxLength": 8192, "minLength": 1, "type": "string" } },
@@ -14,16 +15,22 @@
       "maxItems": 200,
       "type": "array"
     },
-    "status": { "enum": ["draft", "stable", "deprecated"], "type": "string" },
-    "summary": { "maxLength": 16384, "type": "string" },
+    "status": {
+      "description": "Concept maturity status.",
+      "enum": ["draft", "stable", "deprecated"],
+      "type": "string"
+    },
+    "summary": { "description": "Short concept summary.", "maxLength": 16384, "type": "string" },
     "tags": {
+      "description": "Unique concept tags.",
       "items": { "maxLength": 128, "minLength": 1, "pattern": "^[^/\\\\\\s]+$", "type": "string" },
       "maxItems": 200,
       "type": "array",
       "uniqueItems": true
     },
-    "type": { "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
+    "type": { "description": "Concept category slug.", "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
     "updated": {
+      "description": "Last-updated calendar date (YYYY-MM-DD).",
       "pattern": "^[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))$",
       "type": "string"
     }

@@ -18,7 +18,7 @@ from bf.models import Error, InputError, clean, clean_env, clean_text, digest, e
 if TYPE_CHECKING:
     import xml.etree.ElementTree as ET
 
-_RESERVED_FM = frozenset(("id", "ref", "source", "kind", "text", "headings", "elements", "attrs", "tasks", "sha256"))
+_RESERVED_FM = frozenset(("id", "ref", "source", "kind", "text", "headings", "elements", "anchors", "tasks", "sha256"))
 _OMIT_OPT = frozenset(
     (
         "tags",
@@ -30,7 +30,7 @@ _OMIT_OPT = frozenset(
         "links",
         "headings",
         "elements",
-        "attrs",
+        "anchors",
         "tasks",
     )
 )
@@ -303,10 +303,11 @@ def parse_link(
     *,
     section: str = "",
     attr_meta: Mapping[str, str] | None = None,
+    link_id: str = "",
     relative_base: bool = True,
     require_uri: bool = False,
 ) -> dict[str, Any]:
-    """Normalize a Markdown, frontmatter, or record link into canonical `{to, kind, anchor, meta, section}`."""
+    """Normalize a Markdown, frontmatter, or record link into canonical `{id?, to, kind, anchor, meta, section}`."""
     clean_sec = _clean_vis(section, f"{source_path}: link section") if section else ""
     if len(target := _clean_vis(raw_target, f"{source_path}: link target").strip()) > 8192:
         raise Error(f"{source_path}: link exceeds 8192 characters")
@@ -320,7 +321,8 @@ def parse_link(
             if key in merged and merged[key] != cleaned:
                 raise Error(f"{source_path}: conflicting link metadata for {key!r}")
             merged[key] = cleaned
-        return {"to": to, "kind": kind, "anchor": anchor, "meta": merged, "section": clean_sec}
+        base: dict[str, Any] = {"to": to, "kind": kind, "anchor": anchor, "meta": merged, "section": clean_sec}
+        return {"id": link_id, **base} if link_id else base
 
     def canonical_rec(src_s: str, rid_s: str, err_lbl: str) -> str:
         if not models.NAME_RE.fullmatch(src_s) or not rid_s:
@@ -392,7 +394,14 @@ def parse_link(
 def add_link(seen: set[tuple[Any, ...]], out: list[dict[str, Any]], parsed: dict[str, Any]) -> None:
     """Append `parsed` link object to `out` when its normalized tuple key is unseen."""
     m = parsed.get("meta") or {}
-    key = (parsed["to"], parsed["kind"], parsed.get("anchor", ""), tuple(sorted(m.items())), parsed.get("section", ""))
+    key = (
+        parsed.get("id", ""),
+        parsed["to"],
+        parsed["kind"],
+        parsed.get("anchor", ""),
+        tuple(sorted(m.items())),
+        parsed.get("section", ""),
+    )
     if key not in seen:
         seen.add(key)
         out.append(parsed)
@@ -403,14 +412,17 @@ def _extract_ast(path: str, body: str):
     md.reset()
     md.convert(body)
     if (root := capture.root) is None:
-        return "", [], [], [], {}, []
+        return "", [], [], [], {}, [], set()
     stash = [b if isinstance(b, str) else "".join(b.itertext()) for b in md.htmlStash.rawHtmlBlocks]
-    headings, attrs, raw_links, elements, tasks, cited_fn, consumed_p, cur_sec = [], {}, [], [], [], {}, set(), ""
+    headings, anchors, raw_links, elements, tasks, cited_fn, consumed_p, cur_sec = [], {}, [], [], [], {}, set(), ""
+    all_ids: set[str] = set()
 
     def reg(item_id: str, meta: dict[str, str]) -> str:
-        if item_id in attrs:
+        if item_id in all_ids:
             raise Error(f"{path}: duplicate anchor #{item_id}")
-        attrs[item_id] = dict(meta)
+        all_ids.add(item_id)
+        if meta:
+            anchors[item_id] = dict(meta)
         return item_id
 
     def add_el(elem: ET.Element, tag_name: str, eid: str, sec: str, meta: dict[str, str]) -> None:
@@ -442,9 +454,8 @@ def _extract_ast(path: str, body: str):
                     cited_fn.setdefault(href.removeprefix("#fn:"), active)
                 return
             l_meta = _extract_meta(elem.attrib, path, drop=frozenset({"href", "id"}))
-            if elem.attrib.get("id"):
-                reg(clean(elem.attrib["id"], f"{path}: link id"), l_meta)
-            raw_links.append((href, l_meta, active))
+            lid = reg(clean(elem.attrib["id"], f"{path}: link id"), l_meta) if elem.attrib.get("id") else ""
+            raw_links.append((href, l_meta, active, lid))
         else:
             eid = clean(elem.attrib["id"], f"{path}: element id") if elem.attrib.get("id") else ""
             tm = _TASK.match(_own_inline_text(elem, stash)) if tag == "li" and not in_quote and fn_sec is None else None
@@ -476,12 +487,24 @@ def _extract_ast(path: str, body: str):
 
     walk(root)
     plain = "\n".join(ln.strip() for ln in _unstash("".join(root.itertext()), stash).splitlines() if ln.strip())
-    return plain, headings, raw_links, elements, attrs, tasks
+    return plain, headings, raw_links, elements, anchors, tasks, all_ids
 
 
 def anchor_ids(path: str, data: bytes) -> set[str]:
     """Extract all `#id` anchors (headings and keyed `attr_list` elements) from any UTF-8 Markdown file."""
-    return set(_extract_ast(path, _split_frontmatter(path, data, parse_yaml=False)[1])[4])
+    return set(_extract_ast(path, _split_frontmatter(path, data, parse_yaml=False)[1])[6])
+
+
+def compiled_anchors(item: Mapping[str, Any]) -> set[str]:
+    """Return every `#id` anchor recorded across `headings`, `elements`, `tasks`, `links`, and `anchors`."""
+    found: set[str] = set()
+    for field in ("headings", "elements", "tasks", "links"):
+        for entry in item.get(field) or ():
+            if isinstance(entry, Mapping) and isinstance(eid := entry.get("id"), str) and eid:
+                found.add(eid)
+    if isinstance(meta_map := item.get("anchors"), Mapping):
+        found.update(k for k in meta_map if isinstance(k, str) and k)
+    return found
 
 
 def extract_section(text: str, anchor: str, compiled: dict[str, Any]) -> dict[str, Any]:
@@ -492,8 +515,11 @@ def extract_section(text: str, anchor: str, compiled: dict[str, Any]) -> dict[st
                 return {"anchor": anchor, out_key: it}
     headings = [h for h in (compiled.get("headings") or ()) if isinstance(h, dict)]
     if (heading := next((h for h in headings if h.get("id") == anchor), None)) is None:
-        if isinstance(attrs := compiled.get("attrs"), dict) and anchor in attrs:
-            return {"anchor": anchor, "meta": attrs[anchor]}
+        if isinstance(anchors := compiled.get("anchors"), dict) and anchor in anchors:
+            return {"anchor": anchor, "meta": anchors[anchor]}
+        for it in compiled.get("links") or ():
+            if isinstance(it, dict) and it.get("id") == anchor:
+                return {"anchor": anchor, "meta": dict(it.get("meta") or {})}
         raise Error(f"{compiled['ref']}: missing anchor #{anchor}")
     lines = text.splitlines()
     b0 = next((i + 1 for i in range(1, len(lines)) if lines[i] == "---"), 0) if lines[:1] == ["---"] else 0
@@ -562,12 +588,12 @@ def parse_line_spec(spec: str) -> tuple[int, int | None]:
 
 
 def slice_lines(text: str, start: int = 1, count: int | None = None) -> dict[str, Any]:
-    """Return a 1-based line slice `{total_lines, start, count, content}` from `text`."""
+    """Return a 1-based line slice `{total_lines, start, count, text}` from `text`."""
     if start < 1 or (count is not None and count < 0):
         raise InputError("lines requires start >= 1 and count >= 0")
     lines = text.splitlines()
     sliced = lines[start - 1 : (None if count is None else start - 1 + count)]
-    return {"total_lines": len(lines), "start": start, "count": len(sliced), "content": "\n".join(sliced)}
+    return {"total_lines": len(lines), "start": start, "count": len(sliced), "text": "\n".join(sliced)}
 
 
 def note_outline(compiled: Mapping[str, Any]) -> dict[str, Any]:
@@ -591,9 +617,7 @@ def compile_note(path: str, data: bytes, *, brain_name: str) -> dict[str, Any]:
     frontmatter, body = _split_frontmatter(path, data, parse_yaml=True)
     if forbidden := sorted(_RESERVED_FM & frontmatter.keys()):
         raise Error(f"{path}: frontmatter cannot override computed field {', '.join(forbidden)}")
-    if "relations" in frontmatter:
-        raise Error(f"{path}: frontmatter 'relations' was removed; use 'links' with ?rel=... query parameters")
-    plain_text, headings, raw_links, elements, attrs, tasks = _extract_ast(path, body)
+    plain_text, headings, raw_links, elements, anchors, tasks, _ = _extract_ast(path, body)
     fm = dict(frontmatter)
     if (fm_title := fm.pop("title", None)) is not None and not isinstance(fm_title, str):
         raise Error(f"{path}: title must be a string")
@@ -601,27 +625,27 @@ def compile_note(path: str, data: bytes, *, brain_name: str) -> dict[str, Any]:
     h1_title = next((str(h["title"]) for h in headings if h["level"] == 1 and str(h["title"]).strip()), stem)
     title = clean((fm_title.strip() if isinstance(fm_title, str) else "") or h1_title, f"{path}: title")
     tags = normalize_tags(fm.pop("tags"), path) if "tags" in fm and fm["tags"] is not None else []
-    fm_specs: list[tuple[str, dict[str, str], str]] = []
+    fm_specs: list[tuple[str, dict[str, str], str, str]] = []
     bad_fm = f"{path}: frontmatter links must be a list of link targets or {{to, meta}} objects"
     if (fm_links := fm.pop("links", None)) is not None:
         if not isinstance(fm_links, list):
             raise Error(bad_fm)
         for it in fm_links:
             if isinstance(it, str):
-                fm_specs.append((it, {}, ""))
+                fm_specs.append((it, {}, "", ""))
             elif isinstance(it, dict) and set(it) <= {"to", "meta"} and isinstance(to_s := it.get("to"), str):
                 m = it.get("meta", {})
                 if not isinstance(m, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in m.items()):
                     raise Error(bad_fm)
-                fm_specs.append((to_s, dict(m), ""))
+                fm_specs.append((to_s, dict(m), "", ""))
             else:
                 raise Error(bad_fm)
     if isinstance(sources_val := fm.get("sources"), list):
         cites = (s.get("resource") for s in sources_val if isinstance(s, dict))
-        fm_specs.extend((r.strip(), {"rel": "cites"}, "") for r in cites if isinstance(r, str) and r.strip())
+        fm_specs.extend((r.strip(), {"rel": "cites"}, "", "") for r in cites if isinstance(r, str) and r.strip())
     links, seen = [], set()
-    for target, link_meta, sec in [*fm_specs, *raw_links]:
-        add_link(seen, links, parse_link(path, target, brain_name, section=sec, attr_meta=link_meta))
+    for target, link_meta, sec, lid in [*fm_specs, *raw_links]:
+        add_link(seen, links, parse_link(path, target, brain_name, section=sec, attr_meta=link_meta, link_id=lid))
     specs = (
         ("headings", headings, {"id", "title", "level"}),
         ("links", links, {"to", "kind"}),
@@ -633,7 +657,7 @@ def compile_note(path: str, data: bytes, *, brain_name: str) -> dict[str, Any]:
         for k, seq, keep in specs
     }
     base = {"ref": path, "source": source, "kind": kind, "title": title, "text": plain_text}
-    merged = {**fm, **base, "tags": tags, "attrs": attrs, **comp, "sha256": digest(data)}
+    merged = {**fm, **base, "tags": tags, "anchors": anchors, **comp, "sha256": digest(data)}
     compiled = {k: v for k, v in merged.items() if not (k in _OMIT_OPT and v in ("", {}, [], None))}
     encode(compiled)
     return compiled

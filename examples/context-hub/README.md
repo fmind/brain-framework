@@ -4,7 +4,7 @@ Answer one question across Google Workspace, Jira, GitHub, and Google Cloud fixt
 
 | Path                      | Purpose                                                                                              |
 | ------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `bf.yaml`                 | YAML configuration (`version: 15`, `name: context-demo`).                                            |
+| `bf.yaml`                 | YAML configuration (`version: 16`, `name: context-demo`).                                            |
 | `schemas/jira.json`       | Per-source JSON Schema enforcing `type`, `status`, and `links` on `memories/jira/*.json`.            |
 | `fixtures/*.json`         | Offline JSON fixtures for `workspace`, `jira`, `github`, `gcloud`, plus `jira-done.json`.            |
 | `projects/new-website.md` | Authoritative Markdown project note with `attr_list` metadata on headings, links, blocks, and tasks. |
@@ -28,12 +28,10 @@ bf() { uv run --project "$bf_checkout" bf "$@"; }
 for tool in workspace jira github gcloud; do
   python3 sensors/demo.py "$tool" 2026-09-26T12:00:00Z | bf ingest "$tool" --mode snapshot
 done
-bf build
-bf validate
-bf eval
+bf check
 ```
 
-`bf validate` reports `"ok":true` with `1` note and `4` records. Both the compiled Markdown project (`memories/projects/new-website.json`) and the four sensor folders (`memories/{workspace,jira,github,gcloud}/*.json`) live as individual JSON files under `memories/`.
+`bf check` reports `"ok":true` with `1` note and `4` records. Both the compiled Markdown project (`memories/projects/new-website.json`) and the four sensor folders (`memories/{workspace,jira,github,gcloud}/*.json`) live as individual JSON files under `memories/`.
 
 ## 2. Query pure JSON records (`bf query`, `jq`, `rg`)
 
@@ -80,8 +78,7 @@ Hold public launch. The [implementation](github:implementation){rel=implements} 
 - [ ] Run the keyboard navigation check.
   {: #task-a11y priority=p1}
 EOF
-bf build
-bf validate
+bf check
 bf review
 ```
 

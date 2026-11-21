@@ -44,16 +44,19 @@ def _arr(items: dict[str, Any], *, max_items: int = 0, min_items: int = 0, uniqu
     return {"type": "array", "items": items, **ex}
 
 
-def _opt(schema: dict[str, Any]) -> dict[str, Any]:
-    return {**schema, "type": ["object", "null"]}
+def _d(schema: dict[str, Any], desc: str, **extra: Any) -> dict[str, Any]:
+    return {**schema, "description": desc, **extra}
 
 
 def _obj(props: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
-    out: dict[str, Any] = {"type": "object", "additionalProperties": kw.get("extra", False)}
-    ex = (("title", kw.get("title")), ("required", list(kw["req"]) if kw.get("req") else None))
+    tp: Any = ["object", "null"] if kw.get("opt") else "object"
+    out: dict[str, Any] = {"type": tp, "additionalProperties": kw.get("extra", False)}
+    ex = (("title", kw.get("title")), ("description", kw.get("desc")), ("minProperties", kw.get("min_props")))
     out.update({k: v for k, v in ex if v})
-    if kw.get("names"):
-        out["propertyNames"] = {"pattern": kw["names"]}
+    if kw.get("req"):
+        out["required"] = list(kw["req"])
+    if n := kw.get("names"):
+        out["propertyNames"] = n if isinstance(n, dict) else {"pattern": n}
     return {**out, "properties": props} if props is not None else out
 
 
@@ -62,99 +65,129 @@ def _doc(slug: str, title: str, desc: str, body: dict[str, Any]) -> dict[str, An
 
 
 _DUR_S = _s(32, pat=models.DURATION_PAT)
-_DURATION = {"anyOf": [_i(1, 315576000), _DUR_S]}
+_DURATION, _TIMEOUT = {"anyOf": [_i(1, 315576000), _DUR_S]}, {"anyOf": [_i(1, 86400), _DUR_S]}
 _OVERLAP = {"anyOf": [_i(0, 315576000), _s(32, pat=models.DURATION_ZERO_PAT)]}
-_TIMEOUT = {"anyOf": [_i(1, 86400), _DUR_S]}
 _WI = {"anyOf": [{"type": "number", "minimum": 0.5, "maximum": 3600}, _DUR_S]}
-_WD = {"anyOf": [{"type": "number", "minimum": 0.05, "maximum": 60}, _DUR_S]}
-_ENV_MAP = _obj(extra=_s(4096), names=r"^[A-Z_][A-Z0-9_]*$")
+_ENV_MAP = _obj(extra=_s(4096), names=r"^[A-Z_][A-Z0-9_]*$", opt=True)
 _TAG_ITEMS = _arr(_s(128, min_len=1, pat=r"^[^/\\\s]+$"), max_items=200, unique=True)
 _HOOK_ENUM, _ARGV_REF, _META_REF = _enum("pre-commit", "pre-push"), {"$ref": "#/$defs/Argv"}, {"$ref": "#/$defs/Meta"}
-_UNIT_BASE = {"enabled": _BOOL, "requires": _arr(_s(256, min_len=1), max_items=32, unique=True), "env": _ENV_MAP}
+_LOOP_KEY = {"pattern": models.NAME, "not": {"enum": ["events", "cache"]}}
+_SRC_REF = {**_NAME_REF, "not": {"enum": sorted(models.RESERVED_SOURCES)}}
 _SCHED_ITEM = {"anyOf": [_i(1, 315576000), _s(128, min_len=1)]}
 _SCHED_ANY = {"anyOf": [_SCHED_ITEM, _arr(_SCHED_ITEM, min_items=1, max_items=16)]}
 _HOOK_ANY = {"anyOf": [_HOOK_ENUM, _arr(_HOOK_ENUM, min_items=1, max_items=2, unique=True)]}
-_EMIT_VAL = {"anyOf": [_BOOL, _s(128, min_len=1, pat=models.EVENT_KIND_PAT)]}
+_EVENT_KIND_S = _s(128, min_len=1, pat=models.EVENT_KIND_PAT)
+_EVENT_ITEM = {"anyOf": [_EVENT_KIND_S, {"$ref": "#/$defs/EventMatch"}]}
+_EVENTS_ANY = {"anyOf": [_EVENT_ITEM, _arr(_EVENT_ITEM, min_items=1, max_items=32)]}
+_ON_VAL = {"anyOf": [{"const": "daemon"}, {"$ref": "#/$defs/Trigger"}]}
+_ING_VAL = {"anyOf": [_enum("upsert", "snapshot"), {"$ref": "#/$defs/Ingest"}]}
 
 _LOOP_PROPS: dict[str, Any] = {
+    "description": _d(_s(512), "Short summary of what this loop does for humans and AI agents."),
+    "on": _d(_ON_VAL, "When the loop runs: 'daemon' for continuous supervision, a trigger map, or omit for manual."),
+    "window": {"$ref": "#/$defs/Window"},
     "run": _ARGV_REF,
-    "daemon": _BOOL,
-    "input": _s(1024, min_len=1),
-    "action": {"$ref": "#/$defs/Action"},
-    "ingest": {"anyOf": [_NAME_REF, {"$ref": "#/$defs/Ingest"}]},
-    "emit": _EMIT_VAL,
-    "schedule": _SCHED_ANY,
-    "events": _arr({"$ref": "#/$defs/EventMatch"}, min_items=1, max_items=32),
-    "hook": _HOOK_ANY,
-    "lookback": _DURATION,
-    "overlap": _OVERLAP,
-    "timeout": _TIMEOUT,
-    **_UNIT_BASE,
+    "ingest": _d(_ING_VAL, "Ingest stdout JSON into memories/<loop>/ ('upsert'|'snapshot') or {source, mode}."),
+    "emit": _d(_EVENT_KIND_S, "Default event kind emitted from stdout JSONL to .bf/events.jsonl (e.g. loop.event)."),
+    "timeout": _d(_TIMEOUT, "Max cycle runtime before terminating the process group.", default="5m"),
+    "requires": _d(_arr(_s(256, min_len=1), max_items=32, unique=True), "Required CLI executables verified on PATH."),
+    "env": _d(_ENV_MAP, "Loop environment overrides (expands {{brain}}, {{home}}, {{state}})."),
+    "enabled": _d(_BOOL, "Enable automatic triggers and daemon supervision.", default=True),
 }
-_CYCLE_ONLY = ("schedule", "events", "hook", "input", "ingest", "action", "lookback", "overlap", "timeout")
-_EMIT_SET = {"required": ["emit"], "properties": {"emit": {"not": {"const": False}}}}
-_NO_ING_ACT = {"not": {"anyOf": [{"required": ["ingest"]}, {"required": ["action"]}]}}
-_IS_DAEMON = {"required": ["daemon"], "properties": {"daemon": {"const": True}}}
-_NO_CYCLE = {"not": {"anyOf": [{"required": [k]} for k in _CYCLE_ONLY]}}
-_LOOP_RULES = [
-    {"not": {"required": ["ingest", "action"]}},
-    {"if": _EMIT_SET, "then": _NO_ING_ACT},
-    {"if": _IS_DAEMON, "then": _NO_CYCLE},
-]
+_EMIT_SET = {"required": ["emit"]}
+_IS_DAEMON = {"required": ["on"], "properties": {"on": {"const": "daemon"}}}
+_NO_CYCLE = {"not": {"anyOf": [{"required": [k]} for k in ("window", "ingest", "timeout")]}}
+_LOOP_RULES = [{"if": _EMIT_SET, "then": {"not": {"required": ["ingest"]}}}, {"if": _IS_DAEMON, "then": _NO_CYCLE}]
+_WATCH_PROPS: dict[str, Any] = {
+    "interval": _d(_WI, "Schedule polling interval for bf watch (500ms..1h).", default="5s"),
+    "concurrency": _d(_i(1, 32), "Max concurrent cycle loops in bf watch and bf run --due (1..32).", default=4),
+}
+_B_MAP = _obj(extra=_s(4096, min_len=1), names=models.NAME, opt=True)
+_RES_LOOP_PAT = "^(?:" + "|".join(sorted(models.RESERVED_SOURCES)) + ")$"
+_RES_LOOP_SCHEMA = {
+    "$ref": "#/$defs/Loop",
+    "not": {"required": ["ingest"], "properties": {"ingest": {"type": "string"}}},
+}
+_LOOPS_MAP = {
+    **_obj(extra={"$ref": "#/$defs/Loop"}, names=_LOOP_KEY, opt=True),
+    "patternProperties": {_RES_LOOP_PAT: _RES_LOOP_SCHEMA},
+}
 _BRAIN_PROPS: dict[str, Any] = {
-    "version": {"type": "integer", "const": models.FORMAT, "description": "Brain configuration format version."},
-    "name": {**_NAME_REF, "description": "Stable lowercase identifier for this brain."},
-    "timezone": _s(128, min_len=1),
-    "brains": _opt(_obj(extra=_s(4096, min_len=1), names=models.NAME)),
-    "env": _opt(_ENV_MAP),
-    "loops": _opt(_obj(extra={"$ref": "#/$defs/Loop"}, names=models.NAME)),
-    "watch": _opt(_obj({"interval": _WI, "debounce": _WD, "concurrency": _i(1, 32)})),
+    "version": _d({"type": "integer", "const": models.FORMAT}, "Brain configuration format version."),
+    "name": _d(_NAME_REF, "Stable lowercase identifier for this brain."),
+    "description": _d(_s(1024), "Short summary of this brain's scope for humans and AI agents."),
+    "timezone": _d(_s(128, min_len=1), "IANA timezone for cron schedules and new note dates.", default="UTC"),
+    "brains": _d(_B_MAP, "Sibling brain aliases for bf:// links."),
+    "env": _d(_ENV_MAP, "Base environment variables for loops (expands {{brain}}, {{home}}, {{state}})."),
+    "loops": _d(_LOOPS_MAP, "Unified loop definitions."),
+    "watch": _d(_obj(_WATCH_PROPS, opt=True), "Polling interval and concurrency for bf watch and bf run --due."),
 }
-_INGEST_PROPS = {"source": _NAME_REF, "mode": _enum("upsert", "snapshot"), "allow_removal": _BOOL}
-_EVENT_PROPS = {"kind": _s(128, min_len=1), "source": _s(128, min_len=1), "filter": _s(2048, min_len=1)}
+_TRIG_PROPS = {
+    "schedules": _d(_SCHED_ANY, "Duration (1h, 1d), @macro, 5-field cron, or a list of schedules."),
+    "events": _d(_EVENTS_ANY, "Event kind, matcher object, or list subscribed from .bf/events.jsonl."),
+    "hooks": _d(_HOOK_ANY, "Git hook or list of hooks that trigger this loop (pre-commit, pre-push)."),
+}
+_WIN_PROPS = {
+    "backfill": _d(_DURATION, "Initial {{start}} window on first run (now - backfill).", default="1d"),
+    "overlap": _d(_OVERLAP, "Rewind on later runs (last_anchor - overlap).", default=0),
+}
+_INGEST_PROPS = {
+    "source": _d(_SRC_REF, "Target memories/<source>/ folder."),
+    "mode": _d(_enum("upsert", "snapshot"), "Write mode: upsert or snapshot.", default="upsert"),
+}
+_EVENT_PROPS = {
+    "kind": _d(_s(128, min_len=1), "Exact event kind to match (e.g. records.ingested)."),
+    "source": _d(_s(128, min_len=1), "Exact event source to match (loop name or 'bf')."),
+    "filter": _d(_s(2048, min_len=1), "Isolated jq boolean expression evaluated per event."),
+}
 _BRAIN_DEFS = {
-    "Action": _obj({"keep": _i(1, 1000)}, req=("keep",), title="Action"),
-    "Argv": {"title": "Argv", **_arr(_s(4096, min_len=1), min_items=1, max_items=64)},
-    "EventMatch": _obj(_EVENT_PROPS, title="EventMatch"),
-    "Ingest": _obj(_INGEST_PROPS, req=("source",), title="Ingest"),
-    "Loop": {**_obj(_LOOP_PROPS, req=("run",), title="Loop"), "allOf": _LOOP_RULES},
+    "Argv": _d(_arr(_s(4096, min_len=1), min_items=1, max_items=64), "Literal argv without a shell.", title="Argv"),
+    "EventMatch": _obj(_EVENT_PROPS, min_props=1, title="EventMatch", desc="Event matcher against .bf/events.jsonl."),
+    "Ingest": _obj(_INGEST_PROPS, req=("source",), title="Ingest", desc="Explicit memory ingestion target."),
+    "Loop": {**_obj(_LOOP_PROPS, req=("run",), title="Loop", desc="One loop entry."), "allOf": _LOOP_RULES},
+    "Trigger": _obj(_TRIG_PROPS, min_props=1, title="Trigger", desc="When a cycle loop runs."),
+    "Window": _obj(_WIN_PROPS, min_props=1, title="Window", desc="Time window for {{start}}/{{end}}."),
 }
-BRAIN_SCHEMA = _doc(
-    "bf",
-    "Config",
-    "Brain Framework configuration and loop orchestration (bf.yaml).",
-    {**_obj(_BRAIN_PROPS, req=("version", "name")), "$defs": _BRAIN_DEFS},
-)
+_B_BODY = {**_obj(_BRAIN_PROPS, req=("version", "name")), "$defs": _BRAIN_DEFS}
+BRAIN_SCHEMA = _doc("bf", "Config", "Brain Framework configuration and loop orchestration (bf.yaml).", _B_BODY)
 
 _SOURCES_PROP = _arr(_obj({"resource": _s(8192, min_len=1)}, req=("resource",), extra=True), max_items=200)
 _STALE_ANY = [_i(1, 36500), _DUR_S, {"type": "string", "minLength": 10, "pattern": _ISO_DT}]
+_L_ARR = _arr({"$ref": "#/$defs/Link"}, max_items=2000)
+_ATTRS_T = {"type": "object", "propertyNames": _s(256, min_len=1), "additionalProperties": _META_REF}
 _RECORD_PROPS: dict[str, Any] = {
-    **dict.fromkeys(("id", "title", "entity"), _s(4096, min_len=1)),
-    **dict.fromkeys(("type", "status"), _s(128, min_len=1)),
-    **dict.fromkeys(("summary", "description"), _s(16384)),
-    "ref": _s(4200, min_len=1),
-    "source": _NAME_REF,
-    "kind": _enum("project", "concept", "action", "memory"),
-    "text": _s(4 << 20),
-    "url": _s(8192),
-    "time": {"type": "string", "pattern": _OPT_TS},
-    "updated": {"type": "string", "pattern": _ISO_DT},
-    "stale_after": {"anyOf": _STALE_ANY},
-    "tags": _TAG_ITEMS,
-    "sources": _SOURCES_PROP,
-    "aliases": _arr(_s(1024, min_len=1), max_items=200),
-    "attributes": {"type": "object"},
-    "headings": _arr({"$ref": "#/$defs/Heading"}),
-    "links": _arr({"$ref": "#/$defs/Link"}, max_items=2000),
-    **{f"{n.lower()}s": _arr({"$ref": f"#/$defs/{n}"}) for n in ("Element", "Task")},
-    "attrs": {"type": "object", "propertyNames": _s(256, min_len=1), "additionalProperties": _META_REF},
-    "sha256": {"type": "string", "pattern": r"^[0-9a-f]{64}$"},
-    "relations": False,
+    "id": _d(_s(4096, min_len=1), "Stable source-local record identifier (required for kind='memory')."),
+    "title": _d(_s(4096, min_len=1), "Human-readable title."),
+    "entity": _d(_s(4096, min_len=1), "Canonical entity URI or source:id alias."),
+    "type": _d(_s(128, min_len=1), "Domain subtype (e.g. guide, project, issue)."),
+    "status": _d(_s(128, min_len=1), "Lifecycle status (e.g. draft, stable, deprecated)."),
+    "summary": _d(_s(16384), "Short summary of the note or record."),
+    "description": _d(_s(16384), "Optional longer description."),
+    "ref": _d(_s(4200, min_len=1), "Stable brain-local reference (note path or source:id)."),
+    "source": _d(_NAME_REF, "Owning source folder name under memories/."),
+    "kind": _d(_enum("project", "concept", "action", "memory"), "Top-level record category."),
+    "text": _d(_s(4 << 20), "Plain or Markdown body text."),
+    "url": _d(_s(8192), "Canonical external URL."),
+    "time": _d({"type": "string", "pattern": _OPT_TS}, "Event or creation UTC/offset ISO 8601 timestamp."),
+    "updated": _d({"type": "string", "pattern": _ISO_DT}, "Last-updated ISO date (YYYY-MM-DD) or timestamp."),
+    "stale_after": _d({"anyOf": _STALE_ANY}, "Review freshness threshold (days, duration, or ISO date)."),
+    "tags": _d(_TAG_ITEMS, "Unique tags without whitespace or slashes."),
+    "sources": _d(_SOURCES_PROP, "Cited source objects with resource URI and optional retrieved date."),
+    "aliases": _d(_arr(_s(1024, min_len=1), max_items=200), "Alternate identifiers resolved by bf read/review."),
+    "attributes": _d({"type": "object"}, "Freeform sensor-specific domain attributes."),
+    "headings": _d(_arr({"$ref": "#/$defs/Heading"}), "Compiled Markdown headings with attr_list metadata."),
+    "links": _d(_L_ARR, "Normalized outgoing note, record, brain, or URL links."),
+    "elements": _d(_arr({"$ref": "#/$defs/Element"}), "Compiled Markdown blocks/spans with attr_list metadata."),
+    "tasks": _d(_arr({"$ref": "#/$defs/Task"}), "Compiled Markdown checklist tasks."),
+    "anchors": _d(_ATTRS_T, "Keyed map of #anchor id -> non-empty attr_list metadata."),
+    "sha256": _d({"type": "string", "pattern": r"^[0-9a-f]{64}$"}, "SHA-256 hex digest of source Markdown bytes."),
 }
-_LINK_TO = {**_s(8192, min_len=1), "description": "Note path, memories/<source>/<sha256>.json, bf:// URI, or URL."}
+_LINK_TO = _d(_s(8192, min_len=1), "Note path, memories/<source>/<sha256>.json, bf:// URI, or URL.")
+_LK_K = _enum("note", "record", "brain", "url")
 _LINK_P = {
+    "id": _s(256, min_len=1),
     "to": _LINK_TO,
-    "kind": _enum("note", "record", "brain", "url"),
+    "kind": _LK_K,
     "anchor": _s(2048),
     "meta": _META_REF,
     "section": _s(256),
@@ -162,58 +195,47 @@ _LINK_P = {
 _HEAD_P = {"id": _s(256, min_len=1), "title": _s(4096), "level": _i(1, 6), "meta": _META_REF}
 _ELEM_P = {"tag": _s(64, min_len=1), "id": _s(256), "text": _s(16384), "section": _s(256), "meta": _META_REF}
 _TASK_P = {"id": _s(256, min_len=1), "text": _s(4096, min_len=1), "done": _BOOL, "section": _s(256), "meta": _META_REF}
-_REC_BODY = {
-    **_obj(_RECORD_PROPS, req=("ref", "source", "kind", "title"), extra=True),
-    "if": {"required": ["kind"], "properties": {"kind": {"const": "memory"}}},
-    "then": {"required": ["id"]},
-    "$defs": {
-        "Meta": _obj(extra=_s(4096), title="Meta", names=r"^[A-Za-z_][A-Za-z0-9_.-]*$"),
-        "Heading": _obj(_HEAD_P, req=("id", "title", "level"), title="Heading"),
-        "Link": _obj(_LINK_P, req=("to", "kind"), title="Link"),
-        "Element": _obj(_ELEM_P, req=("tag",), title="Element"),
-        "Task": _obj(_TASK_P, req=("text", "done"), title="Task"),
-    },
+_R_DEFS = {
+    "Meta": _obj(extra=_s(4096), title="Meta", names=r"^[A-Za-z_][A-Za-z0-9_.-]*$"),
+    "Heading": _obj(_HEAD_P, req=("id", "title", "level"), title="Heading"),
+    "Link": _obj(_LINK_P, req=("to", "kind"), title="Link"),
+    "Element": _obj(_ELEM_P, req=("tag",), title="Element"),
+    "Task": _obj(_TASK_P, req=("text", "done"), title="Task"),
 }
-RECORD_SCHEMA = _doc(
-    "record",
-    "Record",
-    "Unified JSON record schema enforced on compiled Markdown notes and ingested sensor records in memories/.",
-    _REC_BODY,
-)
+_R_IF = {"if": {"required": ["kind"], "properties": {"kind": {"const": "memory"}}}, "then": {"required": ["id"]}}
+_R_BODY = {**_obj(_RECORD_PROPS, req=("ref", "source", "kind", "title"), extra=True), **_R_IF, "$defs": _R_DEFS}
+_R_DESC = "Unified JSON record schema enforced on compiled Markdown notes and ingested sensor records in memories/."
+RECORD_SCHEMA = _doc("record", "Record", _R_DESC, _R_BODY)
 _CONCEPT_PROPS = {
-    "type": {"type": "string", "pattern": r"^[a-z][a-z0-9-]{0,63}$"},
-    "status": _enum("draft", "stable", "deprecated"),
-    "summary": _s(16384),
-    "updated": {"type": "string", "pattern": rf"^{_CAL_DATE}$"},
-    "tags": _TAG_ITEMS,
-    "sources": _SOURCES_PROP,
+    "type": _d({"type": "string", "pattern": r"^[a-z][a-z0-9-]{0,63}$"}, "Concept category slug."),
+    "status": _d(_enum("draft", "stable", "deprecated"), "Concept maturity status."),
+    "summary": _d(_s(16384), "Short concept summary."),
+    "updated": _d({"type": "string", "pattern": rf"^{_CAL_DATE}$"}, "Last-updated calendar date (YYYY-MM-DD)."),
+    "tags": _d(_TAG_ITEMS, "Unique concept tags."),
+    "sources": _d(_SOURCES_PROP, "Supporting evidence sources."),
 }
-CONCEPTS_SCHEMA = _doc(
-    "concepts",
-    "Concept",
-    "User-customizable schema enforced on concept records compiled from concepts/ (schemas/concepts.json).",
-    _obj(_CONCEPT_PROPS, req=("type", "status"), extra=True),
-)
+_C_DESC = "User-customizable schema enforced on concept records compiled from concepts/ (schemas/concepts.json)."
+CONCEPTS_SCHEMA = _doc("concepts", "Concept", _C_DESC, _obj(_CONCEPT_PROPS, req=("type", "status"), extra=True))
 _S_ARR = _arr(_s(4096, min_len=1))
 _CASE_PROPS: dict[str, Any] = {
-    "name": _s(256, min_len=1),
-    "engine": _enum("rg", "jq", "read"),
-    "query": _s(8192, min_len=1),
-    "scope": _s(1024),
-    **dict.fromkeys(("expect_refs", "forbid_refs", "expect_text"), _S_ARR),
-    **dict.fromkeys(("min_count", "max_count"), _i(0)),
-    "expect_equals": {},
+    "name": _d(_s(256, min_len=1), "Unique eval case name."),
+    "engine": _d(_enum("rg", "jq", "read"), "Retrieval engine for this case.", default="rg"),
+    "query": _d(_s(8192, min_len=1), "Search regex, jq filter, or bf read target."),
+    "scope": _d(_s(1024), "Optional note, source, or memories/ path restriction."),
+    "expect_refs": _d(_S_ARR, "Refs that must appear in results."),
+    "forbid_refs": _d(_S_ARR, "Refs that must not appear in results."),
+    "expect_text": _d(_S_ARR, "Case-insensitive substrings that must appear in results."),
+    "min_count": _d(_i(0), "Minimum expected result count."),
+    "max_count": _d(_i(0), "Maximum expected result count."),
+    "expect_equals": {"description": "Exact JSON value expected from the query items list."},
 }
 _EVAL_PROPS = {
-    "version": {"type": "integer", "const": models.FORMAT},
-    "cases": _arr(_obj(_CASE_PROPS, req=("name", "query")), max_items=500),
+    "version": _d({"type": "integer", "const": models.EVAL_FORMAT}, "Eval suite format version."),
+    "cases": _d(_arr(_obj(_CASE_PROPS, req=("name", "query")), max_items=500), "Deterministic query test cases."),
 }
-EVALS_SCHEMA = _doc(
-    "evals", "Eval", "Deterministic query evaluations in evals/.", _obj(_EVAL_PROPS, req=("version", "cases"))
-)
-_SCHEMAS: dict[Kind, dict[str, Any]] = {
-    "brain": BRAIN_SCHEMA,
-    "record": RECORD_SCHEMA,
+_EV_B = _obj(_EVAL_PROPS, req=("version", "cases"))
+EVALS_SCHEMA = _doc("evals", "Eval", "Deterministic query evaluations in evals/.", _EV_B)
+_SCHEMAS: dict[Kind, dict[str, Any]] = {"brain": BRAIN_SCHEMA, "record": RECORD_SCHEMA} | {
     "concepts": CONCEPTS_SCHEMA,
     "evals": EVALS_SCHEMA,
 }
@@ -292,7 +314,15 @@ def load_validator(store: Store, path: str, fallback: dict[str, Any] | None = No
     return cached
 
 
+def _err_key(e: ValidationError) -> tuple[Any, ...]:
+    return (-len(e.absolute_path), e.validator == "anyOf", [str(p) for p in e.absolute_path], str(e.validator))
+
+
 def _describe_error(error: ValidationError) -> str:
+    if error.validator == "anyOf" and isinstance(error.instance, (dict, list)):
+        skip = {"type", "enum", "const"}
+        if sub := [e for e in error.context if e.absolute_path != error.absolute_path or e.validator not in skip]:
+            return _describe_error(min(sub, key=_err_key))
     loc = ".".join(str(part) for part in error.absolute_path)
     prefix, rule, val = (f"{loc}: " if loc else ""), str(error.validator), error.validator_value
     if error.schema is False:
@@ -303,16 +333,25 @@ def _describe_error(error: ValidationError) -> str:
     if rule == "additionalProperties" and val is False and isinstance(error.instance, dict):
         allowed = set(error.schema.get("properties", {})) if isinstance(error.schema, dict) else set()
         return f"{prefix}unknown property {', '.join(repr(k) for k in sorted(set(error.instance) - allowed))}"
-    if rule in {"minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems"}:
+    if rule in {"minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems", "minProperties"}:
         return f"{prefix}violates {rule} {val}"
+    not_msg = (
+        "value is reserved"
+        if isinstance(val, dict) and "enum" in val
+        else (
+            "reserved loop name cannot use shorthand ingest"
+            if isinstance(val, dict) and val.get("required") == ["ingest"] and "properties" in val
+            else "conflicting properties"
+        )
+    )
     table = {
         "type": f"expected type {val}",
         "enum": f"must be one of {val}",
         "const": f"must equal {val!r}",
         "pattern": f"does not match pattern {val}",
         "uniqueItems": "items must be unique",
-        "propertyNames": "invalid property name",
-        "not": "conflicting properties",
+        "propertyNames": "invalid or reserved property name",
+        "not": not_msg,
     }
     return f"{prefix}{table.get(rule, f'failed schema rule {rule}')}"
 

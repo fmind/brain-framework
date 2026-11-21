@@ -1,4 +1,4 @@
-"""Offline retrieval and deterministic evaluation via `rg` and `jq`."""
+"""Offline retrieval, deterministic evaluation, and combined brain checks via `rg` and `jq`."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import threading
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import IO, Any, TypedDict, Unpack, cast
+from typing import IO, TYPE_CHECKING, Any, TypedDict, Unpack, cast
 from urllib.parse import quote, urlsplit
 
 from bf import models
@@ -20,17 +20,16 @@ from bf.proc import stop_proc as stop_proc
 from bf.proc import stream_proc
 from bf.storage import Store, relative
 
+if TYPE_CHECKING:
+    from datetime import datetime
+
 JQ_PRELUDE = (
     'def modulemeta: error("disabled"); def modulemeta($m): error("disabled"); '
     "def get_jq_origin: null; def get_prog_origin: null; def get_search_list: []; def env: {}; {} as $ENV |"
 )
 _NS_A = ("ref", "source", "kind", "title", "status", "updated", "text", "sha256", "id")
-_NOTE_STRUCT = frozenset((*_NS_A, "headings", "links", "elements", "tasks", "attrs"))
+_NOTE_STRUCT = frozenset((*_NS_A, "headings", "links", "elements", "tasks", "anchors"))
 _HEAD_RE = re.compile(r"(?m)^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+\{[^}]*\})?[ \t]*$")
-
-
-def _mod(name: str) -> Any:
-    return __import__(f"bf.{name}", fromlist=[name])
 
 
 def _decode_obj(store: Store, path: str, *, check_duplicates: bool = True) -> dict[str, Any]:
@@ -53,11 +52,11 @@ def _mem_rel(store: Store, raw_path: str) -> str | None:
     return None
 
 
-def _target_scope(store: Store, scope: str, kind: str, source: str) -> tuple[list[str], str]:
-    md = _mod("markdown")
+def _target_scope(store: Store, scope: str, kind: str) -> tuple[list[str], str]:
+    from bf import markdown as md
 
     def ok(s: str) -> bool:
-        return (kind != "note" or s in AUTHORED) and (kind != "memory" or s not in AUTHORED) and source in ("", s)
+        return (kind != "note" or s in AUTHORED) and (kind != "memory" or s not in AUTHORED)
 
     if stripped := scope.strip():
         _as_input(relative, cl := stripped.rstrip("/"))
@@ -76,8 +75,6 @@ def _target_scope(store: Store, scope: str, kind: str, source: str) -> tuple[lis
             return hits, ""
     if not store.is_dir("memories"):
         return [], ""
-    if source:
-        return ([f"memories/{source}"] if ok(source) and store.is_dir(f"memories/{source}") else []), ""
     if kind == "note":
         return [f"memories/{d}" for d in sorted(AUTHORED) if store.is_dir(f"memories/{d}")], ""
     return ["memories"], ("memory" if kind == "memory" else "")
@@ -150,7 +147,9 @@ def _rg_scan(
     mdata: dict[str, dict[str, Any]] = {}
 
     def read_rg(stdout: IO[bytes]) -> bool:
-        for ln in stdout:
+        while ln := stdout.readline(MAX_BATCH + 1):
+            if len(ln) > MAX_BATCH:
+                raise Error(f"rg output line exceeds {MAX_BATCH} bytes")
             if not (s := ln.strip()) or not isinstance(ev := decode(s, "rg output", check_duplicates=False), dict):
                 continue
             if ev.get("type") != "match" or not isinstance(d := ev.get("data"), dict):
@@ -222,6 +221,35 @@ def _run_jq_stream(blobs: Any, expr: str, limit: int) -> tuple[list[Any], bool]:
     return out[:limit], trunc
 
 
+def _iter_jq_blobs(store: Store, targets: list[str], mem_f: str) -> Any:
+    skip_dirs = set(AUTHORED) if mem_f == "memory" else set()
+    total = 0
+    for target in targets:
+        if target.endswith(".json"):
+            total += 1
+            yield store.read(target)
+        elif target == "memories":
+            subdirs, top_files = store.subdirs("memories")
+            for tf in top_files:
+                if tf.endswith(".json"):
+                    total += 1
+                    yield store.read(tf)
+            for src in subdirs:
+                if src in skip_dirs:
+                    continue
+                for _, data in store.iter_read_files(f"memories/{src}", suffix=".json"):
+                    total += 1
+                    if total > models.MAX_TOTAL_FILES:
+                        raise Error(f"memories exceeds the {models.MAX_TOTAL_FILES:,}-entry total scan limit")
+                    yield data
+        else:
+            for _, data in store.iter_read_files(target, suffix=".json", skip_dirs=skip_dirs):
+                total += 1
+                if total > models.MAX_TOTAL_FILES:
+                    raise Error(f"memories exceeds the {models.MAX_TOTAL_FILES:,}-entry total scan limit")
+                yield data
+
+
 def query(
     store: Store,
     pattern: str | None = None,
@@ -229,17 +257,18 @@ def query(
     jq_expr: str | None = None,
     scope: str = "",
     kind: str = "",
-    source: str = "",
     fields: Sequence[str] | str | None = None,
     limit: int = 20,
     read_only: bool = False,
 ) -> dict[str, Any]:
     """Query compiled notes and sensor memories via `rg`, `jq`, or combined `rg` + `jq`."""
-    eng, cfg_m = _mod("engine"), _mod("config")
+    from bf import config as cfg_m
+    from bf import engine as eng
+
     if scope and not scope.strip():
         raise InputError("scope must be nonempty")
-    if pattern is None and jq_expr is None and not (kind or scope.strip() or source):
-        raise InputError("pass QUERY, --jq FILTER, or a filter (--kind, --scope, --source)")
+    if pattern is None and jq_expr is None and not (kind or scope.strip()):
+        raise InputError("pass PATTERN, --jq EXPR, or a filter (--kind, --scope)")
     for lbl, val in (("query", pattern), ("jq filter", jq_expr)):
         if val is not None:
             _as_input(clean, val, lbl)
@@ -247,13 +276,11 @@ def query(
         raise InputError("limit must be between 1 and 5000")
     if kind not in {"", "note", "memory"}:
         raise InputError("kind must be 'note' or 'memory'")
-    if source and not models.NAME_RE.fullmatch(source):
-        raise InputError("source must use lowercase letters, digits, and hyphens")
     wanted, cfg = eng.parse_fields(fields), cfg_m.load(store)
-    if not read_only and kind in {"", "note"} and source in ("", *AUTHORED):
+    if not read_only and kind in {"", "note"}:
         with suppress(Error, OSError):
             eng.sync_notes(store)
-    targets, mem_f = _target_scope(store, scope, kind, source)
+    targets, mem_f = _target_scope(store, scope, kind)
     extra: dict[str, Any] = {}
     expr = jq_expr if jq_expr is not None else "."
     if pattern is not None and jq_expr is None:
@@ -265,16 +292,7 @@ def query(
         items, trunc = _run_jq_stream((store.read(p) for p in hits), expr, limit)
     else:
         eng_n, q_s = "jq", expr
-        skip_dirs = AUTHORED if mem_f == "memory" else ()
-        it = (
-            (
-                [("", store.read(t))]
-                if t.endswith(".json")
-                else store.iter_read_files(t, suffix=".json", skip_dirs=skip_dirs)
-            )
-            for t in targets
-        )
-        items, trunc = _run_jq_stream((d for g in it for _, d in g), expr, limit)
+        items, trunc = _run_jq_stream(_iter_jq_blobs(store, targets, mem_f), expr, limit)
     if wanted is not None:
         items = [{k: x[k] for k in wanted if k in x} if isinstance(x, dict) else x for x in items]
     hdr = {"ok": True, "brain": cfg.name, "engine": eng_n, "query": q_s, **extra}
@@ -284,7 +302,6 @@ def query(
 class _QueryOpts(TypedDict, total=False):
     scope: str
     kind: str
-    source: str
     fields: Sequence[str] | str | None
     limit: int
     read_only: bool
@@ -302,14 +319,19 @@ def query_jq(store: Store, expr: str, **opts: Unpack[_QueryOpts]) -> dict[str, A
 
 def find_by_alias(store: Store, identity: str, *, read_only: bool = False) -> tuple[str, dict[str, Any]] | None:
     """Locate a stored JSON memory whose `entity` or `aliases` equals `identity`, preferring authored notes."""
-    idx = _mod("engine").load_index(store, read_only=read_only)
+    from bf import engine as eng
+
+    idx = eng.load_index(store, read_only=read_only)
     hits = [
         e for e in idx if e.get("entity") == identity or (isinstance(al := e.get("aliases"), list) and identity in al)
     ]
     hits.sort(key=lambda e: (str(e.get("source", "")) not in AUTHORED, str(e.get("path", ""))))
     for hit in hits:
+        mp = str(hit.get("path", ""))
+        if not (mp.startswith("memories/") and mp.endswith(".json")) or any(p.startswith(".") for p in mp.split("/")):
+            continue
         with suppress(Error):
-            return (mp := str(hit["path"])), _decode_obj(store, mp, check_duplicates=False)
+            return mp, _decode_obj(store, mp, check_duplicates=False)
     return None
 
 
@@ -327,19 +349,18 @@ def _cap_json_bytes(out: dict[str, Any], max_bytes: int) -> dict[str, Any]:
     if len(terminal(out)) <= max_bytes:
         return out
     cand = {**out, "truncated": True}
-    for key in ("text", "content", "markdown"):
-        if isinstance(val := cand.get(key), str) and val:
-            lo, hi, best = 0, len(val), ""
-            while lo <= hi:
-                cand[key] = val[: (mid := (lo + hi) // 2)]
-                if len(terminal(cand)) <= max_bytes:
-                    best, lo = val[:mid], mid + 1
-                else:
-                    hi = mid - 1
-            cand[key] = best
+    if isinstance(val := cand.get("text"), str) and val:
+        lo, hi, best = 0, len(val), ""
+        while lo <= hi:
+            cand["text"] = val[: (mid := (lo + hi) // 2)]
             if len(terminal(cand)) <= max_bytes:
-                return cand
-    bulky = ("elements", "headings", "links", "tasks", "meta", "record", "text", "content", "markdown")
+                best, lo = val[:mid], mid + 1
+            else:
+                hi = mid - 1
+        cand["text"] = best
+        if len(terminal(cand)) <= max_bytes:
+            return cand
+    bulky = ("elements", "headings", "links", "tasks", "meta", "record", "text")
     keep_last = ("updated", "status", "title", "kind", "brain", "ref")
     extra = [k for k in cand if k not in {*bulky, *keep_last, "truncated"}]
     for drop in (*bulky, *extra, *keep_last):
@@ -365,7 +386,10 @@ def read_target(
     read_only: bool = False,
 ) -> dict[str, Any]:
     """Read an OKF note, `note#anchor` section, `source:id` record, JSON memory, or `bf://` URI."""
-    cfg_m, eng, md = _mod("config"), _mod("engine"), _mod("markdown")
+    from bf import config as cfg_m
+    from bf import engine as eng
+    from bf import markdown as md
+
     wanted, line_spec = eng.parse_fields(fields), (md.parse_line_spec(lines) if lines is not None else None)
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 1):
         raise InputError("max_bytes must be at least 1")
@@ -436,7 +460,7 @@ def read_target(
             sec = md.extract_section(text, anchor, comp)
             if "heading" in sec and "text" in sec:
                 hd = sec["heading"]
-                sec = {"anchor": sec["anchor"], "heading": hd, "title": hd["title"], "markdown": sec["text"]}
+                sec = {"anchor": sec["anchor"], "heading": hd, "title": hd["title"], "text": sec["text"]}
             out = {"brain": cfg.name, "kind": "section", "ref": to, **sec}
         elif (outline or full) and not is_okf:
             raise InputError("--outline and --full apply only to OKF notes")
@@ -445,7 +469,7 @@ def read_target(
         elif line_spec is not None:
             out = {**base_n, **md.slice_lines(text, *line_spec)}
         elif raw or not is_okf:
-            out = {**base_n, ("markdown" if raw else "text"): text}
+            out = {**base_n, "text": text}
         elif full:
             out = {**base_n, "path": md.compiled_note_path(to), "record": comp}
         else:
@@ -459,13 +483,16 @@ def read_target(
 
 def load_eval_doc(store: Store, path: str, val: Any, problems: list[str]) -> dict[str, Any] | None:
     """Read, version-check, and schema-validate one `evals/*.{yaml,yml,json}` suite."""
+    from bf import config as cfg_m
+    from bf import schemas as sch_m
+
     try:
         raw_bytes = store.read(path, 1 << 20)
-        doc = decode(raw_bytes, path) if path.endswith(".json") else _mod("config").yaml_object(raw_bytes, path)
+        doc = decode(raw_bytes, path) if path.endswith(".json") else cfg_m.yaml_object(raw_bytes, path)
         if not isinstance(doc, dict):
             raise Error(f"{path}: expected a mapping")
-        models.check_version(doc, path)
-        if val is not None and (errs := _mod("schemas").validate_instance(val, doc, path)):
+        models.check_version(doc, path, expected=models.EVAL_FORMAT)
+        if val is not None and (errs := sch_m.validate_instance(val, doc, path)):
             problems.extend(errs)
             return None
         return doc
@@ -474,9 +501,13 @@ def load_eval_doc(store: Store, path: str, val: Any, problems: list[str]) -> dic
         return None
 
 
-def evaluate(store: Store, target: str = "") -> dict[str, Any]:
+def evaluate(
+    store: Store, target: str = "", *, read_only: bool = False, declared_brains_only: bool = False
+) -> dict[str, Any]:
     """Run deterministic query evaluations in `evals/*.yaml` and `evals/*.json`."""
-    cfg_m, sch_m = _mod("config"), _mod("schemas")
+    from bf import config as cfg_m
+    from bf import schemas as sch_m
+
     cfg, val = cfg_m.load(store), sch_m.load_validator(store, "schemas/evals.json", sch_m.EVALS_SCHEMA)
     problems, results, passed, failed = [], [], 0, 0
     cand_files = [p for p in store.files("evals", skipped=problems) if p.endswith((".yaml", ".yml", ".json"))]
@@ -495,9 +526,9 @@ def evaluate(store: Store, target: str = "") -> dict[str, Any]:
             try:
                 if eng in {"rg", "jq"}:
                     fn = search_rg if eng == "rg" else query_jq
-                    items = fn(store, q_str, scope=sc, limit=200 if eng == "rg" else 500)["items"]
+                    items = fn(store, q_str, scope=sc, limit=200 if eng == "rg" else 500, read_only=read_only)["items"]
                 elif eng == "read":
-                    items = [read_target(store, q_str)]
+                    items = [read_target(store, q_str, declared_brains_only=declared_brains_only, read_only=read_only)]
                 else:
                     raise Error(f"{path}: unsupported eval engine {eng!r}")
                 refs = {str(it.get("ref", "")) for it in items if isinstance(it, dict)}
@@ -519,3 +550,42 @@ def evaluate(store: Store, target: str = "") -> dict[str, Any]:
             results.append({**row, **({"reasons": reasons} if reasons else {})})
     res_a = {"brain": cfg.name, "ok": failed == 0 and not problems, "passed": passed, "failed": failed}
     return {**res_a, "cases": results, "problems": problems}
+
+
+def check_brain(
+    store: Store,
+    *,
+    target: str = "",
+    now: datetime | None = None,
+    build_notes: bool = True,
+    run_validate: bool = True,
+    run_eval: bool = True,
+    limit: int = 50,
+    all_problems: bool = False,
+    strict: bool = False,
+    force: bool = False,
+    declared_brains_only: bool = False,
+    read_only: bool = False,
+) -> dict[str, Any]:
+    """Run incremental `build`, `validate`, and/or `eval` in one pass."""
+    from bf import config as cfg_m
+    from bf import engine as eng
+
+    if target.strip() and not run_eval:
+        raise InputError("eval target cannot be combined with --validate")
+    if run_validate and not all_problems and limit < 1:
+        raise InputError("limit must be at least 1")
+    do_build = build_notes and not read_only
+    b = eng.build(store, now=now, force=force) if do_build else None
+    v_kw = {"declared_brains_only": declared_brains_only, "limit": limit, "all_problems": all_problems}
+    v = eng.validate(store, **v_kw, strict=strict, force=force, read_only=read_only) if run_validate else None
+    if run_eval and v is not None and not v["ok"]:
+        try:
+            cfg_m.load(store)
+        except Error:
+            run_eval = False
+    ev_kw = {"read_only": read_only or not do_build, "declared_brains_only": declared_brains_only}
+    ev = evaluate(store, target, **ev_kw) if run_eval else None
+    parts = {k: val for k, val in (("build", b), ("validate", v), ("eval", ev)) if val is not None}
+    brain_name = next(iter(parts.values()))["brain"] if parts else cfg_m.load(store).name
+    return {"ok": all(bool(p["ok"]) for p in parts.values()), "brain": brain_name, **parts}

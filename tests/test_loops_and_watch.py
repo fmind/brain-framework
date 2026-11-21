@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 from rich.console import Console
 
-from bf import config, engine, loops, models, records, watch
+from bf import cli, config, engine, loops, models, records, watch
 from bf.models import FORMAT, Error, InputError, decode
 from bf.storage import Store, private_dir
 
@@ -39,13 +39,13 @@ def test_loops_schedules_events_hooks_input_daemons_emit_and_timeout(tmp_path: P
         "time.sleep(0.2)\n"
     )
     (root / "routines" / "fake_harness.py").write_text(
-        "import json, pathlib, sys\n"
+        "import json, os, pathlib, sys\n"
         "ctx = json.loads(pathlib.Path(sys.argv[1]).read_text())\n"
         "prompt_path = sys.argv[2]\n"
-        "stdin_txt = sys.stdin.read()\n"
+        "state_arg = sys.argv[3]\n"
         "assert oct(pathlib.Path(sys.argv[1]).stat().st_mode & 0o777) == '0o600'\n"
-        "assert ctx['stdin'] == '' and ctx['input'] == prompt_path and ctx['loop']\n"
-        "assert stdin_txt.startswith('# ')\n"
+        "assert ctx['stdin'] == '' and ctx['loop'] and state_arg == os.environ['BF_STATE_DIR']\n"
+        "assert pathlib.Path(prompt_path).read_text().startswith('# ')\n"
         "out = {'kind': ctx['kind'], 'events': len(ctx['events']), 'prompt': pathlib.Path(prompt_path).name}\n"
         "open('services/sent.jsonl', 'a').write(json.dumps(out) + '\\n')\n"
         "print(json.dumps(out))\n"
@@ -67,54 +67,44 @@ def test_loops_schedules_events_hooks_input_daemons_emit_and_timeout(tmp_path: P
         "bf.yaml",
         f"version: {FORMAT}\n"
         "name: orch\n"
+        "description: Orchestration test brain.\n"
         "timezone: UTC\n"
         "loops:\n"
         "  feed:\n"
+        "    description: Ingest sample feed.\n"
+        "    on:\n      schedules: 1h\n"
+        "    window:\n      backfill: 1d\n      overlap: 10m\n"
         f"    run: [{sys.executable!r}, sensors/feed.py, '{{{{start}}}}']\n"
-        "    ingest:\n"
-        "      source: feed\n"
-        "      mode: upsert\n"
-        "    schedule: 1h\n"
+        "    ingest: upsert\n"
         "  rebuild:\n"
+        "    on:\n      events:\n        kind: records.ingested\n        source: feed\n"
         "    run: [bf, build]\n"
-        "    events:\n"
-        "      - kind: records.ingested\n"
-        "        source: feed\n"
         "  brief:\n"
-        f"    run: [{sys.executable!r}, routines/fake_harness.py, '{{{{context}}}}', '{{{{input}}}}']\n"
-        "    input: prompts/digest.md\n"
-        "    schedule:\n"
-        "      - 1d\n"
-        "      - '0 8 * * 0'\n"
+        "    on:\n      schedules:\n        - 1d\n        - '0 8 * * 0'\n"
+        f"    run: [{sys.executable!r}, routines/fake_harness.py, '{{{{context}}}}', prompts/digest.md, '{{{{state}}}}']\n"
         "  assistant:\n"
-        f"    run: [{sys.executable!r}, routines/fake_harness.py, '{{{{context}}}}', '{{{{input}}}}']\n"
-        "    input: prompts/reply.md\n"
-        "    events:\n"
-        "      - kind: loop.message\n"
-        "        source: chat\n"
-        "        filter: '.data.direct == true'\n"
+        "    on:\n      events:\n        - kind: loop.message\n          source: chat\n          filter: '.data.direct == true'\n"
+        f"    run: [{sys.executable!r}, routines/fake_harness.py, '{{{{context}}}}', prompts/reply.md, '{{{{state}}}}']\n"
         "  ev-emitter:\n"
         f"    run: [{sys.executable!r}, routines/emit_events.py]\n"
-        "    emit: true\n"
+        "    emit: loop.event\n"
         "    enabled: false\n"
         "  delegated:\n"
+        "    on:\n      events:\n        - kind: task.delegate\n          source: ev-emitter\n"
         f"    run: [{sys.executable!r}, -c, 'print(\"delegated-ok\")']\n"
-        "    events:\n"
-        "      - kind: task.delegate\n"
-        "        source: ev-emitter\n"
         "  slow:\n"
         f"    run: [{sys.executable!r}, routines/slow.py]\n"
         "    timeout: 1s\n"
         "    enabled: false\n"
         "  guard-commit:\n"
-        "    run: [bf, validate]\n"
-        "    hook: pre-commit\n"
+        "    on:\n      hooks: pre-commit\n"
+        "    run: [bf, check, --validate]\n"
         "  guard-push:\n"
+        "    on:\n      hooks: [pre-push]\n"
         f"    run: [{sys.executable!r}, routines/hook_guard.py]\n"
-        "    hook: [pre-push]\n"
         "  chat:\n"
+        "    on: daemon\n"
         f"    run: [{sys.executable!r}, services/mock_chat.py]\n"
-        "    daemon: true\n"
         "    emit: loop.message\n".encode(),
     )
 
@@ -144,6 +134,14 @@ def test_loops_schedules_events_hooks_input_daemons_emit_and_timeout(tmp_path: P
     feed_saved = decode(store.read(records.record_file("feed", "f1")), "feed")
     assert isinstance(feed_saved, dict)
     assert feed_saved["id"] == "f1"
+    assert feed_saved["text"] == "2026-11-14T09:00:00Z"
+
+    # Follow-up run rewinds `{{start}}` by `window.overlap` (`10m` before `t0`).
+    t_ov = t0 + timedelta(minutes=2)
+    assert loops.run_loops(store, ("feed",), now=t_ov)["ok"]
+    feed_ov = decode(store.read(records.record_file("feed", "f1")), "feed")
+    assert isinstance(feed_ov, dict)
+    assert feed_ov["text"] == "2026-11-15T08:50:00Z"
 
     # Next tick 5 minutes later: `rebuild` triggers on `records.ingested`!
     t1 = t0 + timedelta(minutes=5)
@@ -154,7 +152,7 @@ def test_loops_schedules_events_hooks_input_daemons_emit_and_timeout(tmp_path: P
     due3 = loops.run_loops(store, due_only=True, now=t1 + timedelta(minutes=5))
     assert due3["results"] == []
 
-    # Cycle loop with `emit: true` publishes JSONL events that immediately wake downstream `delegated` loop!
+    # Cycle loop with `emit: loop.event` publishes JSONL events that immediately wake downstream `delegated` loop!
     ev_res = loops.run_loops(store, ("ev-emitter",), now=t1)
     assert ev_res["ok"]
     assert ev_res["results"][0]["summary"] == {"emitted": 2}
@@ -197,7 +195,7 @@ def test_loops_schedules_events_hooks_input_daemons_emit_and_timeout(tmp_path: P
     sent_after_lines = [json.loads(ln) for ln in (root / "services" / "sent.jsonl").read_text().splitlines()]
     assert any(m == {"kind": "event", "events": 1, "prompt": "reply.md"} for m in sent_after_lines)
 
-    # `DaemonStream` captures JSON line output from `loops.chat` (`daemon: true`, `emit: loop.message`) into `.bf/events.jsonl`!
+    # `DaemonStream` captures JSON line output from `loops.chat` (`on: daemon`, `emit: loop.message`) into `.bf/events.jsonl`!
     cfg = config.load(store)
     stop_ev, wake_ev = threading.Event(), threading.Event()
     daemon = watch.DaemonStream(store, cfg.loops["chat"], stop_ev, wake_ev)
@@ -220,9 +218,12 @@ def test_loops_schedules_events_hooks_input_daemons_emit_and_timeout(tmp_path: P
     assert "timed out" in slow_res["results"][0]["error"]
     st_sum = loops.status_summary(store, check=True)
     assert st_sum["ok"]
+    assert st_sum["description"] == "Orchestration test brain."
     assert set(st_sum["counts"]) == {"notes", "records", "sources", "loops"}
     assert st_sum["counts"]["notes"] >= 2
-    assert st_sum["counts"]["loops"] == len(loops.status_summary(store, all_units=True)["loops"])
+    st_all = loops.status_summary(store, all_units=True)
+    assert st_sum["counts"]["loops"] == len(st_all["loops"])
+    assert st_all["loops"]["feed"]["description"] == "Ingest sample feed."
     assert st_sum["attention"] == []
     assert st_sum["orphaned_states"] == []
     assert "loops" not in st_sum
@@ -234,12 +235,12 @@ def test_loops_schedules_events_hooks_input_daemons_emit_and_timeout(tmp_path: P
     assert "orch · watch" in rendered
     assert "daemon · loop.message" in rendered
     assert "2 schedules" in rendered
-    assert "+1 · 1 record" in rendered
+    assert "~1 · 1 record" in rendered
     assert "2 disabled" in rendered
 
     # Non-TTY `watch.serve` automatically emits JSON tick lines and rebuilds live edits!
     serve_stop = threading.Event()
-    store.write("bf.yaml", store.read("bf.yaml") + b"watch:\n  interval: 500ms\n  debounce: 50ms\n")
+    store.write("bf.yaml", store.read("bf.yaml") + b"watch:\n  interval: 500ms\n")
     serve_thread = threading.Thread(target=lambda: watch.serve(store, stop_event=serve_stop), daemon=True)
     serve_thread.start()
     deadline = time.monotonic() + 8.0
@@ -253,26 +254,25 @@ def test_loops_schedules_events_hooks_input_daemons_emit_and_timeout(tmp_path: P
     serve_thread.join(timeout=5)
     assert store.exists("memories/concepts/live-edit.json")
 
-    # Builtin `review`/`eval`, relative script executable, `requires`, missing input, failed loop attention!
+    # Builtin `review`/`eval`, relative script executable (`ingest: snapshot`), `requires`, failed loop attention!
     rel_exec = root / "routines" / "exec_rel.py"
-    rel_exec.write_text(f"#!{sys.executable}\nprint('---\\ntype: action\\nstatus: draft\\n---\\n# Report\\n')\n")
+    rel_exec.write_text(f"#!{sys.executable}\nimport json\nprint(json.dumps([{{'id': 'r1', 'title': 'Report'}}]))\n")
     rel_exec.chmod(0o755)
     (root / "sensors" / "bad_json.py").write_text("print('{not valid json')\n")
     store.write(
         "bf.yaml",
         f"version: {FORMAT}\nname: orch\nloops:\n"
         "  rev:\n    run: [bf, review]\n"
-        "  ev:\n    run: [bf, eval]\n"
-        "  rel-script:\n    run: [routines/exec_rel.py]\n    action:\n      keep: 1\n"
+        "  ev:\n    run: [bf, check, --eval]\n"
+        "  rel-script:\n    run: [routines/exec_rel.py]\n    ingest: snapshot\n"
         "  need-missing:\n    run: [bf, build]\n    requires: [no-such-binary-bf-xyz]\n"
-        f"  bad-input:\n    run: [{sys.executable!r}, -c, 'pass']\n    input: prompts/missing.md\n"
-        f"  bad-ing:\n    run: [{sys.executable!r}, sensors/bad_json.py]\n    ingest: feed\n"
+        f"  bad-ing:\n    run: [{sys.executable!r}, sensors/bad_json.py]\n    ingest:\n      source: feed\n"
         f"  exit-fail:\n    run: [{sys.executable!r}, -c, 'import sys; sys.exit(2)']\n".encode(),
     )
     rev_ev = loops.run_loops(store, ("rev", "ev", "rel-script"), now=t1)
     assert rev_ev["ok"]
     assert loops.run_loops(store, ("rel-script",), now=t1)["ok"]
-    assert len([p for p in store.files("actions") if "rel-script-" in p]) == 1
+    assert store.exists(records.record_file("rel-script", "r1"))
     bad_ing = loops.run_loops(store, ("bad-ing",), now=t1)
     assert not bad_ing["ok"]
     pf_res = loops.run_loops(store, ("exit-fail",), now=t1)
@@ -291,8 +291,6 @@ def test_loops_schedules_events_hooks_input_daemons_emit_and_timeout(tmp_path: P
     } in st_fail["attention"]
     with pytest.raises(Error, match="no-such-binary-bf-xyz"):
         loops.run_loops(store, ("need-missing",), now=t1)
-    with pytest.raises(Error, match="input file"):
-        loops.run_loops(store, ("bad-input",), now=t1)
 
     for bad_call in (
         lambda: loops.exec_argv((), cwd=root, env={}, timeout=5),
@@ -321,10 +319,10 @@ def test_concurrency_nonblocking_watch_and_multi_schedule(tmp_path: Path) -> Non
     store.write(
         "bf.yaml",
         f"version: {FORMAT}\nname: conc\nloops:\n"
-        f"  a:\n    run: [{sys.executable!r}, routines/barrier.py, a]\n    schedule: 1h\n"
-        f"  b:\n    run: [{sys.executable!r}, routines/barrier.py, b]\n    schedule: 1h\n"
-        f"  c:\n    run: [{sys.executable!r}, routines/barrier.py, c]\n    schedule: 1h\n"
-        "watch:\n  interval: 500ms\n  debounce: 50ms\n  concurrency: 3\n".encode(),
+        f"  a:\n    on:\n      schedules: 1h\n    run: [{sys.executable!r}, routines/barrier.py, a]\n"
+        f"  b:\n    on:\n      schedules: 1h\n    run: [{sys.executable!r}, routines/barrier.py, b]\n"
+        f"  c:\n    on:\n      schedules: 1h\n    run: [{sys.executable!r}, routines/barrier.py, c]\n"
+        "watch:\n  interval: 500ms\n  concurrency: 3\n".encode(),
     )
     res = loops.run_loops(store, due_only=True)
     assert res["ok"]
@@ -343,15 +341,16 @@ def test_concurrency_nonblocking_watch_and_multi_schedule(tmp_path: Path) -> Non
         "    p.write_text(json.dumps(st))\n"
         "    fcntl.flock(lk, fcntl.LOCK_UN)\n"
         "bump(1)\n"
-        "time.sleep(0.12)\n"
+        "time.sleep(0.25)\n"
         "bump(-1)\n"
     )
     cap_loops = "".join(
-        f"  c{i}:\n    run: [{sys.executable!r}, routines/cap.py, c{i}]\n    schedule: 1h\n" for i in range(4)
+        f"  c{i}:\n    on:\n      schedules: 1h\n    run: [{sys.executable!r}, routines/cap.py, c{i}]\n"
+        for i in range(4)
     )
     store.write(
         "bf.yaml",
-        f"version: {FORMAT}\nname: conc\nloops:\n{cap_loops}watch:\n  interval: 500ms\n  debounce: 50ms\n  concurrency: 2\n".encode(),
+        f"version: {FORMAT}\nname: conc\nloops:\n{cap_loops}watch:\n  interval: 500ms\n  concurrency: 2\n".encode(),
     )
     cap_res = loops.run_loops(store, due_only=True)
     assert cap_res["ok"]
@@ -372,9 +371,9 @@ def test_concurrency_nonblocking_watch_and_multi_schedule(tmp_path: Path) -> Non
     store.write(
         "bf.yaml",
         f"version: {FORMAT}\nname: conc\nloops:\n"
-        f"  slow-bg:\n    run: [{sys.executable!r}, routines/slow_bg.py]\n    schedule: 1s\n    events:\n      - kind: poke.slow\n"
-        f"  fast-ev:\n    run: [{sys.executable!r}, routines/fast_ev.py]\n    events:\n      - kind: wake.now\n"
-        "watch:\n  interval: 500ms\n  debounce: 50ms\n  concurrency: 2\n".encode(),
+        f"  slow-bg:\n    on:\n      schedules: 1s\n      events: poke.slow\n    run: [{sys.executable!r}, routines/slow_bg.py]\n"
+        f"  fast-ev:\n    on:\n      events: wake.now\n    run: [{sys.executable!r}, routines/fast_ev.py]\n"
+        "watch:\n  interval: 500ms\n  concurrency: 2\n".encode(),
     )
     stop_w = threading.Event()
     wt = threading.Thread(target=lambda: watch.serve(store, json_stream=True, stop_event=stop_w), daemon=True)
@@ -439,21 +438,21 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
     store.write(
         "bf.yaml",
         f"version: {FORMAT}\nname: resilient\n"
-        "env:\n  GWS_DIR: '{{home}}/.config/gws'\n  BASE_ONLY: '{{home}}/base'\n  GH_TOKEN: from-yaml\n  LOCAL_SECRET: default-val\n"
+        "env:\n  GWS_DIR: '{{home}}/.config/gws'\n  BASE_ONLY: '{{home}}/base'\n  GH_TOKEN: from-yaml\n  LOCAL_SECRET: default-val\n  LOOP_ONLY: from-base\n"
         "loops:\n"
-        f"  warn-ok:\n    run: [{sys.executable!r}, routines/warn_ok.py]\n    ingest:\n      source: warn-ok\n      mode: snapshot\n    schedule: 1h\n"
-        f'  loop-override:\n    run: [{sys.executable!r}, -c, \'import json, os, sys; print(json.dumps([{{"id":"lo","title":os.environ["LOOP_KEY"]+"|"+"|".join(sys.argv[1:])}}]))\']\n'
-        "    ingest: loop-override\n    env:\n      LOOP_KEY: from-loop\n"
-        f"  flaky:\n    run: [{sys.executable!r}, routines/fail_fast.py]\n    schedule: 5m\n"
-        f"  flaky-ev:\n    run: [{sys.executable!r}, routines/fail_fast.py]\n    events:\n      - kind: loop.message\n"
-        f"  chat:\n    run: [{sys.executable!r}, services/dup_stream.py]\n    daemon: true\n    emit: loop.message\n".encode(),
+        f"  warn-ok:\n    on:\n      schedules: 1h\n    run: [{sys.executable!r}, routines/warn_ok.py]\n    ingest: snapshot\n"
+        f'  loop-override:\n    run: [{sys.executable!r}, -c, \'import json, os, sys; print(json.dumps([{{"id":"lo","title":os.environ["LOOP_KEY"]+"|"+os.environ["LOOP_ONLY"]+"|"+"|".join(sys.argv[1:])}}]))\']\n'
+        "    ingest: upsert\n    env:\n      LOOP_KEY: from-loop\n      LOOP_ONLY: from-loop-only\n"
+        f"  flaky:\n    on:\n      schedules: 5m\n    run: [{sys.executable!r}, routines/fail_fast.py]\n"
+        f"  flaky-ev:\n    on:\n      events: loop.message\n    run: [{sys.executable!r}, routines/fail_fast.py]\n"
+        f"  chat:\n    on: daemon\n    run: [{sys.executable!r}, services/dup_stream.py]\n    emit: loop.message\n".encode(),
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BF_BRAIN", str(tmp_path / "evil-override"))
     monkeypatch.setenv("GH_TOKEN", "from-host")
     monkeypatch.setenv("UNALLOW_HOST", "secret-host-val")
 
-    # Full precedence via real `run_loops`: host allowlist < bf.yaml env < .env < loops.<name>.env < BF_*, plus literal extra_args.
+    # Full precedence via real `run_loops`: host allowlist < bf.yaml env < loops.<name>.env < .env < BF_*, plus literal extra_args.
     ok_res = loops.run_loops(store, ("warn-ok",))
     assert ok_res["ok"]
     warn_saved = decode(store.read(records.record_file("warn-ok", "w1")), "warn-ok")
@@ -467,7 +466,7 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
     assert lo_res["ok"]
     lo_saved = decode(store.read(records.record_file("loop-override", "lo")), "loop-override")
     assert isinstance(lo_saved, dict)
-    assert lo_saved["title"] == "from-loop|{{brain}}"
+    assert lo_saved["title"] == "from-dotenv|from-loop-only|{{brain}}"
     # Stdin broken-pipe regression: a child exiting 0 without draining large stdin still returns exit 0, not 127.
     from bf.proc import exec_argv
 
@@ -549,19 +548,14 @@ def test_proxy_env_reactive_schedule_anchors_and_cursor_self_healing(
         "bf.yaml",
         f"version: {FORMAT}\nname: hybrid\ntimezone: UTC\nloops:\n"
         "  bot:\n"
+        "    on:\n      schedules: '0 8 * * *'\n      events: loop.message\n"
         f"    run: [{sys.executable!r}, routines/echo_ctx.py, '{{{{context}}}}', bot]\n"
-        "    schedule: '0 8 * * *'\n"
-        "    events:\n"
-        "      - kind: loop.message\n"
         "  cross-alert:\n"
+        "    on:\n      events:\n        kind: loop.message\n        source: chat\n"
         f"    run: [{sys.executable!r}, routines/echo_ctx.py, '{{{{context}}}}', alerts]\n"
-        "    events:\n"
-        "      - kind: loop.message\n"
-        "        source: chat\n"
         "  hook-every:\n"
-        f"    run: [{sys.executable!r}, routines/echo_ctx.py, '{{{{context}}}}', hook]\n"
-        "    schedule: 1h\n"
-        "    hook: pre-commit\n".encode(),
+        "    on:\n      schedules: 1h\n      hooks: pre-commit\n"
+        f"    run: [{sys.executable!r}, routines/echo_ctx.py, '{{{{context}}}}', hook]\n".encode(),
     )
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.test:8080")
     monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
@@ -608,14 +602,15 @@ def test_proxy_env_reactive_schedule_anchors_and_cursor_self_healing(
     assert [r["loop"] for r in due_1h["results"]] == ["hook-every"]
 
 
-def test_watch_supervises_daemon_loop_and_input_loops(tmp_path: Path) -> None:
+def test_watch_supervises_daemon_loop_and_snapshot_memory_loops(tmp_path: Path) -> None:
     root = tmp_path / "svc-watch"
     engine.init_brain(root, name="svc-watch")
     store = Store(root)
     for sub in ("routines", "services", "prompts"):
         (root / sub).mkdir(exist_ok=True)
     (root / "routines" / "fake_harness.py").write_text(
-        "import pathlib, sys\nprint('Brief from ' + pathlib.Path(sys.argv[1]).name)\n"
+        "import json, pathlib, sys\n"
+        "print(json.dumps([{'id': 'latest', 'title': 'Brief from ' + pathlib.Path(sys.argv[1]).name}]))\n"
     )
     (root / "services" / "tcp_srv.py").write_text(
         "import signal, socket, sys\n"
@@ -645,25 +640,18 @@ def test_watch_supervises_daemon_loop_and_input_loops(tmp_path: Path) -> None:
         f"version: {FORMAT}\nname: svc-watch\n"
         "loops:\n"
         "  brief:\n"
-        f"    run: [{sys.executable!r}, routines/fake_harness.py, '{{{{input}}}}']\n"
-        "    input: prompts/brief.md\n"
-        "    action:\n      keep: 1\n"
+        f"    run: [{sys.executable!r}, routines/fake_harness.py, prompts/brief.md]\n"
+        "    ingest: snapshot\n"
         "  tcp:\n"
+        "    on: daemon\n"
         f"    run: [{sys.executable!r}, services/tcp_srv.py, '{port}']\n"
-        "    daemon: true\n"
         "    enabled: true\n"
-        "watch:\n  interval: 500ms\n  debounce: 50ms\n".encode(),
+        "watch:\n  interval: 500ms\n".encode(),
     )
     ran1 = loops.run_loops(store, ("brief",))
     assert ran1["ok"], ran1
-    act1_rel = ran1["results"][0]["summary"]["action"]
-    act1_mem = f"memories/actions/{Path(act1_rel).parent.name}.json"
-    assert store.exists(act1_mem)
-    ran2 = loops.run_loops(store, ("brief",))
-    assert ran2["ok"], ran2
-    act2_rel = ran2["results"][0]["summary"]["action"]
-    assert act2_rel != act1_rel
-    assert not store.exists(act1_mem)
+    assert ran1["results"][0]["summary"]["records"] == 1
+    assert store.exists(records.record_file("brief", "latest"))
     assert engine.validate(store)["ok"]
 
     conflict_root = tmp_path / "svc-conflict"
@@ -674,11 +662,11 @@ def test_watch_supervises_daemon_loop_and_input_loops(tmp_path: Path) -> None:
         f"version: {FORMAT}\nname: svc-conflict\n"
         "loops:\n"
         "  crash:\n"
+        "    on: daemon\n"
         f"    run: [{sys.executable!r}, -c, 'import sys; sys.stderr.write(\"bind failed\\\\n\"); sys.exit(1)']\n"
-        "    daemon: true\n"
         "    enabled: true\n"
-        "  badreq:\n    run: [echo, hi]\n    daemon: true\n    requires: [nonexistent-req-cmd-xyz]\n"
-        "watch:\n  interval: 500ms\n  debounce: 50ms\n".encode(),
+        "  badreq:\n    on: daemon\n    run: [echo, hi]\n    requires: [nonexistent-req-cmd-xyz]\n"
+        "watch:\n  interval: 500ms\n".encode(),
     )
 
     stop_ev = threading.Event()
@@ -738,10 +726,8 @@ def test_dual_schedule_and_event_loop_advances_cursor_after_scheduled_run(tmp_pa
         f"version: {FORMAT}\nname: dual\n"
         "loops:\n"
         "  combo:\n"
-        f"    run: [{sys.executable!r}, routines/count.py, '{{{{context}}}}']\n"
-        "    schedule: 1h\n"
-        "    events:\n"
-        "      - kind: custom.ping\n".encode(),
+        "    on:\n      schedules: 1h\n      events: custom.ping\n"
+        f"    run: [{sys.executable!r}, routines/count.py, '{{{{context}}}}']\n".encode(),
     )
 
     ev1 = records.append_event(store, "custom.other", "test", {"id": "o1"})
@@ -780,9 +766,7 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
     empty_root = tmp_path / "empty-tui"
     engine.init_brain(empty_root, name="empty-tui")
     empty_store = Store(empty_root)
-    empty_store.write(
-        "bf.yaml", f"version: {FORMAT}\nname: empty-tui\nwatch:\n  interval: 500ms\n  debounce: 50ms\n".encode()
-    )
+    empty_store.write("bf.yaml", f"version: {FORMAT}\nname: empty-tui\nwatch:\n  interval: 500ms\n".encode())
     now = datetime(2026, 11, 16, 12, 30, 0, tzinfo=UTC)
     empty_txt = render_text(empty_store, now=now)
     assert "All healthy" in empty_txt
@@ -796,23 +780,23 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
         "bf.yaml",
         f"version: {FORMAT}\nname: rich-tui\n"
         "loops:\n"
-        "  ing-diff:\n    run: [echo]\n    ingest: items\n    schedule: 30m\n"
-        "  ing-same:\n    run: [echo]\n    ingest:\n      source: archive\n      mode: snapshot\n    schedule: '0 8 * * 1-5'\n"
-        "  b-build:\n    run: [bf, build]\n    schedule: '0 9 * * *'\n"
-        "  b-val:\n    run: [bf, validate]\n    hook: pre-commit\n"
-        "  b-eval:\n    run: [bf, eval]\n    events:\n      - kind: a\n      - kind: b\n"
+        "  ing-diff:\n    on:\n      schedules: 30m\n    run: [echo]\n    ingest:\n      source: items\n"
+        "  ing-same:\n    on:\n      schedules: '0 8 * * 1-5'\n    run: [echo]\n    ingest:\n      source: archive\n      mode: snapshot\n"
+        "  b-build:\n    on:\n      schedules: '0 9 * * *'\n    run: [bf, build]\n"
+        "  b-val:\n    on:\n      hooks: pre-commit\n    run: [bf, check, --validate]\n"
+        "  b-eval:\n    on:\n      events: [a, b]\n    run: [bf, check, --eval]\n"
         "  b-rev:\n    run: [bf, review]\n"
-        "  b-emit:\n    run: [echo]\n    emit: true\n"
-        '  act-loop:\n    run: [echo]\n    action:\n      keep: 1\n    events:\n      - kind: "ev\\u200b"\n'
-        "  idle-ing:\n    run: [echo]\n    ingest: raw\n"
+        "  b-emit:\n    run: [echo]\n    emit: loop.event\n"
+        '  ev-san:\n    on:\n      events:\n        - kind: "ev\\u200b"\n    run: [echo]\n'
+        "  idle-ing:\n    run: [echo]\n    ingest: upsert\n"
         "  idle-plain:\n    run: [echo]\n"
-        "  failing:\n    run: [echo]\n    schedule: 1m\n"
+        "  failing:\n    on:\n      schedules: 1m\n    run: [echo]\n"
         "  off-loop:\n    run: [bf, build]\n    enabled: false\n"
-        "  live-msg:\n    run: [echo]\n    daemon: true\n    emit: loop.message\n"
-        "  live-ev:\n    run: [echo]\n    daemon: true\n    emit: true\n"
-        "  daemon:\n    run: [echo]\n    daemon: true\n"
-        "  halted:\n    run: [echo]\n    daemon: true\n"
-        "watch:\n  interval: 500ms\n  debounce: 50ms\n".encode(),
+        "  live-msg:\n    on: daemon\n    run: [echo]\n    emit: loop.message\n"
+        "  live-ev:\n    on: daemon\n    run: [echo]\n    emit: loop.event\n"
+        "  daemon:\n    on: daemon\n    run: [echo]\n"
+        "  halted:\n    on: daemon\n    run: [echo]\n"
+        "watch:\n  interval: 500ms\n".encode(),
     )
 
     def save_state(
@@ -847,11 +831,11 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
     )
     save_state("ing-same", "ok", ago_s=7200, summary={"records": 4, "added": 0, "updated": 0, "removed": 0})
     save_state("b-build", "ok", ago_s=120, summary={"notes": 3, "written": 1})
-    save_state("b-val", "ok", ago_s=90000, summary={"ok": True, "notes": 3, "records": 5})
-    save_state("b-eval", "ok", ago_s=30, summary={"passed": 4, "failed": 0})
+    save_state("b-val", "ok", ago_s=90000, summary={"ok": True, "validate": {"notes": 3, "records": 5}})
+    save_state("b-eval", "ok", ago_s=30, summary={"ok": True, "eval": {"passed": 4, "failed": 0}})
     save_state("b-rev", "ok", ago_s=30, summary={"stale": [{"ref": "concepts/welcome.md"}], "tasks_open": 1})
     save_state("b-emit", "ok", ago_s=30, summary={"emitted": 2})
-    save_state("act-loop", "ok", ago_s=30, summary={"action": "actions/2026-11-16_demo/ACTION.md"})
+    save_state("ev-san", "ok", ago_s=30, summary={})
     save_state(
         "failing",
         "failed",
@@ -886,7 +870,7 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
         "4/4 passed",
         "1 stale · 1 tasks",
         "2 events emitted",
-        "→ actions/2026-11-16_demo/ACTION.md",
+        "completed",
         "daemon · loop.message",
         "daemon · loop.event",
         "listening",
@@ -904,6 +888,14 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
 
     capped_txt = render_text(store, now=now, max_rows=3)
     assert "+ 13 more" in capped_txt
+
+    save_state(
+        "b-val",
+        "ok",
+        ago_s=30,
+        summary={"ok": True, "validate": {"notes": 3, "records": 5}, "eval": {"passed": 4, "failed": 0}},
+    )
+    assert "valid · 4/4 passed" in render_text(store, now=now, max_rows=50)
 
     paris_cfg = config.LoopSpec(
         name="paris", run=("echo",), schedules=(config.ScheduleSpec("0 2 * * *", None, "0 2 * * *"),)
@@ -939,7 +931,7 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
     assert res["ok"] is True
     assert "empty-tui" in tui_buf.getvalue()
 
-    # Daemon loop with `emit: true` streams JSON stdout objects into `.bf/events.jsonl`!
+    # Daemon loop with `emit: loop.event` streams JSON stdout objects into `.bf/events.jsonl`!
     svc_root = tmp_path / "svc-events"
     engine.init_brain(svc_root, name="svc-events")
     svc_store = Store(svc_root)
@@ -947,10 +939,10 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
         "bf.yaml",
         f"version: {FORMAT}\nname: svc-events\n"
         "loops:\n  emitter:\n"
+        "    on: daemon\n"
         f'    run: [{sys.executable!r}, -c, \'import json; print("[1,2]", flush=True); print(json.dumps({{"id": "s1", "kind": "svc.ping"}}), flush=True)\']\n'
-        "    daemon: true\n"
-        "    emit: true\n"
-        "watch:\n  interval: 500ms\n  debounce: 50ms\n".encode(),
+        "    emit: loop.event\n"
+        "watch:\n  interval: 500ms\n".encode(),
     )
     svc_cfg = config.load(svc_store)
     s_stop, s_wake, s_ui = threading.Event(), threading.Event(), threading.Event()
@@ -986,9 +978,9 @@ def test_watch_dashboard_states_sanitization_and_live_tui_loop(tmp_path: Path, m
     svc_store.write(
         "bf.yaml",
         f"version: {FORMAT}\nname: svc-events\nloops:\n  huge:\n"
+        "    on: daemon\n"
         f"    run: [{sys.executable!r}, -c, \"import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_a: sys.exit(0)); print('x' * 120, flush=True); time.sleep(5)\"]\n"
-        "    daemon: true\n"
-        "    emit: true\n".encode(),
+        "    emit: loop.event\n".encode(),
     )
     huge_cfg = config.load(svc_store)
     h_stop, h_wake = threading.Event(), threading.Event()
@@ -1017,7 +1009,7 @@ def test_loop_popen_failure_secret_redaction_and_watch_json(
         "  missing-bin:\n    run: [nonexistent-bf-bin-xyz]\n"
         "  leaky:\n"
         f"    run: [{sys.executable!r}, -c, \"import sys; sys.stderr.write('Authorization: bearer secret_tok_12345678~v2 ghp_1234567890abcdef\\n-----BEGIN PRIVATE KEY-----\\nABC\\n-----END PRIVATE KEY-----\\n'); sys.exit(2)\"]\n"
-        "watch:\n  interval: 500ms\n  debounce: 50ms\n".encode(),
+        "watch:\n  interval: 500ms\n".encode(),
     )
     cfg = config.load(store)
 
@@ -1073,7 +1065,7 @@ def test_loop_popen_failure_secret_redaction_and_watch_json(
 
 
 def test_batched_jq_filters_stop_event_due_isolation_and_live_reload(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root = tmp_path / "hardened-orch"
     engine.init_brain(root, name="hardened-orch")
@@ -1086,19 +1078,19 @@ def test_batched_jq_filters_stop_event_due_isolation_and_live_reload(
         "bf.yaml",
         f"version: {FORMAT}\nname: hardened-orch\n"
         "loops:\n"
-        "  broken-req:\n    run: [echo, no]\n    requires: [missing-bin-bf-isolated]\n    schedule: 1m\n"
-        "  broken-inp:\n    run: [echo, no]\n    input: prompts/missing.md\n    schedule: 1m\n"
-        f"  healthy:\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n    schedule: 1m\n"
-        f"  ev-zero:\n    run: [{sys.executable!r}, -c, 'pass']\n    events:\n      - kind: custom.num\n        filter: '.data.n'\n"
-        f"  ev-env:\n    run: [{sys.executable!r}, -c, 'pass']\n    events:\n      - kind: custom.num\n        filter: '$ENV.SECRET_VAR != null'\n"
+        "  broken-req:\n    on:\n      schedules: 1m\n    run: [echo, no]\n    requires: [missing-bin-bf-isolated]\n"
+        "  broken-rel:\n    on:\n      schedules: 1m\n    run: [routines/missing.py]\n"
+        f"  healthy:\n    on:\n      schedules: 1m\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n"
+        f"  ev-zero:\n    on:\n      events:\n        - kind: custom.num\n          filter: '.data.n'\n    run: [{sys.executable!r}, -c, 'pass']\n"
+        f"  ev-env:\n    on:\n      events:\n        - kind: custom.num\n          filter: '$ENV.SECRET_VAR != null'\n    run: [{sys.executable!r}, -c, 'pass']\n"
         f"  hang:\n    run: [{sys.executable!r}, routines/hang.py]\n    enabled: false\n"
-        "watch:\n  interval: 500ms\n  debounce: 50ms\n".encode(),
+        "watch:\n  interval: 500ms\n".encode(),
     )
 
     t0 = datetime(2026, 11, 17, 10, 0, tzinfo=UTC)
     due_res = loops.run_loops(store, due_only=True, now=t0)
     by_loop = {r["loop"]: r["status"] for r in due_res["results"]}
-    assert by_loop == {"broken-req": "failed", "broken-inp": "failed", "healthy": "ok"}
+    assert by_loop == {"broken-req": "failed", "broken-rel": "failed", "healthy": "ok"}
 
     monkeypatch.setenv("SECRET_VAR", "top-secret")
     records.append_event(store, "custom.num", "src", {"id": "n-false", "n": False}, now=t0)
@@ -1134,9 +1126,7 @@ def test_batched_jq_filters_stop_event_due_isolation_and_live_reload(
     live_root = tmp_path / "live-reload"
     engine.init_brain(live_root, name="live-reload")
     live_store = Store(live_root)
-    live_store.write(
-        "bf.yaml", f"version: {FORMAT}\nname: live-reload\nwatch:\n  interval: 500ms\n  debounce: 50ms\n".encode()
-    )
+    live_store.write("bf.yaml", f"version: {FORMAT}\nname: live-reload\nwatch:\n  interval: 500ms\n".encode())
     stop_live = threading.Event()
     live_t = threading.Thread(
         target=lambda: watch.serve(live_store, json_stream=True, stop_event=stop_live), daemon=True
@@ -1145,8 +1135,9 @@ def test_batched_jq_filters_stop_event_due_isolation_and_live_reload(
     try:
         added_yaml = (
             f"version: {FORMAT}\nname: live-reload\nloops:\n  added:\n"
+            "    on: daemon\n"
             f'    run: [{sys.executable!r}, -c, \'import json, time; print(json.dumps({{"id": "lr-1", "kind": "reload.ok"}}), flush=True); time.sleep(2)\']\n'
-            "    daemon: true\n    emit: true\nwatch:\n  interval: 500ms\n  debounce: 50ms\n"
+            "    emit: loop.event\nwatch:\n  interval: 500ms\n"
         ).encode()
         lr_deadline = time.monotonic() + 8.0
         found_reload = False
@@ -1161,7 +1152,12 @@ def test_batched_jq_filters_stop_event_due_isolation_and_live_reload(
             if found_reload:
                 break
         assert found_reload
-        base_yaml = f"version: {FORMAT}\nname: live-reload\nwatch:\n  interval: 500ms\n  debounce: 50ms\n".encode()
+        # Singleton lock refuses a second concurrent `bf watch` on the same brain.
+        with pytest.raises(models.BusyError, match="another bf watch is already running"):
+            watch.serve(live_store, json_stream=True)
+        assert cli.run(["watch", "--json", "--brain", str(live_root)]) == 1
+        assert "another bf watch is already running" in capsys.readouterr().err
+        base_yaml = f"version: {FORMAT}\nname: live-reload\nwatch:\n  interval: 500ms\n".encode()
         live_store.write("bf.yaml", base_yaml)
         stop_dl = time.monotonic() + 8.0
         while time.monotonic() < stop_dl and loops.load_unit_state(live_store, "added")["status"] != "stopped":
@@ -1216,8 +1212,8 @@ def test_batched_jq_filters_stop_event_due_isolation_and_live_reload(
     iso_store.write(
         "bf.yaml",
         f"version: {FORMAT}\nname: iso-filter\nloops:\n"
-        "  bad-flt:\n    run: [echo, no]\n    events:\n      - kind: custom.x\n        filter: '[[['\n"
-        f"  good-loop:\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n    schedule: 1m\n".encode(),
+        "  bad-flt:\n    on:\n      events:\n        - kind: custom.x\n          filter: '[[['\n    run: [echo, no]\n"
+        f"  good-loop:\n    on:\n      schedules: 1m\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n".encode(),
     )
     records.append_event(iso_store, "custom.x", "src", {"id": "x1"}, now=t0)
     iso_res = loops.run_loops(iso_store, due_only=True, now=t0)
@@ -1264,7 +1260,7 @@ def test_v30_status_attention_orphans_fields_fallbacks_and_lazy_imports(tmp_path
         (
             f"version: {FORMAT}\nname: v30-ops\nloops:\n"
             "  b:\n    run: [bf, build]\n"
-            "  v:\n    run: [bf, validate]\n"
+            "  v:\n    run: [bf, check, --validate]\n"
             "  c:\n    run: [bf, check]\n"
             "  fail-empty:\n    run: [echo, nope]\n"
         ).encode(),
@@ -1299,13 +1295,15 @@ def test_v30_status_attention_orphans_fields_fallbacks_and_lazy_imports(tmp_path
     assert any(a["name"] == "fail-empty" and "exit code 2" in a["error"] for a in st_fb["attention"])
 
     loops.save_unit_state(store, {**st_doc, "name": "no-log", "status": "failed", "error": ""})
-    store.write("bf.yaml", store.read("bf.yaml") + b"  no-log:\n    run: [echo, ok]\n  evf:\n    run: [bf, eval]\n")
+    store.write(
+        "bf.yaml", store.read("bf.yaml") + b"  no-log:\n    run: [echo, ok]\n  evf:\n    run: [bf, check, --eval]\n"
+    )
     assert any(
         a["name"] == "no-log" and a["error"] == "last run failed" for a in loops.status_summary(store)["attention"]
     )
     store.write(
         "evals/fail.yaml",
-        f"version: {FORMAT}\ncases:\n  - name: bad\n    query: 'select(false)'\n    min_count: 1\n".encode(),
+        b"version: 1\ncases:\n  - name: bad\n    query: 'select(false)'\n    min_count: 1\n",
     )
     ev_fail = loops.run_loops(store, ("evf",), now=t0)
     assert not ev_fail["ok"]
@@ -1336,6 +1334,8 @@ def test_v30_status_attention_orphans_fields_fallbacks_and_lazy_imports(tmp_path
     loops.save_unit_state(store, {**st_doc, "name": "stale_unit"})
     (root / ".bf" / "orphan.context.json").write_text("{}\n")
     (root / ".bf" / "orphan.context.json").chmod(0o600)
+    (root / ".bf" / "b").mkdir(mode=0o700, exist_ok=True)
+    (root / ".bf" / "b" / "nested-link").symlink_to(root / "bf.yaml")
     assert "stale_unit" in loops.status_summary(store)["orphaned_states"]
     assert "orphan" not in loops.status_summary(store)["orphaned_states"]
     with pytest.raises(InputError):
@@ -1356,7 +1356,7 @@ def test_builtin_bf_check_surfaces_eval_failures_and_problems_past_validate_warn
     engine.build(store)
     store.write(
         "evals/smoke.yaml",
-        f"version: {FORMAT}\ncases:\n  - name: smoke-miss\n    query: 'definitely-missing-token-xyz'\n    min_count: 1\n".encode(),
+        b"version: 1\ncases:\n  - name: smoke-miss\n    query: 'definitely-missing-token-xyz'\n    min_count: 1\n",
     )
 
     val = engine.validate(store)
@@ -1370,7 +1370,7 @@ def test_builtin_bf_check_surfaces_eval_failures_and_problems_past_validate_warn
     assert res1["exit_code"] == 1
     assert res1["error"] == "1 eval case(s) failed"
 
-    store.write("evals/bad.yaml", f"version: {FORMAT}\ncases: not-a-list\n".encode())
+    store.write("evals/bad.yaml", b"version: 1\ncases: not-a-list\n")
     res2 = loops.execute_one_loop(store, cfg.loops["check-loop"], trigger="manual", now=t0)
     assert res2["status"] == "failed"
     assert res2["exit_code"] == 1
@@ -1419,3 +1419,45 @@ def test_loops_argv0_confinement_cli_order_redaction_and_note_counts(tmp_path: P
     store.write("actions/2026-11-20_demo/outputs/report.md", b"# Attachment\n")
     st = loops.status_summary(store)
     assert st["counts"]["notes"] == 1
+
+
+def test_daemon_health_timer_resets_consecutive_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "daemon-heal"
+    engine.init_brain(root, name="daemon-heal")
+    store = Store(root)
+    unit = config.LoopSpec(
+        name="bot",
+        run=(sys.executable, "-c", "import time; time.sleep(5)"),
+        daemon=True,
+        emit="loop.message",
+    )
+    loops.save_unit_state(
+        store,
+        {
+            **loops.load_unit_state(store, "bot"),
+            "status": "failed",
+            "consecutive_failures": 12,
+            "error": "URLError",
+        },
+    )
+    monkeypatch.setattr(watch, "_HEALTHY_SECS", 0.08)
+    stop_ev, wake_ev, ui_ev = threading.Event(), threading.Event(), threading.Event()
+    stream = watch.DaemonStream(store, unit, stop_ev, wake_ev, ui_ev)
+    stream.start()
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            doc = loops.load_unit_state(store, "bot")
+            if doc.get("status") == "running" and doc.get("consecutive_failures") == 0 and doc.get("error") == "":
+                break
+            time.sleep(0.03)
+        final_doc = loops.load_unit_state(store, "bot")
+        assert final_doc["status"] == "running"
+        assert final_doc["consecutive_failures"] == 0
+        assert final_doc["error"] == ""
+        assert final_doc["last_success"]
+    finally:
+        stop_ev.set()
+        stream.terminate()
+    # Stopping a daemon must leave final state `"stopped"`, never clobbered back to `"running"`.
+    assert loops.load_unit_state(store, "bot")["status"] == "stopped"

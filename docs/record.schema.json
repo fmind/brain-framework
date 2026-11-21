@@ -29,6 +29,7 @@
       "additionalProperties": false,
       "properties": {
         "anchor": { "maxLength": 2048, "type": "string" },
+        "id": { "maxLength": 256, "minLength": 1, "type": "string" },
         "kind": { "enum": ["note", "record", "brain", "url"], "type": "string" },
         "meta": { "$ref": "#/$defs/Meta" },
         "section": { "maxLength": 256, "type": "string" },
@@ -69,25 +70,71 @@
   "description": "Unified JSON record schema enforced on compiled Markdown notes and ingested sensor records in memories/.",
   "if": { "properties": { "kind": { "const": "memory" } }, "required": ["kind"] },
   "properties": {
-    "aliases": { "items": { "maxLength": 1024, "minLength": 1, "type": "string" }, "maxItems": 200, "type": "array" },
-    "attributes": { "type": "object" },
-    "attrs": {
+    "aliases": {
+      "description": "Alternate identifiers resolved by bf read/review.",
+      "items": { "maxLength": 1024, "minLength": 1, "type": "string" },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "anchors": {
       "additionalProperties": { "$ref": "#/$defs/Meta" },
+      "description": "Keyed map of #anchor id -> non-empty attr_list metadata.",
       "propertyNames": { "maxLength": 256, "minLength": 1, "type": "string" },
       "type": "object"
     },
-    "description": { "maxLength": 16384, "type": "string" },
-    "elements": { "items": { "$ref": "#/$defs/Element" }, "type": "array" },
-    "entity": { "maxLength": 4096, "minLength": 1, "type": "string" },
-    "headings": { "items": { "$ref": "#/$defs/Heading" }, "type": "array" },
-    "id": { "maxLength": 4096, "minLength": 1, "type": "string" },
-    "kind": { "enum": ["project", "concept", "action", "memory"], "type": "string" },
-    "links": { "items": { "$ref": "#/$defs/Link" }, "maxItems": 2000, "type": "array" },
-    "ref": { "maxLength": 4200, "minLength": 1, "type": "string" },
-    "relations": false,
-    "sha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
-    "source": { "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
+    "attributes": { "description": "Freeform sensor-specific domain attributes.", "type": "object" },
+    "description": { "description": "Optional longer description.", "maxLength": 16384, "type": "string" },
+    "elements": {
+      "description": "Compiled Markdown blocks/spans with attr_list metadata.",
+      "items": { "$ref": "#/$defs/Element" },
+      "type": "array"
+    },
+    "entity": {
+      "description": "Canonical entity URI or source:id alias.",
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    },
+    "headings": {
+      "description": "Compiled Markdown headings with attr_list metadata.",
+      "items": { "$ref": "#/$defs/Heading" },
+      "type": "array"
+    },
+    "id": {
+      "description": "Stable source-local record identifier (required for kind='memory').",
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    },
+    "kind": {
+      "description": "Top-level record category.",
+      "enum": ["project", "concept", "action", "memory"],
+      "type": "string"
+    },
+    "links": {
+      "description": "Normalized outgoing note, record, brain, or URL links.",
+      "items": { "$ref": "#/$defs/Link" },
+      "maxItems": 2000,
+      "type": "array"
+    },
+    "ref": {
+      "description": "Stable brain-local reference (note path or source:id).",
+      "maxLength": 4200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "sha256": {
+      "description": "SHA-256 hex digest of source Markdown bytes.",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source": {
+      "description": "Owning source folder name under memories/.",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$",
+      "type": "string"
+    },
     "sources": {
+      "description": "Cited source objects with resource URI and optional retrieved date.",
       "items": {
         "additionalProperties": true,
         "properties": { "resource": { "maxLength": 8192, "minLength": 1, "type": "string" } },
@@ -106,29 +153,47 @@
           "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$",
           "type": "string"
         }
-      ]
+      ],
+      "description": "Review freshness threshold (days, duration, or ISO date)."
     },
-    "status": { "maxLength": 128, "minLength": 1, "type": "string" },
-    "summary": { "maxLength": 16384, "type": "string" },
+    "status": {
+      "description": "Lifecycle status (e.g. draft, stable, deprecated).",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "summary": { "description": "Short summary of the note or record.", "maxLength": 16384, "type": "string" },
     "tags": {
+      "description": "Unique tags without whitespace or slashes.",
       "items": { "maxLength": 128, "minLength": 1, "pattern": "^[^/\\\\\\s]+$", "type": "string" },
       "maxItems": 200,
       "type": "array",
       "uniqueItems": true
     },
-    "tasks": { "items": { "$ref": "#/$defs/Task" }, "type": "array" },
-    "text": { "maxLength": 4194304, "type": "string" },
+    "tasks": {
+      "description": "Compiled Markdown checklist tasks.",
+      "items": { "$ref": "#/$defs/Task" },
+      "type": "array"
+    },
+    "text": { "description": "Plain or Markdown body text.", "maxLength": 4194304, "type": "string" },
     "time": {
+      "description": "Event or creation UTC/offset ISO 8601 timestamp.",
       "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
       "type": "string"
     },
-    "title": { "maxLength": 4096, "minLength": 1, "type": "string" },
-    "type": { "maxLength": 128, "minLength": 1, "type": "string" },
+    "title": { "description": "Human-readable title.", "maxLength": 4096, "minLength": 1, "type": "string" },
+    "type": {
+      "description": "Domain subtype (e.g. guide, project, issue).",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
     "updated": {
+      "description": "Last-updated ISO date (YYYY-MM-DD) or timestamp.",
       "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$",
       "type": "string"
     },
-    "url": { "maxLength": 8192, "type": "string" }
+    "url": { "description": "Canonical external URL.", "maxLength": 8192, "type": "string" }
   },
   "required": ["ref", "source", "kind", "title"],
   "then": { "required": ["id"] },
