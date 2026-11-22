@@ -27,7 +27,7 @@ summary: Open standards governing agent protocols and tool integrations.
 
 ## Heading anchors, tasks, and link metadata
 
-Use Python-Markdown `attr_list` syntax where it adds real signal—heading `#id` anchors and typed links—alongside standard checklist tasks:
+Use Python-Markdown `attr_list` syntax where it adds real signal (heading `#id` anchors and typed links) alongside standard checklist tasks:
 
 <!-- dprint-ignore-start -->
 ```markdown
@@ -49,7 +49,7 @@ Authored notes and ingested JSONL records share one normalized `links` list (`no
 
 - **Markdown prose**: link to local notes (`../concepts/aaif.md#mcp`, `#mcp`), records by `source:id` (`[Issue 7](github-issues:7){rel=cites}`), declared sibling brains (`bf://team-brain/concepts/aaif.md#mcp`, `bf://team-brain/jira:WEB-1`), or external URLs (`https://`, `http://`, `mailto:`, `urn:`).
 - **Note frontmatter & JSON (`links`)**: accept brain-root note paths, `source:id`, `bf://` URIs, external URLs, or `{to, meta}` objects. Cross-brain `bf://<host>/...` targets must declare `<host>` under `brains:` in `bf.yaml`. Record IDs cannot contain `#` or whitespace, and schemes containing `://` other than `https`/`http`/`bf` are rejected rather than misclassified as record refs.
-- **Validation**: `bf check` is strictly read-only—run `bf build` after editing Markdown, then `bf check` to verify compiled-note sync, schemas, `memories/` & `usages/`, enabled `loops:`, links, `#anchor` headings, and declared cross-brain targets. Missing targets in snapshot-ingested sources or `.forgotten` emit warnings (`ok: true` unless `--strict`).
+- **Validation**: `bf check` is strictly read-only. Run `bf build` after editing Markdown, then `bf check` to verify compiled-note sync, schemas, `memories/` & `usages/`, enabled `loops:`, links, `#anchor` headings, and declared cross-brain targets. Missing targets in snapshot-ingested sources or `.forgotten` emit warnings (`ok: true` unless `--strict`).
 
 ## Flat notes and `index.md` bundles
 

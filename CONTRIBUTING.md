@@ -28,7 +28,7 @@ mise run format
 mise run all
 ```
 
-`mise install --locked` installs the pinned, provenance-checked tools from `mise.lock`, whose lockfile revision 4 needs mise 2026.11.4 or later; tasks never install tools themselves (`task.run_auto_install = false`). `install` syncs locked dependencies and installs Git hooks. Run `format` deliberately after editing; it rewrites source files, so preserve unrelated work and inspect its diff. `all` checks, tests (including runnable examples), and builds distributions without rewriting source files. Formatting drift fails the gate; fix it with `format`, then rerun the failed check. Tasks use `uv run --locked`, so an outdated `uv.lock` fails instead of being rewritten; run `uv lock` deliberately.
+`mise install --locked` installs the pinned, provenance-checked tools from `mise.lock`, whose lockfile revision 4 needs mise 2026.11.12 or later; tasks never install tools themselves (`task.run_auto_install = false`). `install` syncs locked dependencies and installs Git hooks. Run `format` deliberately after editing; it rewrites source files, so preserve unrelated work and inspect its diff. `all` checks, tests (including runnable examples), and builds distributions without rewriting source files. Formatting drift fails the gate; fix it with `format`, then rerun the failed check. Tasks use `uv run --locked`, so an outdated `uv.lock` fails instead of being rewritten; run `uv lock` deliberately.
 
 Use a focused check while editing, then run the full gate. Modules live in `src/bf/`, and each module's first docstring line states its concern:
 

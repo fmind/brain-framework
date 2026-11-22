@@ -198,13 +198,12 @@ def test_every_workflow_pins_the_same_mise() -> None:
     # in CD; push-and-tag tags only after CI ran with that pin.
     pins = {
         line.split()[1]
-        for path in (ROOT / ".github/workflows").glob("*.yml")
+        for path in [*(ROOT / ".github/workflows").glob("*.yml"), *(ROOT / ".github/actions").rglob("*.yml")]
         for line in path.read_text().splitlines()
         if line.strip().startswith("version: 20")
     }
     # mise.toml's min_version fails a local mise older than that pin early, so the two move together.
-    pins.add(tomllib.loads((ROOT / "mise.toml").read_text())["min_version"])
-    assert len(pins) == 1, pins
+    assert pins == {tomllib.loads((ROOT / "mise.toml").read_text())["min_version"]}, pins
 
 
 def test_workflow_pipelines_fail_when_any_command_fails() -> None:

@@ -5,6 +5,9 @@ on:
     tags: ["v*"]
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash
 concurrency:
   group: cd-${{ github.ref }}
   cancel-in-progress: false
@@ -17,7 +20,7 @@ jobs:
   publish_python_package:
     name: Publish to PyPI
     needs: verify
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     environment:
       name: pypi
@@ -68,7 +71,7 @@ jobs:
   publish_github_release:
     name: Publish GitHub release
     needs: publish_python_package
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: write # Publish the already-attested draft after PyPI succeeds.

@@ -66,5 +66,5 @@ loops: {}
 
 ## Published JSON Schemas
 
-- [`bf.schema.json`](https://fmind.github.io/brain-framework/bf.schema.json): `bf.yaml` (`Config` — `notes`, `concurrency`, `env`, `defaults`, composable `loops` with `when` and `ingest` targets).
-- [`record.schema.json`](https://fmind.github.io/brain-framework/record.schema.json): `memories/<source>.jsonl` & `usages/<source>.jsonl` (`Record` — uniform `kind: "note"|"memory"|"usage"`, universal `ref`, frontmatter/attributes, `headings`, `links`, `tasks`, `text`, `sha256`).
+- [`bf.schema.json`](https://fmind.github.io/brain-framework/bf.schema.json): `bf.yaml` (`Config`: `notes`, `concurrency`, `env`, `defaults`, composable `loops` with `when` and `ingest` targets).
+- [`record.schema.json`](https://fmind.github.io/brain-framework/record.schema.json): `memories/<source>.jsonl` & `usages/<source>.jsonl` (`Record`: uniform `kind: "note"|"memory"|"usage"`, universal `ref`, frontmatter/attributes, `headings`, `links`, `tasks`, `text`, `sha256`).

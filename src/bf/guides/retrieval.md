@@ -1,6 +1,6 @@
 # Retrieval
 
-Agents and humans query flat JSON Lines files in `memories/<source>.jsonl`, `usages/<source>.jsonl`, and `logs/<loop>.jsonl` directly—zero database, zero external indexer. `bf` delegates text search to `rg` and JSON filtering to `jq`, and any UNIX or analytics tool (`rg`, `jq`, DuckDB) works directly on the same files. Retrieval maintains a **strict read/write boundary**: `bf status`, `bf review`, `bf read`, `bf query`, `bf check`, and `bf schema` never mutate disk.
+Agents and humans query flat JSON Lines files in `memories/<source>.jsonl`, `usages/<source>.jsonl`, and `logs/<loop>.jsonl` directly, with zero database and zero external indexer. `bf` delegates text search to `rg` and JSON filtering to `jq`, and any UNIX or analytics tool (`rg`, `jq`, DuckDB) works directly on the same files. Retrieval maintains a **strict read/write boundary**: `bf status`, `bf review`, `bf read`, `bf query`, `bf check`, and `bf schema` never mutate disk.
 
 ## 1. Orient with `bf status` and `bf review`
 

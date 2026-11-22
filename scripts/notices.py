@@ -20,7 +20,7 @@ Brain Framework depends on the following non-development Python distributions on
 License expressions come from the installed distribution metadata. Legal text is copied from the corresponding installed wheel files and formatted only as Markdown text blocks. The Brain Framework project itself is licensed separately in `LICENSE`.
 """
 # Reviewed expressions for distributions whose metadata declares no SPDX expression; metadata wins once it does.
-LICENSES: dict[str, str] = {"markdown-it-py": "MIT", "mdurl": "MIT"}
+LICENSES: dict[str, str] = {}
 SOURCES = ("source", "source code", "repository", "github", "homepage", "home")
 # SPDX identifiers joined by operators, with optional parentheses; unbalanced parentheses are rejected separately.
 IDENTIFIER = r"[A-Za-z0-9.+-]+"

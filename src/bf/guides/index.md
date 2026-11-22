@@ -1,6 +1,6 @@
 # Overview
 
-Brain Framework (`bf`) is a UNIX-native, local-first knowledge brain built on three formats (**YAML for config**, **Markdown for humans**, **JSONL for records**) and a **3x3 folder convention**—with zero database, zero external indexer, and zero built-in LLMs. Query flat JSONL directly with `rg`, `jq`, DuckDB, or the `bf` CLI.
+Brain Framework (`bf`) is a UNIX-native, local-first knowledge brain built on three formats (**YAML for config**, **Markdown for humans**, **JSONL for records**) and a **3x3 folder convention**, with zero database, zero external indexer, and zero built-in LLMs. Query flat JSONL directly with `rg`, `jq`, DuckDB, or the `bf` CLI.
 
 ![Brain Framework loop](https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-loop.svg)
 

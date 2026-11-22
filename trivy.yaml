@@ -7,6 +7,9 @@ pkg:
   # uv.lock replaces the skipped .venv as the package source; keep development tools in the report.
   include-dev-deps: true
 scan:
+  # Keep scans local: no usage data or version notices to Aqua (top-level keys are ignored).
+  disable-telemetry: true
+  skip-version-check: true
   scanners:
     - license
     - misconfig

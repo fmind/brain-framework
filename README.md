@@ -1,12 +1,12 @@
 <p align="center">
   <img
     src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-framework.svg"
-    alt="Brain Framework — Plain-file knowledge and offline retrieval for humans and AI agents"
+    alt="Brain Framework: Plain-file knowledge and offline retrieval for humans and AI agents"
     width="100%"
   />
 </p>
 
-Brain Framework (`bf`) turns a 3x3 folder of human-authored Markdown notes, shell/Python loops, and JSONL records (`memories/<source>.jsonl`, `usages/<source>.jsonl`, `logs/<loop>.jsonl`) into a schema-validated, UNIX-native knowledge brain with zero database or external indexer—ready for humans and AI coding harnesses to query offline with `rg`, `jq`, and DuckDB.
+Brain Framework (`bf`) turns a 3x3 folder of human-authored Markdown notes, shell/Python loops, and JSONL records (`memories/<source>.jsonl`, `usages/<source>.jsonl`, `logs/<loop>.jsonl`) into a schema-validated, UNIX-native knowledge brain with zero database or external indexer, ready for humans and AI coding harnesses to query offline with `rg`, `jq`, and DuckDB.
 
 - **Three formats, one job each.** **YAML for config** (`bf.yaml` `version: 17` + note frontmatter), **Markdown for humans** (`concepts/`, `projects/`, `actions/` with flat `<slug>.md` and universal `<slug>/index.md` bundles), and **JSONL for records** (`memories/`, `usages/`, and private `logs/`, validated by bundled `bf`/`record` schemas plus `schemas/<source>.json` and `schemas/usages.json`).
 - **Strict read/write boundary & UNIX composability.** `bf status`, `bf review`, `bf read`, `bf query`, `bf check`, and `bf schema` are strictly read-only and never mutate disk; flat JSONL files stay directly inspectable with `rg`, `jq`, and DuckDB.
@@ -16,7 +16,7 @@ Brain Framework (`bf`) turns a 3x3 folder of human-authored Markdown notes, shel
 
 ## Try it
 
-Requires Linux or macOS, [uv](https://docs.astral.sh/uv/getting-started/installation/), [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), and [jq](https://jqlang.org/) — no model or cloud account needed:
+Requires Linux or macOS, [uv](https://docs.astral.sh/uv/getting-started/installation/), [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), and [jq](https://jqlang.org/), no model or cloud account needed:
 
 ```bash
 uv tool install --python 3.14 brain-framework

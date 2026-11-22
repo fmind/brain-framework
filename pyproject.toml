@@ -63,9 +63,12 @@ module-name = "bf"
 
 [dependency-groups]
 dev = [
+  "deptry>=0.25.1",
   # Imported directly by scripts/notices.py to parse requirements and normalize names.
   "packaging>=26.3",
   "pytest-cov>=7.1.0",
+  "pytest-socket>=0.8.1",
+  "pytest-timeout>=2.4.0",
   "pytest-watcher>=0.6.3",
   "pytest-xdist>=3.8.0",
   "pytest>=9.1.1",
@@ -153,11 +156,19 @@ ignore = [
   "T201", # Test diagnostics may use print.
 ]
 
+[tool.deptry]
+# deptry does not infer uv_build's src/ layout on `.`; examples/ and scripts/ are repo-only like tests/.
+extend_exclude = ["examples", "scripts"]
+known_first_party = ["bf"]
+
 [tool.ty.rules]
 blanket-ignore-comment = "error" # Require `ty: ignore[<rule>]`; Ruff PGH003 checks only `type: ignore`.
+unused-ignore-comment = "error"
+unused-type-ignore-comment = "error"
 
 [tool.pytest]
-addopts = ["-ra"]
+# Offline by default: tests reach only loopback and Unix sockets.
+addopts = ["-ra", "--allow-hosts=127.0.0.1,::1", "--allow-unix-socket"]
 # A test still running after 300 seconds dumps every thread's traceback and ends the run, long before CI's 30-minute job
 # timeout. Subprocess waits in tests stay within 120 seconds. The timeout is a string option.
 faulthandler_timeout = "300"
@@ -165,6 +176,7 @@ faulthandler_exit_on_timeout = true
 filterwarnings = ["error"]
 strict = true
 testpaths = ["tests"]
+timeout = "60"
 
 [tool.coverage.run]
 branch = true

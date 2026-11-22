@@ -1,0 +1,14 @@
+# Docs: https://docs.github.com/en/actions/reference/workflows-and-actions/metadata-syntax
+name: Set up mise
+description: Install the pinned mise and the locked tools without restoring a cache
+runs:
+  using: composite
+  steps:
+    - name: Install mise and locked tools
+      uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+      with:
+        version: 2026.11.12 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
+        # Fail on a tool that mise.lock does not pin instead of resolving it live.
+        install_args: --locked
+        cache: false # These artifacts can be published; never restore a PR cache.
+        cache_save: false

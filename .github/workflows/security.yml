@@ -8,13 +8,16 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash
 concurrency:
   group: security
   cancel-in-progress: true
 jobs:
   scan:
     name: Full-history scan
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - name: Checkout complete history
@@ -23,10 +26,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install locked toolchain
-        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
-        with:
-          version: 2026.11.4 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
-          cache: false # Like CI: scans and installation checks never restore a cache.
+        # jactionlint ignore=self-repository
+        uses: ./.github/actions/setup-mise
       - name: Scan complete Git history
         run: betterleaks git --config .betterleaks.toml --redact=100 --verbose --no-banner
       - name: Scan full checkout
@@ -40,10 +41,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }} # Read-only API access for impostor-commit and known-vulnerability audits.
         # Strict: a skipped lookup fails instead of passing unchecked.
-        run: jactionlint --online=strict --online-token-env=GH_TOKEN
+        run: mise run check:actions:online
   install:
     name: Unlocked installation (Python ${{ matrix.python }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -56,10 +57,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Install locked toolchain
-        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
-        with:
-          version: 2026.11.4 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
-          cache: false # Like CI: scans and installation checks never restore a cache.
+        # jactionlint ignore=self-repository
+        uses: ./.github/actions/setup-mise
       - name: Build distributions
         run: uv build --clear
       - name: Smoke-test distributions with the newest allowed dependencies
