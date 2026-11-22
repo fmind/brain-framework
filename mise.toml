@@ -114,8 +114,8 @@ run = "betterleaks git --staged --config .betterleaks.toml --redact=100 --verbos
 
 [tasks."check:links"]
 description = "Check repository Markdown links and anchors; check:docs owns documentation links"
-# Example sensor memories (`examples/*/memories/<source>/<sha256>.json`) are generated and verified by `tests/test_examples.py`.
-run = "lychee --offline --include-fragments --no-progress --hidden --extensions md --exclude-path '(^|/)docs/' --exclude '^file://.*/examples/(brain|context-hub)/memories/[a-z0-9-]+/[0-9a-f]{64}\\.json$' ."
+# Example sensor refs (`demo:retention`, `workspace:brief`) and `bf://` URIs are validated by `tests/test_examples.py`.
+run = "lychee --offline --include-fragments --no-progress --hidden --extensions md --exclude-path '(^|/)docs/' --exclude '^(bf|demo|workspace|jira|github|gcloud):' ."
 
 [tasks."check:lint"]
 alias = "cl"

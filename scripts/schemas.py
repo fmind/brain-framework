@@ -1,4 +1,4 @@
-"""Check or regenerate every published configuration and reply schema; compare JSON independent of formatting."""
+"""Check or regenerate every published JSON Schema; compare JSON independent of formatting."""
 
 import argparse
 from pathlib import Path
@@ -17,16 +17,10 @@ def main() -> None:
     args = parser.parse_args()
     # Generate everything before replacing a file; an invalid model must not leave a partial update.
     schemas = {kind: document(kind) for kind in get_args(Kind)}
-    documents = {
-        ROOT / "docs" / f"{'bf' if kind == 'brain' else kind}.schema.json": schema for kind, schema in schemas.items()
-    }
+    documents = {ROOT / "docs" / f"{kind}.schema.json": schema for kind, schema in schemas.items()}
     store = Store(ROOT)
-    obsolete_roots = (
-        (ROOT / "docs").glob("*.schema.json"),
-        *((ROOT / "examples" / ex / "schemas").glob("*.json") for ex in ("brain", "context-hub")),
-    )
-    for path in sorted(p for group in obsolete_roots for p in group):
-        if path in documents or path == ROOT / "examples/context-hub/schemas/jira.json":
+    for path in sorted((ROOT / "docs").glob("*.schema.json")):
+        if path in documents:
             continue
         if args.write:
             path.unlink()

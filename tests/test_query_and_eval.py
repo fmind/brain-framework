@@ -1,4 +1,4 @@
-"""Tests for `bf read`, `bf query` (`rg`, `jq`), and `bf check` evals."""
+"""Tests for `bf read` and `bf query` (`rg`, `jq`, compact list) over JSONL `memories/*.jsonl`."""
 
 from __future__ import annotations
 
@@ -9,39 +9,30 @@ from pathlib import Path
 
 import pytest
 
-from bf import engine, query, records
-from bf.models import EVAL_FORMAT, FORMAT, Error, InputError
+from bf import engine, markdown, proc, query, records
+from bf.models import FORMAT, Error, InputError
 from bf.storage import Store
+
+OBJ_SCHEMA = b'{"type":"object"}\n'
 
 
 def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain: Store) -> None:
     with pytest.raises(InputError, match="target is required"):
         query.read_target(brain, "")
 
-    # 1. Markdown note section slicing by `#anchor` and block `#id` fallback.
-    sec = query.read_target(brain, "bf:///projects/offline.md?rel=cites#decision")
+    # 1. Markdown note section slicing by heading `#anchor`.
+    sec = query.read_target(brain, "bf:///projects/offline.md#decision")
+    assert sec["ok"] is True
     assert sec["kind"] == "section"
-    assert sec["title"] == "Decision"
+    assert sec["heading"]["title"] == "Decision"
     assert "## Decision" in sec["text"]
     assert "## Next actions" not in sec["text"]
     assert "markdown" not in sec
     assert "record" not in sec
 
-    blk = query.read_target(brain, "projects/offline#summary")
-    assert blk["element"]["id"] == "summary"
-
-    # Task `#id` and Link `#id` anchors resolve cleanly in `bf read`!
-    brain.write(
-        "concepts/anchors.md",
-        b"---\ntype: guide\nstatus: stable\n---\n# Anchors\n\n"
-        b"Cite [doc](../memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json){#cite-1 rel=cites}.\n\n"
-        b"- [ ] Verify anchors. {: #task-v1 due=2026-12-01}\n",
-    )
-    engine.build(brain)
-    task_read = query.read_target(brain, "concepts/anchors.md#task-v1")
-    assert task_read["task"]["id"] == "task-v1"
-    link_read = query.read_target(brain, "concepts/anchors.md#cite-1")
-    assert link_read["meta"] == {"rel": "cites"}
+    # Extensionless note target resolves cleanly on disk!
+    ext_sec = query.read_target(brain, "projects/offline#decision")
+    assert ext_sec["heading"]["title"] == "Decision"
 
     brain.write(
         "concepts/fenced.md",
@@ -97,7 +88,7 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
     assert "Body1." in query.read_target(brain, "concepts/ref-head.md#spaceless")["text"]
     assert "Body2." in query.read_target(brain, "concepts/ref-head.md#mcp")["text"]
 
-    for blocked in ("logs/events.log", "Logs/events.log", "LOGS", ".vale.ini"):
+    for blocked in ("logs/events.jsonl", "Logs/events.jsonl", "LOGS", ".vale.ini"):
         with pytest.raises(InputError, match="private or runtime paths"):
             query.read_target(brain, blocked)
 
@@ -107,37 +98,29 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
     with pytest.raises(Error, match="missing anchor #nope"):
         query.read_target(brain, "projects/offline.md#nope")
 
-    # 2. JSON file read works, and `#fragment` on JSON or records is rejected with InputError!
-    with pytest.raises(InputError, match="JSON records do not support #fragments"):
-        query.read_target(brain, "bf:///memories/projects/offline.json#.title")
-
-    plain_json = query.read_target(brain, "memories/projects/offline.json")
-    assert plain_json["record"]["ref"] == "projects/offline.md"
-
-    # Sensor memory JSON file read via `bf:///memories/<source>/<sha256>.json` and `#fragment` rejection!
-    sensor_mem = "memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json"
-    sensor_json = query.read_target(brain, f"bf:///{sensor_mem}")
-    assert sensor_json["ref"] == "meetings:decision-1"
-    assert sensor_json["kind"] == "memory"
-    assert sensor_json["record"]["title"] == "Preserve durable evidence"
-    with pytest.raises(InputError, match="JSON records do not support #fragments"):
-        query.read_target(brain, f"{sensor_mem}#.title")
-    with pytest.raises(Error, match=r"record memories/meetings/0000\.json not found"):
-        query.read_target(brain, "bf:///memories/meetings/0000.json")
-
-    # 3. Sensor record by `source:id` + alias lookup + `#fragment` rejection!
+    # 2. Sensor record by `source:id`, alias lookup, and `#fragment` rejection!
     rec = query.read_target(brain, "meetings:decision-1")
+    assert rec["ok"] is True
+    assert rec["ref"] == "meetings:decision-1"
+    assert rec["kind"] == "memory"
+    assert rec["path"] == "memories/meetings.jsonl"
     assert rec["record"]["title"] == "Preserve durable evidence"
     with pytest.raises(InputError, match="JSON records do not support #fragments"):
         query.read_target(brain, "meetings:decision-1#.title")
 
-    records.ingest(brain, "repos", b'[{"id":"r1","title":"Brain Repo","aliases":["repo:fmind/bf"]}]')
+    brain.write("schemas/repos.json", OBJ_SCHEMA)
+    records.ingest(
+        brain,
+        "repos",
+        b'[{"id":"r1","title":"Brain Repo","aliases":["repo:fmind/bf"]},{"id":"org/.github/issues/1","title":"Dot Repo Issue"}]',
+    )
+    assert query.read_target(brain, "repos:org/.github/issues/1")["record"]["title"] == "Dot Repo Issue"
     by_alias = query.read_target(brain, "repo:fmind/bf")
     assert by_alias["ref"] == "repos:r1"
     by_urn_alias = query.read_target(brain, "urn:repo:fmind/bf")
     assert by_urn_alias["ref"] == "repos:r1"
 
-    # 4. Cross-brain `bf://sib/...` read!
+    # 3. Cross-brain `bf://sib/...` read!
     sib_root = tmp_path / "sib"
     engine.init_brain(sib_root, name="sib")
     sib = Store(sib_root)
@@ -151,11 +134,13 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
     assert cross["brain"] == "sib"
     assert "Hello sib." in cross["text"]
 
-    # Cross-brain percent-encoded paths (`%25`), percent-encoded & HTTP `source:id`, and JSON reads without fragment!
+    # Cross-brain percent-encoded paths (`%25`), percent-encoded & HTTP `source:id`!
     sib.write("docs/100%25.md", b"# Literal Percent\n")
     cross_pct = query.read_target(brain, "bf://sib/docs/100%2525.md")
     assert cross_pct["brain"] == "sib"
     assert "Literal Percent" in cross_pct["text"]
+    sib.write("schemas/docs.json", OBJ_SCHEMA)
+    sib.write("schemas/web.json", OBJ_SCHEMA)
     records.ingest(
         sib,
         "docs",
@@ -167,10 +152,10 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
     assert query.read_target(brain, "bf://sib/docs:a%2Fb")["record"]["title"] == "Encoded Slash"
     assert query.read_target(brain, "bf://sib/docs:My%20Report.pdf")["record"]["title"] == "Space Doc"
     assert query.read_target(brain, "bf://sib/web:https://example.com/p?a=1&b=2")["record"]["title"] == "Query Page"
-    cross_json = query.read_target(brain, "bf://sib/memories/concepts/topic.json")
-    assert cross_json["record"]["title"] == "Sib Topic"
+    cross_note = query.read_target(brain, "bf://sib/concepts/topic.md")
+    assert cross_note["record"]["title"] == "Sib Topic"
     with pytest.raises(InputError, match="JSON records do not support #fragments"):
-        query.read_target(brain, "bf://sib/memories/concepts/topic.json#.title")
+        query.read_target(brain, "bf://sib/docs:a%2Fb#.title")
 
     for bad, exc in (
         ("https://example.com", InputError),
@@ -183,175 +168,131 @@ def test_read_target_urls_anchors_cross_brain_and_aliases(tmp_path: Path, brain:
 
 
 def test_query_rg_jq_streaming_and_limits(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    rg_hits = query.search_rg(brain, "durable", limit=1)
+    rg_hits = query.query(brain, "durable", limit=1)
+    assert rg_hits["ok"] is True
     assert rg_hits["engine"] == "rg"
     assert len(rg_hits["items"]) == 1
     assert rg_hits["truncated"] is True
 
-    # Match-centered `rg` snippets on compact single-line JSON records (> 240 chars, UTF-8 safe)!
+    # Zero-length regex match with pathological backtracking pattern does NOT trigger Python ReDoS!
+    import time as _t
+
+    brain.write("concepts/redos.md", ("---\ntype: guide\nstatus: stable\n---\n# R\n\n" + ("a" * 50) + "\n").encode())
+    engine.build(brain)
+    t_rd = _t.monotonic()
+    zl = query.query(brain, "(a+)+!|", scope="concepts/redos.md")
+    assert _t.monotonic() - t_rd < 2.0
+    assert zl["count"] == 1
+    t_rd2 = _t.monotonic()
+    assert query.query(brain, r"(\w+)+!|.", scope="concepts/redos.md")["count"] == 1
+    assert _t.monotonic() - t_rd2 < 2.0
+
+    # Scope prefix boundary: `--scope projects/api` does NOT match sibling `projects/api-v2.md`!
+    brain.write("projects/api.md", b"---\ntype: project\nstatus: stable\n---\n# API\n\nneedle-scope\n")
+    brain.write("projects/api-v2.md", b"---\ntype: project\nstatus: stable\n---\n# API v2\n\nneedle-scope\n")
+    engine.build(brain)
+    assert [it["ref"] for it in query.query(brain, "needle-scope", scope="projects/api")["items"]] == [
+        "projects/api.md"
+    ]
+
+    # Match-centered `rg` snippets on compact single-line JSONL records (> 240 chars, UTF-8 safe)!
+    brain.write("schemas/docs.json", OBJ_SCHEMA)
     long_body = ("Café — " * 50) + "deep-centered-needle" + (" omega" * 50)
     records.ingest(brain, "docs", json.dumps([{"id": "d-long", "title": "EarlyHead", "text": long_body}]).encode())
-    deep_hit = query.search_rg(brain, "deep-centered-needle", scope="docs")
+    deep_hit = query.query(brain, "deep-centered-needle", scope="docs")
     assert deep_hit["count"] == 1
     assert "deep-centered-needle" in deep_hit["items"][0]["snippet"]
     assert len(deep_hit["items"][0]["snippet"]) == 240
-    head_hit = query.search_rg(brain, "d-long", scope="docs")
+    head_hit = query.query(brain, "d-long", scope="docs")
     assert head_hit["count"] == 1
     assert head_hit["items"][0]["snippet"] == "EarlyHead (d-long)"
-    tail_hit = query.search_rg(brain, "EarlyHead", scope="docs")
+    tail_hit = query.query(brain, "EarlyHead", scope="docs")
     assert tail_hit["count"] == 1
     assert "EarlyHead" in tail_hit["items"][0]["snippet"]
 
-    # Scope resolution: OKF note path, explicit memories/*.json path, subfolder, invalid scope, and empty scope!
-    assert query.search_rg(brain, "durable", scope="projects/offline.md")["count"] == 1
-    assert query.query_jq(brain, ".ref", scope="memories/projects/offline.json")["items"] == ["projects/offline.md"]
-    assert query.query_jq(brain, ".ref", scope="concepts")["count"] >= 1
-    assert query.search_rg(brain, "durable", scope="empty-source")["items"] == []
-    assert query.query_jq(brain, ".ref", scope="empty-source")["items"] == []
+    # Scope resolution: note path, explicit memories/*.jsonl path, subfolder, invalid scope, empty scope, and compact list!
+    assert query.query(brain, "durable", scope="projects/offline.md")["count"] == 1
+    assert query.query(brain, None, jq_expr=".ref", scope="memories/projects.jsonl")["items"]
+    assert query.query(brain, None, jq_expr=".ref", scope="concepts")["count"] >= 1
+    assert query.query(brain, "durable", scope="empty-source")["items"] == []
+    assert query.query(brain, None, jq_expr=".ref", scope="empty-source")["items"] == []
+    listed = query.query(brain, None, kind="note", limit=2)
+    assert listed["engine"] == "list"
+    assert listed["count"] == 2
+    assert listed["truncated"] is True
+    assert all("text" not in it and "ref" in it and "title" in it for it in listed["items"])
     with pytest.raises(InputError, match="expected a normalized brain-relative path"):
-        query.search_rg(brain, "durable", scope="../outside")
+        query.query(brain, "durable", scope="../outside")
     with pytest.raises(InputError, match="jq failed"):
-        query.query_jq(brain, "[[[", scope="empty-source")
+        query.query(brain, None, jq_expr="[[[", scope="empty-source")
 
-    empty_rg = query.search_rg(brain, "zzz-never-matches-zzz")
+    empty_rg = query.query(brain, "zzz-never-matches-zzz")
     assert empty_rg["items"] == []
     assert empty_rg["truncated"] is False
     with pytest.raises(InputError, match="rg failed"):
-        query.search_rg(brain, "[unclosed")
+        query.query(brain, "[unclosed")
 
-    jq_hits = query.query_jq(brain, ".ref", limit=1)
+    jq_hits = query.query(brain, None, jq_expr=".ref", limit=1)
     assert len(jq_hits["items"]) == 1
     assert jq_hits["truncated"] is True
-    jq_all = query.query_jq(brain, 'select(.kind == "project") | .ref', limit=20)
-    assert jq_all["items"] == ["projects/offline.md"]
+    jq_all = query.query(brain, None, jq_expr='select(.source == "projects") | .ref', limit=20)
+    assert "projects/offline.md" in jq_all["items"]
     assert jq_all["truncated"] is False
 
     # Streaming jq reports unreadable-file / feeder errors cleanly instead of silently dropping records.
-    real_iter = brain.iter_read_files
+    real_iter = Store.iter_lines
 
-    def broken_iter(_name: str, **_kw: object) -> object:
+    def broken_iter(_self: Store, _path: str, _limit: int = 0) -> object:
         raise Error("simulated read failure")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(brain, "iter_read_files", broken_iter)
+    monkeypatch.setattr(Store, "iter_lines", broken_iter)
     with pytest.raises(Error, match="simulated read failure"):
-        query.query_jq(brain, ".")
-    monkeypatch.setattr(brain, "iter_read_files", real_iter)
+        query.query(brain, None, jq_expr=".")
+    monkeypatch.setattr(Store, "iter_lines", real_iter)
 
     # jq confinement blocks modulemeta/import/include file probes and strips host environment variables ($ENV).
     for forbidden_jq in ('import "foo" as f; .', 'include "foo"; .', 'modulemeta("foo")'):
         with pytest.raises(InputError, match="jq failed"):
-            query.query_jq(brain, forbidden_jq)
+            query.query(brain, None, jq_expr=forbidden_jq)
     monkeypatch.setenv("SECRET_HOST_TOKEN", "should-not-leak")
-    env_probe = query.query_jq(brain, "$ENV.SECRET_HOST_TOKEN // $ENV.HOME // empty")
+    env_probe = query.query(brain, None, jq_expr="$ENV.SECRET_HOST_TOKEN // $ENV.HOME // empty")
     assert env_probe["items"] == []
 
     # Bad JSON returned by jq or invalid jq syntax raises InputError / Error cleanly.
     with pytest.raises(InputError, match="jq failed"):
-        query.query_jq(brain, "invalid syntax [[[")
+        query.query(brain, None, jq_expr="invalid syntax [[[")
     for bad_fn in (
-        lambda: query.search_rg(brain, ""),
-        lambda: query.search_rg(brain, "x", limit=0),
-        lambda: query.query_jq(brain, ""),
-        lambda: query.query_jq(brain, ".", limit=0),
+        lambda: query.query(brain, ""),
+        lambda: query.query(brain, "x", limit=0),
+        lambda: query.query(brain, None, jq_expr=""),
+        lambda: query.query(brain, None, jq_expr=".", limit=0),
     ):
         with pytest.raises(InputError):
             bad_fn()
 
     monkeypatch.setattr(shutil, "which", lambda _name: None)
     assert query.find_by_alias(brain, "meetings:nonexistent") is None
+    assert query.read_target(brain, "meetings:decision-1")["record"]["title"] == "Preserve durable evidence"
     with pytest.raises(Error, match="is required on PATH"):
-        query.search_rg(brain, "durable")
+        query.query(brain, "durable")
 
 
-def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    brain.write(
-        "evals/suite.json",
-        json.dumps(
-            {
-                "version": EVAL_FORMAT,
-                "cases": [
-                    {
-                        "name": "rg-offline",
-                        "engine": "rg",
-                        "query": "durable",
-                        "expect_refs": ["projects/offline.md"],
-                        "forbid_refs": ["meetings:lunch"],
-                        "min_count": 1,
-                    },
-                    {
-                        "name": "jq-project",
-                        "engine": "jq",
-                        "query": 'select(.kind == "project") | {ref}',
-                        "expect_equals": [{"ref": "projects/offline.md"}],
-                    },
-                    {
-                        "name": "jq-count",
-                        "engine": "jq",
-                        "query": 'select(.kind == "concept") | .ref',
-                        "max_count": 5,
-                    },
-                    {
-                        "name": "read-decision",
-                        "engine": "read",
-                        "query": "bf:///projects/offline.md#decision",
-                        "expect_text": ["retention"],
-                    },
-                ],
-            }
-        ).encode(),
-    )
-    res = query.evaluate(brain)
-    assert res["ok"], res
-
-    # Failing eval file reports structured failure reasons without raising (including expect_text against empty items!).
-    brain.write(
-        "evals/failing.yaml",
-        f"version: {EVAL_FORMAT}\n"
-        "cases:\n"
-        "  - name: bad-case\n"
-        "    engine: rg\n"
-        "    query: durable\n"
-        "    expect_refs: [concepts/missing.md]\n"
-        "    forbid_refs: [projects/offline.md]\n"
-        "    min_count: 99\n"
-        "    max_count: 0\n"
-        "  - name: self-match-guard\n"
-        "    engine: rg\n"
-        "    query: zzz-unmatched-query-literal\n"
-        "    expect_text: [zzz-unmatched-query-literal]\n"
-        "  - name: broken-read\n"
-        "    engine: read\n"
-        "    query: concepts/nonexistent.md\n".encode(),
-    )
-    brain.write("evals/broken.yaml", b"version: 99\ncases: []\n")
-    brain.write("evals/badschema.yaml", f"version: {EVAL_FORMAT}\ncases: not-a-list\n".encode())
-    brain.write("evals/scalar.json", b"123\n")
-    fail_res = query.evaluate(brain, target="failing")
-    assert not fail_res["ok"]
-    assert fail_res["failed"] == 3
-    assert len(fail_res["cases"][0]["reasons"]) == 4
-    assert "missing expected text 'zzz-unmatched-query-literal'" in fail_res["cases"][1]["reasons"][0]
-
-    all_res = query.evaluate(brain)
-    assert not all_res["ok"]
-    assert len(all_res["problems"]) >= 3
-
-    with pytest.raises(Error, match="no eval file matching") as ev_exc:
-        query.evaluate(brain, target="nonexistent-suite")
-    assert not isinstance(ev_exc.value, InputError)
-
-    # Corrupt stored JSON raises Error (not InputError) in query_jq; script shims preserve HOME/XDG/MISE while keeping $ENV/env empty and stripping secrets; rg exit 1 with stderr fails closed / falls back!
-    brain.write("memories/corrupt/bad.json", b"{corrupt\n")
-    with pytest.raises(Error, match="parse error:") as exc_info:
-        query.query_jq(brain, ".", scope="corrupt")
+def test_tool_shims_proc_drain_tail_and_corrupt_jsonl(
+    tmp_path: Path, brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Corrupt stored JSONL raises Error (not InputError) in jq query.
+    brain.write("memories/corrupt.jsonl", b"{corrupt\n")
+    with pytest.raises(Error, match=r"jq failed|invalid JSON") as exc_info:
+        query.query(brain, None, jq_expr=".", scope="corrupt")
     assert not isinstance(exc_info.value, InputError)
-    brain.delete("memories/corrupt/bad.json")
+    brain.delete("memories/corrupt.jsonl")
 
+    brain.write("schemas/items.json", OBJ_SCHEMA)
     records.ingest(
         brain, "items", json.dumps([{"id": "alias-1", "title": "Alias item", "aliases": ["legacy:alias-1"]}]).encode()
     )
-    target_mem = brain.root / records.record_file("items", "alias-1")
+    items_line = brain.read(records.memory_file("items")).decode().strip()
     shim_bin = tmp_path / "shim-bin"
     shim_bin.mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "bf-home"))
@@ -359,7 +300,7 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
     monkeypatch.setenv("MISE_DATA_DIR", str(tmp_path / "bf-mise"))
     monkeypatch.setenv("GITHUB_TOKEN", "secret-tok")
     monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(tmp_path / "evil-rg"))
-    real_jq = query.resolve_tool("jq")
+    real_jq = proc.resolve_tool("jq")
     wrap_jq = shim_bin / "jq"
     wrap_jq.write_text(
         '#!/bin/sh\n[ -n "$HOME" ] && [ -n "$XDG_DATA_HOME" ] && [ -n "$MISE_DATA_DIR" ]'
@@ -367,30 +308,32 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
         f'exec "{real_jq}" "$@"\n'
     )
     wrap_jq.chmod(0o755)
+    rg_match_ev = json.dumps(
+        {"type": "match", "data": {"lines": {"text": items_line + "\n"}, "submatches": [{"match": {"text": "Alias"}}]}}
+    )
     pass_rg = shim_bin / "rg-ok"
     pass_rg.write_text(
         '#!/bin/sh\n[ -n "$HOME" ] && [ -n "$XDG_DATA_HOME" ] && [ -n "$MISE_DATA_DIR" ]'
         ' && [ -z "${GITHUB_TOKEN:-}" ] && [ -z "${RIPGREP_CONFIG_PATH:-}" ] || exit 2\n'
-        f'printf \'{{"type":"match","data":{{"path":{{"text":"{target_mem}"}},'
-        '"lines":{"text":"Alias item"},"submatches":[{"start":0}]}}\\n\'\n'
+        f"printf '%s\\n' '{rg_match_ev}'\n"
     )
     pass_rg.chmod(0o755)
     monkeypatch.setattr(shutil, "which", lambda n: str(wrap_jq) if n == "jq" else str(pass_rg) if n == "rg" else None)
-    assert query.query_jq(brain, "[$ENV, env]", limit=1)["items"] == [[{}, {}]]
-    assert query.search_rg(brain, "Alias")["items"][0]["path"] == records.record_file("items", "alias-1")
+    assert query.query(brain, None, jq_expr="[$ENV, env]", limit=1)["items"] == [[{}, {}]]
+    assert query.query(brain, "Alias")["items"][0]["ref"] == "items:alias-1"
 
     fail_rg = shim_bin / "rg"
     fail_rg.write_text("#!/bin/sh\necho 'mise ERROR: missing HOME' >&2\nexit 1\n")
     fail_rg.chmod(0o755)
     monkeypatch.setattr(shutil, "which", lambda n: str(fail_rg) if n == "rg" else None)
     with pytest.raises(Error, match="rg failed: mise ERROR: missing HOME") as rg_exc:
-        query.search_rg(brain, "durable")
+        query.query(brain, "durable")
     assert not isinstance(rg_exc.value, InputError)
     with pytest.raises(Error, match="rg failed: mise ERROR: missing HOME"):
-        query.search_rg(brain, "durable", scope="nonexistent-scope")
+        query.query(brain, "durable", scope="nonexistent-scope")
     alias_hit = query.find_by_alias(brain, "legacy:alias-1")
     assert alias_hit is not None
-    assert alias_hit[0] == records.record_file("items", "alias-1")
+    assert alias_hit[0] == records.memory_file("items")
 
     # `resolve_tool` unwraps `mise` shims to the underlying executable, and `drain_tail` bounds memory:
     mise_dir = tmp_path / "fake-mise"
@@ -401,14 +344,14 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
     mise_shim = mise_dir / "jq"
     mise_shim.symlink_to(fake_mise)
     monkeypatch.setattr(shutil, "which", lambda n: str(mise_shim) if n == "jq" else None)
-    assert query.resolve_tool("jq") == real_jq
-    assert set(query.safe_env(real_jq)) == {"LC_ALL", "LANG"}
-    assert "HOME" in query.safe_env(str(mise_shim))
+    assert proc.resolve_tool("jq") == real_jq
+    assert set(proc.safe_env(real_jq)) == {"LC_ALL", "LANG"}
+    assert "HOME" in proc.safe_env(str(mise_shim))
 
     import io
     import subprocess
 
-    tail_t, tail_buf = query.drain_tail(io.BytesIO(b"a" * 20000 + b"TAIL"), 16)
+    tail_t, tail_buf = proc.drain_tail(io.BytesIO(b"a" * 20000 + b"TAIL"), 16)
     tail_t.join(timeout=2)
     assert bytes(tail_buf) == b"aaaaaaaaaaaaTAIL"
 
@@ -426,13 +369,13 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
         start_new_session=True,
     ) as gc_proc:
         assert gc_proc.stderr is not None
-        gt, gbuf = query.drain_tail(gc_proc.stderr, 64, stop_err)
+        gt, gbuf = proc.drain_tail(gc_proc.stderr, 64, stop_err)
         gc_proc.wait(timeout=5)
         stop_err.set()
         gt.join(timeout=2)
         assert not gt.is_alive()
         assert b"boom" in bytes(gbuf)
-        query.stop_proc(gc_proc)
+        proc.stop_proc(gc_proc)
 
     # Failing `jq` wrapper shim (exit 1) maps to `Error` (exit 1), not `InputError` (exit 2):
     fail_jq = shim_bin / "jq-fail"
@@ -440,7 +383,7 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
     fail_jq.chmod(0o755)
     monkeypatch.setattr(shutil, "which", lambda n: str(fail_jq) if n == "jq" else None)
     with pytest.raises(Error, match="jq failed: mise ERROR: boom") as jq_exc:
-        query.query_jq(brain, ".ref")
+        query.query(brain, None, jq_expr=".ref")
     assert not isinstance(jq_exc.value, InputError)
 
     monkeypatch.setattr(
@@ -448,7 +391,7 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
     )
     monkeypatch.setattr(shutil, "which", lambda n: str(fail_rg) if n == "rg" else None)
     with pytest.raises(Error, match="rg timed out after 5s"):
-        query.search_rg(brain, "durable", scope="nonexistent-scope")
+        query.query(brain, "durable", scope="nonexistent-scope")
     monkeypatch.undo()
 
     # `rg` exit 127 (wrapper/exec failure) maps to `Error` (exit 1), not `InputError` (exit 2):
@@ -457,7 +400,7 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
     rc127_rg.chmod(0o755)
     monkeypatch.setattr(shutil, "which", lambda n: str(rc127_rg) if n == "rg" else None)
     with pytest.raises(Error, match="rg failed: not found") as rc127_exc:
-        query.search_rg(brain, "durable")
+        query.query(brain, "durable")
     assert not isinstance(rc127_exc.value, InputError)
     monkeypatch.undo()
 
@@ -476,7 +419,7 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
             r_fd = -1
             with os.fdopen(high_fd, "rb", buffering=0) as high_stream:
                 high_fd = -1
-                ht, hbuf = query.drain_tail(high_stream, 64)
+                ht, hbuf = proc.drain_tail(high_stream, 64)
                 os.write(w_fd, b"hello-high-fd")
                 os.close(w_fd)
                 w_fd = -1
@@ -505,79 +448,75 @@ def test_evaluate_passes_and_reports_failures(tmp_path: Path, brain: Store, monk
     dyn_shim = cache_dir / "jq"
     dyn_shim.symlink_to(dyn_mise)
     monkeypatch.setattr(shutil, "which", lambda n: str(dyn_shim) if n == "jq" else None)
-    assert query.resolve_tool("jq") == str(target_a)
+    assert proc.resolve_tool("jq") == str(target_a)
     target_a.unlink()
-    assert query.resolve_tool("jq") == str(target_b)
+    assert proc.resolve_tool("jq") == str(target_b)
     target_b.unlink()
-    assert query.resolve_tool("jq") == str(dyn_shim)
+    assert proc.resolve_tool("jq") == str(dyn_shim)
     target_b.write_text(f'#!/bin/sh\nexec "{real_jq}" "$@"\n')
     target_b.chmod(0o755)
-    assert query.resolve_tool("jq") == str(target_b)
+    assert proc.resolve_tool("jq") == str(target_b)
 
 
-def test_read_modes_and_query_format15(brain: Store) -> None:
-    # Note outline, lines, raw, full, fields, max_bytes, conflicts, and dirty auto-sync.
-    outl = query.read_target(brain, "projects/offline.md", outline=True)
-    assert outl["ref"] == "projects/offline.md"
-    assert "headings" in outl
-    assert "text" not in outl
-    lns = query.read_target(brain, "projects/offline.md", lines="1:3")
-    assert lns["start"] == 1
-    assert lns["count"] == 3
-    assert "text" in lns
+def test_read_modes_and_query_v17(brain: Store) -> None:
+    # Uniform read shapes: default compiled record, `--raw` Markdown text, `#anchor` section, and `--max-bytes`.
+    rec_rd = query.read_target(brain, "projects/offline.md")
+    assert rec_rd["ref"] == "projects/offline.md"
+    assert rec_rd["kind"] == "note"
+    assert rec_rd["path"] == "memories/projects.jsonl"
+    assert rec_rd["record"]["title"] == "Offline retrieval"
     raw = query.read_target(brain, "projects/offline.md", raw=True)
     assert "text" in raw
-    assert "markdown" not in raw
     assert "record" not in raw
-    full = query.read_target(brain, "projects/offline.md", full=True, fields=["ref", "record"])
-    assert set(full) == {"ref", "record"}
 
     capped = query.read_target(brain, "projects/offline.md", max_bytes=120)
     assert capped["truncated"] is True
-    tiny = query.read_target(brain, "projects/offline.md", max_bytes=30)
+    tiny = query.read_target(brain, "projects/offline.md", max_bytes=40)
     assert tiny["truncated"] is True
     assert "text" not in tiny
 
     with pytest.raises(InputError):
-        query.read_target(brain, "projects/offline.md", outline=True, raw=True)
-    with pytest.raises(InputError):
         query.read_target(brain, "projects/offline.md", max_bytes=0)
     with pytest.raises(InputError, match="cannot be combined with #anchor"):
-        query.read_target(brain, "projects/offline.md#decision", outline=True)
-    with pytest.raises(InputError, match="apply only to OKF notes"):
-        query.read_target(brain, "AGENTS.md", outline=True)
-    with pytest.raises(InputError, match="apply only to Markdown notes"):
+        query.read_target(brain, "projects/offline.md#decision", raw=True)
+    with pytest.raises(InputError, match="applies only to Markdown notes"):
         query.read_target(brain, "meetings:decision-1", raw=True)
 
-    # Dirty note auto-syncs on read and query.
+    # Strictly read-only: reading a dirty/unbuilt note compiles in-memory without mutating `memories/`!
     brain.write("concepts/dirty.md", b"---\ntype: guide\nstatus: draft\n---\n# Dirty\n\nFresh body.\n")
     dirty_rd = query.read_target(brain, "concepts/dirty.md")
-    assert "Fresh body." in dirty_rd["text"]
-    assert query.read_target(brain, "memories/concepts/dirty.json")["record"]["title"] == "Dirty"
+    assert "Fresh body." in dirty_rd["record"]["text"]
+    assert "concepts/dirty.md" not in brain.read("memories/concepts.jsonl").decode()
+    engine.build(brain)
+    assert query.read_target(brain, "concepts/dirty.md")["record"]["title"] == "Dirty"
 
-    # Combined rg + jq, kind/source/fields filters, and streaming jq parity.
+    # Combined rg + jq, kind/scope filters, and streaming jq parity.
     comb = query.query(brain, "durable", jq_expr=".ref", kind="note")
     assert comb["engine"] == "rg+jq"
     assert "projects/offline.md" in comb["items"]
     miss = query.query(brain, "zzz-never-zzz", jq_expr=".ref")
     assert miss["engine"] == "rg+jq"
     assert miss["items"] == []
-    mem_only = query.query(brain, "decision", kind="memory", scope="meetings", fields="ref,kind")
+    mem_only = query.query(brain, "decision", kind="memory", scope="meetings")
     assert mem_only["items"]
     assert all(it["kind"] == "memory" for it in mem_only["items"])
-    idx_q = query.query_jq(brain, 'select(.kind == "concept") | .ref', kind="note")
+    idx_q = query.query(brain, None, jq_expr='select(.source == "concepts") | .ref', kind="note")
     assert "concepts/dirty.md" in idx_q["items"]
     for bad_q in (
         lambda: query.query(brain),
+        lambda: query.query(brain, "x", scope="   "),
         lambda: query.query(brain, "x", kind="bad"),
         lambda: query.query(brain, "x", scope="../escape"),
         lambda: query.query(brain, "x", limit=5001),
     ):
         with pytest.raises(InputError):
             bad_q()
+    assert [it["ref"] for it in query.query(brain, None, scope="projects/offline.md")["items"]] == [
+        "projects/offline.md"
+    ]
 
-    # Additional branch coverage: safe_env(""), UTF-8 byte cap, anchor/path fallbacks, eval engines & scalar cases.
-    assert query.safe_env("") == {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"}
+    # Additional branch coverage: safe_env(""), UTF-8 byte cap, anchor/path fallbacks.
+    assert proc.safe_env("") == {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"}
     brain.write("concepts/utf8.md", ("---\ntype: guide\nstatus: stable\n---\n# U\n\n" + ("é" * 120) + "\n").encode())
     engine.build(brain)
     utf_cap = query.read_target(brain, "concepts/utf8.md", max_bytes=140)
@@ -586,50 +525,37 @@ def test_read_modes_and_query_format15(brain: Store) -> None:
     assert sec_cap["truncated"] is True
     with pytest.raises(Error, match="missing anchor"):
         query.read_target(brain, "AGENTS.md#head")
-    with pytest.raises(Error, match=r"record memories/concepts/none\.json not found"):
-        query.read_target(brain, "memories/concepts/none.json")
     assert query.query(brain, "durable", scope="concepts/dirty.md")["count"] == 0
     assert query.query(brain, "durable", scope="memories")["count"] >= 1
-    assert query.query(brain, "durable", scope="memories/meetings/none.json")["items"] == []
+    assert query.query(brain, "durable", scope="memories/none.jsonl")["items"] == []
     assert query.query(brain, "durable", kind="note", scope="meetings")["items"] == []
-    assert query.query_jq(brain, ".ref", scope="memories/concepts")["items"]
-    assert query.query_jq(brain, ".ref", scope="concepts/dirty")["items"] == ["concepts/dirty.md"]
-    assert query.query_jq(brain, ".ref", kind="memory", fields=["ref"])["count"] >= 1
+    assert query.query(brain, None, jq_expr=".ref", scope="memories/concepts.jsonl")["items"]
+    assert query.query(brain, None, jq_expr=".ref", scope="concepts/dirty")["items"] == ["concepts/dirty.md"]
+    assert query.query(brain, None, jq_expr=".ref", kind="memory")["count"] >= 1
     assert query.query(brain, "durable", jq_expr=".ref", limit=1)["truncated"] is True
-    brain.write(
-        "evals/badengine.yaml",
-        f"version: {EVAL_FORMAT}\ncases:\n  - name: bad-eng\n    engine: nope\n    query: x\n".encode(),
-    )
-    ev_bad = query.evaluate(brain, target="badengine")
-    assert not ev_bad["ok"]
-    assert ev_bad["problems"]
-    brain.write(
-        "evals/eqfail.yaml",
-        f"version: {EVAL_FORMAT}\ncases:\n"
-        "  - name: eq-fail\n    engine: jq\n    query: '.ref'\n    expect_equals: [nope]\n".encode(),
-    )
-    ev_eq = query.evaluate(brain, target="eqfail")
-    assert not ev_eq["ok"]
-    assert ev_eq["failed"] == 1
 
 
-def test_query_autosync_index_guard_readonly_and_max_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_query_readonly_jq_and_max_bytes(tmp_path: Path) -> None:
     from bf.models import terminal
 
     b_root = tmp_path / "fresh"
     engine.init_brain(b_root, name="fresh")
     st = Store(b_root)
 
-    # 1. `query()` auto-syncs unbuilt notes BEFORE `_target_scope`, even when `memories/projects/` does not exist yet.
+    # 1. `query()` is strictly read-only: unbuilt notes stay unbuilt until explicit `engine.build(st)`.
     st.write(
         "projects/unbuilt.md",
         b"---\ntype: project\nstatus: draft\n---\n# Unbuilt\n\nneedle-beta in fresh project.\n",
     )
+    assert query.query(st, "needle-beta", kind="note")["items"] == []
+    assert not st.exists("memories/projects.jsonl")
+    engine.build(st)
     assert query.query(st, "needle-beta", kind="note")["items"][0]["ref"] == "projects/unbuilt.md"
     st.write(
         "concepts/unbuilt2.md",
         b"---\ntype: guide\nstatus: stable\n---\n# Unbuilt Two\n\nneedle-alpha\n",
     )
+    engine.build(st)
     assert query.query(st, "needle-alpha", scope="concepts/unbuilt2.md")["items"][0]["ref"] == "concepts/unbuilt2.md"
 
     # 2. Direct streaming `jq` evaluates rich expressions and sensor `.updated` faithfully.
@@ -639,53 +565,64 @@ def test_query_autosync_index_guard_readonly_and_max_bytes(tmp_path: Path, monke
         b"See [welcome](welcome.md#conventions).\n",
     )
     engine.build(st)
+    st.write("schemas/cal.json", OBJ_SCHEMA)
     records.ingest(st, "cal", b'[{"id":"ev1","title":"Meet","time":"2026-08-01T10:00:00Z"}]')
-    cal_p = records.record_file("cal", "ev1")
     st.write(
-        cal_p,
-        b'{"id":"ev1","source":"cal","kind":"memory","ref":"cal:ev1","title":"Meet","time":"2026-08-01T10:00:00Z"}',
+        "memories/cal.jsonl",
+        b'{"id":"ev1","source":"cal","kind":"memory","ref":"cal:ev1","title":"Meet","time":"2026-08-01T10:00:00Z"}\n',
     )
-    engine.build(st, force=True)
 
-    shorthand = query.query_jq(st, 'select(.kind == "concept" and .ref == "concepts/rich.md") | {ref, text}')["items"]
+    shorthand = query.query(st, None, jq_expr='select(.kind == "note" and .ref == "concepts/rich.md") | {ref, text}')[
+        "items"
+    ]
     assert shorthand == [{"ref": "concepts/rich.md", "text": "Rich\nSee welcome."}]
-    with_links = query.query_jq(st, 'select(.ref == "concepts/rich.md") | {ref, links}')["items"]
+    with_links = query.query(st, None, jq_expr='select(.ref == "concepts/rich.md") | {ref, links}')["items"]
     assert with_links[0]["links"][0]["section"] == "rich"
     assert with_links[0]["links"][0]["anchor"] == "conventions"
-    assert query.query_jq(st, 'select(.ref == "concepts/rich.md") | .["text"]')["items"] == ["Rich\nSee welcome."]
-    assert query.query_jq(st, 'select(.ref == "concepts/rich.md") | ."text"')["items"] == ["Rich\nSee welcome."]
-    assert query.query_jq(st, 'select(.ref == "concepts/rich.md") | has("text")')["items"] == [True]
-    if_dot = query.query_jq(st, 'if .ref == "concepts/rich.md" then . else empty end')["items"][0]
+    assert query.query(st, None, jq_expr='select(.ref == "concepts/rich.md") | .["text"]')["items"] == [
+        "Rich\nSee welcome."
+    ]
+    assert query.query(st, None, jq_expr='select(.ref == "concepts/rich.md") | ."text"')["items"] == [
+        "Rich\nSee welcome."
+    ]
+    assert query.query(st, None, jq_expr='select(.ref == "concepts/rich.md") | has("text")')["items"] == [True]
+    if_dot = query.query(st, None, jq_expr='if .ref == "concepts/rich.md" then . else empty end')["items"][0]
     assert "text" in if_dot
     assert "path" not in if_dot
-    del_status = query.query_jq(st, 'select(.ref == "concepts/rich.md") | del(.status)')["items"][0]
+    del_status = query.query(st, None, jq_expr='select(.ref == "concepts/rich.md") | del(.status)')["items"][0]
     assert "text" in del_status
     assert "status" not in del_status
-    chained_sel = query.query_jq(st, 'select(.kind == "concept") | select(.ref == "concepts/rich.md")')["items"][0]
+    chained_sel = query.query(st, None, jq_expr='select(.source == "concepts") | select(.ref == "concepts/rich.md")')[
+        "items"
+    ][0]
     assert "text" in chained_sel
-    assert query.query_jq(st, 'select(.source == "cal") | .updated')["items"] == [None]
-    assert "2026-09-02" in query.query_jq(st, 'select(.kind == "concept") | .updated', kind="note")["items"]
+    assert query.query(st, None, jq_expr='select(.source == "cal") | .updated')["items"] == [None]
+    assert (
+        "2026-09-02" in query.query(st, None, jq_expr='select(.source == "concepts") | .updated', kind="note")["items"]
+    )
 
     # Streaming jq regressions: string interpolation `\(...`, comma-separated zero-arg filters, and `tojson`/`values`.
-    assert query.query_jq(st, 'select("\\(.text)" | test("See welcome")) | .ref')["items"] == ["concepts/rich.md"]
-    assert query.query_jq(st, 'select(.status == "stable" and .ref == "concepts/rich.md") | .ref + ":\\(.text)"')[
-        "items"
-    ] == ["concepts/rich.md:Rich\nSee welcome."]
-    tojson_items = query.query_jq(st, 'select(.ref == "concepts/rich.md") | .ref, tojson')["items"]
+    assert query.query(st, None, jq_expr='select("\\(.text)" | test("See welcome")) | .ref')["items"] == [
+        "concepts/rich.md"
+    ]
+    assert query.query(
+        st, None, jq_expr='select(.status == "stable" and .ref == "concepts/rich.md") | .ref + ":\\(.text)"'
+    )["items"] == ["concepts/rich.md:Rich\nSee welcome."]
+    tojson_items = query.query(st, None, jq_expr='select(.ref == "concepts/rich.md") | .ref, tojson')["items"]
     assert tojson_items[0] == "concepts/rich.md"
     tojson_obj = json.loads(tojson_items[1])
     assert "text" in tojson_obj
     assert "path" not in tojson_obj
-    val_items = query.query_jq(st, 'select(.ref == "concepts/rich.md") | .ref, values')["items"]
+    val_items = query.query(st, None, jq_expr='select(.ref == "concepts/rich.md") | .ref, values')["items"]
     assert val_items[0] == "concepts/rich.md"
     assert "text" in val_items[1]
     assert "path" not in val_items[1]
-    no_pipe_sel = query.query_jq(st, 'select(.ref == "concepts/rich.md")')["items"][0]
+    no_pipe_sel = query.query(st, None, jq_expr='select(.ref == "concepts/rich.md")')["items"][0]
     assert "text" in no_pipe_sel
     assert "path" not in no_pipe_sel
 
     records.ingest(st, "cal", b'[{"id":"ev2","title":"EmptySum","summary":"","time":"2026-08-01T10:00:00Z"}]')
-    assert query.query_jq(st, 'select(.source == "cal" and .ref == "cal:ev2") | .summary')["items"] == [""]
+    assert query.query(st, None, jq_expr='select(.source == "cal" and .ref == "cal:ev2") | .summary')["items"] == [""]
 
     # 3. `read_target` `--max-bytes` strictly caps output bytes or raises `InputError`.
     st.write(
@@ -695,7 +632,7 @@ def test_query_autosync_index_guard_readonly_and_max_bytes(tmp_path: Path, monke
     engine.build(st)
     untruncated = query.read_target(st, "concepts/mb.md", max_bytes=10000)
     assert "truncated" not in untruncated
-    for budget in (140, 80, 40):
+    for budget in (140, 80, 45):
         capped = query.read_target(st, "concepts/mb.md", max_bytes=budget)
         assert capped["truncated"] is True
         assert len(terminal(capped)) <= budget
@@ -703,59 +640,27 @@ def test_query_autosync_index_guard_readonly_and_max_bytes(tmp_path: Path, monke
         with pytest.raises(InputError, match="too small"):
             query.read_target(st, "concepts/mb.md", max_bytes=too_small)
 
-    # 4. `read_target` auto-syncs dirty notes cleanly even when `.bf/` and `memories/` are `0o500` read-only.
+    # 4. `read_target` reads dirty notes cleanly even when `.bf/` and `memories/` are `0o500` read-only.
     st.write("concepts/rich.md", b"---\ntype: guide\nstatus: stable\n---\n# Rich\n\nDirty2\n")
     (b_root / ".bf").chmod(0o500)
     (b_root / "memories").chmod(0o500)
     try:
         ro_res = query.read_target(st, "concepts/rich.md")
-        assert "Dirty2" in ro_res["text"]
+        assert "Dirty2" in ro_res["record"]["text"]
     finally:
         (b_root / ".bf").chmod(0o700)
         (b_root / "memories").chmod(0o700)
 
-    # 5. Snippet fallback (`_HEAD_RE`, nested list/dict, key-name miss), non-dict JSON, empty `memories/`, and eval cases.
+    # 5. Snippet fallback (nested list/dict, key-name miss) and missing `memories/`.
+    st.write("schemas/notes2.json", OBJ_SCHEMA)
     records.ingest(
         st,
         "notes2",
-        json.dumps(
-            [{"id": "n1", "title": "Snip", "text": "## Auto Sec\n\nfind-in-sec", "extra": [{"k": ["deep-tag"]}]}]
-        ).encode(),
+        json.dumps([{"id": "n1", "title": "Snip", "text": "find-in-sec", "extra": [{"k": ["deep-tag"]}]}]).encode(),
     )
-    assert query.search_rg(st, "find-in-sec", scope="notes2")["items"][0]["anchor"] == "auto-sec"
-    assert query.search_rg(st, "deep-tag", scope="notes2")["items"][0]["snippet"] == "deep-tag"
-    assert query.search_rg(st, "extra", scope="notes2")["items"][0]["snippet"] == "Snip"
-
-    st.write("memories/corrupt/list.json", b"[1, 2]\n")
-    with pytest.raises(Error, match="expected a JSON object"):
-        query.read_target(st, "memories/corrupt/list.json")
-    st.delete("memories/corrupt/list.json")
-
-    shim = tmp_path / "rg-filter"
-    outside = tmp_path / "outside.json"
-    outside.write_text("{}")
-    note_mem = b_root / "memories" / "concepts" / "rich.json"
-    cal_mem = b_root / "memories" / records.record_file("cal", "ev1").removeprefix("memories/")
-    shim.write_text(
-        "#!/bin/sh\n"
-        f'printf \'{{"type":"match","data":{{"path":{{"text":"{outside}"}},"lines":{{"text":"x"}}}}}}\\n\'\n'
-        f'printf \'{{"type":"match","data":{{"path":{{"text":"{note_mem}"}},"lines":{{"text":"x"}}}}}}\\n\'\n'
-        f'printf \'{{"type":"match","data":{{"path":{{"text":"{cal_mem}"}},"lines":{{"text":"Meet"}}}}}}\\n\'\n'
-    )
-    shim.chmod(0o755)
-    monkeypatch.setattr(shutil, "which", lambda n: str(shim) if n == "rg" else None)
-    filt = query.search_rg(st, "Meet", kind="memory")
-    assert [it["ref"] for it in filt["items"]] == ["cal:ev1"]
-    monkeypatch.undo()
-
-    st.write("schemas/evals.json", b'{"type": "object"}\n')
-    st.write(
-        "evals/custom.yaml",
-        f'version: {EVAL_FORMAT}\ncases:\n  - "not-a-dict"\n  - name: bad-eng\n    engine: nope\n    query: x\n'.encode(),
-    )
-    custom_ev = query.evaluate(st, target="custom")
-    assert custom_ev["failed"] == 1
-    assert "unsupported eval engine" in custom_ev["cases"][0]["reasons"][0]
+    assert query.query(st, "find-in-sec", scope="notes2")["items"][0]["snippet"] == "find-in-sec"
+    assert query.query(st, "deep-tag", scope="notes2")["items"][0]["snippet"] == "deep-tag"
+    assert query.query(st, "extra", scope="notes2")["items"][0]["snippet"] == "Snip"
 
     shutil.rmtree(b_root / "memories")
     assert query.query(st, "anything", kind="memory")["items"] == []
@@ -764,7 +669,7 @@ def test_query_autosync_index_guard_readonly_and_max_bytes(tmp_path: Path, monke
 def test_query_jq_parity_and_ordering(tmp_path: Path) -> None:
     import subprocess
 
-    from bf.models import AUTHORED
+    from bf.models import DEFAULT_NOTES
 
     b_root = tmp_path / "parity"
     engine.init_brain(b_root, name="parity")
@@ -778,76 +683,82 @@ def test_query_jq_parity_and_ordering(tmp_path: Path) -> None:
         b'---\ntype: project\nstatus: draft\nupdated: ""\n---\n# Empty Upd\n\nValid empty updated.\n',
     )
     st.write(
-        "actions/2026-10-01_act/ACTION.md",
+        "actions/2026-10-01_act/index.md",
         b"---\ntype: action\nstatus: draft\n---\n# Act One\n\nAction body.\n",
     )
     assert engine.build(st)["ok"]
     assert engine.validate(st)["ok"]
+    st.write("schemas/projects.json", OBJ_SCHEMA)
     st.write(
         "projects/empty-status.md",
-        b'---\ntype: project\nstatus: ""\nupdated: ""\n---\n# Empty Status\n\nCompiled empty status.\n',
+        b'---\ntype: project\nstatus: draft\nupdated: ""\n---\n# Empty Status\n\nCompiled empty updated.\n',
     )
     assert engine.build(st)["ok"]
 
-    records.ingest(st, "cal", b'[{"id":"ev1","title":"Meet","summary":""}]')
-    records.ingest(st, "cal", b'[{"id":"a@b#c","title":"AtHash"}]')
+    st.write("schemas/cal.json", OBJ_SCHEMA)
+    records.ingest(st, "cal", b'[{"id":"ev1","title":"Meet","summary":""},{"id":"a@b_c","title":"AtUnderscore"}]')
+    cal_lines = st.read("memories/cal.jsonl")
     st.write(
-        records.record_file("cal", "empty-fields"),
-        b'{"id":"empty-fields","source":"cal","kind":"memory","ref":"cal:empty-fields",'
-        b'"title":"","status":"","entity":"","stale_after":"","summary":"","updated":""}',
+        "memories/cal.jsonl",
+        cal_lines + b'{"id":"empty-fields","source":"cal","kind":"memory","ref":"cal:empty-fields",'
+        b'"title":"","status":"","entity":"","stale_after":"","summary":"","updated":""}\n',
     )
-    engine.build(st, force=True)
 
-    jq_bin = query.resolve_tool("jq")
+    # Extensionless bundle resolution for `index.md`!
+    assert query.read_target(st, "actions/2026-10-01_act")["ref"] == "actions/2026-10-01_act/index.md"
+    st.write("projects/bnd/index.md", b"---\ntype: project\nstatus: stable\n---\n# Bundle P\n")
+    engine.build(st)
+    assert query.read_target(st, "projects/bnd")["ref"] == "projects/bnd/index.md"
+
+    jq_bin = proc.resolve_tool("jq")
 
     def run_real_jq(expr: str, knd: str = "") -> list[object]:
         if knd == "note":
             files = sorted(
-                p
-                for d in sorted(AUTHORED)
-                if (b_root / "memories" / d).is_dir()
-                for p in (b_root / "memories" / d).rglob("*.json")
-                if p.is_file()
+                b_root / "memories" / f"{d}.jsonl"
+                for d in sorted(DEFAULT_NOTES)
+                if (b_root / "memories" / f"{d}.jsonl").is_file()
             )
         else:
-            files = sorted(p for p in (b_root / "memories").rglob("*.json") if p.is_file())
-        blob = b"".join(p.read_bytes().rstrip(b"\n") + b"\n" for p in files)
-        proc = subprocess.run(  # noqa: S603
-            [jq_bin, "-L", "/dev/null", "-c", "--", f"{query.JQ_PRELUDE}\n{expr}"],
+            files = sorted(p for p in (b_root / "memories").glob("*.jsonl") if p.is_file())
+        blob = b"".join(p.read_bytes() for p in files)
+        proc_res = subprocess.run(  # noqa: S603
+            [jq_bin, "-L", "/dev/null", "-c", "--", f"{proc.JQ_PRELUDE}\n{expr}"],
             input=blob,
             capture_output=True,
             cwd="/",
-            env=query.safe_env(jq_bin),
+            env=proc.safe_env(jq_bin),
             timeout=30,
             check=True,
         )
-        return [json.loads(line) for line in proc.stdout.decode("utf-8").splitlines() if line.strip()]
+        return [json.loads(line) for line in proc_res.stdout.decode("utf-8").splitlines() if line.strip()]
 
     for expr, knd in (
         (".ref", ""),
-        ('select(.kind == "concept" or .kind == "project") | .ref, .kind', ""),
+        ('select(.source == "concepts" or .source == "projects") | .ref, .kind', ""),
         ('select(.ref | startswith("concepts/")) | .ref', ""),
-        ('select(.kind == "concept") | .title, .sha256', "note"),
-        ('select(.kind == "project") | .updated', "note"),
+        ('select(.source == "concepts") | .title, .sha256', "note"),
+        ('select(.source == "projects") | .updated', "note"),
         ('select(.source == "cal") | .summary', ""),
         (".", ""),
     ):
-        assert query.query_jq(st, expr, kind=knd, limit=100)["items"] == run_real_jq(expr, knd)
+        assert query.query(st, None, jq_expr=expr, kind=knd, limit=100)["items"] == run_real_jq(expr, knd)
 
-    assert query.query_jq(st, ".ref", scope="memories/concepts/alpha.json")["items"] == ["concepts/alpha.md"]
-    assert query.query_jq(st, ".ref", kind="note", limit=2)["items"] == run_real_jq(".ref", "note")[:2]
+    assert query.query(st, None, jq_expr=".ref", scope="projects/alpha.md")["items"] == []
+    assert query.query(st, None, jq_expr=".ref", scope="concepts/alpha.md")["items"] == ["concepts/alpha.md"]
+    assert query.query(st, None, jq_expr=".ref", kind="note", limit=2)["items"] == run_real_jq(".ref", "note")[:2]
     with pytest.raises(InputError, match="jq failed"):
-        query.query_jq(st, 'select(.kind == "concept")) | .ref')
+        query.query(st, None, jq_expr='select(.kind == "note")) | .ref')
 
     # Nested note ordering parity.
     for rel, title in (("concepts/a-b.md", "A-B"), ("concepts/a.md", "A"), ("concepts/a/c.md", "A/C")):
         st.write(rel, f"---\ntype: guide\nstatus: stable\n---\n# {title}\n\nBody.\n".encode())
     assert engine.build(st)["ok"]
-    concepts_items = query.query_jq(st, ".ref", scope="concepts", kind="note", limit=100)["items"]
+    concepts_items = query.query(st, None, jq_expr=".ref", scope="concepts", kind="note", limit=100)["items"]
     assert concepts_items == [
-        "concepts/a/c.md",
         "concepts/a-b.md",
         "concepts/a.md",
+        "concepts/a/c.md",
         "concepts/alpha.md",
         "concepts/welcome.md",
     ]
@@ -862,5 +773,48 @@ def test_query_jq_parity_and_ordering(tmp_path: Path) -> None:
     )
     engine.build(sib_st)
     st.write("bf.yaml", f"version: {FORMAT}\nname: jq-parity\nbrains:\n  sib-alias: {sib_root}\n".encode())
-    cross_alias = query.read_target(st, "bf://sib-alias/repo:acme/demo", read_only=True)
+    cross_alias = query.read_target(st, "bf://sib-alias/repo:acme/demo")
     assert cross_alias["ref"] == "concepts/demo-repo.md"
+
+    # `usages/` scopes, alias lookup, and cross-brain undeclared rejection work end-to-end.
+    st.write("schemas/usages.json", OBJ_SCHEMA)
+    records.ingest(
+        st,
+        "llm",
+        b'[{"id":"u-9","title":"Token spend","model":"m1","input_tokens":50,"aliases":["spend:u-9"]}]',
+        target="usages",
+    )
+    assert query.query(st, "Token", kind="usage")["count"] == 1
+    assert query.query(st, "Token", jq_expr=".ref", scope="usages/llm")["items"] == ["llm:u-9"]
+    assert query.query(st, "Token", kind="memory")["count"] == 0
+    assert query.query(st, "Body", scope="concepts/a.md")["count"] == 1
+    assert query.query(st, None, scope="usages")["count"] == 1
+    assert query.query(st, None, scope="usages/llm")["count"] == 1
+    assert query.query(st, None, jq_expr='.kind == "usage" | select(.)', scope="usages")["count"] == 1
+    assert query.find_by_alias(st, "spend:u-9") is not None
+    assert query.read_target(st, "spend:u-9")["kind"] == "usage"
+    assert query.read_target(st, "concepts/a.md", max_bytes=80)["truncated"] is True
+    assert query.read_target(st, "concepts/a.md", raw=True)["kind"] == "note"
+    assert query.read_target(st, "bf.yaml")["kind"] == "file"
+    assert query.read_target(st, "bf.yaml", max_bytes=40)["truncated"] is True
+    with pytest.raises(Error, match="not found"):
+        query.read_target(st, "llm:missing")
+    with pytest.raises(Error, match="not found"):
+        query.read_target(st, "concepts/does-not-exist.md")
+    with pytest.raises(InputError):
+        query.read_target(st, "   ")
+    with pytest.raises(Error, match=r"not declared in bf\.yaml brains:"):
+        query.read_target(st, "bf://undeclared/concepts/welcome.md")
+    assert query.query(st, "nothing", scope="usages/missing")["count"] == 0
+    assert query.query(st, "nothing", scope="usages/nested/deep")["count"] == 0
+    assert query.query(st, "nothing", scope="usages/notes")["count"] == 0
+    assert query.query(st, "nothing", scope="notes")["count"] == 0
+    assert query.query(st, "Body", scope="concepts/a")["count"] >= 2
+    st.delete("usages/llm.jsonl")
+    (st.root / "usages").rmdir()
+    assert query.query(st, "nothing", scope="usages")["count"] == 0
+    # Flat/bundle collision raises when `skipped=None` in `authored_notes`.
+    st.write("concepts/a/index.md", b"---\ntype: guide\nstatus: stable\n---\n# Collide\n")
+    with pytest.raises(Error, match="collides with"):
+        markdown.authored_notes(st)
+    st.delete("concepts/a/index.md")

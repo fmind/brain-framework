@@ -1,9 +1,9 @@
-"""Brain Framework: OKF Markdown notes, pure JSON memories, JSON Schema contracts, and offline retrieval."""
+"""Brain Framework: OKF Markdown notes, JSONL memories, JSON Schema contracts, and offline retrieval."""
 
 import os
 import sys
 
-__version__ = "31.0.0"
+__version__ = "32.0.0"
 
 
 def main() -> None:

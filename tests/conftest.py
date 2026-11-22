@@ -19,6 +19,12 @@ from bf import engine, records
 from bf.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ_SCHEMA = (
+    json.dumps(
+        {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": True}
+    ).encode()
+    + b"\n"
+)
 
 _FAKE = '''#!{python}
 """Answer argv patterns from a JSON script once each unless repeated; record every call."""
@@ -120,7 +126,7 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(home / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     monkeypatch.delenv("BF_BRAIN", raising=False)
-    monkeypatch.delenv("DEFAULT_BRAIN_PATH", raising=False)
+    monkeypatch.delenv("BRAIN_LOCATION", raising=False)
     monkeypatch.chdir(tmp_path)
     for key in tuple(os.environ):
         if key.startswith("GIT_"):
@@ -133,6 +139,7 @@ def brain(tmp_path: Path) -> Store:
     root = tmp_path / "brain"
     engine.init_brain(root, name="fixture")
     store = Store(root)
+    store.write("schemas/meetings.json", OBJ_SCHEMA)
     records.ingest(
         store,
         "meetings",
@@ -160,7 +167,7 @@ def brain(tmp_path: Path) -> Store:
         "projects/offline.md",
         b"---\ntype: project\nstatus: draft\nupdated: 2026-09-01\ntags: [retention]\n---\n\n"
         b"# Offline retrieval\n\n"
-        b"Keep stored reads offline. Decided in [the meeting](../memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json){rel=cites}.\n"
+        b"Keep stored reads offline. Decided in [the meeting](meetings:decision-1){rel=cites}.\n"
         b"{: #summary confidence=high}\n\n"
         b"## Decision {#decision owner=alice}\n\n"
         b"Provider retention cannot guarantee historical evidence, so the team keeps durable JSONL records.\n\n"

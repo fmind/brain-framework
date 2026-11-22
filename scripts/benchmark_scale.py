@@ -1,4 +1,4 @@
-"""Time pure JSON record ingestion, note compilation, validation, and review over synthetic notes and records.
+"""Time JSONL record ingestion, note compilation, validation, and review over synthetic notes and records.
 
 The synthetic brain lives in a temporary folder under --dir, on disk by default: record writes fsync, and a RAM-backed
 /tmp would hide that cost while holding the whole corpus in memory.
@@ -16,9 +16,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from bf import engine, query, records, watch
+from bf import engine, query, records, status
 from bf.models import FORMAT, MAX_BATCH, MAX_FILES
 from bf.storage import Store
+
+_OBJ_SCHEMA = json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}).encode() + b"\n"
 
 
 def _seed_batches(store: Store, source: str, items: list[dict[str, object]]) -> None:
@@ -63,6 +65,7 @@ def main() -> None:
         engine.init_brain(root, name="benchmark")
         store = Store(root)
         store.write("bf.yaml", f"version: {FORMAT}\nname: benchmark\n".encode())
+        store.write("schemas/benchmark.json", _OBJ_SCHEMA)
         background = ("Routine project background. " * args.body_chars)[: args.body_chars]
         items: list[dict[str, object]] = [
             {
@@ -76,13 +79,12 @@ def main() -> None:
         ]
         _seed_batches(store, "benchmark", items)
         for n in range(args.notes):
-            rec_rel = records.record_file("benchmark", str(n % args.records))
             store.write(
                 f"concepts/{n}.md",
                 (
                     f"---\ntype: concept\nstatus: stable\nupdated: 2026-09-10\ntags: [bench]\n---\n"
                     f"# Concept {n}\n\n## Details {{#details idx={n}}}\n\n{background}\n\n"
-                    f"Evidence: [Decision](../{rec_rel}).\n"
+                    f"Evidence: [Decision](benchmark:{n % args.records}).\n"
                 ).encode(),
             )
 
@@ -99,6 +101,7 @@ def main() -> None:
             nonlocal active_source
             churn[kind] += 1
             active_source = f"churn-{kind}-{churn[kind]}"
+            store.write(f"schemas/{active_source}.json", _OBJ_SCHEMA)
             if kind != "add":
                 records.ingest(store, active_source, base_payload)
 
@@ -113,9 +116,13 @@ def main() -> None:
             ("build", None, lambda: engine.build(store)),
             ("validate", None, lambda: engine.validate(store)),
             ("review", None, lambda: engine.review(store)),
-            ("query_rg", None, lambda: query.search_rg(store, "Retain evidence", scope="benchmark", limit=20)),
-            ("query_jq", None, lambda: query.query_jq(store, ".id", scope="benchmark", limit=20)),
-            ("watch_dashboard", None, lambda: (watch.render_dashboard(store), {"ok": True})[1]),
+            ("query_rg", None, lambda: query.query(store, "Retain evidence", scope="benchmark", limit=20)),
+            ("query_jq", None, lambda: query.query(store, None, jq_expr=".id", scope="benchmark", limit=20)),
+            (
+                "status_text",
+                None,
+                lambda: (status.format_status_text(status.status_summary(store, all_units=True)), {"ok": True})[1],
+            ),
             ("unchanged_record", None, lambda: records.ingest(store, "benchmark", json.dumps([items[0]]).encode())),
             ("upsert_add", lambda: prep_write("add"), lambda: run_write("add")),
             ("upsert_update", lambda: prep_write("update"), lambda: run_write("update")),
@@ -141,8 +148,8 @@ def main() -> None:
                 "max": round(max(timings), 4),
             }
 
-        notes_bytes = sum(p.stat().st_size for p in (store.root / "memories/concepts").glob("*.json"))
-        memories_bytes = sum(p.stat().st_size for p in (store.root / "memories/benchmark").glob("*.json"))
+        notes_bytes = (store.root / "memories/concepts.jsonl").stat().st_size
+        memories_bytes = (store.root / "memories/benchmark.jsonl").stat().st_size
         max_rss_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         max_rss_kb = max_rss_raw // 1024 if sys.platform == "darwin" else max_rss_raw
         corpus = {key: value for key, value in vars(args).items() if key != "dir"}
@@ -152,8 +159,8 @@ def main() -> None:
                     "corpus": corpus,
                     "seconds": measurements,
                     "peak_rss_kib": max_rss_kb,
-                    "notes_json_bytes": notes_bytes,
-                    "memories_json_bytes": memories_bytes,
+                    "notes_jsonl_bytes": notes_bytes,
+                    "memories_jsonl_bytes": memories_bytes,
                 }
             )
             + "\n"

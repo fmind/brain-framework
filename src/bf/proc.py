@@ -1,4 +1,4 @@
-"""Isolated subprocess execution, tool resolution, bounded tail draining, and process-group teardown."""
+"""Isolated subprocess execution, tool resolution, jq confinement, bounded tail draining, and process-group teardown."""
 
 from __future__ import annotations
 
@@ -7,22 +7,54 @@ import select
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import IO, Any, cast
 
-from bf import models
-from bf.models import MAX_BATCH, Error
+from bf import config, models
+from bf.models import MAX_BATCH, Error, encode
+from bf.storage import Store, private_dir, relative
 
+JQ_PRELUDE = (
+    'def modulemeta: error("disabled"); def modulemeta($m): error("disabled"); '
+    "def get_jq_origin: null; def get_prog_origin: null; def get_search_list: []; def env: {}; {} as $ENV |"
+)
 _S_XDG = ("CONFIG", "DATA", "CACHE", "STATE")
 _S_MISE = ("DATA_DIR", "CONFIG_DIR", "CACHE_DIR", "STATE_DIR", "TRUSTED_CONFIG_PATHS")
 _SHIM_ENV = ("PATH", "HOME", *(f"XDG_{k}_HOME" for k in _S_XDG), *(f"MISE_{k}" for k in _S_MISE))
+_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "TMPDIR",
+    "SHELL",
+    "TERM",
+    "TZ",
+    "SSH_AUTH_SOCK",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    *(f"XDG_{k}_HOME" for k in _S_XDG),
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "CLOUDSDK_CONFIG",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    *(p for k in ("HTTP", "HTTPS", "NO", "ALL") for p in (f"{k}_PROXY", f"{k.lower()}_proxy")),
+)
 _TOOL_CACHE: dict[tuple[str, ...], str] = {}
 _TOOL_LOCK = threading.Lock()
 type _Feeder = Callable[[IO[bytes], threading.Event], None]
+type _LineHook = Callable[[bytes], None]
 
 
 def resolve_tool(name: str) -> str:
@@ -61,13 +93,22 @@ def safe_env(binary: str = "") -> dict[str, str]:
 
 
 def drain_tail(
-    stream: IO[bytes], limit: int, stop: threading.Event | None = None
+    stream: IO[bytes],
+    limit: int,
+    stop: threading.Event | None = None,
+    *,
+    on_line: _LineHook | None = None,
 ) -> tuple[threading.Thread, bytearray]:
-    """Drain `stream` in a daemon thread while retaining at most the last `limit` bytes in memory."""
-    buf, fd, poller = bytearray(), None, None
+    """Drain `stream` in a daemon thread, retaining the last `limit` bytes and optionally forwarding lines."""
+    buf, pending, fd, poller = bytearray(), bytearray(), None, None
     with suppress(OSError, ValueError):
         fd, poller = stream.fileno(), select.poll()
         poller.register(fd, select.POLLIN)
+
+    def _emit_line(raw_line: bytes) -> None:
+        if on_line is not None and raw_line.strip():
+            with suppress(Exception):
+                on_line(raw_line)
 
     def _read() -> None:
         with suppress(OSError, ValueError):
@@ -82,6 +123,17 @@ def drain_tail(
                 buf.extend(chunk)
                 if len(buf) > limit * 2:
                     del buf[:-limit]
+                if on_line is not None:
+                    pending.extend(chunk)
+                    while (nl := pending.find(b"\n")) != -1:
+                        _emit_line(bytes(pending[:nl]))
+                        del pending[: nl + 1]
+                    if len(pending) > 65536:
+                        _emit_line(bytes(pending[:65536]))
+                        del pending[:65536]
+            if on_line is not None and pending:
+                _emit_line(bytes(pending))
+                pending.clear()
             del buf[: max(0, len(buf) - limit)]
 
     (t := threading.Thread(target=_read, daemon=True)).start()
@@ -134,17 +186,6 @@ def stream_proc(
         return rc, bytes(err_buf), to_ev.is_set()
 
 
-def _feed_stdin(pipe: Any, data: bytes) -> None:
-    if pipe is not None:
-        try:
-            with suppress(OSError):
-                pipe.write(data)
-                pipe.flush()
-        finally:
-            with suppress(OSError):
-                pipe.close()
-
-
 def _read_stdout(proc: subprocess.Popen[bytes], buf: bytearray, ov_ev: threading.Event) -> None:
     with suppress(OSError):
         while proc.stdout and (chunk := proc.stdout.read(65536)):
@@ -154,38 +195,56 @@ def _read_stdout(proc: subprocess.Popen[bytes], buf: bytearray, ov_ev: threading
             buf.extend(chunk)
 
 
+def _write_stdin(stream: IO[bytes], data: bytes) -> None:
+    with suppress(OSError):
+        try:
+            stream.write(data)
+            stream.flush()
+        finally:
+            stream.close()
+
+
 def exec_argv(
     argv: Sequence[str],
     *,
     cwd: Path,
     env: dict[str, str],
     timeout: int,
-    stdin_bytes: bytes = b"",
+    stdin_data: bytes | None = None,
     stop_event: threading.Event | None = None,
+    on_stderr_line: _LineHook | None = None,
 ) -> tuple[int, bytes, str]:
-    """Run literal `argv` in a dedicated process group with bounded stdio, timeout, and clean teardown."""
+    """Run literal `argv` in a dedicated process group with optional stdin JSON, bounded stdio, and clean teardown."""
     if not argv:
         raise Error("empty command argv")
     if stop_event is not None and stop_event.is_set():
         return 130, b"", "stopped"
-    pipe, s_in = subprocess.PIPE, subprocess.PIPE if stdin_bytes else subprocess.DEVNULL
+    pipe = subprocess.PIPE
     deadline, out_buf, ov_ev = time.monotonic() + timeout, bytearray(), threading.Event()
     ov_msg = f"output exceeds {MAX_BATCH} bytes"
     try:
         proc = subprocess.Popen(  # noqa: S603
-            list(argv), cwd=cwd, env=env, stdin=s_in, stdout=pipe, stderr=pipe, start_new_session=True
+            list(argv),
+            cwd=cwd,
+            env=env,
+            stdin=pipe if stdin_data is not None else subprocess.DEVNULL,
+            stdout=pipe,
+            stderr=pipe,
+            start_new_session=True,
         )
     except (OSError, ValueError) as error:
         return 127, b"", models.failure(error)
     with proc:
+        in_t: threading.Thread | None = None
+        if stdin_data is not None and proc.stdin is not None:
+            in_t = threading.Thread(target=_write_stdin, args=(proc.stdin, stdin_data), daemon=True)
+            in_t.start()
         err_stop = threading.Event()
-        err_t, err_buf = drain_tail(proc.stderr, 65536, err_stop) if proc.stderr else (None, bytearray())
-        in_t = (
-            threading.Thread(target=_feed_stdin, args=(proc.stdin, stdin_bytes), daemon=True) if stdin_bytes else None
+        err_t, err_buf = (
+            drain_tail(proc.stderr, 65536, err_stop, on_line=on_stderr_line) if proc.stderr else (None, bytearray())
         )
         out_t = threading.Thread(target=_read_stdout, args=(proc, out_buf, ov_ev), daemon=True)
-        for t in filter(None, (in_t, out_t)):
-            t.start()
+        out_t.start()
         try:
             while True:
                 if stop_event is not None and stop_event.is_set():
@@ -205,11 +264,62 @@ def exec_argv(
             raise
         finally:
             out_t.join(timeout=2)
+            if in_t is not None:
+                in_t.join(timeout=2)
             err_stop.set()
-            for t in filter(None, (in_t, err_t)):
-                t.join(timeout=2)
-            if proc.stdin is not None:
-                with suppress(OSError):
-                    proc.stdin.close()
+            if err_t is not None:
+                err_t.join(timeout=2)
         err_s = bytes(err_buf).decode("utf-8", "replace").strip()
         return (1, b"", ov_msg) if ov_ev.is_set() else (rc, bytes(out_buf), err_s)
+
+
+def prepare_unit(
+    store: Store,
+    name: str,
+    base_argv: Sequence[str],
+    run_id: str,
+    start_iso: str,
+    *,
+    trigger: str = "manual",
+    end_iso: str = "",
+    events: Sequence[dict[str, Any]] = (),
+    base_env: Mapping[str, str] | None = None,
+    unit_env: Mapping[str, str] | None = None,
+) -> tuple[list[str], dict[str, str], bytes]:
+    """Resolve `argv`, build layered `BF_*` env, and encode JSON context bytes for stdin."""
+    effective_end = end_iso or start_iso
+    state_dir = str(private_dir(store).root / name)
+    ctx_bytes = encode(
+        {
+            "run": run_id,
+            "trigger": trigger,
+            "loop": name,
+            "start": start_iso,
+            "end": effective_end,
+            "events": list(events),
+        }
+    )
+    argv = list(base_argv)
+    if argv and argv[0] == "bf":
+        argv = [sys.executable, "-m", "bf", *argv[1:]]
+    elif argv and "/" in argv[0] and not Path(argv[0]).is_absolute():
+        cleaned = argv[0].removeprefix("./")
+        parts = relative(cleaned)
+        if not store.exists(cleaned):
+            raise Error(f"{name}: command {argv[0]} does not exist inside brain")
+        argv[0] = str(store.root.joinpath(*parts))
+
+    env: dict[str, str] = {key: val for key in _ENV_ALLOWLIST if (val := os.environ.get(key))}
+    env |= dict(base_env or {}) | dict(unit_env or {}) | config.load_dotenv(store)
+    bf_env = {
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8",
+        "BF_BRAIN": str(store.root),
+        "BF_LOOP": name,
+        "BF_STATE": state_dir,
+        "BF_START": start_iso,
+        "BF_END": effective_end,
+        "BF_TRIGGER": trigger,
+        "BF_RUN": run_id,
+    }
+    return argv, {**env, **bf_env}, ctx_bytes

@@ -1,10 +1,10 @@
-"""Orchestration of unified `loops`, `.bf/<loop>.json`, and JSON `logs/<loop>.log`."""
+"""Orchestration of unified `loops:` (`sensors/`, `routines/`, `agents/`), `.bf/<loop>.json`, and `logs/<loop>.jsonl`."""
 
 from __future__ import annotations
 
+import fnmatch
 import os
-import re
-import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -14,65 +14,129 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
-from zoneinfo import ZoneInfo
+from typing import Any, Literal
 
-from bf import config, engine, models, proc, query, records
-from bf.config import Config, EventMatch, LoopSpec
-from bf.models import AUTHORED, MAX_BATCH, Error, InputError, decode, encode, now_utc
-from bf.proc import exec_argv as exec_argv
-from bf.storage import Store, private_dir, relative, writer
+from bf import config, engine, models, proc, records
+from bf.config import Config, EventMatch, LoopSpec, ScheduleSpec
+from bf.config import due_schedule as due_schedule
+from bf.models import Error, InputError, decode, encode, now_utc
+from bf.proc import prepare_unit as prepare_unit
+from bf.records import (
+    emit_output_events as emit_output_events,
+)
+from bf.records import (
+    find_orphans,
+    load_unit_state,
+    mark_unit_state,
+    save_unit_state,
+)
+from bf.records import (
+    parse_emitted_event as parse_emitted_event,
+)
+from bf.storage import Store, private_dir, writer
 
-_ENV_SYS = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "SHELL", "TERM", "TZ", "SSH_AUTH_SOCK")
-_ENV_GUI = ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")
-_ENV_XDG = tuple(f"XDG_{k}_HOME" for k in ("CONFIG", "CACHE", "DATA", "STATE"))
-_ENV_AUTH = ("GH_TOKEN", "GITHUB_TOKEN", "CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS")
-_ENV_TLS = ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
-_ENV_PROXY = tuple(p for k in ("HTTP", "HTTPS", "NO", "ALL") for p in (f"{k}_PROXY", f"{k.lower()}_proxy"))
-_ENV_ALLOWLIST = (*_ENV_SYS, *_ENV_GUI, *_ENV_XDG, *_ENV_AUTH, *_ENV_TLS, *_ENV_PROXY)
-_GIT_KEYS = ("DIR", "WORK_TREE", "INDEX_FILE", "OBJECT_DIRECTORY", "ALTERNATE_OBJECT_DIRECTORIES", "QUARANTINE_PATH")
-_GIT_HOOK_ENV = tuple(f"GIT_{k}" for k in _GIT_KEYS)
+_GLOB_CHARS = frozenset("*?[")
+_LOOP_DIRS = ("sensors", "routines", "agents")
+_INTERPRETERS = frozenset({"sh", "bash", "zsh", "dash", "fish", "python", "python3", "uv"})
+_AGENT_DEFAULT_TIMEOUT = 900
 
 type _Events = tuple[list[dict[str, Any]], int]
-type _DueItem = tuple[LoopSpec, str, list[dict[str, Any]], int | None]
+type _DueItem = tuple[LoopSpec, str, list[dict[str, Any]], int | None, ScheduleSpec | None]
 
 
-def load_unit_state(store: Store, name: str) -> dict[str, Any]:
-    """Load `.bf/<name>.json`, returning an initialized `idle` state when absent."""
-    with suppress(FileNotFoundError):
-        state = private_dir(store, create=False)
-        if isinstance(parsed := decode(state.read(f"{name}.json", 1 << 20), f".bf/{name}.json"), dict):
-            return dict(parsed)
-    zeros = dict.fromkeys(("event_seq", "runs", "failures", "consecutive_failures", "duration_ms"), 0)
-    empty = dict.fromkeys(("last_start", "last_end", "last_success", "last_scheduled", "error"), "")
-    return {"kind": "loop", "name": name, "status": "idle", "updated": now_utc(), **empty, **zeros, "last_run": {}}
+def _script_folder(argv: Sequence[str]) -> str:
+    """Detect convention folder (`sensors`, `routines`, `agents`) from direct or interpreter-prefixed argv."""
+    if not argv:
+        return ""
+    first = argv[0].removeprefix("./")
+    if hit := next((f for f in _LOOP_DIRS if first.startswith(f"{f}/")), ""):
+        return hit
+    exe = Path(first).name
+    if exe in _INTERPRETERS or exe.startswith("python3."):
+        for tok in argv[1:]:
+            if tok.startswith("-") or (exe == "uv" and tok == "run"):
+                continue
+            cleaned = tok.removeprefix("./")
+            return next((f for f in _LOOP_DIRS if cleaned.startswith(f"{f}/")), "")
+    return ""
 
 
-def save_unit_state(store: Store, doc: dict[str, Any], *, locked: bool = False) -> None:
-    """Write `.bf/<name>.json` atomically with `0600` permissions."""
-    state, path = private_dir(store), f"{doc['name']}.json"
-    if locked:
-        state.write(path, encode(doc), mode=0o600)
+def resolve_loop(
+    store: Store, loop: LoopSpec, reserved: frozenset[str] = models.RESERVED_SOURCES
+) -> tuple[tuple[str, ...], str, records.Target, Literal["upsert", "snapshot"], int]:
+    """Resolve `(argv, ingest_source, ingest_target, ingest_mode, timeout)` via explicit `run:` or folder conventions."""
+    if loop.run:
+        argv, folder = loop.run, _script_folder(loop.run)
     else:
-        with writer(store):
-            state.write(path, encode(doc), mode=0o600)
+        found: list[tuple[str, str, os.stat_result]] = []
+        for fld in _LOOP_DIRS:
+            for ext in ("", ".sh", ".py"):
+                cand = f"{fld}/{loop.name}{ext}"
+                try:
+                    info = store.stat(cand)
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    raise Error(f"loops.{loop.name}: {cand}: expected a regular file")
+                found.append((fld, cand, info))
+        if not found:
+            raise Error(f"loops.{loop.name}: no run command and no script found in sensors/, routines/, or agents/")
+        if len(found) > 1:
+            names = ", ".join(c for _, c, _ in found)
+            raise Error(f"loops.{loop.name}: ambiguous convention scripts ({names}); keep one or set run:")
+        folder, cand, info = found[0]
+        if info.st_mode & stat.S_IXUSR:
+            argv = (cand,)
+        elif cand.endswith(".sh"):
+            argv = ("bash", cand)
+        elif cand.endswith(".py"):
+            argv = (sys.executable, cand)
+        else:
+            raise Error(f"loops.{loop.name}: {cand} is not executable; run chmod +x {cand}")
+
+    timeout = _AGENT_DEFAULT_TIMEOUT if (folder == "agents" and not loop.explicit_timeout) else loop.timeout
+    if loop.explicit_ingest:
+        return argv, loop.ingest, loop.target, loop.mode, timeout
+    if folder == "sensors" and not loop.daemon and not loop.emit:
+        if loop.name in reserved:
+            raise Error(f"loops.{loop.name}: sensor name {loop.name!r} is reserved")
+        return argv, loop.name, "memories", "upsert", timeout
+    return argv, "", "memories", "upsert", timeout
 
 
-def mark_unit_state(store: Store, name: str, **fields: Any) -> None:
-    """Atomically read-modify-write fields on `.bf/<name>.json` under `writer(store)`."""
-    with writer(store):
-        cur = load_unit_state(store, name)
-        save_unit_state(store, {**cur, "kind": "loop", "name": name, **fields}, locked=True)
+def effective_ingest(
+    store: Store, loop: LoopSpec, reserved: frozenset[str] = models.RESERVED_SOURCES
+) -> tuple[str, records.Target, str]:
+    """Return `(ingest_source, ingest_target, ingest_mode)` for status display without raising on missing scripts."""
+    if loop.explicit_ingest:
+        return loop.ingest, loop.target, loop.mode
+    if not loop.daemon and not loop.emit:
+        with suppress(Error):
+            _, src, tgt, mode, _ = resolve_loop(store, loop, reserved)
+            return src, tgt, mode
+    return "", "memories", "upsert"
 
 
-def _rule_head_matches(ev: Mapping[str, Any], r: EventMatch) -> bool:
-    return (not r.kind or ev.get("kind") == r.kind) and (not r.source or ev.get("source") == r.source)
+def _rule_head_matches(ev: Mapping[str, Any], rule: EventMatch, *, self_name: str = "") -> bool:
+    if (
+        self_name
+        and not rule.source
+        and ev.get("source") == self_name
+        and ev.get("kind") in {"loop.succeeded", "loop.failed"}
+    ):
+        return False
+    return (not rule.kind or ev.get("kind") == rule.kind) and (not rule.source or ev.get("source") == rule.source)
 
 
 def pending_events(
-    store: Store, last_seq: int, rules: tuple[EventMatch, ...], *, events_data: _Events | None = None
+    store: Store,
+    last_seq: int,
+    rules: tuple[EventMatch, ...],
+    *,
+    self_name: str = "",
+    events_data: _Events | None = None,
 ) -> _Events:
-    """Return `(matching_events, latest_seq)` since `last_seq` from `.bf/events.jsonl`."""
+    """Return `(matching_events, latest_seq)` since `last_seq` from `logs/events.jsonl`."""
     if not rules:
         return [], 0
     if events_data is not None:
@@ -84,7 +148,9 @@ def pending_events(
     if not cands:
         return [], latest
     plain_rules = [r for r in rules if not r.filter]
-    matched_idx = {i for i, ev in enumerate(cands) if any(_rule_head_matches(ev, r) for r in plain_rules)}
+    matched_idx = {
+        i for i, ev in enumerate(cands) if any(_rule_head_matches(ev, r, self_name=self_name) for r in plain_rules)
+    }
     groups: dict[str, list[EventMatch]] = {}
     for rule in rules:
         if rule.filter:
@@ -92,12 +158,15 @@ def pending_events(
     jq_bin: str | None = None
     for flt, flt_rules in groups.items():
         unmatched = (i for i in range(len(cands)) if i not in matched_idx)
-        sub_idx = [i for i in unmatched if any(_rule_head_matches(cands[i], r) for r in flt_rules)]
-        if not sub_idx:
+        if not (
+            sub_idx := [
+                i for i in unmatched if any(_rule_head_matches(cands[i], r, self_name=self_name) for r in flt_rules)
+            ]
+        ):
             continue
         jq_bin = jq_bin or proc.resolve_tool("jq")
         wrapped = (
-            f"{query.JQ_PRELUDE}\ntry ([\n{flt}\n] | "
+            f"{proc.JQ_PRELUDE}\ntry ([\n{flt}\n] | "
             "if length == 0 then false else (.[-1] // false | . != false) end) "
             'catch (if . == "disabled" then error else false end)'
         )
@@ -113,131 +182,6 @@ def pending_events(
         outs = cp.stdout.splitlines()[: len(sub_idx)]
         matched_idx.update(sub_idx[pos] for pos, ln in enumerate(outs) if ln == b"true")
     return [ev for i, ev in enumerate(cands) if i in matched_idx], latest
-
-
-def _parse_dt(raw: str) -> datetime | None:
-    with suppress(ValueError):
-        return dt if raw and (dt := datetime.fromisoformat(raw)).tzinfo is not None else None
-    return None
-
-
-def _backoff_cap(loop: LoopSpec) -> int:
-    return min((s.every for s in loop.schedules if s.every is not None), default=3600)
-
-
-def _in_backoff(doc: Mapping[str, Any], cap: int, now: datetime) -> bool:
-    fails = int(doc.get("consecutive_failures") or 0)
-    last_dt = _parse_dt(str(doc.get("last_end") or "")) if fails > 0 else None
-    return last_dt is not None and (now - last_dt).total_seconds() < min(60 * (1 << min(fails - 1, 10)), cap)
-
-
-def _sched_anchor(doc: Mapping[str, Any]) -> str:
-    return str(doc["last_scheduled"] if "last_scheduled" in doc else doc.get("last_success") or "")
-
-
-def is_schedule_due(loop: LoopSpec, state_doc: Mapping[str, Any], now: datetime, *, tz_name: str = "UTC") -> bool:
-    """Whether any duration or cron entry in `loop.schedules` is due at `now`, respecting failure backoff."""
-    if not loop.schedules or _in_backoff(state_doc, _backoff_cap(loop), now):
-        return False
-    last_dt, tz, local_now = _parse_dt(_sched_anchor(state_doc)), None, None
-    for sc in loop.schedules:
-        if sc.every is not None:
-            if last_dt is None or (now - last_dt).total_seconds() >= sc.every:
-                return True
-            continue
-        if tz is None or local_now is None:
-            tz = ZoneInfo(tz_name)
-            local_now = (now.astimezone(UTC).replace(microsecond=0) + timedelta(seconds=1)).astimezone(tz)
-        with suppress(ValueError, KeyError, TypeError):
-            if last_dt is None or last_dt.astimezone(tz) < config.prev_cron(sc.cron, local_now):
-                return True
-    return False
-
-
-def check_requires(bins: tuple[str, ...], label: str) -> list[str]:
-    return [f"{label}: missing required command {b!r} on PATH" for b in bins if shutil.which(b) is None]
-
-
-def prepare_unit(
-    store: Store,
-    name: str,
-    base_argv: Sequence[str],
-    run_id: str,
-    start_iso: str,
-    *,
-    trigger: str = "manual",
-    end_iso: str = "",
-    events: Sequence[dict[str, Any]] = (),
-    stdin_text: str = "",
-    base_env: Mapping[str, str] | None = None,
-    unit_env: Mapping[str, str] | None = None,
-) -> tuple[list[str], dict[str, str]]:
-    """Expand `{{...}}` placeholders, write `.bf/<name>.context.json`, and build layered `env`."""
-    effective_end, bf_dir = end_iso or start_iso, private_dir(store)
-    ctx_path, state_dir = f"{name}.context.json", str(bf_dir.root / name)
-    ctx_a = {"run": run_id, "kind": trigger, "loop": name, "events": list(events), "stdin": stdin_text}
-    bf_dir.write(ctx_path, encode({**ctx_a, "start": start_iso, "end": effective_end}), mode=0o600)
-    home_str = os.environ.get("HOME", "")
-    with suppress(RuntimeError):
-        home_str = str(Path.home())
-    env_map = {"{{brain}}": str(store.root), "{{home}}": home_str, "{{state}}": state_dir}
-    toks = {**env_map, "{{run}}": run_id, "{{start}}": start_iso, "{{end}}": effective_end}
-    toks["{{context}}"] = str(bf_dir.root / ctx_path)
-
-    def _sub(text: str, table: Mapping[str, str]) -> str:
-        return re.sub(r"\{\{[a-z]+\}\}", lambda m: table.get(m[0], m[0]), text)
-
-    argv = [_sub(token, toks) for token in base_argv]
-    if argv and argv[0] == "bf":
-        argv = [sys.executable, "-m", "bf", *argv[1:]]
-    elif argv and "/" in argv[0] and not Path(argv[0]).is_absolute():
-        parts = relative(argv[0])
-        if not store.exists(argv[0]):
-            raise Error(f"{name}: command {argv[0]} does not exist inside brain")
-        argv[0] = str(store.root.joinpath(*parts))
-
-    # Precedence: host allowlist < bf.yaml env: < loops.<name>.env: < .env < protected BF_*.
-    def _expand(mapping: Mapping[str, str] | None) -> dict[str, str]:
-        return {k: _sub(v, env_map) for k, v in (mapping or {}).items()}
-
-    keys = (*_ENV_ALLOWLIST, *(_GIT_HOOK_ENV if trigger == "hook" else ()))
-    env: dict[str, str] = {key: val for key in keys if (val := os.environ.get(key))}
-    env |= _expand(base_env) | _expand(unit_env) | config.load_dotenv(store)
-    bf_env = {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8", "BF_BRAIN": str(store.root), "BF_TRIGGER": trigger}
-    bf_env |= {"BF_STATE_DIR": state_dir, "BF_START": start_iso, "BF_END": effective_end}
-    return argv, {**env, **bf_env}
-
-
-def parse_emitted_event(raw_line: bytes, default_kind: str, label: str) -> tuple[str, dict[str, Any]]:
-    """Parse one emitted JSONL line into `(event_kind, payload_dict)` for both daemon and cycle loops."""
-    parsed = decode(raw_line, label)
-    if not isinstance(parsed, dict):
-        raise Error(f"{label}: emitted event must be a JSON object")
-    raw_k = parsed.get("kind")
-    if raw_k is not None and not isinstance(raw_k, str):
-        raise Error(f"{label}: event kind must be a string")
-    ev_kind = models.clean(raw_k or default_kind, f"{label} kind")
-    if not models.EVENT_KIND_RE.fullmatch(ev_kind):
-        raise Error(f"{label}: invalid event kind")
-    return ev_kind, dict(parsed)
-
-
-def emit_output_events(
-    store: Store, name: str, default_kind: str, out_bytes: bytes, *, now: datetime | None = None
-) -> int:
-    """Validate all JSONL stdout events first, then atomically append deduplicated events."""
-    if len(out_bytes) > MAX_BATCH:
-        raise Error(f"loops.{name}: emitted output exceeds {MAX_BATCH} bytes")
-    parsed_evs: list[tuple[str, dict[str, Any]]] = []
-    label = f"loops.{name}"
-    for idx, raw_ln in enumerate(out_bytes.splitlines(), 1):
-        if stripped := raw_ln.strip():
-            parsed_evs.append(parse_emitted_event(stripped, default_kind, f"{label} line {idx}"))
-    if parsed_evs:
-        with writer(store):
-            for ev_k, payload in parsed_evs:
-                records.append_event(store, ev_k, name, payload, dedupe=True, locked=True, now=now)
-    return len(parsed_evs)
 
 
 def _merge_cursor(stored: int, target: int, disk: int) -> int:
@@ -259,50 +203,96 @@ def record_run(
     cursor_seq: int | None = None,
     emit_loop_event: bool = False,
     trigger: str = "",
+    schedule_key: str = "",
 ) -> None:
-    """Update `.bf/<name>.json`, append a JSON line to `logs/<name>.log`, and optionally emit `loop.*`."""
+    """Update `.bf/<name>.json`, append a summary line to `logs/<name>.jsonl`, and optionally emit `loop.*`."""
     cfg_name, ended_iso, ok = config.load(store).name, now_utc(ended), code == 0
     with writer(store):
-        latest = load_unit_state(store, name)
-        last_ok = ended_iso if ok else str(latest.get("last_success") or "")
-        last_sched = ended_iso if ok and trigger not in {"event", "hook", "daemon"} else _sched_anchor(latest)
+        latest: dict[str, Any]
+        try:
+            latest = load_unit_state(store, name)
+        except Error:
+            latest = {"kind": "loop", "name": name, "schedule_last": {}, "last_run": {}}
+        last_ok = started_iso if ok else str(latest.get("last_success") or "")
+        last_sched = started_iso if ok and trigger == "schedule" else str(latest.get("last_scheduled") or "")
+        sched_last = dict(latest.get("schedule_last") or {}) if isinstance(latest.get("schedule_last"), dict) else {}
+        if ok and schedule_key:
+            sched_last[schedule_key] = started_iso
         consec = 0 if ok else int(latest.get("consecutive_failures") or 0) + 1
         runs, fails = int(latest.get("runs") or 0) + 1, int(latest.get("failures") or 0) + int(not ok)
         stored_seq = int(latest.get("event_seq") or 0)
         disk_seq = records.latest_event_seq(store) if ok and cursor_seq is not None else 0
         seq = _merge_cursor(stored_seq, cursor_seq, disk_seq) if ok and cursor_seq is not None else stored_seq
         raw_err = err_msg if ok else (err_msg.strip() or stderr.strip() or f"exit code {code}")
-        err_clean = models.redact_secrets(raw_err)[:4096]
+        err_clean = models.redact_secrets(raw_err)[-4096:]
         err_clean = err_clean if (ok or err_clean.strip()) else f"exit code {code}"
-        stderr_clean = models.redact_secrets(stderr)[:8192]
+        stderr_clean = models.redact_secrets(stderr)[-8192:]
         safe_sum = models.redact_value(dict(summary)) if isinstance(summary, dict) and summary else {}
-        d1 = {"kind": "loop", "name": name, "status": "ok" if ok else "failed", "updated": ended_iso}
-        d2 = {"last_start": started_iso, "last_end": ended_iso, "last_success": last_ok, "last_scheduled": last_sched}
-        d3 = {"event_seq": seq, "runs": runs, "failures": fails, "consecutive_failures": consec, "duration_ms": dur_ms}
-        save_unit_state(store, {**d1, **d2, **d3, "last_run": safe_sum, "error": err_clean}, locked=True)
+        doc = {
+            "kind": "loop",
+            "name": name,
+            "status": "ok" if ok else "failed",
+            "updated": ended_iso,
+            "last_start": started_iso,
+            "last_end": ended_iso,
+            "last_success": last_ok,
+            "last_scheduled": last_sched,
+            "schedule_last": sched_last,
+            "event_seq": seq,
+            "runs": runs,
+            "failures": fails,
+            "consecutive_failures": consec,
+            "duration_ms": dur_ms,
+            "last_run": safe_sum,
+            "error": err_clean,
+        }
+        save_unit_state(store, doc, locked=True)
         extras = {k: v for k, v in (("summary", safe_sum), ("error", err_clean), ("stderr", stderr_clean)) if v}
-        ev_a = {"brain": cfg_name, "unit": name, "kind": "loop", "run": run_id, "trigger": trigger or "loop"}
-        ev_b = {"started": started_iso, "ended": ended_iso, "duration_ms": dur_ms, "exit_code": code}
         msg, sev = f"loop.{'succeeded' if ok else 'failed'}", "INFO" if ok else "ERROR"
-        store.append_log(name, models.log_line(msg, severity=sev, time_iso=ended_iso, **ev_a, **ev_b, **extras))
+        log_meta = {
+            "brain": cfg_name,
+            "loop": name,
+            "run": run_id,
+            "trigger": trigger or "loop",
+            "started": started_iso,
+            "ended": ended_iso,
+            "duration_ms": dur_ms,
+            "exit_code": code,
+            **extras,
+        }
+        store.append_log(name, models.log_line(msg, severity=sev, time_iso=ended_iso, **log_meta))
         if emit_loop_event:
-            ev_d = {"run": run_id, "exit_code": code, "duration_ms": dur_ms}
-            records.append_event(store, f"loop.{'succeeded' if ok else 'failed'}", name, ev_d, locked=True, now=ended)
+            ev_data = {"run": run_id, "exit_code": code, "duration_ms": dur_ms}
+            records.append_event(store, msg, name, ev_data, locked=True, now=ended)
 
 
 def _bf_error_summary(run_argv: Sequence[str], out_bytes: bytes) -> str:
     if len(run_argv) < 2 or run_argv[0] != "bf" or not out_bytes.strip():
         return ""
     with suppress(Error):
-        if not isinstance(res := decode(out_bytes, "bf output", check_duplicates=False), dict):
-            return ""
-        cmd = run_argv[1]
-        subs = [res.get(k) or {} for k in ("build", "validate", "eval")] if cmd == "check" else [res]
-        probs = next((p for s in subs if isinstance(s, dict) and not s.get("ok") and (p := s.get("problems"))), None)
-        if isinstance(probs, list) and probs:
-            return "; ".join(str(p) for p in probs[:3])
-        if ev_failed := (res.get("eval") or {}).get("failed", 0):
-            return f"{ev_failed} eval case(s) failed"
+        if (
+            isinstance(res := decode(out_bytes, "bf output", check_duplicates=False), dict)
+            and not res.get("ok")
+            and isinstance(probs := res.get("problems"), list)
+            and probs
+        ):
+            errs = [str(p) for p in probs if ": warning: " not in str(p)] or [str(p) for p in probs]
+            return "; ".join(errs[:3])
+    return ""
+
+
+def _last_error_line(err_txt: str) -> str:
+    for line in reversed(err_txt.splitlines()):
+        if not (stripped := line.strip()):
+            continue
+        if stripped.startswith("{"):
+            with suppress(Error):
+                parsed = decode(stripped, "stderr", check_duplicates=False)
+                if isinstance(parsed, dict) and (
+                    msg := parsed.get("message") or parsed.get("event") or parsed.get("error")
+                ):
+                    return str(msg)
+        return stripped
     return ""
 
 
@@ -313,51 +303,84 @@ def execute_one_loop(
     trigger: str,
     events: Sequence[dict[str, Any]] = (),
     cursor_target_seq: int | None = None,
+    schedule: ScheduleSpec | None = None,
     extra_args: Sequence[str] = (),
-    stdin_bytes: bytes = b"",
     dry_run: bool = False,
     now: datetime | None = None,
     stop_event: threading.Event | None = None,
     base_env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Execute one triggered `LoopSpec`, handling `ingest`/`emit` and recording `.bf/` + `logs/`."""
+    """Execute one triggered `LoopSpec` with `BF_*` env + stdin JSON, structured stderr logs, and `ingest`/`emit`."""
+    cfg = config.load(store)
     instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
     started_iso, run_id = now_utc(instant), f"{loop.name}-{int(instant.timestamp())}-{os.urandom(3).hex()}"
-    state_doc = load_unit_state(store, loop.name)
-    last_ok = _sched_anchor(state_doc) if trigger == "schedule" else str(state_doc.get("last_success") or "")
-    last_dt = _parse_dt(last_ok)
-    win_start = (last_dt or instant) - timedelta(seconds=loop.overlap if last_dt else loop.backfill)
-    if missing := check_requires(loop.requires, f"loops.{loop.name}"):
-        raise Error("; ".join(missing))
+    try:
+        state_doc = load_unit_state(store, loop.name)
+    except Error:
+        state_doc = {"schedule_last": {}, "last_run": {}}
+    last_ok = (
+        config.sched_anchor(state_doc, schedule) if trigger == "schedule" else str(state_doc.get("last_success") or "")
+    )
+    last_dt = config.parse_dt(last_ok)
+    backfill = schedule.backfill if (schedule and schedule.backfill is not None) else loop.backfill
+    overlap = schedule.overlap if (schedule and schedule.overlap is not None) else loop.overlap
+    win_start = min(
+        (last_dt or instant) - timedelta(seconds=overlap if last_dt else backfill), instant - timedelta(seconds=1)
+    )
+    resolved_run, ingest_src, ingest_target, ingest_mode, timeout = resolve_loop(store, loop, cfg.reserved_sources)
+    if ingest_src:
+        records.require_ingest_validators(store, ingest_src, ingest_target)
+
+    b_env = cfg.env if base_env is None else base_env
+    argv, env, ctx_bytes = prepare_unit(
+        store,
+        loop.name,
+        resolved_run,
+        run_id,
+        now_utc(win_start),
+        end_iso=started_iso,
+        trigger=trigger,
+        events=events,
+        base_env=b_env,
+        unit_env=loop.env,
+    )
     if dry_run:
-        return {"loop": loop.name, "run": run_id, "status": "dry_run", "trigger": trigger}
+        ing = {"ingest": {"source": ingest_src, "target": ingest_target, "mode": ingest_mode}} if ingest_src else {}
+        return {
+            "loop": loop.name,
+            "run": run_id,
+            "status": "dry_run",
+            "trigger": trigger,
+            "argv": [*argv, *extra_args],
+            **ing,
+        }
 
     t0, summary, err_msg, err_txt = time.monotonic(), {}, "", ""
-    p_a: dict[str, Any] = {"end_iso": started_iso, "trigger": trigger, "events": events}
-    b_env = config.load(store).env if base_env is None else base_env
-    p_b: dict[str, Any] = {
-        "stdin_text": stdin_bytes.decode("utf-8", "replace"),
-        "base_env": b_env,
-        "unit_env": loop.env,
-    }
-    argv, env = prepare_unit(store, loop.name, loop.run, run_id, now_utc(win_start), **p_a, **p_b)
-    argv = [*argv, *extra_args]
-    recorded = False
+    argv, recorded = [*argv, *extra_args], False
     mark_unit_state(store, loop.name, status="running", updated=started_iso, last_start=started_iso)
     try:
-        code, out_bytes, err_txt = exec_argv(
-            argv, cwd=store.root, env=env, timeout=loop.timeout, stdin_bytes=stdin_bytes, stop_event=stop_event
+        code, out_bytes, err_txt = proc.exec_argv(
+            argv,
+            cwd=store.root,
+            env=env,
+            timeout=timeout,
+            stdin_data=ctx_bytes,
+            stop_event=stop_event,
+            on_stderr_line=records.make_stderr_logger(store, loop.name, run_id),
         )
         if stop_event is not None and stop_event.is_set() and code == 130:
             dur_ms = max(0, int((time.monotonic() - t0) * 1000))
             return {"loop": loop.name, "run": run_id, "status": "stopped", "exit_code": 130, "duration_ms": dur_ms}
         if code != 0:
-            raw_fail = err_txt or _bf_error_summary(loop.run, out_bytes) or f"exit code {code}"
+            safe_err = models.redact_secrets(err_txt)
+            raw_fail = _last_error_line(safe_err) or _bf_error_summary(resolved_run, out_bytes) or f"exit code {code}"
             err_msg = (models.redact_secrets(raw_fail).strip() or f"exit code {code}")[-1024:]
         else:
             try:
-                if loop.ingest:
-                    summary = records.ingest(store, loop.ingest, out_bytes, mode=loop.mode, now=now)
+                if ingest_src:
+                    summary = records.ingest(
+                        store, ingest_src, out_bytes, target=ingest_target, mode=ingest_mode, now=now
+                    )
                 elif loop.emit and out_bytes.strip():
                     summary = {"emitted": emit_output_events(store, loop.name, loop.emit, out_bytes, now=now)}
                 elif len(out_bytes) <= 65536 and out_bytes.decode("utf-8", "replace").strip().startswith("{"):
@@ -368,18 +391,36 @@ def execute_one_loop(
                 code, err_msg = 1, (models.redact_secrets(models.failure(error) or "failed")[-1024:] or "failed")
 
         ended, dur_ms = (datetime.now(UTC) if now is None else instant), max(0, int((time.monotonic() - t0) * 1000))
-        r_a: dict[str, Any] = {"ended": ended, "dur_ms": dur_ms, "code": code, "err_msg": err_msg, "stderr": err_txt}
-        r_b: dict[str, Any] = {"summary": summary, "cursor_seq": cursor_target_seq, "emit_loop_event": True}
-        record_run(store, loop.name, run_id, started_iso, **r_a, **r_b, trigger=trigger)
+        record_run(
+            store,
+            loop.name,
+            run_id,
+            started_iso,
+            ended=ended,
+            dur_ms=dur_ms,
+            code=code,
+            err_msg=err_msg,
+            stderr=err_txt,
+            summary=summary,
+            cursor_seq=cursor_target_seq,
+            emit_loop_event=True,
+            trigger=trigger,
+            schedule_key=schedule.raw if schedule else "",
+        )
         recorded = True
     finally:
         if not recorded:
             with suppress(Error, OSError):
                 t_end = now_utc(None if now is None else instant)
                 mark_unit_state(store, loop.name, status="stopped", updated=t_end, last_end=t_end)
-    res = {"loop": loop.name, "run": run_id, "status": "ok" if code == 0 else "failed", "exit_code": code}
-    extra = {**({"error": err_msg} if err_msg else {}), **({"summary": summary} if summary else {})}
-    return {**res, "duration_ms": dur_ms, **extra}
+    res = {
+        "loop": loop.name,
+        "run": run_id,
+        "status": "ok" if code == 0 else "failed",
+        "exit_code": code,
+        "duration_ms": dur_ms,
+    }
+    return {**res, **({"error": err_msg} if err_msg else {}), **({"summary": summary} if summary else {})}
 
 
 def record_failure(
@@ -390,8 +431,18 @@ def record_failure(
     end_dt = datetime.now(UTC) if now is None else now.astimezone(UTC)
     pre_id = f"{name}-{int(end_dt.timestamp())}-{os.urandom(3).hex()}"
     with suppress(Error, OSError):
-        r_kw: dict[str, Any] = {"ended": end_dt, "dur_ms": 0, "code": 1, "err_msg": msg, "emit_loop_event": True}
-        record_run(store, name, pre_id, now_utc(end_dt), **r_kw, trigger=trigger)
+        record_run(
+            store,
+            name,
+            pre_id,
+            now_utc(end_dt),
+            ended=end_dt,
+            dur_ms=0,
+            code=1,
+            err_msg=msg,
+            emit_loop_event=True,
+            trigger=trigger,
+        )
     return {"loop": name, "run": pre_id, "status": "failed", "exit_code": 1, "duration_ms": 0, "error": msg}
 
 
@@ -407,13 +458,21 @@ def select_due_loops(
     """Select enabled due/event cycle loops not in `exclude`, advancing idle event cursors atomically."""
     latest_disk_seq: int | None = None
     cached_events: _Events | None = None
-    selected, advance_cursors, failures = [], [], []
+    selected: list[_DueItem] = []
+    advance_cursors: list[tuple[str, int]] = []
+    failures: list[dict[str, Any]] = []
 
     for name, loop in cfg.loops.items():
         if not loop.enabled or loop.daemon or name in exclude or not (loop.schedules or loop.events):
             continue
-        state_doc = load_unit_state(store, name)
-        if _in_backoff(state_doc, _backoff_cap(loop), sched_now):
+        try:
+            state_doc = load_unit_state(store, name)
+        except Error as err:
+            if dry_run:
+                raise
+            failures.append(record_failure(store, name, "state", err, now=now))
+            continue
+        if config.backoff_remaining(state_doc, config.backoff_cap(loop), sched_now) > 0:
             continue
         cur_seq, matched_evs, target_seq = int(state_doc.get("event_seq") or 0), [], None
         if loop.events:
@@ -422,16 +481,18 @@ def select_due_loops(
             if cur_seq != latest_disk_seq and latest_disk_seq > 0:
                 cached_events = records.read_events(store) if cached_events is None else cached_events
                 try:
-                    matched_evs, target_seq = pending_events(store, cur_seq, loop.events, events_data=cached_events)
+                    matched_evs, target_seq = pending_events(
+                        store, cur_seq, loop.events, self_name=name, events_data=cached_events
+                    )
                 except models.FAILURES as err:
                     if dry_run:
                         raise
                     failures.append(record_failure(store, name, "event", err, now=now))
                     continue
         if matched_evs:
-            selected.append((loop, "event", matched_evs, target_seq))
-        elif is_schedule_due(loop, state_doc, sched_now, tz_name=cfg.timezone):
-            selected.append((loop, "schedule", [], target_seq))
+            selected.append((loop, "event", matched_evs, target_seq, None))
+        elif (matched_sched := due_schedule(loop, state_doc, sched_now, tz_name=cfg.timezone)) is not None:
+            selected.append((loop, "schedule", [], target_seq, matched_sched))
         elif target_seq is not None and target_seq != cur_seq:
             advance_cursors.append((name, target_seq))
 
@@ -439,11 +500,31 @@ def select_due_loops(
         with writer(store):
             disk_seq = records.latest_event_seq(store)
             for cursor_name, cursor_seq in advance_cursors:
-                latest = load_unit_state(store, cursor_name)
-                stored = int(latest.get("event_seq") or 0)
-                if (nxt := _merge_cursor(stored, cursor_seq, disk_seq)) != stored:
-                    save_unit_state(store, {**latest, "event_seq": nxt}, locked=True)
+                with suppress(Error):
+                    latest = load_unit_state(store, cursor_name)
+                    stored = int(latest.get("event_seq") or 0)
+                    if (nxt := _merge_cursor(stored, cursor_seq, disk_seq)) != stored:
+                        save_unit_state(store, {**latest, "event_seq": nxt}, locked=True)
     return selected, failures
+
+
+def _expand_loop_selectors(cfg: Config, selectors: Sequence[str]) -> list[str]:
+    resolved: list[str] = []
+    for token in selectors:
+        if any(ch in _GLOB_CHARS for ch in token):
+            matches = [
+                n for n, lp in cfg.loops.items() if lp.enabled and not lp.daemon and fnmatch.fnmatchcase(n, token)
+            ]
+            if not matches:
+                raise InputError(f"pattern {token!r} matched no enabled cycle loops in bf.yaml")
+            resolved.extend(matches)
+        else:
+            if token not in cfg.loops:
+                raise InputError(f"unknown loop {token!r} in bf.yaml")
+            if cfg.loops[token].daemon:
+                raise InputError(f"loop {token!r} is a daemon; run it with bf watch")
+            resolved.append(token)
+    return list(dict.fromkeys(resolved))
 
 
 def run_loops(
@@ -451,58 +532,60 @@ def run_loops(
     names: Sequence[str] = (),
     *,
     due_only: bool = False,
-    hook: str = "",
-    rebuild: bool = True,
+    all_loops: bool = False,
     extra_args: Sequence[str] = (),
-    stdin_bytes: bytes = b"",
     dry_run: bool = False,
     now: datetime | None = None,
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
-    """Run selected, due (concurrently up to `watch.concurrency`), or Git-hook loops."""
+    """Run selected, glob-matched, `--all`, or `--due` loops (concurrently up to `cfg.concurrency` for `--due`)."""
     cfg, sched_now = config.load(store), datetime.now(UTC) if now is None else now.astimezone(UTC)
-    if bool(names) + bool(due_only) + bool(hook) != 1:
-        raise InputError("specify loop names, --due, or --hook (mutually exclusive)")
-    if hook and hook not in {"pre-commit", "pre-push"}:
-        raise InputError("hook must be pre-commit or pre-push")
-    if bad := next((w for w in names if w not in cfg.loops), ""):
-        raise InputError(f"unknown loop {bad!r} in bf.yaml")
-    if dm := next((w for w in names if cfg.loops[w].daemon), ""):
-        raise InputError(f"loop {dm!r} is a daemon; run it with bf watch")
-    if extra_args and (due_only or len(names) > 1):
-        raise InputError("passthrough -- arguments require a single loop or --hook")
+    if bool(names) + bool(due_only) + bool(all_loops) != 1:
+        raise InputError("specify loop names/patterns, --due, or --all (mutually exclusive)")
+    if extra_args and (due_only or all_loops):
+        raise InputError("passthrough -- arguments require a single loop")
 
-    built = engine.build(store, now=now, incremental=True) if due_only and rebuild and not dry_run else None
+    built = engine.build(store, now=now) if due_only and not dry_run else None
     results: list[dict[str, Any]] = []
     if due_only:
         selected, pre_fails = select_due_loops(store, cfg, sched_now=sched_now, dry_run=dry_run, now=now)
         results.extend(pre_fails)
-    elif hook:
-        selected = [
-            (lp, "hook", [], None) for lp in cfg.loops.values() if lp.enabled and not lp.daemon and hook in lp.hooks
-        ]
+    elif all_loops:
+        selected = [(lp, "manual", [], None, None) for lp in cfg.loops.values() if lp.enabled and not lp.daemon]
     else:
-        selected = [(cfg.loops[n], "manual", [], None) for n in dict.fromkeys(names)]
+        matched_names = _expand_loop_selectors(cfg, names)
+        if extra_args and len(matched_names) > 1:
+            raise InputError("passthrough -- arguments require a single loop")
+        selected = [(cfg.loops[n], "manual", [], None, None) for n in matched_names]
 
     def run_item(item: _DueItem, *, stop: threading.Event | None = stop_event) -> dict[str, Any]:
-        loop, trig, evs, seq_target = item
+        loop, trig, evs, seq_target, sched = item
         if stop is not None and stop.is_set():
             return {"loop": loop.name, "status": "stopped", "exit_code": 130, "duration_ms": 0}
         try:
-            e_a: dict[str, Any] = {"trigger": trig, "events": evs, "cursor_target_seq": seq_target}
-            e_b: dict[str, Any] = {"extra_args": extra_args, "stdin_bytes": stdin_bytes, "dry_run": dry_run}
-            return execute_one_loop(store, loop, **e_a, **e_b, now=now, stop_event=stop, base_env=cfg.env)
+            return execute_one_loop(
+                store,
+                loop,
+                trigger=trig,
+                events=evs,
+                cursor_target_seq=seq_target,
+                schedule=sched,
+                extra_args=extra_args,
+                dry_run=dry_run,
+                now=now,
+                stop_event=stop,
+                base_env=cfg.env,
+            )
         except models.FAILURES as err:
             if not due_only or dry_run:
                 raise
             return record_failure(store, loop.name, trig, err, now=now)
 
-    if due_only and not dry_run and len(selected) > 1 and cfg.watch.concurrency > 1:
+    if due_only and not dry_run and len(selected) > 1 and cfg.concurrency > 1:
         local_stop = stop_event or threading.Event()
-        pool = ThreadPoolExecutor(max_workers=min(cfg.watch.concurrency, len(selected)))
+        pool = ThreadPoolExecutor(max_workers=min(cfg.concurrency, len(selected)))
         try:
-            futs = [pool.submit(run_item, it, stop=local_stop) for it in selected]
-            results.extend(f.result() for f in futs)
+            results.extend(f.result() for f in [pool.submit(run_item, it, stop=local_stop) for it in selected])
         except BaseException:
             local_stop.set()
             pool.shutdown(wait=True, cancel_futures=True)
@@ -515,155 +598,48 @@ def run_loops(
             results.append(run_item(item))
 
     ok_all = (built is None or bool(built["ok"])) and all(r["status"] in {"ok", "dry_run", "stopped"} for r in results)
-    out_d = {"brain": cfg.name, "ok": ok_all, "ran": len(results), "results": results}
-    return {**out_d, "problems": list(built["problems"])} if built and built["problems"] else out_d
+    out: dict[str, Any] = {"brain": cfg.name, "ok": ok_all, "ran": len(results), "results": results}
+    return {**out, "problems": list(built["problems"])} if built and built["problems"] else out
 
 
-def _log_error_fallback(store: Store, name: str) -> str:
-    with suppress(Error, OSError, FileNotFoundError):
-        tail, _ = private_dir(store, "logs", create=False).read_tail(f"{name}.log", 65536)
-        for raw_ln in reversed(tail.splitlines()):
-            if stripped := raw_ln.strip():
-                with suppress(Error):
-                    if isinstance(entry := decode(stripped, f"logs/{name}.log", check_duplicates=False), dict):
-                        if raw := str(entry.get("error") or "").strip() or str(entry.get("stderr") or "").strip():
-                            return models.redact_secrets(raw)[:1024]
-                        if type(ec := entry.get("exit_code")) is int and ec != 0:
-                            return f"exit code {ec}"
-                break
-    return "last run failed"
-
-
-def reset_loops(store: Store, names: Sequence[str]) -> dict[str, Any]:
-    """Reset `.bf/<loop>.json` and `.bf/<loop>.context.json` state for named loops back to idle."""
+def reset_loops(store: Store, names: Sequence[str], *, dry_run: bool = False) -> dict[str, Any]:
+    """Reset `.bf/<loop>.json` state for named loops back to idle."""
     cfg = config.load(store)
     if not names:
         raise InputError("--reset requires one or more loop names")
     if bad := next((w for w in names if w not in cfg.loops), ""):
         raise InputError(f"unknown loop {bad!r} in bf.yaml")
-    unique_names = list(dict.fromkeys(names))
     reset_done: list[str] = []
-    with suppress(FileNotFoundError), writer(store):
+    if dry_run:
+        with suppress(FileNotFoundError):
+            bf_dir = private_dir(store, create=False)
+            existing = [name for name in dict.fromkeys(names) if bf_dir.exists(f"{name}.json")]
+            return {"ok": True, "brain": cfg.name, "reset": existing, "dry_run": True}
+        return {"ok": True, "brain": cfg.name, "reset": [], "dry_run": True}
+    with writer(store), suppress(FileNotFoundError):
         bf_dir = private_dir(store, create=False)
-        for name in unique_names:
-            removed_any = False
-            for leaf in (f"{name}.json", f"{name}.context.json"):
-                if bf_dir.exists(leaf):
-                    bf_dir.delete(leaf, durable=False)
-                    removed_any = True
-            if removed_any:
+        for name in dict.fromkeys(names):
+            if bf_dir.exists(f"{name}.json"):
+                bf_dir.delete(f"{name}.json", durable=False)
                 reset_done.append(name)
         if reset_done:
             store.sync_dirs([".bf"])
-    return {"ok": True, "brain": cfg.name, "reset": reset_done}
+    return {"ok": True, "brain": cfg.name, "reset": reset_done, "dry_run": False}
 
 
-def status_summary(
-    store: Store,
-    *,
-    check: bool = False,
-    all_units: bool = False,
-    fields: Sequence[str] | str | None = None,
-    prune: bool = False,
-) -> dict[str, Any]:
-    """Return compact counts, failing attention loops, orphaned `.bf/` states, and optional `loops`."""
-    from bf import index
-
-    wanted, cfg, problems, attention, loops_out = engine.parse_fields(fields), config.load(store), [], [], {}
-    for name, loop in cfg.loops.items():
-        doc = load_unit_state(store, name)
-        st, consec = str(doc.get("status") or "idle"), int(doc.get("consecutive_failures") or 0)
-        err = str(doc.get("error") or "").strip() or (_log_error_fallback(store, name) if st == "failed" else "")
-        mode = "daemon" if loop.daemon else "cycle"
-        if loop.enabled:
-            if check:
-                problems.extend(check_requires(loop.requires, f"loops.{name}"))
-            if st == "failed" or consec > 0:
-                reason = "last run failed" if st == "failed" else f"{consec} consecutive failure(s)"
-                problems.append(f"loops.{name}: {reason}")
-                att = {"kind": "loop", "mode": mode, "name": name, "status": st, "failed": st == "failed"}
-                attention.append({**att, "consecutive_failures": consec, **({"error": err} if err else {})})
-        lr = doc.get("last_run") if isinstance(doc.get("last_run"), dict) and doc.get("last_run") else None
-        extra_pairs = (
-            ("description", loop.description),
-            ("ingest_mode", loop.mode if loop.ingest else ""),
-            ("last_run", lr),
-            ("error", err),
-        )
-        extra_i = {k: v for k, v in extra_pairs if v}
-        base_i = {"enabled": loop.enabled, "mode": mode, "status": st, "last_success": doc.get("last_success", "")}
-        loops_out[name] = {**base_i, "consecutive_failures": consec, **extra_i}
-
-    events_seq, known_units, orphaned_states, orphaned_contexts = (
-        records.latest_event_seq(store),
-        set(cfg.loops),
-        [],
-        [],
-    )
-    with suppress(FileNotFoundError):
-        private_dir(store, create=False)
-        for p, _ in store.walk(".bf", ordered=True, recursive=False):
-            if p.count("/") != 1 or not p.endswith(".json"):
-                continue
-            if p.endswith(".context.json"):
-                if (s := p[4:-13]) not in known_units:
-                    orphaned_contexts.append(s)
-            elif (s := p[4:-5]) not in known_units:
-                orphaned_states.append(s)
-
-    notes_total = len(index.authored_notes(store))
-    rec_total, rec_sources = 0, set()
-    active_mem_sources = set(AUTHORED)
-    for src in index.valid_memory_sources(store):
-        active_mem_sources.add(src)
-        if src in AUTHORED:
-            continue
-        src_count = sum(
-            1 for p, _ in store.walk(f"memories/{src}", ordered=False, recursive=False) if p.endswith(".json")
-        )
-        if src_count:
-            rec_total += src_count
-            if rec_total > models.MAX_TOTAL_FILES:
-                raise Error(f"memories exceeds the {models.MAX_TOTAL_FILES:,}-entry total scan limit")
-            rec_sources.add(src)
-
+def prune_state(store: Store, *, dry_run: bool = False) -> dict[str, Any]:
+    """Delete orphaned `.bf/<loop>.json` state files."""
+    cfg = config.load(store)
+    orphans = find_orphans(store, set(cfg.loops))
+    if dry_run or not orphans:
+        return {"ok": True, "brain": cfg.name, "pruned": orphans, "dry_run": dry_run}
     pruned: list[str] = []
-    if prune:
-        with writer(store):
-            with suppress(FileNotFoundError):
-                bf_dir = private_dir(store, create=False)
-                for orphan in sorted(set(orphaned_states) | set(orphaned_contexts)):
-                    deleted_any = False
-                    for leaf in (f"{orphan}.json", f"{orphan}.context.json"):
-                        if bf_dir.exists(leaf):
-                            bf_dir.delete(leaf, durable=False)
-                            deleted_any = True
-                    if deleted_any:
-                        pruned.append(orphan)
-                if pruned:
-                    store.sync_dirs([".bf"])
-            pruned.extend(index.prune_cache_shards(store, active_mem_sources, locked=True))
-        orphaned_states = []
-
-    skill_outdated = index.skill_is_outdated(store)
-    if skill_outdated and check:
-        problems.append("skills/bf/SKILL.md: differs from installed bf; refresh from package")
-
-    counts = {"notes": notes_total, "records": rec_total, "sources": len(rec_sources), "loops": len(cfg.loops)}
-    inside = False
-    with suppress(Error):
-        inside = config.inside_brain() is not None
-    desc_d = {"description": cfg.description} if cfg.description else {}
-    skill_d = {"skill_outdated": True} if skill_outdated else {}
-    prune_d = {"pruned": pruned} if prune else {}
-    out_a = {"brain": cfg.name, **desc_d, "ok": not problems, "inside_brain": inside, "events_seq": events_seq}
-    out_b = {
-        "counts": counts,
-        "attention": attention,
-        "orphaned_states": orphaned_states,
-        **skill_d,
-        **prune_d,
-        "problems": problems,
-    }
-    out: dict[str, Any] = {**out_a, **out_b, **({"loops": loops_out} if all_units else {})}
-    return {k: out[k] for k in wanted if k in out} if wanted is not None else out
+    with writer(store), suppress(FileNotFoundError):
+        bf_dir = private_dir(store, create=False)
+        for name in orphans:
+            if bf_dir.exists(f"{name}.json"):
+                bf_dir.delete(f"{name}.json", durable=False)
+                pruned.append(name)
+        if pruned:
+            store.sync_dirs([".bf"])
+    return {"ok": True, "brain": cfg.name, "pruned": sorted(pruned), "dry_run": False}

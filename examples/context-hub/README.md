@@ -2,13 +2,14 @@
 
 Answer one question across Google Workspace, Jira, GitHub, and Google Cloud fixtures: **"Can the New website launch, what remains, and why did we choose one page?"** Everything runs offline from local JSON fixtures.
 
-| Path                      | Purpose                                                                                              |
-| ------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `bf.yaml`                 | YAML configuration (`version: 16`, `name: context-demo`).                                            |
-| `schemas/jira.json`       | Per-source JSON Schema enforcing `type`, `status`, and `links` on `memories/jira/*.json`.            |
-| `fixtures/*.json`         | Offline JSON fixtures for `workspace`, `jira`, `github`, `gcloud`, plus `jira-done.json`.            |
-| `projects/new-website.md` | Authoritative Markdown project note with `attr_list` metadata on headings, links, blocks, and tasks. |
-| `sensors/demo.py`         | Normalizes `fixtures/TOOL.json` into unified JSON records piped into `bf ingest`.                    |
+| Path                      | Purpose                                                                                               |
+| ------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `bf.yaml`                 | YAML configuration (`version: 17`, `name: context-demo`).                                             |
+| `schemas/*.json`          | Required per-source JSON Schemas (`projects`, `workspace`, `jira`, `github`, `gcloud`).               |
+| `fixtures/*.json`         | Offline JSON fixtures for `workspace`, `jira`, `github`, `gcloud`, plus `jira-done.json`.             |
+| `projects/new-website.md` | Authoritative Markdown project note with heading `#id` anchors, link `{rel=...}` metadata, and tasks. |
+| `sensors/demo.py`         | Normalizes `fixtures/TOOL.json` into unified JSON records piped into `bf ingest`.                     |
+| `evals/smoke.py`          | Runnable Python/pytest retrieval check invoking `bf query` and `bf read`.                             |
 
 ## Run on a disposable copy
 
@@ -22,18 +23,19 @@ cd "$context_demo/brain"
 bf() { uv run --project "$bf_checkout" bf "$@"; }
 ```
 
-## 1. Ingest four tools and compile Markdown to JSON
+## 1. Ingest four tools and compile Markdown to JSONL
 
 ```bash
 for tool in workspace jira github gcloud; do
   python3 sensors/demo.py "$tool" 2026-09-26T12:00:00Z | bf ingest "$tool" --mode snapshot
 done
+bf build
 bf check
 ```
 
-`bf check` reports `"ok":true` with `1` note and `4` records. Both the compiled Markdown project (`memories/projects/new-website.json`) and the four sensor folders (`memories/{workspace,jira,github,gcloud}/*.json`) live as individual JSON files under `memories/`.
+`bf check` reports `"ok":true` with `1` note and `4` records. Both the compiled Markdown project (`memories/projects.jsonl`) and the four sensor sources (`memories/{workspace,jira,github,gcloud}.jsonl`) live as flat JSONL files under `memories/`.
 
-## 2. Query pure JSON records (`bf query`, `jq`, `rg`)
+## 2. Query JSONL records (`bf query`, `jq`, `rg`)
 
 ```bash
 # Every record linked to projects/new-website.md across all four tools
@@ -50,7 +52,7 @@ bf query --jq '{source, kind, ref, title}'
 
 ## 3. Record the launch hold decision
 
-Update `projects/new-website.md` dated `2026-09-27` citing all four records with `attr_list` metadata, rebuild `memories/projects/new-website.json`, and check `bf review`:
+Update `projects/new-website.md` dated `2026-09-27` citing all four records with `attr_list` metadata, rebuild `memories/projects.jsonl`, and check `bf review`:
 
 ```bash
 cat > projects/new-website.md <<'EOF'
@@ -67,7 +69,6 @@ summary: Launch a product website that explains the product before signup.
 ## Decision {#decision owner=product}
 
 Start with a single product page: visitors need a clear explanation before signing up. Evidence: [Workspace brief](workspace:brief){rel=cites}.
-{: #single-page confidence=high}
 
 ## Launch review {#launch-review gate=accessibility}
 
@@ -76,8 +77,9 @@ Hold public launch. The [implementation](github:implementation){rel=implements} 
 ## Next actions
 
 - [ ] Run the keyboard navigation check.
-  {: #task-a11y priority=p1}
+  {: priority=p1}
 EOF
+bf build
 bf check
 bf review
 ```

@@ -13,7 +13,7 @@ body:
     attributes:
       label: Command
       description: The command that misbehaved.
-      placeholder: bf validate --brain /tmp/demo
+      placeholder: bf check --brain /tmp/demo
     validations:
       required: true
   - type: textarea
@@ -35,7 +35,7 @@ body:
     id: status
     attributes:
       label: Review or validation output
-      description: Redacted output of `bf validate` or `bf review`.
+      description: Redacted output of `bf check` or `bf review`.
       render: text
   - type: input
     id: version

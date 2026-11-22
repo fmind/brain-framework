@@ -7,9 +7,8 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote
 
 import pytest
 import yaml
@@ -29,7 +28,7 @@ def test_models_sanitization_json_and_dates() -> None:
     with pytest.raises(Error, match="forbidden control"):
         models.clean_text("bad\x00byte")
 
-    assert models.FORMAT == 16
+    assert models.FORMAT == 17
     assert not models.invisible("plain-ascii")
     assert not models.invisible("éàü")
     assert models.invisible("bidir\u202eattack")
@@ -110,7 +109,7 @@ def test_check_version_rejects_missing_bool_and_wrong_versions() -> None:
         models.check_version({}, "bf.yaml")
     with pytest.raises(FormatError, match="declares version 11"):
         models.check_version({"version": 11}, "bf.yaml")
-    for legacy in (13, 14, 15):
+    for legacy in (13, 14, 15, 16):
         with pytest.raises(FormatError, match=rf"declares version {legacy}"):
             models.check_version({"version": legacy}, "bf.yaml")
     with pytest.raises(FormatError, match="declares an invalid version"):
@@ -286,9 +285,10 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
         with pytest.raises(Error, match="libyaml"):
             config.yaml_object(b"a: 1\n")
 
-    # Brain selection precedence: --brain -> BF_BRAIN -> nearest enclosing bf.yaml -> Error.
+    # Brain selection precedence: --brain -> nearest enclosing bf.yaml -> BF_BRAIN -> BRAIN_LOCATION -> ~/brain -> Error.
     monkeypatch.delenv("BF_BRAIN", raising=False)
-    monkeypatch.delenv("DEFAULT_BRAIN_PATH", raising=False)
+    monkeypatch.delenv("BRAIN_LOCATION", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     monkeypatch.chdir(tmp_path)
     with pytest.raises(Error, match="no brain selected"):
         config.select()
@@ -321,93 +321,92 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.chdir(b2 / "projects")
     assert config.inside_brain() is not None
     assert config.load(config.select()).name == "beta"
-    monkeypatch.setenv("BF_BRAIN", "beta")
-    assert config.select().root == b2.resolve()  # bare BF_BRAIN matching bf.yaml name inside brain
-    monkeypatch.setenv("BF_BRAIN", "b2")
-    assert config.select().root == b2.resolve()  # bare BF_BRAIN matching enclosing brain folder
-    monkeypatch.setenv("BF_BRAIN", "alpha")
-    with pytest.raises(Error, match="does not exist"):
-        config.select()
+    # Enclosing bf.yaml beats BF_BRAIN and BRAIN_LOCATION; --brain always wins!
+    monkeypatch.setenv("BF_BRAIN", str(b1))
+    monkeypatch.setenv("BRAIN_LOCATION", str(b1))
+    assert config.load(config.select()).name == "beta"
+    assert config.load(config.select(str(b1))).name == "alpha"
+    monkeypatch.chdir(tmp_path)
+    assert config.inside_brain() is None
+    assert config.load(config.select()).name == "alpha"  # BF_BRAIN outside brain
     monkeypatch.setenv("BF_BRAIN", str(tmp_path / "missing-brain"))
     with pytest.raises(Error, match="does not exist"):
         config.select()
     monkeypatch.delenv("BF_BRAIN")
-    monkeypatch.setenv("DEFAULT_BRAIN_PATH", str(b1))
-    assert config.load(config.select()).name == "beta"  # enclosing bf.yaml beats DEFAULT_BRAIN_PATH!
-    bad_named = tmp_path / "bad-named"
-    bad_named.mkdir()
-    (bad_named / "bf.yaml").write_text("not: [valid: yaml")
-    monkeypatch.chdir(bad_named)
-    monkeypatch.setenv("BF_BRAIN", "bad-named")
-    assert config.select().root == bad_named.resolve()  # falls back to folder name when bf.yaml is invalid
-    monkeypatch.delenv("BF_BRAIN")
-    monkeypatch.chdir(tmp_path)
-    assert config.inside_brain() is None
-    assert config.load(config.select()).name == "alpha"  # outside brain -> DEFAULT_BRAIN_PATH
-    monkeypatch.setenv("BF_BRAIN", str(b2))
-    assert config.load(config.select()).name == "beta"  # BF_BRAIN beats DEFAULT_BRAIN_PATH
-    assert config.load(config.select(str(b1))).name == "alpha"  # --brain beats BF_BRAIN
+    assert config.load(config.select()).name == "alpha"  # BRAIN_LOCATION fallback
+    monkeypatch.delenv("BRAIN_LOCATION")
+    home_brain = tmp_path / "empty-home" / "brain"
+    home_brain.mkdir(parents=True)
+    (home_brain / "bf.yaml").write_text(f"version: {models.FORMAT}\nname: homebrain\n")
+    assert config.load(config.select()).name == "homebrain"  # ~/brain fallback
+    assert config.load(config.select(str(b2))).name == "beta"  # --brain beats all
 
-    # Cross-brain resolution (`resolve_brain`): self, `brains:` map, sibling `../<name>`, percent-encoded, and unknown.
+    # Cross-brain resolution (`resolve_brain`): self or declared `brains:` only (fails closed on undeclared).
     sib_path.mkdir()
     (sib_path / "bf.yaml").write_text(f"version: {models.FORMAT}\nname: sib\n")
     s1 = Store(b1)
     assert config.resolve_brain(s1, cfg1, "").root == b1.resolve()
     assert config.resolve_brain(s1, cfg1, "alpha").root == b1.resolve()
     assert config.resolve_brain(s1, cfg1, "sib").root == sib_path.resolve()
-    assert config.resolve_brain(s1, cfg1, "b2").root == b2.resolve()
-    assert config.resolve_brain(s1, cfg1, "b2").root == b2.resolve()
-    assert config.resolve_brain(s1, cfg1, quote(str(b2), safe="")).root == b2.resolve()
-    assert config.resolve_brain(s1, cfg1, quote("../b2", safe="")).root == b2.resolve()
-    assert config.resolve_brain(s1, cfg1, "sib", declared_only=True).root == sib_path.resolve()
     with pytest.raises(Error, match=r"not declared in bf\.yaml brains:"):
-        config.resolve_brain(s1, cfg1, "b2", declared_only=True)
-    with pytest.raises(Error, match="unknown brain"):
+        config.resolve_brain(s1, cfg1, "b2")
+    with pytest.raises(Error, match=r"not declared in bf\.yaml brains:"):
         config.resolve_brain(s1, cfg1, "nonexistent-brain")
-    with pytest.raises(Error, match="percent-encoding"):
-        config.resolve_brain(s1, cfg1, "%FF")
 
-    # Unified loops (`description`, `on: daemon` | `{schedules, events, hooks}`, `window: {backfill, overlap}`, `ingest`, `emit`, env, .env).
+    # Unified loops (`notes`, `concurrency`, `defaults`, `when: daemon` | triggers, `window`, `ingest`, `emit`, env, .env).
     rich_b = tmp_path / "rich"
     rich_b.mkdir()
     (rich_b / "bf.yaml").write_text(
         f"version: {models.FORMAT}\nname: rich\ndescription: Rich test brain.\n"
-        "timezone: Europe/Paris\nenv:\n  GWS_DIR: '{{home}}/.config/gws'\n  EMPTY_VAR: ''\n"
+        "timezone: Europe/Paris\nconcurrency: 8\n"
+        "notes: [concepts, projects, actions, research]\n"
+        "env:\n  GWS_DIR: /var/lib/gws\n  EMPTY_VAR: ''\n"
+        "defaults:\n  timeout: 4m\n  window:\n    backfill: 2d\n    overlap: 5m\n"
         "loops:\n"
         "  sync:\n"
         "    description: Sync records.\n"
-        "    on:\n      schedules: 10m\n      hooks: pre-commit\n      events: records.ingested\n"
-        "    window:\n      backfill: 2d\n      overlap: 5m\n"
-        "    run: [echo, hi]\n"
-        "    ingest:\n      source: sync-src\n      mode: snapshot\n"
+        "    when:\n      - 10m\n      - event: records.ingested\n"
+        "    run: [echo, base, hi]\n"
+        "    ingest:\n      source: sync-src\n      target: usages\n      mode: snapshot\n"
         "    timeout: 2m\n"
         "    env:\n      EXTRA_VAR: custom\n"
         "  digest:\n"
-        "    on:\n      schedules:\n        - 1h\n        - '0 8 * * *'\n"
-        "      events:\n        kind: loop.message\n        source: chat\n"
+        "    when:\n"
+        "      - every: 1h\n        backfill: 1d\n        overlap: 5m\n"
+        "      - cron: '0 8 * * *'\n        backfill: 1w\n"
+        "      - event:\n          kind: loop.message\n          source: chat\n"
         "    run: [claude, -p, prompts/digest.md]\n"
         "    emit: loop.event\n"
         "  short-ing:\n    run: [echo, '[]']\n    ingest: upsert\n"
         "  short-snap:\n    run: [echo, '[]']\n    ingest: snapshot\n"
-        "  chat:\n    on: daemon\n    run: [echo, listen]\n    emit: loop.message\n"
-        "  daemon:\n    on: daemon\n    run: [echo, serve]\n"
-        "watch:\n  interval: 1s\n  concurrency: 8\n"
+        "  chat:\n    when: daemon\n    run: [echo, listen]\n    emit: loop.message\n"
+        "  daemon:\n    when: daemon\n    run: [echo, serve]\n"
+        "  conv-only:\n    when: 15m\n"
     )
     rich_store = Store(rich_b)
     rich_cfg = config.load(rich_store)
     assert rich_cfg.description == "Rich test brain."
     assert rich_cfg.timezone == "Europe/Paris"
-    assert rich_cfg.env == {"GWS_DIR": "{{home}}/.config/gws", "EMPTY_VAR": ""}
+    assert rich_cfg.concurrency == 8
+    assert rich_cfg.notes == ("concepts", "projects", "actions", "research")
+    assert rich_cfg.env == {"GWS_DIR": "/var/lib/gws", "EMPTY_VAR": ""}
     assert rich_cfg.loops["sync"].description == "Sync records."
+    assert rich_cfg.loops["sync"].run == ("echo", "base", "hi")
     assert rich_cfg.loops["sync"].schedules[0].every == 600
     assert rich_cfg.loops["sync"].events == (config.EventMatch(kind="records.ingested"),)
-    assert [(s.every, s.cron) for s in rich_cfg.loops["digest"].schedules] == [(3600, ""), (None, "0 8 * * *")]
+    assert [(s.every, s.cron, s.backfill, s.overlap) for s in rich_cfg.loops["digest"].schedules] == [
+        (3600, "", 86_400, 300),
+        (None, "0 8 * * *", 604_800, None),
+    ]
     assert rich_cfg.loops["digest"].emit == "loop.event"
     assert rich_cfg.loops["sync"].backfill == 172_800
     assert rich_cfg.loops["sync"].overlap == 300
     assert rich_cfg.loops["sync"].timeout == 120
-    assert (rich_cfg.loops["sync"].ingest, rich_cfg.loops["sync"].mode) == ("sync-src", "snapshot")
-    assert rich_cfg.loops["sync"].hooks == ("pre-commit",)
+    assert (rich_cfg.loops["sync"].ingest, rich_cfg.loops["sync"].target, rich_cfg.loops["sync"].mode) == (
+        "sync-src",
+        "usages",
+        "snapshot",
+    )
     assert rich_cfg.loops["sync"].env == {"EXTRA_VAR": "custom"}
     assert (rich_cfg.loops["short-ing"].ingest, rich_cfg.loops["short-ing"].mode) == ("short-ing", "upsert")
     assert (rich_cfg.loops["short-snap"].ingest, rich_cfg.loops["short-snap"].mode) == ("short-snap", "snapshot")
@@ -417,16 +416,16 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     assert rich_cfg.loops["daemon"].daemon is True
     assert rich_cfg.loops["daemon"].run == ("echo", "serve")
     assert rich_cfg.loops["daemon"].emit == ""
-    assert (rich_cfg.watch.interval, rich_cfg.watch.concurrency) == (1.0, 8)
+    assert rich_cfg.loops["conv-only"].run == ()
+    assert rich_cfg.loops["conv-only"].timeout == 240
     sec_b = tmp_path / "sec-watch"
     sec_b.mkdir()
     (sec_b / "bf.yaml").write_text(
-        f"version: {models.FORMAT}\nname: sec\nwatch:\n  interval: 2\nloops:\n"
-        "  hk:\n    on:\n      hooks: [pre-commit, pre-push]\n    run: [echo]\n"
+        f"version: {models.FORMAT}\nname: sec\nloops:\n  ev:\n    when:\n      event: custom.ping\n    run: [echo]\n"
     )
     sec_cfg = config.load(Store(sec_b))
-    assert (sec_cfg.watch.interval, sec_cfg.watch.concurrency) == (2.0, 4)
-    assert sec_cfg.loops["hk"].hooks == ("pre-commit", "pre-push")
+    assert sec_cfg.concurrency == 4
+    assert sec_cfg.loops["ev"].events == (config.EventMatch(kind="custom.ping"),)
 
     # Optional gitignored `.env` loading + edge cases:
     assert config.load_dotenv(rich_store) == {}
@@ -461,31 +460,40 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
         rich_store.write(".env", bad_env_bytes, mode=0o600)
         with pytest.raises(Error, match=env_err):
             config.load_dotenv(rich_store)
-    cache_b = tmp_path / "reserved-cache-loop"
-    cache_b.mkdir()
-    (cache_b / "bf.yaml").write_text(f"version: {models.FORMAT}\nname: rc\nloops:\n  cache:\n    run: [echo]\n")
+    ev_b = tmp_path / "reserved-events-loop"
+    ev_b.mkdir()
+    (ev_b / "bf.yaml").write_text(f"version: {models.FORMAT}\nname: rc\nloops:\n  events:\n    run: [echo]\n")
     with pytest.raises(Error, match="reserved"):
-        config.load(Store(cache_b))
+        config.load(Store(ev_b))
 
     for idx, (bad_yaml, err_match) in enumerate(
         (
             (f"version: {models.FORMAT}\nname: badtz\ntimezone: Not/AZone\n", "unknown IANA timezone"),
-            (f"version: {models.FORMAT}\nname: baddef\ndefaults:\n  post: chat\n", "unknown property 'defaults'"),
+            (f"version: {models.FORMAT}\nname: baddef\ndefaults:\n  post: chat\n", "unknown property 'post'"),
             (
-                f"version: {models.FORMAT}\nname: noexec\nloops:\n  l1:\n    on:\n      schedules: 5m\n",
-                "missing required 'run'",
+                f"version: {models.FORMAT}\nname: badtpl\ntemplates:\n  s:\n    run: [echo]\n",
+                "unknown property 'templates'",
             ),
             (
-                f"version: {models.FORMAT}\nname: badcron\nloops:\n  l1:\n    on:\n      schedules: 'not a cron'\n    run: [echo]\n",
+                f"version: {models.FORMAT}\nname: baduse\nloops:\n  l1:\n    use: s\n    run: [echo]\n",
+                "unknown property 'use'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: badargs\nloops:\n  l1:\n    args: [a]\n    run: [echo]\n",
+                "unknown property 'args'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: badreq\nloops:\n  l1:\n    requires: [git]\n    run: [echo]\n",
+                "unknown property 'requires'",
+            ),
+            (f"version: {models.FORMAT}\nname: badwatch\nwatch:\n  interval: 1s\n", "unknown property 'watch'"),
+            (
+                f"version: {models.FORMAT}\nname: badcron\nloops:\n  l1:\n    when: 'not a cron'\n    run: [echo]\n",
                 "duration .*, @macro, or 5-field cron",
             ),
             (
-                f"version: {models.FORMAT}\nname: singon\nloops:\n  l1:\n    on:\n      schedule: 5m\n    run: [echo]\n",
-                "unknown property 'schedule'",
-            ),
-            (
-                f"version: {models.FORMAT}\nname: singhk\nloops:\n  l1:\n    on:\n      hook: pre-commit\n    run: [echo]\n",
-                "unknown property 'hook'",
+                f"version: {models.FORMAT}\nname: legon\nloops:\n  l1:\n    on:\n      schedules: 5m\n    run: [echo]\n",
+                "unknown property 'on'",
             ),
             (
                 f"version: {models.FORMAT}\nname: resing\nloops:\n  l1:\n    run: [echo]\n    ingest:\n      source: concepts\n",
@@ -493,6 +501,10 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
             ),
             (
                 f"version: {models.FORMAT}\nname: resing2\nloops:\n  concepts:\n    run: [echo]\n    ingest: upsert\n",
+                "reserved",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: rescustom\nnotes: [wiki]\nloops:\n  wiki:\n    run: [echo]\n    ingest: upsert\n",
                 "reserved",
             ),
             (
@@ -504,23 +516,19 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
                 "conflicting properties",
             ),
             (
-                f"version: {models.FORMAT}\nname: dwin\nloops:\n  l1:\n    on: daemon\n    window:\n      backfill: 1h\n    run: [echo]\n",
+                f"version: {models.FORMAT}\nname: dwin\nloops:\n  l1:\n    when: daemon\n    window:\n      backfill: 1h\n    run: [echo]\n",
                 "conflicting properties",
             ),
             (
-                f"version: {models.FORMAT}\nname: ding\nloops:\n  l1:\n    on: daemon\n    ingest: upsert\n    run: [echo]\n",
+                f"version: {models.FORMAT}\nname: ding\nloops:\n  l1:\n    when: daemon\n    ingest: upsert\n    run: [echo]\n",
                 "conflicting properties",
             ),
             (
-                f"version: {models.FORMAT}\nname: dto\nloops:\n  l1:\n    on: daemon\n    timeout: 1m\n    run: [echo]\n",
+                f"version: {models.FORMAT}\nname: dto\nloops:\n  l1:\n    when: daemon\n    timeout: 1m\n    run: [echo]\n",
                 "conflicting properties",
             ),
             (
-                f"version: {models.FORMAT}\nname: emptyon\nloops:\n  l1:\n    on: {{}}\n    run: [echo]\n",
-                "violates minProperties 1",
-            ),
-            (
-                f"version: {models.FORMAT}\nname: emptyev\nloops:\n  l1:\n    on:\n      events:\n        - {{}}\n    run: [echo]\n",
+                f"version: {models.FORMAT}\nname: emptyev\nloops:\n  l1:\n    when:\n      - event: {{}}\n    run: [echo]\n",
                 "violates minProperties 1",
             ),
             (
@@ -583,19 +591,40 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
                 f"version: {models.FORMAT}\nname: resenv\nenv:\n  BF_BRAIN: /x\n",
                 "cannot override reserved",
             ),
-            (f"version: {models.FORMAT}\nname: badiv\nwatch:\n  interval: 100ms\n", "between 500ms and 1h"),
-            (f"version: {models.FORMAT}\nname: baddeb\nwatch:\n  debounce: 300ms\n", "unknown property 'debounce'"),
-            (f"version: {models.FORMAT}\nname: badconc\nwatch:\n  concurrency: 0\n", "violates minimum 1"),
-            (f"version: {models.FORMAT}\nname: badconc2\nwatch:\n  concurrency: 64\n", "violates maximum 32"),
+            (f"version: {models.FORMAT}\nname: badconc\nconcurrency: 0\n", "violates minimum 1"),
+            (f"version: {models.FORMAT}\nname: badconc2\nconcurrency: 64\n", "violates maximum 32"),
             (f"version: {models.FORMAT}\nname: badenvlist\nenv: [A]\n", "expected type"),
             (f"version: {models.FORMAT}\nname: badenvk\nenv:\n  1BAD: v\n", "does not match pattern"),
             (f"version: {models.FORMAT}\nname: badenvv\nenv:\n  OK_K: 123\n", "expected type string"),
             (
-                f"version: {models.FORMAT}\nname: unsatcron\nloops:\n  l1:\n    on:\n      schedules: '0 0 31 2 *'\n    run: [echo]\n",
+                f"version: {models.FORMAT}\nname: unsatcron\nloops:\n  l1:\n    when: '0 0 31 2 *'\n    run: [echo]\n",
                 "duration .*, @macro, or 5-field cron",
             ),
             (f'version: {models.FORMAT}\nname: ctlbr\nbrains:\n  sib: "/tmp/\\u0007bad"\n', "no control characters"),
             (f'version: {models.FORMAT}\nname: ctldesc\ndescription: "bad\\u0000desc"\n', "forbidden control"),
+            (
+                f"version: {models.FORMAT}\nname: dupsched\nloops:\n  l1:\n    when:\n      - 30m\n      - every: 30m\n        backfill: 7d\n    run: [echo]\n",
+                "duplicate schedule trigger",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: baddefenv\ndefaults:\n  env:\n    BF_STATE: /evil\n",
+                "unknown property 'env'",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: badloopenv\nloops:\n  l1:\n    run: [echo]\n    env:\n      BF_STATE: /evil\n",
+                "cannot override reserved",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: badwhenarr\nloops:\n  l1:\n    when: []\n    run: [echo]\n",
+                "violates minItems 1",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: badbfzero\nloops:\n  l1:\n    when:\n      every: 1h\n      backfill: 0s\n    run: [echo]\n",
+                "must be > 0s",
+            ),
+            (f"version: {models.FORMAT}\nname: emptynotes\nnotes: []\n", "violates minItems 1"),
+            (f"version: {models.FORMAT}\nname: resnotes\nnotes: [memories]\n", "value is reserved"),
+            (f"version: {models.FORMAT}\nname: dupnotes\nnotes: [wiki, wiki]\n", "unique"),
         )
     ):
         bad_dir = tmp_path / f"bad-{idx}"
@@ -617,52 +646,62 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     macro_dir = tmp_path / "macro-brain"
     macro_dir.mkdir()
     (macro_dir / "bf.yaml").write_text(
-        f"version: {models.FORMAT}\nname: macro\nloops:\n  daily:\n    on:\n      schedules: '@daily'\n    run: [echo]\n"
+        f"version: {models.FORMAT}\nname: macro\n"
+        "defaults:\n  timeout: 2m\n  window:\n    backfill: 3d\n    overlap: 5m\n"
+        "loops:\n"
+        "  daily:\n    when: '@daily'\n    window:\n      overlap: 10m\n    run: [echo, new]\n    env:\n      K: from-loop\n"
+        "  sec60:\n    when: 60\n    run: [echo]\n"
+        "  d1:\n    when: daemon\n    run: [echo]\n"
     )
-    assert config.load(Store(macro_dir)).loops["daily"].schedules[0].cron == "@daily"
+    m_cfg = config.load(Store(macro_dir))
+    assert m_cfg.loops["daily"].schedules[0].cron == "@daily"
+    assert (m_cfg.loops["daily"].backfill, m_cfg.loops["daily"].overlap) == (259_200, 600)
+    assert m_cfg.loops["daily"].run == ("echo", "new")
+    assert m_cfg.loops["daily"].env == {"K": "from-loop"}
+    assert m_cfg.loops["sec60"].schedules[0].every == 60
+    assert m_cfg.loops["d1"].daemon is True
+    assert m_cfg.loops["d1"].ingest == ""
+    nxt = config.next_cron("0 8 * * *", datetime(2026, 11, 15, 7, 30, tzinfo=UTC))
+    assert nxt == datetime(2026, 11, 15, 8, 0, tzinfo=UTC)
 
     # Symlinked bf.yaml rejected by inside_brain().
     sym_brain = tmp_path / "sym-brain"
     sym_brain.mkdir()
     (sym_brain / "bf.yaml").symlink_to(b1 / "bf.yaml")
-    monkeypatch.delenv("BF_BRAIN")
-    monkeypatch.delenv("DEFAULT_BRAIN_PATH")
+    monkeypatch.delenv("BF_BRAIN", raising=False)
+    monkeypatch.delenv("BRAIN_LOCATION", raising=False)
     monkeypatch.chdir(sym_brain)
     with pytest.raises(Error, match="not a regular file owned by you"):
         config.select()
 
-    # `Store.read_files` & `Store.append_log` bounded trimming + `0700`/`0600` permissions:
+    # `Store.iter_lines` & `Store.append_log` bounded trimming + `0700`/`0600` permissions:
     log_store = Store(b1)
     log_store.append_log("sample", b'{"msg":"one"}', max_lines=2, max_bytes=80)
     log_store.append_log("sample", b'{"msg":"two"}', max_lines=2, max_bytes=80)
     log_store.append_log("sample", b'{"msg":"three"}', max_lines=2, max_bytes=80)
     assert oct((b1 / "logs").stat().st_mode & 0o777) == "0o700"
-    assert oct((b1 / "logs" / "sample.log").stat().st_mode & 0o777) == "0o600"
-    assert [ln.decode() for ln in log_store.read("logs/sample.log").splitlines()] == [
+    assert oct((b1 / "logs" / "sample.jsonl").stat().st_mode & 0o777) == "0o600"
+    assert [ln.decode() for ln in log_store.read("logs/sample.jsonl").splitlines()] == [
         '{"msg":"two"}',
         '{"msg":"three"}',
     ]
-    log_store.write("logs/big.log", b"".join(f'{{"n":{i}}}\n'.encode() for i in range(40)), mode=0o600)
+    log_store.write("logs/big.jsonl", b"".join(f'{{"n":{i}}}\n'.encode() for i in range(40)), mode=0o600)
     log_store.append_log("big", b'{"n":40}', max_lines=5, max_bytes=80)
-    big_bytes = log_store.read("logs/big.log")
+    big_bytes = log_store.read("logs/big.jsonl")
     assert len(big_bytes) <= 80
     assert big_bytes.endswith(b'{"n":40}\n')
     log_store.append_log("sample", b'{"msg":"012345678901234567890"}', max_lines=5, max_bytes=35)
-    assert log_store.read("logs/sample.log") == b'{"msg":"012345678901234567890"}\n'
+    assert log_store.read("logs/sample.jsonl") == b'{"msg":"012345678901234567890"}\n'
     with pytest.raises(Error, match="exceeds 20 bytes"):
         log_store.append_log("sample", b"x" * 25, max_bytes=20)
-    os.mkfifo(b1 / "logs" / "fifo.log")
+    os.mkfifo(b1 / "logs" / "fifo.jsonl")
     with pytest.raises(Error, match="expected a regular file"):
         log_store.append_log("fifo", b'{"msg":"x"}')
     b1_docs = Store(b1)
-    b1_docs.write("sub/a.json", b'{"a":1}\n')
-    b1_docs.write("sub/b.txt", b"ignored\n")
-    assert list(b1_docs.iter_read_files("sub", suffix=".json", limit=1 << 20)) == [("sub/a.json", b'{"a":1}\n')]
-    skipped_ov: list[str] = []
-    assert list(b1_docs.iter_read_files("sub", suffix=".json", limit=2, skipped=skipped_ov)) == []
-    assert skipped_ov
-    assert "exceeds 2 bytes" in skipped_ov[0]
-    assert list(b1_docs.iter_read_files("sub")) == [("sub/a.json", b'{"a":1}\n')]
+    b1_docs.write("sub/a.jsonl", b'{"a":1}\n')
+    assert list(b1_docs.iter_lines("sub/a.jsonl")) == [b'{"a":1}\n']
+    with pytest.raises(Error, match="exceeds 2 bytes"):
+        list(b1_docs.iter_lines("sub/a.jsonl", limit=2))
     assert tail_lines([b"a\n", b"b\n"], 0, 100) == []
     assert tail_lines([b"a\n", b"b\n"], 2, 0) == []
     long_jwt = "eyJ" + ("a" * 600)
@@ -696,27 +735,7 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     assert models.redact_secrets("Error: basic validation failed") == "Error: basic validation failed"
 
 
-def test_dump_yaml_scalars_and_lazy_imports() -> None:
-    tricky_scalars = (
-        "0o755",
-        "0o027",
-        "0o10",
-        "1e5",
-        "1E-3",
-        "-0x10",
-        "0123",
-        "yes",
-        "no",
-        "true",
-        "null",
-        "~",
-        "2026-11-20",
-        "",
-    )
-    for val in tricky_scalars:
-        dumped = config.dump_yaml({"val": val})
-        assert config.yaml_object(dumped) == {"val": val}
-
+def test_lazy_imports() -> None:
     proc = subprocess.run(
         [
             sys.executable,

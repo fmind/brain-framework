@@ -12,8 +12,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bf import cli, engine, loops, query, records, watch
+from bf import cli, engine, loops, query, records
 from bf.storage import Store
+
+OBJ_SCHEMA = b'{"type":"object"}\n'
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,7 +42,8 @@ def test_context_hub_walkthrough(tmp_path: Path) -> None:
     assert (built["notes"], built["problems"]) == (1, [])
     val = engine.validate(store)
     assert val["ok"], val["problems"]
-    assert query.evaluate(store)["ok"]
+    eval_env = {**os.environ, "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}"}
+    subprocess.run([sys.executable, str(hub / "evals" / "smoke.py")], cwd=hub, env=eval_env, check=True, timeout=30)  # noqa: S603
 
     store.write(
         "projects/new-website.md",
@@ -53,14 +56,13 @@ def test_context_hub_walkthrough(tmp_path: Path) -> None:
         b"---\n\n"
         b"# New website\n\n"
         b"## Decision {#decision owner=product}\n\n"
-        b"Start with a single product page. Evidence: [Workspace brief](workspace:brief){rel=cites}.\n"
-        b"{: #single-page confidence=high}\n\n"
+        b"Start with a single product page. Evidence: [Workspace brief](workspace:brief){rel=cites}.\n\n"
         b"## Launch review {#launch-review gate=accessibility}\n\n"
         b"Hold public launch: [implementation](github:implementation){rel=implements} and "
         b"[preview](gcloud:deployment){rel=verifies} are ready, but [review](jira:review){rel=blocks} blocks.\n\n"
         b"## Next actions\n\n"
         b"- [ ] Run the keyboard navigation check.\n"
-        b"  {: #task-a11y priority=p1}\n",
+        b"  {: priority=p1}\n",
     )
     assert engine.build(store)["problems"] == []
     assert engine.validate(store)["ok"]
@@ -68,7 +70,7 @@ def test_context_hub_walkthrough(tmp_path: Path) -> None:
     assert rev_before["stale"] == []
     assert rev_before["total_tasks_open"] == 1
 
-    jq_res = query.query_jq(store, ".source", limit=20)
+    jq_res = query.query(store, None, jq_expr=".source", limit=20)
     assert dict(Counter(jq_res["items"])) == {"gcloud": 1, "github": 1, "jira": 1, "projects": 1, "workspace": 1}
 
     shutil.copy2(hub / "fixtures" / "jira-done.json", hub / "fixtures" / "jira.json")
@@ -94,13 +96,14 @@ def test_context_hub_walkthrough(tmp_path: Path) -> None:
 def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     b_root = tmp_path / "example"
     shutil.copytree(ROOT / "examples" / "brain", b_root, symlinks=True)
-    assert not (b_root / "skills" / "weekly-review").exists()
-    assert (b_root / "skills" / "bf" / "SKILL.md").read_bytes() == (ROOT / "src/bf/skills/bf/SKILL.md").read_bytes()
+    assert not (b_root / "skills").exists()
+    assert not (b_root / "loops").exists()
     assert not (b_root / ".agents").exists()
 
     demo_out = subprocess.run(  # noqa: S603
-        [sys.executable, str(b_root / "sensors" / "demo.py"), "2026-09-18T00:00:00Z", "2026-09-19T00:00:00Z"],
+        [sys.executable, str(b_root / "sensors" / "demo.py")],
         cwd=b_root,
+        env={**os.environ, "BF_START": "2026-09-18T00:00:00Z", "BF_END": "2026-09-19T00:00:00Z"},
         capture_output=True,
         timeout=30,
         check=True,
@@ -110,28 +113,28 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     assert engine.build(store)["problems"] == []
     val = engine.validate(store)
     assert val["ok"], val["problems"]
-    assert query.evaluate(store)["ok"]
-    rev = engine.review(store, now=datetime(2026, 10, 1, 12, 0, tzinfo=UTC))
-    assert len(rev["actions_open"]) == 2
-    edges = query.query_jq(
-        store,
-        'select(.kind == "project" or .kind == "concept" or .kind == "action") | .links[]? | select(.meta.rel != null)',
-        limit=50,
+    eval_env = {**os.environ, "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}"}
+    subprocess.run(  # noqa: S603
+        [sys.executable, str(b_root / "evals" / "smoke.py")], cwd=b_root, env=eval_env, check=True, timeout=30
+    )
+
+    now_ex = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+    edges = query.query(
+        store, None, jq_expr='select(.kind == "note") | .links[]? | select(.meta.rel != null)', limit=50
     )
     assert edges["count"] >= 2
 
-    # Exercise `routines/weekly-review.py` (`ingest: snapshot` -> `memories/weekly-review/`), `loops/local.py` (`send` + `listen --once`),
-    # and reactive `loops.assistant` (passing `prompts/digest.md` as an arg + `{{context}}` JSON)!
-    wr = loops.run_loops(store, ("weekly-review",))
+    wr = loops.run_loops(store, ("weekly-review",), now=now_ex)
     assert wr["ok"], wr
     assert wr["results"][0]["summary"]["records"] == 1
     assert engine.validate(store)["ok"]
+
     local_state = b_root / ".bf" / "local"
     send_res = subprocess.run(  # noqa: S603
-        [sys.executable, str(b_root / "loops" / "local.py"), "send"],
+        [sys.executable, str(b_root / "routines" / "local.py"), "send"],
         cwd=b_root,
         input=json.dumps({"id": "out-0", "text": "Retention review ready"}) + "\n",
-        env={**os.environ, "BF_STATE_DIR": str(local_state)},
+        env={**os.environ, "BF_STATE": str(local_state)},
         capture_output=True,
         text=True,
         timeout=15,
@@ -142,14 +145,13 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     assert oct((local_state / "outbox.jsonl").stat().st_mode & 0o777) == "0o600"
     assert "Retention review ready" in (local_state / "outbox.jsonl").read_text()
 
-    # Refuses symlinked outbox.jsonl and loose-permission state dirs cleanly!
     sym_state = tmp_path / "sym-local"
     sym_state.mkdir(mode=0o700)
     (sym_state / "outbox.jsonl").symlink_to(tmp_path / "target.jsonl")
     sym_send = subprocess.run(  # noqa: S603
-        [sys.executable, str(b_root / "loops" / "local.py"), "send"],
+        [sys.executable, str(b_root / "routines" / "local.py"), "send"],
         input='{"text": "hi"}\n',
-        env={**os.environ, "BF_STATE_DIR": str(sym_state)},
+        env={**os.environ, "BF_STATE": str(sym_state)},
         capture_output=True,
         text=True,
         timeout=15,
@@ -157,13 +159,14 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     )
     assert sym_send.returncode != 0
     assert "refusing" in sym_send.stderr
+
     loose_state = tmp_path / "loose-local"
     loose_state.mkdir()
     loose_state.chmod(0o755)
     loose_send = subprocess.run(  # noqa: S603
-        [sys.executable, str(b_root / "loops" / "local.py"), "send"],
+        [sys.executable, str(b_root / "routines" / "local.py"), "send"],
         input='{"text": "hi"}\n',
-        env={**os.environ, "BF_STATE_DIR": str(loose_state)},
+        env={**os.environ, "BF_STATE": str(loose_state)},
         capture_output=True,
         text=True,
         timeout=15,
@@ -175,9 +178,9 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     (local_state / "inbox.offset").write_text("99\n")
     (local_state / "inbox.jsonl").write_text("not-json\n" + json.dumps({"id": "in-1", "text": "status?"}) + "\n")
     listen = subprocess.run(  # noqa: S603
-        [sys.executable, str(b_root / "loops" / "local.py"), "listen", "--once"],
+        [sys.executable, str(b_root / "routines" / "local.py"), "listen", "--once"],
         cwd=b_root,
-        env={**os.environ, "BF_STATE_DIR": str(local_state)},
+        env={**os.environ, "BF_STATE": str(local_state)},
         capture_output=True,
         text=True,
         timeout=15,
@@ -186,21 +189,22 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     records.append_event(store, "loop.message", "local", json.loads(listen.stdout.strip()))
     (b_root / "routines" / "fake_harness.py").write_text(
         "import json, pathlib, subprocess, sys\n"
-        "prompt_path, ctx_path = sys.argv[1], sys.argv[2]\n"
-        "ctx = json.loads(pathlib.Path(ctx_path).read_text())\n"
-        "assert 'Digest prompt' in pathlib.Path(prompt_path).read_text() and ctx['events']\n"
-        "msg = {'text': 'Digest from ' + pathlib.Path(prompt_path).name}\n"
-        f"subprocess.run([{sys.executable!r}, 'loops/local.py', 'send'], input=json.dumps(msg).encode(), check=True)\n"
+        "ctx = json.loads(sys.stdin.read())\n"
+        "prompt_path = pathlib.Path(sys.argv[1])\n"
+        "assert 'Digest prompt' in prompt_path.read_text() and ctx['events']\n"
+        "msg = {'text': 'Digest from ' + prompt_path.name}\n"
+        f"subprocess.run([{sys.executable!r}, 'routines/local.py', 'send'], input=json.dumps(msg).encode(), check=True)\n"
     )
     bf_txt = store.read("bf.yaml").decode()
     bf_txt = bf_txt.replace(
-        'run: [claude, -p, "Prompt: prompts/digest.md Context: {{context}}"]\n    enabled: false',
-        f'run: [{sys.executable!r}, routines/fake_harness.py, prompts/digest.md, "{{{{context}}}}"]\n    enabled: true',
+        'run: [claude, -p, "Read prompts/digest.md and the context JSON from stdin."]\n    enabled: false',
+        f"run: [{sys.executable!r}, routines/fake_harness.py, prompts/digest.md]\n    enabled: true",
     )
     store.write("bf.yaml", bf_txt.encode())
-    tick_res = watch.tick(store)
-    assert tick_res["loops_ran"] == 3
-    assert tick_res["ok"]
+    due_res = loops.run_loops(store, due_only=True, now=now_ex)
+    assert due_res["ran"] == 3
+    assert {r["loop"] for r in due_res["results"]} == {"demo", "weekly-review", "assistant"}
+    assert due_res["ok"]
     assert "Digest from digest.md" in (local_state / "outbox.jsonl").read_text()
     assert engine.validate(store)["ok"]
 
@@ -226,7 +230,7 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     )
     summary = json.loads(bench.stdout)
     assert (summary["corpus"]["records"], summary["corpus"]["notes"]) == (20, 4)
-    assert summary["notes_json_bytes"] > 0
+    assert summary["notes_jsonl_bytes"] > 0
 
 
 def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path: Path, provider: Any) -> None:
@@ -241,14 +245,13 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
 
     brain_dir = tmp_path / "sensor-brain"
     assert cli.run(["init", str(brain_dir), "--name", "sensors"]) == 0
-    assert (brain_dir / ".agents" / "skills" / "bf").is_symlink()
-    assert (brain_dir / ".agents" / "skills" / "bf" / "SKILL.md").read_bytes() == (
-        ROOT / "src/bf/skills/bf/SKILL.md"
-    ).read_bytes()
-    assert "/.agents/skills" in (brain_dir / ".gitignore").read_text().splitlines()
+    assert not (brain_dir / ".agents").exists()
+    assert not (brain_dir / "skills").exists()
     store = Store(brain_dir)
+    for src in ("agent-telemetry", "local-docs", "github-issues", "gmail", "git-history"):
+        store.write(f"schemas/{src}.json", OBJ_SCHEMA)
 
-    # 1. agent-telemetry.py (circular harness telemetry sensor: JSON + JSONL, token redaction, symlink refusal)
+    # 1. agent-telemetry.py
     tel_dir = tmp_path / "telemetry"
     tel_dir.mkdir()
     session_file = tel_dir / "session-1.jsonl"
@@ -268,7 +271,6 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     )
     ts_epoch = datetime(2026, 11, 12, 10, 0, tzinfo=UTC).timestamp()
     os.utime(session_file, (ts_epoch, ts_epoch))
-    # Stale session touched inside window and boundary event at exact END must both be excluded by `[START, END)`!
     stale_file = tel_dir / "stale.jsonl"
     stale_file.write_text(
         json.dumps({"role": "user", "content": "Old turn", "timestamp": "2026-10-15T10:00:00Z"}) + "\n"
@@ -312,7 +314,7 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert at_fail.returncode != 0
     assert at_fail.stdout == ""
 
-    # 2. local-documents.py (including spaces in subdirectories and filenames)
+    # 2. local-documents.py
     docs_dir = tmp_path / "docs"
     (docs_dir / "Project Notes").mkdir(parents=True)
     (docs_dir / "Project Notes" / "q4 plan.md").write_text("# Design Note\n\nKeep formats simple.\n")
@@ -320,7 +322,7 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert ld.returncode == 0, ld.stderr
     assert records.ingest(store, "local-docs", ld.stdout.encode(), mode="snapshot")["added"] == 1
 
-    # 3. github-issues.py (success + failure)
+    # 3. github-issues.py
     provider.install(
         "gh",
         [
@@ -353,7 +355,7 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert ghi_fail.returncode != 0
     assert ghi_fail.stdout == ""
 
-    # 4. gmail-headers.py via fake gws
+    # 4. gmail-headers.py
     ts_ms = str(int(datetime(2026, 11, 12, 10, 0, tzinfo=UTC).timestamp() * 1000))
     provider.install(
         "gws",
@@ -384,7 +386,7 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert records.ingest(store, "gmail", gm.stdout.encode())["added"] == 1
     assert provider.run("gmail-headers.py", "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z").returncode != 0
 
-    # 5. git-history.py on a disposable local Git repository (including folder names with spaces + gitfile confinement)
+    # 5. git-history.py
     git_bin = shutil.which("git")
     assert git_bin is not None
     repos_root = tmp_path / "repos"
@@ -429,59 +431,61 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert "escapes ROOT" in ghist_esc.stderr
     shutil.rmtree(escape_repo)
 
-    # Legitimate Git worktree (`git worktree add`, no local `objects/`) succeeds cleanly!
-    git_bin = shutil.which("git") or "/usr/bin/git"
     wt_dir = repos_root / "demo-wt"
     subprocess.run([git_bin, "-C", str(repo), "worktree", "add", "-b", "wt", str(wt_dir)], check=True, timeout=30)  # noqa: S603
     ghist_wt = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
     assert ghist_wt.returncode == 0, ghist_wt.stderr
     subprocess.run([git_bin, "-C", str(repo), "worktree", "remove", "--force", str(wt_dir)], check=True, timeout=30)  # noqa: S603
 
-    # `.git` directory with `commondir` or symlinked `refs` pointing outside ROOT is also refused!
     cd_repo = repos_root / "escape-commondir"
     (cd_repo / ".git" / "objects").mkdir(parents=True)
     (cd_repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     (cd_repo / ".git" / "commondir").write_text(f"{tmp_path}\n")
-    ghist_cd = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
-    assert ghist_cd.returncode != 0
-    assert "commondir target escapes ROOT" in ghist_cd.stderr
+    assert (
+        "commondir target escapes ROOT"
+        in provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z").stderr
+    )
     shutil.rmtree(cd_repo)
 
     sym_git_repo = repos_root / "escape-symref"
     (sym_git_repo / ".git").mkdir(parents=True)
     (sym_git_repo / ".git" / "refs").symlink_to(tmp_path)
-    ghist_sym = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
-    assert ghist_sym.returncode != 0
-    assert "symlinked git entry" in ghist_sym.stderr
+    assert (
+        "symlinked git entry"
+        in provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z").stderr
+    )
     shutil.rmtree(sym_git_repo)
 
-    # Nested symlink inside `objects/pack/`, quoted `alternates`, leading/trailing-space `alternates` differentials, and >4096B `alternates` are refused!
     pack_repo = repos_root / "escape-pack"
     (pack_repo / ".git" / "objects" / "pack").mkdir(parents=True)
     (pack_repo / ".git" / "objects" / "pack" / "evil.pack").symlink_to(tmp_path)
-    ghist_pack = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
-    assert ghist_pack.returncode != 0
-    assert "symlinked git entry" in ghist_pack.stderr
+    assert (
+        "symlinked git entry"
+        in provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z").stderr
+    )
     shutil.rmtree(pack_repo)
 
     alt_repo = repos_root / "escape-alt"
     (alt_repo / ".git" / "objects" / "info").mkdir(parents=True)
     (alt_repo / ".git" / "objects" / "info" / "alternates").write_text('"/etc"\n')
-    ghist_alt = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
-    assert ghist_alt.returncode != 0
-    assert "quoted git alternates" in ghist_alt.stderr
+    assert (
+        "quoted git alternates"
+        in provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z").stderr
+    )
     (alt_repo / ".git" / "objects" / " #").mkdir()
     (alt_repo / ".git" / "objects" / "info" / "alternates").write_text(" #/../../../../../etc\n")
-    ghist_space = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
-    assert ghist_space.returncode != 0
-    assert "escapes ROOT" in ghist_space.stderr
+    assert (
+        "escapes ROOT"
+        in provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z").stderr
+    )
     (alt_repo / ".git" / "objects" / "info" / "alternates").write_text(("#" * 4100) + "\n/etc\n")
-    ghist_big = provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
-    assert ghist_big.returncode != 0
-    assert "exceeds 4096 bytes" in ghist_big.stderr
+    assert (
+        "exceeds 4096 bytes"
+        in provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z").stderr
+    )
 
-    # `examples/brain/loops/local.py`: refuses symlinked `.bf` without `BF_BRAIN`, and handles empty `inbox.jsonl` truncation without dropping subsequent messages!
-    local_svc = ROOT / "examples" / "brain" / "loops" / "local.py"
+    # `examples/brain/routines/local.py`: refuses symlinked `.bf` without `BF_BRAIN`, handles empty `inbox.jsonl` truncation.
+    local_svc = ROOT / "examples" / "brain" / "routines" / "local.py"
     svc_tmp = tmp_path / "svc-sec"
     svc_tmp.mkdir()
     outside_dir = tmp_path / "svc-outside"
@@ -491,17 +495,17 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
 
     def run_local(args: list[str], env: dict[str, str], *, stdin: str = "", check: bool = True):
         cmd = [sys.executable, str(local_svc), *args]
-        return subprocess.run(cmd, input=stdin, capture_output=True, text=True, env=env, check=check)  # noqa: S603
+        return subprocess.run(cmd, input=stdin, capture_output=True, text=True, env=env, timeout=30, check=check)  # noqa: S603
 
     sym_svc = run_local(
-        ["send"], {**env_no_brain, "BF_STATE_DIR": str(svc_tmp / ".bf" / "local")}, stdin='{"text":"hi"}\n', check=False
+        ["send"], {**env_no_brain, "BF_STATE": str(svc_tmp / ".bf" / "local")}, stdin='{"text":"hi"}\n', check=False
     )
     assert sym_svc.returncode != 0
     assert "refusing symlink" in sym_svc.stderr
     assert not (outside_dir / "local").exists()
 
     trunc_state = tmp_path / "svc-trunc" / ".bf" / "local"
-    env_trunc = {**env_no_brain, "BF_STATE_DIR": str(trunc_state)}
+    env_trunc = {**env_no_brain, "BF_STATE": str(trunc_state)}
     (tmp_path / "svc-trunc").mkdir()
     run_local(["listen", "--once"], env_trunc)
     (trunc_state / "inbox.jsonl").write_text('{"id":"m1","text":"a"}\n{"id":"m2","text":"b"}\n')

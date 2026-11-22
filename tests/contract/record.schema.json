@@ -1,18 +1,5 @@
 {
   "$defs": {
-    "Element": {
-      "additionalProperties": false,
-      "properties": {
-        "id": { "maxLength": 256, "type": "string" },
-        "meta": { "$ref": "#/$defs/Meta" },
-        "section": { "maxLength": 256, "type": "string" },
-        "tag": { "maxLength": 64, "minLength": 1, "type": "string" },
-        "text": { "maxLength": 16384, "type": "string" }
-      },
-      "required": ["tag"],
-      "title": "Element",
-      "type": "object"
-    },
     "Heading": {
       "additionalProperties": false,
       "properties": {
@@ -29,12 +16,11 @@
       "additionalProperties": false,
       "properties": {
         "anchor": { "maxLength": 2048, "type": "string" },
-        "id": { "maxLength": 256, "minLength": 1, "type": "string" },
         "kind": { "enum": ["note", "record", "brain", "url"], "type": "string" },
         "meta": { "$ref": "#/$defs/Meta" },
         "section": { "maxLength": 256, "type": "string" },
         "to": {
-          "description": "Note path, memories/<source>/<sha256>.json, bf:// URI, or URL.",
+          "description": "Universal ref: note path, source:id, bf://<brain>/<ref>, or URL.",
           "maxLength": 8192,
           "minLength": 1,
           "type": "string"
@@ -54,7 +40,6 @@
       "additionalProperties": false,
       "properties": {
         "done": { "type": "boolean" },
-        "id": { "maxLength": 256, "minLength": 1, "type": "string" },
         "meta": { "$ref": "#/$defs/Meta" },
         "section": { "maxLength": 256, "type": "string" },
         "text": { "maxLength": 4096, "minLength": 1, "type": "string" }
@@ -67,8 +52,8 @@
   "$id": "https://fmind.github.io/brain-framework/record.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": true,
-  "description": "Unified JSON record schema enforced on compiled Markdown notes and ingested sensor records in memories/.",
-  "if": { "properties": { "kind": { "const": "memory" } }, "required": ["kind"] },
+  "description": "Unified JSON record schema enforced on compiled notes and ingested records in memories/*.jsonl and usages/*.jsonl.",
+  "if": { "properties": { "kind": { "enum": ["memory", "usage"] } }, "required": ["kind"] },
   "properties": {
     "aliases": {
       "description": "Alternate identifiers resolved by bf read/review.",
@@ -76,19 +61,7 @@
       "maxItems": 200,
       "type": "array"
     },
-    "anchors": {
-      "additionalProperties": { "$ref": "#/$defs/Meta" },
-      "description": "Keyed map of #anchor id -> non-empty attr_list metadata.",
-      "propertyNames": { "maxLength": 256, "minLength": 1, "type": "string" },
-      "type": "object"
-    },
     "attributes": { "description": "Freeform sensor-specific domain attributes.", "type": "object" },
-    "description": { "description": "Optional longer description.", "maxLength": 16384, "type": "string" },
-    "elements": {
-      "description": "Compiled Markdown blocks/spans with attr_list metadata.",
-      "items": { "$ref": "#/$defs/Element" },
-      "type": "array"
-    },
     "entity": {
       "description": "Canonical entity URI or source:id alias.",
       "maxLength": 4096,
@@ -96,29 +69,29 @@
       "type": "string"
     },
     "headings": {
-      "description": "Compiled Markdown headings with attr_list metadata.",
+      "description": "Compiled Markdown headings with optional attr_list meta.",
       "items": { "$ref": "#/$defs/Heading" },
       "type": "array"
     },
     "id": {
-      "description": "Stable source-local record identifier (required for kind='memory').",
+      "description": "Stable source-local record identifier (required for memory/usage).",
       "maxLength": 4096,
       "minLength": 1,
       "type": "string"
     },
     "kind": {
-      "description": "Top-level record category.",
-      "enum": ["project", "concept", "action", "memory"],
+      "description": "Top-level record kind (note, memory, or usage).",
+      "enum": ["note", "memory", "usage"],
       "type": "string"
     },
     "links": {
-      "description": "Normalized outgoing note, record, brain, or URL links.",
+      "description": "Normalized outgoing links.",
       "items": { "$ref": "#/$defs/Link" },
       "maxItems": 2000,
       "type": "array"
     },
     "ref": {
-      "description": "Stable brain-local reference (note path or source:id).",
+      "description": "Universal brain-local reference (note path or source:id).",
       "maxLength": 4200,
       "minLength": 1,
       "type": "string"
@@ -129,20 +102,9 @@
       "type": "string"
     },
     "source": {
-      "description": "Owning source folder name under memories/.",
+      "description": "Owning source name (<bucket>/<source>.jsonl).",
       "pattern": "^[a-z][a-z0-9-]{0,63}$",
       "type": "string"
-    },
-    "sources": {
-      "description": "Cited source objects with resource URI and optional retrieved date.",
-      "items": {
-        "additionalProperties": true,
-        "properties": { "resource": { "maxLength": 8192, "minLength": 1, "type": "string" } },
-        "required": ["resource"],
-        "type": "object"
-      },
-      "maxItems": 200,
-      "type": "array"
     },
     "stale_after": {
       "anyOf": [
@@ -183,7 +145,7 @@
     },
     "title": { "description": "Human-readable title.", "maxLength": 4096, "minLength": 1, "type": "string" },
     "type": {
-      "description": "Domain subtype (e.g. guide, project, issue).",
+      "description": "Domain subtype (e.g. guide, project, issue, session).",
       "maxLength": 128,
       "minLength": 1,
       "type": "string"

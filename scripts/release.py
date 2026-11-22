@@ -299,7 +299,7 @@ def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major:
 def check() -> None:
     clone = toplevel()
     load_manifest(clone)
-    # GitHub Actions makes Typer color its errors, which once failed a tag's gate that had passed locally.
+    # Mirror CI's GITHUB_ACTIONS=true environment so formatting and gate behavior match tag runs.
     env = trusted_env(clone, GITHUB_ACTIONS="true")
     stream("uv", "sync", "--locked", cwd=clone, env=env)
     stream("mise", "run", "all", cwd=clone, env=env)

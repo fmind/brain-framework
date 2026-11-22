@@ -15,6 +15,8 @@ from bf import main as bf_main
 from bf.models import FORMAT, MAX_BATCH
 from bf.storage import Store
 
+OBJ_SCHEMA = b'{"type":"object"}\n'
+
 
 def test_cli_commands_and_exit_codes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
@@ -22,14 +24,20 @@ def test_cli_commands_and_exit_codes(
     target = tmp_path / "my-brain"
     assert cli.run(["init", str(target), "--name", "cli-demo"]) == 0
     init_reply = json.loads(capsys.readouterr().out)
-    assert init_reply == {"brain": "cli-demo", "path": str(target.resolve())}
+    assert init_reply == {"ok": True, "brain": "cli-demo", "path": str(target.resolve())}
 
-    # Ingest from stdin (`--input -`).
+    # Ingest without schemas/<source>.json fails closed (exit 1)!
     stdin_payload = b'[{"id":"m-1","title":"Stdin item","text":"hello"}]\n'
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(stdin_payload), encoding="utf-8"))
+    assert cli.run(["ingest", "notes-feed", "--brain", str(target)]) == 1
+    assert "missing required schema" in capsys.readouterr().err
+
+    # Add required schema and ingest from stdin (`--input -`).
+    (target / "schemas" / "notes-feed.json").write_bytes(OBJ_SCHEMA)
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(stdin_payload), encoding="utf-8"))
     assert cli.run(["ingest", "notes-feed", "--brain", str(target)]) == 0
     ing_reply = json.loads(capsys.readouterr().out)
-    assert (ing_reply["source"], ing_reply["added"]) == ("notes-feed", 1)
+    assert (ing_reply["ok"], ing_reply["source"], ing_reply["added"]) == (True, "notes-feed", 1)
 
     # Ingest from explicit `--input FILE` with `--dry-run`.
     batch_file = tmp_path / "batch.json"
@@ -56,17 +64,16 @@ def test_cli_commands_and_exit_codes(
     assert cli.run(["ingest", "notes-feed", "--brain", str(target)]) == 1
     assert "exceeds" in capsys.readouterr().err
 
-    # Removed `action` and `post` commands -> exit 2.
-    assert cli.run(["action", "Audit CLI"]) == 2
-    capsys.readouterr()
-    assert cli.run(["post", "hello"]) == 2
-    capsys.readouterr()
+    # Removed `new`, `action`, `post`, `validate`, `eval` commands -> exit 2.
+    for removed_cmd in (["new", "concept", "x"], ["action", "Audit"], ["post", "hi"], ["validate"], ["eval"]):
+        assert cli.run(removed_cmd) == 2
+        capsys.readouterr()
 
-    # Plain Markdown under `actions/` builds cleanly with `bf build`!
-    (target / "actions" / "2026-11-16_audit-cli").mkdir(parents=True)
-    (target / "actions" / "2026-11-16_audit-cli" / "ACTION.md").write_text(
-        "---\ntype: action\nstatus: draft\n---\n\n# Audit CLI\n\n- [ ] Check help text\n"
-    )
+    # Universal bundle `<slug>/index.md` builds cleanly and ignores sibling attachments!
+    act_dir = target / "actions" / "2026-11-16_audit-cli"
+    (act_dir / "inputs").mkdir(parents=True)
+    (act_dir / "inputs" / "raw.md").write_text("# Ignored attachment\n")
+    (act_dir / "index.md").write_text("---\ntype: action\nstatus: draft\n---\n\n# Audit CLI\n\n- [ ] Check help text\n")
     assert cli.run(["build", "--brain", str(target)]) == 0
     assert json.loads(capsys.readouterr().out)["notes"] == 2
 
@@ -92,19 +99,19 @@ def test_cli_commands_and_exit_codes(
     assert cli.run(["--brain", str(target), "init", str(tmp_path / "b2")]) == 2
     assert "does not accept --brain" in capsys.readouterr().err
 
-    # `read` requires TARGET and rejects `#fragment` on JSON/records (exit 2).
+    # `read` requires TARGET and rejects `#fragment` on records (exit 2).
     assert cli.run(["read", "--brain", str(target)]) == 2
     capsys.readouterr()
     assert cli.run(["read", "notes-feed:m-1#.title", "--brain", str(target)]) == 2
     capsys.readouterr()
 
-    # `query` supports `-s/--scope`, `-n/--limit`, `--` for leading-dash patterns, and rejects `--sql`.
+    # `query` supports `-s/--scope`, `-n/--limit`, `--`, and rejects removed flags.
     assert cli.run(["query", "Conventions", "-s", "concepts", "-n", "5", "--brain", str(target)]) == 0
     q_rg = json.loads(capsys.readouterr().out)
     assert q_rg["count"] >= 1
     assert q_rg["truncated"] is False
 
-    assert cli.run(["query", "--jq", 'select(.kind=="concept") | .ref', "--brain", str(target)]) == 0
+    assert cli.run(["query", "--jq", 'select(.kind=="note") | .ref', "--brain", str(target)]) == 0
     assert "concepts/welcome.md" in json.loads(capsys.readouterr().out)["items"]
 
     assert cli.run(["query", "--brain", str(target), "--", "-unknown"]) == 0
@@ -119,45 +126,44 @@ def test_cli_commands_and_exit_codes(
     assert cli.run(["review", "--brain", str(target), "--", "extra"]) == 2
     capsys.readouterr()
 
-    # `run` requires JOB/--due/--hook; guards `-- EXTRA_ARGS`.
+    # Configure one loop to exercise `run` (exact, glob, `--all`, `--due`, `--dry-run`, guards).
+    (target / "bf.yaml").write_text(
+        f"version: {FORMAT}\nname: cli-demo\nloops:\n  check-a:\n    run: [bf, check]\n  check-b:\n    run: [bf, check]\n"
+    )
     assert cli.run(["run", "--brain", str(target)]) == 2
     capsys.readouterr()
-    assert cli.run(["run", "build", "--due", "--brain", str(target)]) == 2
+    assert cli.run(["run", "check-a", "--due", "--brain", str(target)]) == 2
     capsys.readouterr()
     assert cli.run(["run", "--due", "--brain", str(target), "--", "x"]) == 2
     capsys.readouterr()
-    assert cli.run(["run", "--dry-run", "build", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["results"][0]["status"] == "dry_run"
-    assert cli.run(["run", "--hook", "pre-commit", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert cli.run(["run", "--all", "--brain", str(target), "--", "x"]) == 2
+    capsys.readouterr()
+    assert cli.run(["run", "--dry-run", "check-*", "--brain", str(target)]) == 0
+    glob_out = json.loads(capsys.readouterr().out)
+    assert [r["loop"] for r in glob_out["results"]] == ["check-a", "check-b"]
+    assert cli.run(["run", "--dry-run", "--all", "--brain", str(target)]) == 0
+    assert json.loads(capsys.readouterr().out)["ran"] == 2
     assert cli.run(["--brain", str(target), "run", "--due"]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
-    # `mcp` serves `stdio` only and rejects removed `--transport` and `--port` flags (exit 2).
-    called_mcp: list[str] = []
-    monkeypatch.setattr("bf.mcp.serve", lambda b: called_mcp.append(b))
-    assert cli.run(["mcp", "--brain", str(target)]) == 0
-    assert called_mcp == [str(target)]
-    assert cli.run(["mcp", "--brain", str(target), "--transport", "http"]) == 2
-    capsys.readouterr()
-    assert cli.run(["mcp", "--brain", str(target), "--port", "9000"]) == 2
+    assert cli.run(["mcp", "--brain", str(target)]) == 2
     capsys.readouterr()
 
-    assert cli.run(["check", "--eval", "--brain", str(target)]) == 0
+    assert cli.run(["check", "--brain", str(target)]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
-    assert cli.run(["validate", "--brain", str(target)]) == 2
+    assert cli.run(["check", "--eval", "--brain", str(target)]) == 2
     capsys.readouterr()
-    assert cli.run(["eval", "--brain", str(target)]) == 2
-    capsys.readouterr()
-    assert cli.run(["query", "Conventions", "--source", "concepts", "--brain", str(target)]) == 2
+    assert cli.run(["check", "--validate", "--brain", str(target)]) == 2
     capsys.readouterr()
 
     assert cli.run(["status", "--check", "--brain", str(target)]) == 0
     st_out = json.loads(capsys.readouterr().out)
     assert st_out["ok"] is True
-    assert set(st_out["counts"]) == {"notes", "records", "sources", "loops"}
+    assert set(st_out["counts"]) == {"notes", "records", "usages", "sources", "loops"}
     assert st_out["counts"]["notes"] == 2
     assert st_out["attention"] == []
+    assert cli.run(["status", "--format", "text", "--brain", str(target)]) == 0
+    assert "HEALTHY" in capsys.readouterr().out
 
     # `emit` appends custom events (and rejects non-object `--data`).
     assert (
@@ -204,39 +210,33 @@ def test_cli_commands_and_exit_codes(
     assert cli.run(["emit", "custom.ping", "--data", "[1,2]", "--brain", str(target)]) == 2
     capsys.readouterr()
 
-    # `watch --once` is removed (exit 2); `watch` delegates to `watch.serve`.
-    assert cli.run(["watch", "--once", "--brain", str(target)]) == 2
-    capsys.readouterr()
-    called_watch: list[tuple[Path, bool]] = []
+    # `watch` delegates to `watch.serve`.
+    called_watch: list[tuple[Path, str]] = []
 
-    def fake_watch_serve(store: Store, *, json_stream: bool = False) -> dict[str, object]:
-        called_watch.append((store.root, json_stream))
+    def fake_watch_serve(store: Store, *, fmt: str = "auto") -> dict[str, object]:
+        called_watch.append((store.root, fmt))
         return {"ok": len(called_watch) == 1, "brain": "cli-demo"}
 
     monkeypatch.setattr("bf.watch.serve", fake_watch_serve)
-    assert cli.run(["watch", "--json", "--brain", str(target)]) == 0
+    assert cli.run(["watch", "--format", "jsonl", "--brain", str(target)]) == 0
     assert cli.run(["watch", "--brain", str(target)]) == 1
-    assert called_watch == [(target.resolve(), True), (target.resolve(), False)]
-
-    assert cli.run(["build", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["notes"] == 2
-
-    assert cli.run(["check", "--validate", "--brain", str(target)]) == 0
-    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert called_watch == [(target.resolve(), "jsonl"), (target.resolve(), "auto")]
 
     assert cli.run(["review", "-n", "10", "--brain", str(target)]) == 0
     rv_ok = json.loads(capsys.readouterr().out)
     assert rv_ok["ok"] is True
     assert rv_ok["brain"] == "cli-demo"
 
-    # Broken note makes `build`, `check`, and `review` exit 1 while still emitting compact JSON.
+    # Broken note makes `build` and `check` exit 1; corrupt sensor JSONL makes `review` exit 1.
     (target / "concepts" / "broken.md").write_text("---\nid: forbidden\n---\n# Bad\n")
     assert cli.run(["build", "--brain", str(target)]) == 1
     assert json.loads(capsys.readouterr().out)["problems"]
-    assert cli.run(["check", "--validate", "--brain", str(target)]) == 1
+    assert cli.run(["check", "--brain", str(target)]) == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False
+    (target / "memories" / "corrupt.jsonl").write_text('{"links":[{"to":"x"}]}\n{bad\n')
     assert cli.run(["review", "--brain", str(target)]) == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False
+    (target / "memories" / "corrupt.jsonl").unlink()
 
     # Invalid flag, abbreviated subcommand flag, or reserved source -> exit 2.
     assert cli.run(["--unknown-flag"]) == 2
@@ -252,12 +252,11 @@ def test_cli_commands_and_exit_codes(
     assert cli.run(["review", "--brain", str(target)]) == 130
 
 
-def test_cli_format15_commands_and_flags(
+def test_cli_schema_read_query_review_and_hygiene(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("BF_BRAIN", raising=False)
     monkeypatch.setenv("NO_COLOR", "1")
-    # Lazy imports: `bf schema` works without a brain and skips heavy modules.
     lazy_proc = subprocess.run(
         [
             sys.executable,
@@ -273,13 +272,12 @@ def test_cli_format15_commands_and_flags(
         check=False,
     )
     assert lazy_proc.returncode == 0
-    assert json.loads(lazy_proc.stdout)["title"]
+    assert json.loads(lazy_proc.stdout)["title"] == "Config"
     assert cli.run(["schema"]) == 0
-    assert set(json.loads(capsys.readouterr().out)) >= {"bf", "record", "concepts", "evals"}
-    assert cli.run(["schema", "unknown"]) == 2
-    capsys.readouterr()
-    assert cli.run(["schema", ""]) == 2
-    assert "bf: invalid input:" in capsys.readouterr().err
+    assert set(json.loads(capsys.readouterr().out)) == {"bf", "record"}
+    for bad_s in ("unknown", "evals", "concepts", ""):
+        assert cli.run(["schema", bad_s]) == 2
+        capsys.readouterr()
     assert cli.run(["--brain", str(tmp_path), "schema", "bf"]) == 2
     capsys.readouterr()
     assert cli.run(["init", str(tmp_path / "empty-name"), "--name", ""]) == 2
@@ -290,221 +288,165 @@ def test_cli_format15_commands_and_flags(
     assert cli.run(["init", str(tmp_path / "bad-desc"), "--description", "x" * 1025]) == 2
     capsys.readouterr()
 
-    b = tmp_path / "f15"
-    assert cli.run(["init", str(b), "--name", "f15"]) == 0
+    b = tmp_path / "f17"
+    assert cli.run(["init", str(b), "--name", "f17"]) == 0
     capsys.readouterr()
-    assert (
-        cli.run(
-            [
-                "new",
-                "concept",
-                "topic-a",
-                "--title",
-                "Topic A",
-                "--type",
-                "architecture",
-                "--status",
-                "draft",
-                "--brain",
-                str(b),
-            ]
-        )
-        == 0
+    (b / "concepts" / "topic-a.md").write_text("---\ntype: architecture\nstatus: draft\n---\n\n# Topic A\n")
+    (b / "projects" / "bundle-proj").mkdir(parents=True)
+    (b / "projects" / "bundle-proj" / "index.md").write_text(
+        "---\ntype: project\nstatus: stable\n---\n\n# Bundle Proj\n"
     )
-    assert json.loads(capsys.readouterr().out)["path"] == "concepts/topic-a.md"
-    assert "type: architecture" in (b / "concepts" / "topic-a.md").read_text()
-    assert cli.run(["build", "--force", "--brain", str(b)]) == 0
-    capsys.readouterr()
-    # Seed a stale note and a draft action (with a tab in title) to exercise review/query formatting thoroughly.
     (b / "concepts" / "stale-tab.md").write_text(
         "---\ntype: guide\nstatus: stable\nupdated: 2020-01-01\nstale_after: 30d\n---\n\n# Stale\tTab\n"
     )
-    assert cli.run(["new", "action", "open-act", "--title", "Open Act", "--brain", str(b)]) == 0
-    assert json.loads(capsys.readouterr().out)["ok"] is True
-    # Invalid `bf new` title (invalid attr_list) or concept schema value exits 2 without creating the file.
-    assert cli.run(["new", "concept", "bad-title", "--title", "Demo {#a?b=1}", "--brain", str(b)]) == 2
+    assert cli.run(["build", "--brain", str(b)]) == 0
     capsys.readouterr()
-    assert not (b / "concepts" / "bad-title.md").exists()
-    assert cli.run(["new", "concept", "bad-st", "--status", "bogus", "--brain", str(b)]) == 2
-    capsys.readouterr()
-    assert not (b / "concepts" / "bad-st.md").exists()
 
-    assert cli.run(["read", "concepts/topic-a.md", "--outline", "--brain", str(b)]) == 0
-    rd_out = json.loads(capsys.readouterr().out)
-    assert rd_out["headings"]
-    assert "text" not in rd_out
-    assert cli.run(["read", "concepts/topic-a.md", "--lines", "1:3", "--brain", str(b)]) == 0
-    assert "type: architecture" in json.loads(capsys.readouterr().out)["text"]
+    # Unified `bf read` returns `"ok": True` + compiled record or `--raw`.
+    assert cli.run(["read", "concepts/topic-a.md", "--brain", str(b)]) == 0
+    rd_rec = json.loads(capsys.readouterr().out)
+    assert (rd_rec["ok"], rd_rec["kind"], rd_rec["record"]["ref"]) == (True, "note", "concepts/topic-a.md")
     assert cli.run(["read", "concepts/topic-a.md", "--raw", "--brain", str(b)]) == 0
     assert "# Topic A" in json.loads(capsys.readouterr().out)["text"]
-    assert (
-        cli.run(
-            ["read", "concepts/topic-a.md", "--full", "--fields", "ref,kind", "--max-bytes", "500", "--brain", str(b)]
-        )
-        == 0
-    )
-    assert json.loads(capsys.readouterr().out) == {"ref": "concepts/topic-a.md", "kind": "concept"}
+    assert cli.run(["read", "concepts/topic-a.md", "--max-bytes", "90", "--brain", str(b)]) == 0
+    assert json.loads(capsys.readouterr().out)["truncated"] is True
 
-    assert cli.run(["query", "--kind", "note", "--fields", "ref,title", "--format", "jsonl", "--brain", str(b)]) == 0
+    # `bf query --kind note` returns compact summary rows (not full `text` bodies!) and warns on jsonl truncation.
+    assert cli.run(["query", "--kind", "note", "-n", "1", "--format", "jsonl", "--brain", str(b)]) == 0
+    q_trunc = capsys.readouterr()
+    assert len(q_trunc.out.splitlines()) == 1
+    assert "truncated" in q_trunc.err
+    assert cli.run(["query", "--kind", "note", "--format", "jsonl", "--brain", str(b)]) == 0
     jsonl_rows = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert jsonl_rows
-    assert all(set(r) == {"ref", "title"} for r in jsonl_rows)
-    assert any(r["ref"] == "concepts/topic-a.md" for r in jsonl_rows)
-    assert cli.run(["query", "--jq", ".ref", "--format", "tsv", "--brain", str(b)]) == 0
-    assert "concepts/topic-a.md" in capsys.readouterr().out.splitlines()
-    assert cli.run(["query", "Stale", "--format", "tsv", "--fields", "ref,title", "--brain", str(b)]) == 0
-    assert capsys.readouterr().out.strip() == "concepts/stale-tab.md\tStale Tab"
-    assert cli.run(["query", "no-such-match-xyz", "--format", "tsv", "--brain", str(b)]) == 0
-    assert capsys.readouterr().out == ""
-    assert cli.run(["query", "--scope", "   ", "--brain", str(b)]) == 2
-    capsys.readouterr()
+    assert any(r["ref"] == "concepts/topic-a.md" and "text" not in r for r in jsonl_rows)
+    assert cli.run(["query", "--jq", ".ref", "--format", "jsonl", "--brain", str(b)]) == 0
+    assert '"concepts/topic-a.md"' in capsys.readouterr().out.splitlines()
 
     assert cli.run(["review", "--format", "jsonl", "--brain", str(b)]) == 0
     rev_jsonl = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert {r["section"] for r in rev_jsonl} == {"stale", "action_open"}
-    assert cli.run(["review", "--format", "tsv", "--fields", "section,ref,title", "--brain", str(b)]) == 0
-    rev_tsv = [ln.split("\t") for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert ["stale", "concepts/stale-tab.md", "Stale Tab"] in rev_tsv
-    assert any(row[0] == "action_open" and row[2] == "Open Act" for row in rev_tsv)
-    assert (
-        cli.run(["review", "--limit", "1", "--all", "--fields", "ref,title", "--format", "tsv", "--brain", str(b)]) == 0
-    )
-    rev_proj = [ln.split("\t") for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert all(len(row) == 2 for row in rev_proj)
+    assert any(r["ref"] == "concepts/stale-tab.md" for r in rev_jsonl)
+    assert cli.run(["review", "--format", "tsv", "--brain", str(b)]) == 2
+    capsys.readouterr()
 
-    assert cli.run(["check", "--eval", "smoke.yaml", "--brain", str(b)]) == 0
-    assert json.loads(capsys.readouterr().out)["ok"] is True
-    assert cli.run(["check", "--validate", "-n", "10", "--all", "--strict", "--force", "--brain", str(b)]) == 0
-    assert json.loads(capsys.readouterr().out)["ok"] is True
-    assert cli.run(["check", "--eval", "--validate", "--brain", str(b)]) == 2
-    capsys.readouterr()
-    assert cli.run(["check", "smoke.yaml", "--validate", "--brain", str(b)]) == 2
-    capsys.readouterr()
-    for bad_check in (
-        ["check", "--no-build"],
-        ["check", "--no-eval"],
-        ["check", ""],
-        ["check", "--eval", "   "],
-        ["check", "--eval", "-n", "0"],
-        ["check", "--eval", "--all"],
-        ["check", "--eval", "--strict"],
-        ["check", "--eval", "--force"],
-    ):
-        assert cli.run([*bad_check, "--brain", str(b)]) == 2
-        capsys.readouterr()
-    assert cli.run(["status", "--all", "--check", "--fields", "brain", "--brain", str(b)]) == 0
-    assert json.loads(capsys.readouterr().out) == {"brain": "f15"}
-    assert cli.run(["check", "--strict", "--force", "--brain", str(b)]) == 0
+    assert cli.run(["check", "--all", "--strict", "--brain", str(b)]) == 0
     chk = json.loads(capsys.readouterr().out)
     assert chk["ok"] is True
-    assert set(chk) >= {"build", "validate", "eval"}
-    with pytest.raises(SystemExit):
-        cli.run(["--help"])
-    assert "DEFAULT_BRAIN_PATH" in capsys.readouterr().out
+    assert chk["notes"] == 4
+    assert cli.run(["check", "-n", "10", "--all", "--brain", str(b)]) == 2
+    capsys.readouterr()
 
-    (b / "concepts" / "broken-chk.md").write_text("---\nid: forbidden\n---\n# Bad\n")
+    # Unbuilt note fails strictly read-only `bf check` without writing `memories/concepts.jsonl`.
+    (b / "concepts" / "unbuilt.md").write_text("---\ntype: guide\nstatus: stable\n---\n# Unbuilt\n")
+    before_jsonl = (b / "memories" / "concepts.jsonl").read_bytes()
     assert cli.run(["check", "--brain", str(b)]) == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False
-    (b / "concepts" / "broken-chk.md").unlink()
+    assert (b / "memories" / "concepts.jsonl").read_bytes() == before_jsonl
+    (b / "concepts" / "unbuilt.md").unlink()
     assert cli.run(["build", "--brain", str(b)]) == 0
     capsys.readouterr()
-    assert cli.run(["read", "concepts/topic-a.md", "--outline", "--raw", "--brain", str(b)]) == 2
-    capsys.readouterr()
-    assert cli.run(["read", "concepts/topic-a.md", "--brain", str(b), "--", "extra"]) == 2
-    capsys.readouterr()
+
     assert cli.run(["emit", "BAD_KIND", "--brain", str(b)]) == 2
     capsys.readouterr()
     assert cli.run(["emit", "ok.ev", "--source", "BAD_SRC", "--brain", str(b)]) == 2
     capsys.readouterr()
-    assert cli.run(["new", "concept", "ctl-bad", "--title", "bad\x00title", "--brain", str(b)]) == 2
-    capsys.readouterr()
 
-    # `bf status --check --fields problems` still exits 1 when `--check` fails despite omitting `ok`.
-    (b / "bf.yaml").write_text(
-        f"version: {FORMAT}\nname: f15\nloops:\n  miss:\n    run: [echo]\n    requires: [bf-no-such-bin-xyz]\n"
+    # `bf emit --data -` (stdin JSON), `bf status --format text`, and `bf ingest --to usages`:
+    class _StdinBuf:
+        def __init__(self, payload: bytes, tty: bool = False) -> None:
+            self._payload, self._tty = payload, tty
+
+        @property
+        def buffer(self) -> io.BytesIO:
+            return io.BytesIO(self._payload)
+
+        def isatty(self) -> bool:
+            return self._tty
+
+    monkeypatch.setattr(sys, "stdin", _StdinBuf(b'{"id":"e-in","ok":true}\n'))
+    assert cli.run(["emit", "stdin.ev", "--data", "-", "--brain", str(b)]) == 0
+    assert json.loads(capsys.readouterr().out)["event"]["data"]["id"] == "e-in"
+    monkeypatch.setattr(sys, "stdin", _StdinBuf(b"{bad"))
+    assert cli.run(["emit", "stdin.ev", "--data", "-", "--brain", str(b)]) == 2
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "stdin", _StdinBuf(b"", tty=True))
+    assert cli.run(["emit", "stdin.ev", "--data", "-", "--brain", str(b)]) == 2
+    capsys.readouterr()
+    monkeypatch.setattr(
+        sys, "stdin", _StdinBuf(b'[{"id":"u1","title":"LLM call","model":"m","input_tokens":5,"cost_usd":0.01}]\n')
     )
-    assert cli.run(["status", "--check", "--fields", "problems", "--brain", str(b)]) == 1
-    st_out = json.loads(capsys.readouterr().out)
-    assert "ok" not in st_out
-    assert st_out["problems"]
-
-    # `bf review --format jsonl|tsv` emits sanitized stderr diagnostic on broken notes while keeping stdout pure.
-    (b / "concepts" / "broken.md").write_text("---\n: [broken\n---\n# Bad\n")
-    for fmt in ("jsonl", "tsv"):
-        assert cli.run(["review", "--format", fmt, "--brain", str(b)]) == 1
-        cap = capsys.readouterr()
-        assert cap.err.startswith("bf: ")
-        assert "broken.md" in cap.err
-    (b / "concepts" / "broken.md").unlink()
-
-    # `bf status --prune` and `bf run --reset`:
-    (b / ".bf" / "orphan-loop.json").write_text('{"name":"orphan-loop","status":"failed"}\n')
-    (b / ".bf" / "orphan-loop.json").chmod(0o600)
-    (b / ".bf" / "ctx-only.context.json").write_text('{"loop":"ctx-only"}\n')
-    (b / ".bf" / "ctx-only.context.json").chmod(0o600)
-    (b / ".bf" / "index.jsonl").write_text("{}\n")
-    (b / ".bf" / "index.jsonl").chmod(0o600)
-    (b / ".bf" / "cache" / "state.json").parent.mkdir(parents=True, exist_ok=True)
-    (b / ".bf" / "cache" / "state.json").write_text("{}\n")
-    (b / ".bf" / "cache" / "state.json").chmod(0o600)
-    (b / ".bf" / "cache" / "index").mkdir(parents=True, exist_ok=True)
-    (b / ".bf" / "cache" / "index" / "gone.json").write_text('{"version":16,"entries":{},"stats":{}}\n')
-    (b / ".bf" / "cache" / "index" / "gone.json").chmod(0o600)
-    (b / ".bf" / "cache" / "validate").mkdir(parents=True, exist_ok=True)
-    (b / ".bf" / "cache" / "validate" / "gone.json").write_text('{"version":16,"clean":{}}\n')
-    (b / ".bf" / "cache" / "validate" / "gone.json").chmod(0o600)
-    # Invalid `--fields` fails exit 2 before `--prune` mutates disk!
-    assert cli.run(["status", "--prune", "--fields", "", "--brain", str(b)]) == 2
+    assert cli.run(["ingest", "llm", "--to", "usages", "--brain", str(b)]) == 0
+    assert json.loads(capsys.readouterr().out)["target"] == "usages"
+    assert cli.run(["query", "--kind", "usage", "--brain", str(b)]) == 0
+    assert json.loads(capsys.readouterr().out)["count"] == 1
+    assert cli.run(["read", "llm:u1", "--brain", str(b)]) == 0
+    assert json.loads(capsys.readouterr().out)["kind"] == "usage"
+    assert cli.run(["status", "--format", "text", "--brain", str(b)]) == 0
+    st_text = capsys.readouterr().out
+    assert "Brain: f17" in st_text
+    assert "usages=1" in st_text
+    assert cli.run(["--brain", str(b), "run", "no-such", "--", "--flag"]) == 2
     capsys.readouterr()
-    assert (b / ".bf" / "orphan-loop.json").exists()
-    # Invalid `bf check -n 0` fails exit 2 before `build()` mutates disk!
-    (b / "concepts" / "unbuilt.md").write_text("---\ntype: guide\nstatus: stable\n---\n# Unbuilt\n")
-    assert cli.run(["check", "-n", "0", "--brain", str(b)]) == 2
+    assert cli.run(["ingest", "llm", "--input", str(tmp_path / "missing.jsonl"), "--brain", str(b)]) == 1
     capsys.readouterr()
-    assert not (b / "memories" / "concepts" / "unbuilt.json").exists()
-    (b / "concepts" / "unbuilt.md").unlink()
-    assert cli.run(["status", "--prune", "--brain", str(b)]) == 0
-    pruned_out = json.loads(capsys.readouterr().out)
-    assert {
-        "orphan-loop",
-        "ctx-only",
-        "cache/index/gone",
-        "cache/validate/gone",
-        ".bf/index.jsonl",
-        ".bf/cache/state.json",
-    } <= set(pruned_out["pruned"])
-    assert pruned_out["orphaned_states"] == []
-    assert not (b / ".bf" / "ctx-only.context.json").exists()
-    assert not (b / ".bf" / "index.jsonl").exists()
-    assert not (b / ".bf" / "cache" / "state.json").exists()
+    assert cli.run(["ingest", "llm", "--to", "invalid", "--brain", str(b)]) == 2
+    capsys.readouterr()
+    assert cli.run(["watch", "--format", "invalid", "--brain", str(b)]) == 2
+    capsys.readouterr()
+    assert cli.run(["status", "--format", "invalid", "--brain", str(b)]) == 2
+    capsys.readouterr()
 
+    # `bf status --check` exits 1 when a loop failed.
+    (b / "bf.yaml").write_text(f'version: {FORMAT}\nname: f17\nloops:\n  miss:\n    run: ["false"]\n')
     (b / ".bf" / "miss.json").write_text('{"name":"miss","status":"failed","consecutive_failures":2}\n')
     (b / ".bf" / "miss.json").chmod(0o600)
+    assert cli.run(["status", "--all", "--check", "--brain", str(b)]) == 1
+    st_out = json.loads(capsys.readouterr().out)
+    assert st_out["ok"] is False
+    assert st_out["problems"]
+
+    # `bf review --format jsonl` emits sanitized stderr diagnostic on broken sensor JSONL while keeping stdout pure.
+    (b / "memories" / "badsrc.jsonl").write_text('{"links":[{"to":"x"}]}\n{broken\n')
+    assert cli.run(["review", "--format", "jsonl", "--brain", str(b)]) == 1
+    cap = capsys.readouterr()
+    assert cap.err.startswith("bf: ")
+    assert "badsrc.jsonl" in cap.err
+    (b / "memories" / "badsrc.jsonl").unlink()
+
+    # `bf run --prune` and `bf run --reset` (including `--dry-run`):
+    (b / ".bf" / "orphan-loop.json").write_text('{"name":"orphan-loop","status":"failed"}\n')
+    (b / ".bf" / "orphan-loop.json").chmod(0o600)
+    assert cli.run(["run", "--prune", "--dry-run", "--brain", str(b)]) == 0
+    prune_dry = json.loads(capsys.readouterr().out)
+    assert prune_dry["dry_run"] is True
+    assert "orphan-loop" in prune_dry["pruned"]
+    assert (b / ".bf" / "orphan-loop.json").is_file()
+    assert cli.run(["run", "--prune", "miss", "--brain", str(b)]) == 2
+    capsys.readouterr()
+    assert cli.run(["run", "--prune", "--brain", str(b), "--", "extra"]) == 2
+    capsys.readouterr()
+    assert cli.run(["run", "--prune", "--brain", str(b)]) == 0
+    pruned_out = json.loads(capsys.readouterr().out)
+    assert "orphan-loop" in pruned_out["pruned"]
+    assert not (b / ".bf" / "orphan-loop.json").exists()
+
+    assert cli.run(["run", "--reset", "miss", "--dry-run", "--brain", str(b)]) == 0
+    reset_dry = json.loads(capsys.readouterr().out)
+    assert reset_dry["dry_run"] is True
+    assert reset_dry["reset"] == ["miss"]
+    assert (b / ".bf" / "miss.json").is_file()
     assert cli.run(["run", "--reset", "miss", "--brain", str(b)]) == 0
     assert json.loads(capsys.readouterr().out)["reset"] == ["miss"]
     assert not (b / ".bf" / "miss.json").exists()
-    assert cli.run(["run", "--reset", "miss", "--dry-run", "--brain", str(b)]) == 2
-    capsys.readouterr()
     assert cli.run(["run", "--reset", "--brain", str(b)]) == 2
     capsys.readouterr()
     assert cli.run(["run", "--reset", "no-such", "--brain", str(b)]) == 2
     capsys.readouterr()
 
-    # Outdated `skills/bf/SKILL.md` sets `skill_outdated` and fails `status --check` / `check --strict`.
-    orig_skill = (b / "skills" / "bf" / "SKILL.md").read_bytes()
-    (b / "skills" / "bf" / "SKILL.md").write_text("stale skill\n")
-    assert cli.run(["status", "--check", "--brain", str(b)]) == 1
-    sk_st = json.loads(capsys.readouterr().out)
-    assert sk_st["skill_outdated"] is True
-    assert any("skills/bf/SKILL.md" in p for p in sk_st["problems"])
-    (b / "skills" / "bf" / "SKILL.md").write_bytes(orig_skill)
-
-    # Subcommand `--help` includes descriptive flag help text.
     with pytest.raises(SystemExit) as help_exc:
         cli.run(["read", "--help"])
     assert help_exc.value.code == 0
     help_txt = capsys.readouterr().out
-    assert "1-based line slice" in help_txt
+    assert "raw Markdown" in help_txt
     assert "Maximum UTF-8 JSON response size" in help_txt
 
 

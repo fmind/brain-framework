@@ -1,35 +1,33 @@
-"""Brain lifecycle operations: init, build, validate, review, and new."""
+"""Brain lifecycle operations: init, build, validate, and review (pure JSONL, zero SQLite)."""
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from importlib import resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-from zoneinfo import ZoneInfo
+from typing import Any
 
-from bf import config, index, markdown, models, records, schemas
-from bf.models import AUTHORED, FORMAT, MAX_TOTAL_FILES, Error, InputError, decode, encode, now_utc
+from bf import config, markdown, models, proc, records, schemas
+from bf.markdown import authored_notes
+from bf.models import DEFAULT_NOTES, FORMAT, MAX_TOTAL_FILES, Error, InputError, encode, now_utc
 from bf.storage import Store, expand, private_dir, writer
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-_NOTE_REQ = frozenset(("ref", "source", "kind", "title", "text", "sha256"))
-_OPT_LISTS = ("tags", "links", "headings", "elements", "tasks")
-_NAMED_BF_URI = re.compile(rb"(?i)bf://[^/]")
-_OMIT_KEYS = (*_OPT_LISTS, "anchors", "sources", "aliases", "entity", "stale_after", "summary")
-_NOTE_KINDS = frozenset(("project", "concept", "action"))
-_WF = "snapshot_or_forgotten"
+_WARN_FORGOTTEN = "snapshot_or_forgotten"
 
 
-load_index = index.load_index
+def _starter_bf_yaml(name: str, description: str) -> bytes:
+    header = "# yaml-language-server: $schema=https://fmind.github.io/brain-framework/bf.schema.json\n"
+    name_json = json.dumps(name, ensure_ascii=False)
+    desc_json = json.dumps(description, ensure_ascii=False)
+    return f"{header}version: {FORMAT}\nname: {name_json}\ndescription: {desc_json}\nloops: {{}}\n".encode()
 
 
 def init_brain(target: Path, *, name: str = "", description: str = "") -> dict[str, Any]:
-    """Initialize a new brain directory with minimal starter files and `/bf`."""
+    """Initialize a new brain directory with 3x3 conventions, starter schemas, welcome note, and smoke eval."""
     exp = expand(target)
     slug = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9-]+", "-", exp.name.lower()).strip("-"))
     default_name = (f"brain-{slug}" if slug and not slug[0].isalpha() else (slug or "brain"))[:64].rstrip("-")
@@ -49,140 +47,26 @@ def init_brain(target: Path, *, name: str = "", description: str = "") -> dict[s
         raise Error(f"{target}: directory is not empty; pass a new or empty folder")
     exp.mkdir(parents=True, mode=0o755, exist_ok=True)
     store = Store(exp)
-    pkg = resources.files("bf")
-    starter = pkg.joinpath("starter")
-    hdr = b"# yaml-language-server: $schema=https://fmind.github.io/brain-framework/bf.schema.json\n"
-    loops_doc = {
-        k: {"description": d, "on": {"hooks": "pre-commit"}, "run": cmd}
-        for k, d, cmd in (
-            ("build", "Compile Markdown notes into memories/.", ["bf", "build"]),
-            ("check", "Validate schemas, notes, records, and links.", ["bf", "check", "--validate"]),
-        )
-    }
-    bf_doc = {"version": FORMAT, "name": brain_name, "description": desc, "loops": loops_doc}
-    for rel in (".gitignore", "AGENTS.md", "concepts/welcome.md", "evals/smoke.yaml"):
+    starter = resources.files("bf").joinpath("starter")
+    for rel in (".gitignore", "AGENTS.md", "concepts/welcome.md", "evals/smoke.py"):
         src_name = "gitignore" if rel == ".gitignore" else rel
         store.write(rel, starter.joinpath(src_name).read_bytes(), durable=False)
-    store.write("bf.yaml", hdr + config.dump_yaml(bf_doc), durable=False)
-    store.write("skills/bf/SKILL.md", pkg.joinpath("skills/bf/SKILL.md").read_bytes(), durable=False)
-    for folder in ("projects", "actions", "memories", ".agents/skills"):
+    for folder in DEFAULT_NOTES:
+        store.write(f"schemas/{folder}.json", encode(schemas.starter_note_schema(folder)), durable=False)
+    store.write("schemas/usages.json", encode(schemas.starter_usages_schema()), durable=False)
+    store.write("bf.yaml", _starter_bf_yaml(brain_name, desc), durable=False)
+    for folder in ("projects", "actions", "sensors", "routines", "agents", "memories", "usages"):
         (store.root / folder).mkdir(parents=True, exist_ok=True, mode=0o755)
     private_dir(store, "logs")
-    (store.root / ".agents" / "skills" / "bf").symlink_to("../../skills/bf")
-    store.sync_dirs(["", "concepts", "evals", "skills", "skills/bf", ".agents", ".agents/skills"])
+    store.sync_dirs(["", "concepts", "evals", "schemas"])
     build(store)
-    return {"brain": brain_name, "path": str(store.root)}
+    return {"ok": True, "brain": brain_name, "path": str(store.root)}
 
 
-def load_or_compile_note(
-    store: Store, path: str, data: bytes, *, brain_name: str
-) -> tuple[dict[str, Any], bytes | None]:
-    """Return `(compiled_note, matching_disk_bytes)` reusing up-to-date `memories/*.json` when safe."""
-    if not _NAMED_BF_URI.search(data):
-        with suppress(Error, OSError):
-            mem_path = markdown.compiled_note_path(path)
-            raw_mem = store.read(mem_path)
-            cached = decode(raw_mem, mem_path, check_duplicates=False)
-            if (
-                isinstance(cached, dict)
-                and cached.keys() >= _NOTE_REQ
-                and cached.get("ref") == path
-                and "id" not in cached
-                and "attrs" not in cached
-                and cached.get("sha256") == models.digest(data)
-            ):
-                anc = cached.get("anchors")
-                anc_ok = anc is None or (
-                    isinstance(anc, dict) and bool(anc) and all(isinstance(v, dict) and bool(v) for v in anc.values())
-                )
-                lists_ok = all(k not in cached or isinstance(cached[k], list) for k in _OPT_LISTS)
-                omit_ok = not any(cached.get(k) in ("", {}, [], None) for k in _OMIT_KEYS if k in cached)
-                if anc_ok and lists_ok and omit_ok:
-                    rec_links = (
-                        lk for lk in cached.get("links", ()) if isinstance(lk, dict) and lk.get("kind") == "record"
-                    )
-                    links_ok = all(markdown.is_memory_record_path(str(lk.get("to", ""))) for lk in rec_links)
-                    items = (x for k in _OPT_LISTS[1:] for x in cached.get(k, ()) if isinstance(x, dict))
-                    clean_items = not any(
-                        x.get(f) in ("", {}) for x in items for f in ("anchor", "section", "meta", "id")
-                    )
-                    if links_ok and clean_items:
-                        return dict(cached), raw_mem
-    return markdown.compile_note(path, data, brain_name=brain_name), None
-
-
-def build(
-    store: Store,
-    *,
-    now: datetime | None = None,
-    incremental: bool = True,
-    force: bool = False,
-    emit_event: bool = True,
-) -> dict[str, Any]:
-    """Compile all OKF notes into compact JSON files under `memories/{concepts,projects,actions}/`."""
-    cfg = config.load(store)
-    problems: list[str] = []
-    synced: set[str] = set()
-    notes: dict[str, dict[str, Any]] = {}
-    for path in index.authored_notes(store, skipped=problems):
-        try:
-            raw = store.read(path, models.MAX_NOTE)
-            if incremental and not force:
-                compiled, raw_mem = load_or_compile_note(store, path, raw, brain_name=cfg.name)
-                if raw_mem == encode(compiled):
-                    synced.add(markdown.compiled_note_path(path))
-            else:
-                compiled = markdown.compile_note(path, raw, brain_name=cfg.name)
-            notes[path] = compiled
-        except (Error, OSError) as err:
-            problems.append(str(err) if isinstance(err, Error) else f"{path}: unreadable file")
-    desired = {markdown.compiled_note_path(ref): note for ref, note in notes.items()}
-    to_del = [p for f in AUTHORED for p in store.files(f"memories/{f}") if p not in desired and p.endswith(".json")]
-    to_write: list[tuple[str, bytes]] = []
-    for mp, note in sorted(desired.items()):
-        if mp not in synced and (payload := encode(note)) != (store.read(mp) if store.exists(mp) else b""):
-            to_write.append((mp, payload))
-    written, removed = len(to_write), len(to_del)
-    if to_write or to_del:
-        with writer(store):
-            for ex in to_del:
-                store.delete(ex, durable=False)
-            for mp, payload in to_write:
-                store.write(mp, payload, durable=False)
-            store.sync_dirs({p.rsplit("/", 1)[0] for p in (*to_del, *(p for p, _ in to_write))})
-            index.sync_authored_index(store, desired, locked=True)
-            if emit_event:
-                ev = {"notes": len(notes), "written": written, "removed": removed}
-                records.append_event(store, "notes.built", "bf", ev, locked=True, now=now)
-    else:
-        index.sync_authored_index(store, desired, locked=False)
-    return {
-        "ok": not problems,
-        "brain": cfg.name,
-        "notes": len(notes),
-        "written": written,
-        "removed": removed,
-        "output": "memories/{concepts,projects,actions}",
-        "problems": problems,
-    }
-
-
-def sync_notes(store: Store, *, now: datetime | None = None) -> dict[str, Any]:
-    """Incrementally synchronize dirty authored notes and authored index shards without emitting `notes.built`."""
-    return build(store, now=now, incremental=True, emit_event=False)
-
-
-def _read_obj(store: Store, path: str) -> tuple[dict[str, Any] | None, str]:
-    try:
-        obj = decode(store.read(path, models.MAX_FILE), path)
-    except Error as error:
-        return None, str(error)
-    return (obj, "") if isinstance(obj, dict) else (None, f"{path}: expected a JSON object")
-
-
-def _check_rec(obj: dict[str, Any], rec_v: Any, src_v: Any, label: str, out: list[str]) -> None:
-    for val in (v for v in (rec_v, src_v) if v is not None):
-        out.extend(schemas.validate_instance(val, obj, label))
+def _check_rec(obj: dict[str, Any], validators: list[Any], label: str, out: list[str]) -> None:
+    for validator in validators:
+        if validator is not None:
+            out.extend(schemas.validate_instance(validator, obj, label))
     if isinstance(sa := obj.get("stale_after"), str) and models.DURATION_RE.fullmatch(sa):
         try:
             models.parse_duration_seconds(sa, f"{label}: stale_after")
@@ -190,28 +74,137 @@ def _check_rec(obj: dict[str, Any], rec_v: Any, src_v: Any, label: str, out: lis
             out.append(str(error))
 
 
-def parse_fields(fields: Sequence[str] | str | None) -> tuple[str, ...] | None:
-    """Validate and split `--fields` into a tuple of non-empty field names."""
-    if fields is None:
-        return None
-    wanted = tuple(f.strip() for f in (fields.split(",") if isinstance(fields, str) else list(fields)))
-    if not wanted or any(not f for f in wanted):
-        raise InputError("fields must be nonempty field names")
-    return wanted
+def build(store: Store, *, now: datetime | None = None) -> dict[str, Any]:
+    """Compile authored Markdown notes into `memories/<dir>.jsonl`, preserving prior output on partial failure."""
+    with writer(store):
+        cfg = config.load(store)
+        problems: list[str] = []
+        base_val = schemas.base_record_validator()
+        local_rec_val, local_rec_bad = None, False
+        try:
+            local_rec_val = schemas.load_validator(store, "schemas/record.json")
+        except Error as err:
+            local_rec_bad = True
+            problems.append(str(err))
+        dir_vals: dict[str, Any] = {}
+        for folder in cfg.notes:
+            try:
+                dir_vals[folder] = schemas.require_validator(store, folder)
+            except Error as err:
+                dir_vals[folder] = None
+                problems.append(str(err))
+
+        existing_by_dir: dict[str, dict[str, bytes]] = {folder: {} for folder in cfg.notes}
+        for folder in cfg.notes:
+            with suppress(FileNotFoundError, Error, OSError):
+                for raw_ln, obj in records.iter_jsonl(store, records.memory_file(folder)):
+                    if isinstance(ref := obj.get("ref"), str) and ref.startswith(f"{folder}/"):
+                        existing_by_dir[folder][ref] = raw_ln
+
+        desired_by_dir: dict[str, dict[str, bytes]] = {folder: {} for folder in cfg.notes}
+        scan_failed_dirs: set[str] = set()
+        note_count = written = removed = 0
+
+        for folder in cfg.notes:
+            folder_skips: list[str] = []
+            folder_paths = authored_notes(store, (folder,), skipped=folder_skips)
+            if folder_skips:
+                problems.extend(folder_skips)
+                scan_failed_dirs.add(folder)
+            if local_rec_bad or dir_vals.get(folder) is None:
+                continue
+            vals = [base_val, local_rec_val, dir_vals[folder]]
+            for path in folder_paths:
+                try:
+                    raw = store.read(path, models.MAX_NOTE)
+                    compiled = markdown.compile_note(path, raw, brain_name=cfg.name, note_dirs=cfg.notes)
+                    note_errs: list[str] = []
+                    _check_rec(compiled, vals, path, note_errs)
+                    if note_errs:
+                        problems.extend(note_errs)
+                        if (prev := existing_by_dir[folder].get(path)) is not None:
+                            desired_by_dir[folder][path] = prev
+                        continue
+                    line_bytes = encode(compiled).rstrip(b"\n")
+                    desired_by_dir[folder][path] = line_bytes
+                    note_count += 1
+                    if folder not in scan_failed_dirs and existing_by_dir[folder].get(path) != line_bytes:
+                        written += 1
+                except (Error, OSError) as err:
+                    problems.append(str(err) if isinstance(err, Error) else f"{path}: unreadable file")
+                    if (prev := existing_by_dir[folder].get(path)) is not None:
+                        desired_by_dir[folder][path] = prev
+
+        touched = False
+        for folder in cfg.notes:
+            if local_rec_bad or dir_vals.get(folder) is None or folder in scan_failed_dirs:
+                continue
+            desired = desired_by_dir[folder]
+            existing = existing_by_dir[folder]
+            removed += sum(1 for ref in existing if ref not in desired)
+            mem_file = records.memory_file(folder)
+            if desired:
+                payload = b"\n".join(desired[ref] for ref in sorted(desired)) + b"\n"
+                cur_bytes = store.read(mem_file) if store.exists(mem_file) else b""
+                if payload != cur_bytes:
+                    store.write(mem_file, payload, durable=False)
+                    touched = True
+            elif store.exists(mem_file):
+                store.delete(mem_file, durable=False)
+                touched = True
+
+        if touched and store.is_dir("memories"):
+            store.sync_dirs(["memories"])
+        if written or removed:
+            ev = {"notes": note_count, "written": written, "removed": removed}
+            records.append_event(store, "notes.built", "bf", ev, locked=True, now=now)
+
+    return {
+        "ok": not problems,
+        "brain": cfg.name,
+        "notes": note_count,
+        "written": written,
+        "removed": removed,
+        "output": f"memories/{{{','.join(cfg.notes)}}}.jsonl",
+        "problems": problems,
+    }
 
 
-def validate(
-    store: Store,
-    *,
-    declared_brains_only: bool = False,
-    limit: int = 50,
-    all_problems: bool = False,
-    strict: bool = False,
-    force: bool = False,
-    read_only: bool = False,
-) -> dict[str, Any]:
-    """Read-only structural, JSON Schema, eval, and graph link validation with per-source digest caching."""
-    from bf import query
+def _load_source_refs(store: Store, source: str, cache: dict[str, set[str]]) -> set[str]:
+    if source not in cache:
+        refs: set[str] = set()
+        for target in models.RECORD_DIRS:
+            with suppress(FileNotFoundError, Error, OSError):
+                for _, obj in records.iter_jsonl(store, records.record_file(source, target)):
+                    if isinstance(r := obj.get("ref"), str) and r:
+                        refs.add(r)
+        cache[source] = refs
+    return cache[source]
+
+
+def _check_jq_filter(flt: str, label: str) -> str:
+    try:
+        jq_bin = proc.resolve_tool("jq")
+        wrapped = f"{proc.JQ_PRELUDE}\ntry ([\n{flt}\n] | length > 0) catch false"
+        cp = subprocess.run(  # noqa: S603
+            [jq_bin, "-n", "-L", "/dev/null", "--", wrapped],
+            capture_output=True,
+            cwd="/",
+            env=proc.safe_env(jq_bin),
+            timeout=5,
+            check=False,
+        )
+    except (Error, subprocess.TimeoutExpired) as err:
+        return f"{label}: {err}"
+    if cp.returncode != 0:
+        err_t = cp.stderr.decode("utf-8", "replace").strip()
+        return f"{label}: invalid jq event filter ({err_t.splitlines()[-1] if err_t else 'jq exited nonzero'})"
+    return ""
+
+
+def validate(store: Store, *, limit: int = 50, all_problems: bool = False, strict: bool = False) -> dict[str, Any]:
+    """Strictly read-only config, schemas, JSONL records (`memories/` & `usages/`), notes, loops, and link checks."""
+    from bf import loops as lp_m
 
     if not all_problems and limit < 1:
         raise InputError("limit must be at least 1")
@@ -236,6 +229,7 @@ def validate(
             "brain": store.root.name,
             "notes": 0,
             "records": 0,
+            "usages": 0,
             "errors_count": 1,
             "warnings_count": 0,
             "summary": sm,
@@ -246,213 +240,193 @@ def validate(
     except Error as err:
         add(errors, "config", str(err))
 
-    s_vals: dict[str, Any] = {}
-    s_skip: list[str] = []
-    for sp in store.files("schemas", skipped=s_skip):
+    validators: dict[str, Any] = {}
+    schema_skips: list[str] = []
+    for sp in store.files("schemas", skipped=schema_skips):
         if len(sp.split("/")) != 2 or not sp.endswith(".json"):
             add(errors, "schema", f"{sp}: schemas/ holds only flat <source>.json files")
         else:
+            stem = sp[8:-5]
             try:
-                s_vals[sp[8:-5]] = schemas.load_validator(store, sp)
+                validators[stem] = schemas.load_validator(store, sp)
             except Error as err:
-                s_vals[sp[8:-5]] = None
+                validators[stem] = None
                 add(errors, "schema", str(err))
-    add(errors, "schema", *s_skip)
-    for sk_n in ("record", "evals", "concepts"):
-        if sk_n not in s_vals:
-            s_vals[sk_n] = schemas.load_validator(store, f"schemas/{sk_n}.json", schemas.document(sk_n))
-    rec_v, ev_v = s_vals.get("record"), s_vals.get("evals")
-    s_dig: dict[str, str] = {"record": ""}
-    with suppress(Error):
-        s_dig = schemas.schemas_digests(store, skipped=[])
+    add(errors, "schema", *schema_skips)
+    base_rec_val = schemas.base_record_validator()
+    local_rec_val = validators.get("record")
+    for folder in cfg.notes:
+        if folder not in validators:
+            add(errors, "schema", f"schemas/{folder}.json: missing required schema for note folder {folder!r}")
 
-    f_skip: list[str] = []
-    authored_refs = {markdown.compiled_note_path(p): p for p in index.authored_notes(store, skipped=f_skip)}
-    add(errors, "note", *f_skip)
+    note_skips: list[str] = []
+    authored_list = authored_notes(store, cfg.notes, skipped=note_skips)
+    add(errors, "note", *note_skips)
+    authored_set = set(authored_list)
 
-    seen_built: set[str] = set()
-    fg_mem: dict[str, set[str]] = {}
-    known_exists: set[str] = set(authored_refs.values())
-    val_updates: dict[str, dict[str, Any]] = {}
-    rec_count = 0
-    total_scanned = 0
+    notes_set, reserved = frozenset(cfg.notes), cfg.reserved_sources
+    forgotten_map: dict[str, set[str]] = {}
+    built_notes: dict[str, dict[str, dict[str, Any]]] = {folder: {} for folder in cfg.notes}
+    source_refs: dict[str, set[str]] = {}
+    rec_count = usage_count = total_scanned = 0
 
-    m_skip: list[str] = []
-    mem_dirs, mem_top_files = store.subdirs("memories", skipped=m_skip)
-    for top_f in mem_top_files:
-        known_exists.add(top_f)
-        add(errors, "memory", f"{top_f}: memories/ holds <source>/<sha256>.json files")
-    for src in mem_dirs:
-        is_auth = src in AUTHORED
-        bad_src = not is_auth and (not models.NAME_RE.fullmatch(src) or src in models.RESERVED_SOURCES)
-        shard = {} if (force or is_auth or bad_src) else index.load_validate_shard(store, src)
-        shard_ok = (
-            not force
-            and bool(s_dig["record"])
-            and shard.get("record_schema") == s_dig["record"]
-            and shard.get("source_schema", "") == s_dig.get(src, "")
-        )
-        old_clean = shard["clean"] if shard_ok and isinstance(shard.get("clean"), dict) else {}
-        new_clean: dict[str, list[Any]] = {}
-        seen_ids: set[str] = set()
-        for mp, st_info in store.walk_stats(f"memories/{src}", skipped=m_skip, ordered=True):
-            total_scanned += 1
-            if total_scanned > MAX_TOTAL_FILES:
-                raise Error(f"memories exceeds the {MAX_TOTAL_FILES:,}-entry total scan limit")
-            known_exists.add(mp)
-            parts = mp.split("/")
-            if is_auth:
-                if not mp.endswith(".json"):
-                    add(errors, "note", f"{mp}: compiled note memories must be .json files")
-                elif mp not in authored_refs:
-                    add(errors, "note", f"{mp}: orphaned compiled note; run bf build")
-                else:
-                    seen_built.add(mp)
-            elif len(parts) == 3 and parts[2] == ".forgotten":
+    for bucket in models.RECORD_DIRS:
+        b_skips: list[str] = []
+        b_dirs, b_files = store.subdirs(bucket, skipped=b_skips)
+        for sub in b_dirs:
+            add(
+                errors,
+                bucket[:-1] if bucket == "usages" else "memory",
+                f"{bucket}/{sub}: {bucket}/ holds flat <source>.jsonl files",
+            )
+        for rec_path in b_files:
+            leaf = rec_path.removeprefix(f"{bucket}/")
+            if leaf.endswith(".forgotten"):
+                src = leaf.removesuffix(".forgotten")
+                if not models.NAME_RE.fullmatch(src) or src in reserved:
+                    add(errors, "memory", f"{rec_path}: invalid or reserved source {src!r}")
+                    continue
                 try:
-                    raw_fg = store.read(mp, models.MAX_NOTE).decode("utf-8").splitlines()
-                    fg_mem[src] = {
-                        records.record_file(src, s) for ln in raw_fg if (s := ln.strip()) and not s.startswith("#")
-                    }
+                    raw_fg = store.read(rec_path, models.MAX_NOTE).decode("utf-8").splitlines()
+                    forgotten_map.setdefault(src, set()).update(
+                        f"{src}:{line}" for ln in raw_fg if (line := ln.strip()) and not line.startswith("#")
+                    )
                 except (Error, UnicodeDecodeError) as err:
-                    add(errors, "memory", str(err) if isinstance(err, Error) else f"{mp}: file is not valid UTF-8")
-            elif bad_src:
-                add(errors, "memory", f"{mp}: invalid or reserved source directory {src!r}")
-            elif len(parts) != 3 or not mp.endswith(".json"):
-                add(errors, "memory", f"{mp}: memories/ holds <source>/<sha256>.json files")
+                    add(
+                        errors, "memory", str(err) if isinstance(err, Error) else f"{rec_path}: file is not valid UTF-8"
+                    )
+                continue
+            if not leaf.endswith(".jsonl"):
+                add(errors, "memory", f"{rec_path}: {bucket}/ holds flat <source>.jsonl files")
+                continue
+            src = leaf.removesuffix(".jsonl")
+            is_note_dir = bucket == "memories" and src in notes_set
+            if not is_note_dir and (not models.NAME_RE.fullmatch(src) or src in reserved):
+                add(errors, "memory", f"{rec_path}: invalid or reserved source {src!r}")
+                continue
+            if is_note_dir:
+                try:
+                    for _, obj in records.iter_jsonl(store, rec_path, check_duplicates=True):
+                        ref_s = str(obj.get("ref") or "")
+                        if not ref_s or not ref_s.startswith(f"{src}/") or ref_s not in authored_set:
+                            add(errors, "note", f"{rec_path}: orphaned compiled note {ref_s!r}; run bf build")
+                        elif ref_s in built_notes[src]:
+                            add(errors, "note", f"{rec_path}: duplicate compiled note {ref_s!r}; run bf build")
+                        else:
+                            built_notes[src][ref_s] = obj
+                except Error as err:
+                    add(errors, "note", str(err))
+                continue
+
+            if bucket == "usages":
+                if "usages" not in validators:
+                    add(errors, "schema", "schemas/usages.json: missing required schema for usages/")
+                rec_vals = [base_rec_val, local_rec_val, validators.get("usages"), validators.get(src)]
+                exp_kind, err_cat = "usage", "usage"
             else:
-                sig = index.stat_sig(st_info)
-                c_rec = old_clean.get(mp)
-                if (
-                    shard_ok
-                    and isinstance(c_rec, list)
-                    and len(c_rec) == 5
-                    and sig == c_rec[:4]
-                    and isinstance(c_rec[4], str)
-                ):
-                    rec_count += 1
-                    rec_id_str = c_rec[4]
-                    new_clean[mp] = c_rec
-                else:
-                    rec_obj, read_err = _read_obj(store, mp)
-                    if rec_obj is None:
-                        add(errors, "memory", read_err)
-                        continue
-                    rec_count += 1
-                    rec_errs: list[str] = []
-                    _check_rec(rec_obj, rec_v, s_vals.get(src), mp, rec_errs)
+                if src not in validators:
+                    add(errors, "schema", f"schemas/{src}.json: missing required schema for source {src!r}")
+                rec_vals = [base_rec_val, local_rec_val, validators.get(src)]
+                exp_kind, err_cat = "memory", "memory"
+
+            seen_ids: set[str] = set()
+            refs_for_src = source_refs.setdefault(src, set())
+            try:
+                for idx, (_, rec_obj) in enumerate(records.iter_jsonl(store, rec_path, check_duplicates=True), 1):
+                    if (total_scanned := total_scanned + 1) > MAX_TOTAL_FILES:
+                        raise Error(f"{bucket} exceeds the {MAX_TOTAL_FILES:,}-record total scan limit")
+                    if bucket == "usages":
+                        usage_count += 1
+                    else:
+                        rec_count += 1
                     rec_id_str = rid if isinstance(rid := rec_obj.get("id"), str) else ""
                     if rec_id_str:
-                        for key, exp in (("source", src), ("ref", f"{src}:{rec_id_str}"), ("kind", "memory")):
-                            if key in rec_obj and rec_obj[key] != exp:
-                                rec_errs.append(f"{mp}: {key} must equal {exp!r}")
+                        refs_for_src.add(f"{src}:{rec_id_str}")
+                        if rec_id_str in seen_ids:
+                            add(errors, err_cat, f"{rec_path}:{idx}: duplicate record id {rec_id_str!r} in {src}")
+                        seen_ids.add(rec_id_str)
+                    rec_errs: list[str] = []
+                    label = f"{rec_path}:{idx}"
+                    _check_rec(rec_obj, rec_vals, label, rec_errs)
+                    checks = (("source", src), ("kind", exp_kind))
+                    if rec_id_str:
+                        checks = (*checks, ("ref", f"{src}:{rec_id_str}"))
+                    for key, exp in checks:
+                        if rec_obj.get(key) != exp:
+                            rec_errs.append(f"{label}: {key} must equal {exp!r}")
                     if isinstance(lks := rec_obj.get("links"), list):
                         rec_errs.extend(
-                            f"{mp}: {prob}"
+                            f"{label}: {prob}"
                             for lnk in lks
-                            if isinstance(lnk, dict) and (prob := markdown.record_link_problem(lnk))
+                            if isinstance(lnk, dict)
+                            and (prob := markdown.record_link_problem(lnk, note_dirs=cfg.notes, reserved=reserved))
                         )
                     if rec_errs:
-                        add(errors, "memory", *rec_errs)
-                    else:
-                        new_clean[mp] = [*sig, rec_id_str]
-                if rec_id_str:
-                    if rec_id_str in seen_ids:
-                        add(errors, "memory", f"{mp}: duplicate record id {rec_id_str!r} in {src}")
-                    seen_ids.add(rec_id_str)
-        if not is_auth and not bad_src and (not shard_ok or new_clean != old_clean):
-            val_updates[src] = {
-                "record_schema": s_dig["record"],
-                "source_schema": s_dig.get(src, ""),
-                "clean": new_clean,
-            }
-    add(errors, "memory", *m_skip)
+                        add(errors, err_cat, *rec_errs)
+            except Error as err:
+                if "total scan limit" in str(err):
+                    raise
+                add(errors, err_cat, str(err))
+        add(errors, "memory", *b_skips)
+
+    for lp_name, loop in cfg.loops.items():
+        if not loop.enabled:
+            continue
+        try:
+            _, ing_src, ing_tgt, _, _ = lp_m.resolve_loop(store, loop, reserved)
+        except Error as err:
+            add(errors, "loop", str(err))
+        else:
+            if ing_src:
+                if ing_tgt == "usages" and "usages" not in validators:
+                    add(errors, "schema", f"loops.{lp_name}: missing required schemas/usages.json")
+                elif ing_tgt == "memories" and ing_src not in validators:
+                    add(errors, "schema", f"loops.{lp_name}: missing required schemas/{ing_src}.json")
+        for ev_rule in loop.events:
+            if ev_rule.filter and (jq_err := _check_jq_filter(ev_rule.filter, f"loops.{lp_name}")):
+                add(errors, "loop", jq_err)
 
     anchors: dict[tuple[str, str], set[str]] = {}
     note_links: dict[str, list[dict[str, Any]]] = {}
-    notes_by_src: dict[str, list[tuple[str, str]]] = {f: [] for f in AUTHORED}
-    for mp, ref in sorted(authored_refs.items()):
-        notes_by_src[ref.split("/")[0]].append((mp, ref))
-    for src, pairs in notes_by_src.items():
-        shard = {} if force else index.load_validate_shard(store, src)
-        shard_ok = (
-            not force
-            and bool(s_dig["record"])
-            and shard.get("brain") == cfg.name
-            and shard.get("record_schema") == s_dig["record"]
-            and shard.get("source_schema", "") == s_dig.get(src, "")
-        )
-        old_notes = shard["clean"] if shard_ok and isinstance(shard.get("clean"), dict) else {}
-        new_notes: dict[str, list[Any]] = {}
-        for mp, ref in pairs:
-            md_sig = index.file_sig(store, ref)
-            mem_sig = index.file_sig(store, mp) if mp in seen_built else None
-            cn = old_notes.get(ref)
-            if shard_ok and index.valid_cached_note_entry(cn, md_sig, mem_sig):
-                anchors[("", ref)] = set(cn[2])
-                note_links[ref] = list(cn[3])
-                new_notes[ref] = cn
-                continue
-            try:
-                item = markdown.compile_note(ref, store.read(ref, models.MAX_NOTE), brain_name=cfg.name)
-            except (Error, OSError) as err:
-                add(errors, "note", str(err) if isinstance(err, Error) else f"{ref}: unreadable file")
-                continue
-            item_anc = markdown.compiled_anchors(item)
-            anchors[("", ref)] = item_anc
-            note_links[ref] = list(item.get("links") or ())
-            note_errs: list[str] = []
-            _check_rec(item, rec_v, s_vals.get(src), ref, note_errs)
-            if mp not in seen_built and not store.exists(mp):
-                note_errs.append(f"{mp}: missing compiled note for {ref}; run bf build")
-            else:
-                built_obj, built_err = _read_obj(store, mp)
-                if built_obj is None or built_obj != item:
-                    note_errs.append(built_err or f"{mp}: out of sync with {ref}; run bf build")
-            if note_errs:
-                add(errors, "note", *note_errs)
-            elif md_sig is not None and mem_sig is not None:
-                new_notes[ref] = [md_sig, mem_sig, sorted(item_anc), note_links[ref]]
-        if not shard_ok or new_notes != old_notes:
-            val_updates[src] = {
-                "brain": cfg.name,
-                "record_schema": s_dig["record"],
-                "source_schema": s_dig.get(src, ""),
-                "clean": new_notes,
-            }
+    for ref in authored_list:
+        src = ref.split("/")[0]
+        try:
+            item = markdown.compile_note(
+                ref, store.read(ref, models.MAX_NOTE), brain_name=cfg.name, note_dirs=cfg.notes
+            )
+        except (Error, OSError) as err:
+            add(errors, "note", str(err) if isinstance(err, Error) else f"{ref}: unreadable file")
+            continue
+        anchors[("", ref)] = markdown.compiled_anchors(item)
+        note_links[ref] = list(item.get("links") or ())
+        note_errs: list[str] = []
+        _check_rec(item, [base_rec_val, local_rec_val, validators.get(src)], ref, note_errs)
+        built_obj = built_notes[src].get(ref)
+        if built_obj is None:
+            note_errs.append(f"{records.memory_file(src)}: missing compiled note for {ref}; run bf build")
+        elif built_obj != item:
+            note_errs.append(f"{records.memory_file(src)}: out of sync with {ref}; run bf build")
+        if note_errs:
+            add(errors, "note", *note_errs)
 
-    e_skip: list[str] = []
-    for ev_p in store.files("evals", skipped=e_skip):
-        if not ev_p.endswith((".yaml", ".yml", ".json")):
-            add(errors, "eval", f"{ev_p}: evals/ holds .yaml or .json files")
-        else:
-            ev_errs: list[str] = []
-            query.load_eval_doc(store, ev_p, ev_v, ev_errs)
-            add(errors, "eval", *ev_errs)
-    add(errors, "eval", *e_skip)
-
-    if index.skill_is_outdated(store):
-        add(warnings, "skill_outdated", "skills/bf/SKILL.md: warning: differs from installed bf; refresh from package")
-
-    exists_cache: dict[str, bool] = dict.fromkeys(known_exists, True)
+    exists_cache: dict[str, bool] = dict.fromkeys(authored_list, True)
     siblings: dict[str, Store | None] = {}
+    sib_refs: dict[tuple[str, str], set[str]] = {}
     snap_srcs = {lp.ingest for lp in cfg.loops.values() if lp.ingest and lp.mode == "snapshot"}
-    no_frag = "JSON record links do not support #anchor fragments"
+    no_frag = "record links do not support #anchor fragments"
 
     def resolve_sib(alias: str, origin: str) -> Store | None:
         if alias not in siblings:
             siblings[alias] = None
             try:
-                siblings[alias] = config.resolve_brain(store, cfg, alias, declared_only=declared_brains_only)
+                siblings[alias] = config.resolve_brain(store, cfg, alias)
             except Error as err:
                 add(errors, "link", f"{origin}: {err}")
         return siblings[alias]
 
-    def check_anc(target: Store, b_key: str, rel: str, anc: str, origin: str) -> None:
-        if rel.endswith(".json"):
-            add(errors, "link", f"{origin}: {no_frag}")
-        elif rel.endswith(".md"):
-            key = (b_key, rel)
+    def check_anchor(target: Store, brain_key: str, rel: str, anc: str, origin: str) -> None:
+        if rel.endswith(".md"):
+            key = (brain_key, rel)
             if key not in anchors:
                 try:
                     anchors[key] = markdown.anchor_ids(rel, target.read(rel, models.MAX_NOTE))
@@ -460,7 +434,7 @@ def validate(
                     add(errors, "link", f"{origin}: {err}")
                     return
             if anc not in anchors[key]:
-                tgt = f"cross-brain anchor bf://{b_key}/{rel}#{anc}" if b_key else f"anchor #{anc} in {rel}"
+                tgt = f"cross-brain anchor bf://{brain_key}/{rel}#{anc}" if brain_key else f"anchor #{anc} in {rel}"
                 add(errors, "link", f"{origin}: missing {tgt}")
 
     for alias in cfg.brains:
@@ -472,28 +446,45 @@ def validate(
             if kind == "brain":
                 sib_name, _, rest = to.removeprefix("bf://").partition("/")
                 if (sib := resolve_sib(sib_name, origin)) is not None:
-                    if ":" in rest or not sib.exists(rest):
+                    sib_cfg = config.load(sib)
+                    if (parsed_r := markdown.parse_record_ref(rest, sib_cfg.reserved_sources)) is not None:
+                        if anc:
+                            add(errors, "link", f"{origin}: {no_frag}")
+                        else:
+                            s_src = parsed_r[0]
+                            s_key = (sib_name, s_src)
+                            if s_key not in sib_refs:
+                                tmp: dict[str, set[str]] = {}
+                                sib_refs[s_key] = _load_source_refs(sib, s_src, tmp)
+                            if rest not in sib_refs[s_key]:
+                                add(errors, "link", f"{origin}: broken cross-brain link bf://{sib_name}/{rest}")
+                    elif not sib.exists(rest):
                         add(errors, "link", f"{origin}: broken cross-brain link bf://{sib_name}/{rest}")
                     elif anc:
-                        check_anc(sib, sib_name, rest, anc, origin)
+                        check_anchor(sib, sib_name, rest, anc, origin)
             elif kind == "record" and anc:
                 add(errors, "link", f"{origin}: {no_frag}")
             elif kind == "record":
-                src = to.split("/")[1] if markdown.is_memory_record_path(to) else ""
-                if not src:
+                parsed_r = markdown.parse_record_ref(to, reserved)
+                if parsed_r is None:
                     add(errors, "link", f"{origin}: invalid record link {to}")
-                elif not exists_cache.setdefault(to, to in exists_cache or store.exists(to)):
-                    if src in snap_srcs or to in fg_mem.get(src, ()):
-                        add(warnings, _WF, f"{origin}: warning: missing record target {to} (snapshot or forgotten)")
-                    else:
-                        add(errors, "link", f"{origin}: broken link to {to}")
+                else:
+                    src = parsed_r[0]
+                    refs_set = _load_source_refs(store, src, source_refs)
+                    if to not in refs_set:
+                        if src in snap_srcs or to in forgotten_map.get(src, ()):
+                            add(
+                                warnings,
+                                _WARN_FORGOTTEN,
+                                f"{origin}: warning: missing record target {to} (snapshot or forgotten)",
+                            )
+                        else:
+                            add(errors, "link", f"{origin}: broken link to {to}")
             elif not exists_cache.setdefault(to, to in exists_cache or store.exists(to)):
                 add(errors, "link", f"{origin}: broken link to {to}")
             elif anc:
-                check_anc(store, "", to, anc, origin)
+                check_anchor(store, "", to, anc, origin)
 
-    if not read_only and val_updates and s_dig["record"]:
-        index.save_validate_shards(store, val_updates)
     msgs, err_n, warn_n = [*errors, *warnings], len(errors), len(warnings)
     summary = {
         "errors": err_n,
@@ -506,8 +497,9 @@ def validate(
     return {
         "ok": ok_all,
         "brain": cfg.name,
-        "notes": len(authored_refs),
+        "notes": len(authored_list),
         "records": rec_count,
+        "usages": usage_count,
         "errors_count": err_n,
         "warnings_count": warn_n,
         "summary": summary,
@@ -523,67 +515,100 @@ def _ts_key(raw: str) -> str:
     return raw
 
 
-def review(
-    store: Store,
-    *,
-    now: datetime | None = None,
-    limit: int = 20,
-    all_items: bool = False,
-    fields: Sequence[str] | str | None = None,
-    read_only: bool = False,
-) -> dict[str, Any]:
-    """Staleness, `newer_evidence`, open `draft` actions, and open task summary via per-source index shards."""
+def _note_updated(rec: dict[str, Any]) -> str:
+    if upd := str(rec.get("updated") or ""):
+        return upd
+    if isinstance(srcs := rec.get("sources"), list):
+        rets = [
+            str(r)
+            for s in srcs
+            if isinstance(s, dict) and isinstance(r := s.get("retrieved"), str) and len(r) >= 10 and r[:4].isdigit()
+        ]
+        return max(rets, default="")
+    return ""
+
+
+def review(store: Store, *, now: datetime | None = None, limit: int = 20, all_items: bool = False) -> dict[str, Any]:
+    """Read-only staleness (`newer_evidence`, `due`, `future_updated`) and open task summary over JSONL."""
     if not all_items and limit < 1:
         raise InputError("limit must be at least 1")
-    wanted, cfg = parse_fields(fields), config.load(store)
+    cfg = config.load(store)
     instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
     today, now_iso = instant.date(), now_utc(instant)
-    sync_probs = [] if read_only else sync_notes(store, now=now)["problems"]
-    idx_probs: list[str] = []
-    entries = index.load_index(store, problems=idx_probs, read_only=read_only)
-    problems = list(dict.fromkeys([*sync_probs, *idx_probs]))
+    problems: list[str] = []
 
-    rec_t: dict[str, str] = {}
-    note_t: dict[str, str] = {}
-    mem_ref: dict[str, str] = {}
-    incoming: dict[str, set[str]] = {}
-    note_ent: list[dict[str, Any]] = []
-    pfx = (f"bf://{cfg.name}/", "bf:///")
+    notes_set = frozenset(cfg.notes)
+    prefixes = (f"bf://{cfg.name}/", "bf:///")
 
     def norm(ref_s: str) -> str:
-        t = ref_s.partition("#")[0].partition("?")[0]
-        return next((t.removeprefix(p) for p in pfx if t.startswith(p)), t)
+        bare = ref_s.partition("#")[0]
+        return next((bare.removeprefix(p) for p in prefixes if bare.startswith(p)), bare)
 
-    for entry in entries:
-        mp, kind, rv = str(entry["path"]), str(entry["kind"]), str(entry["ref"])
-        mem_ref[mp] = rv
-        is_note = kind in _NOTE_KINDS
-        if is_note:
-            note_ent.append(entry)
-            if u := str(entry.get("updated") or entry.get("evidence_updated") or ""):
-                note_t[rv] = _ts_key(u)
-        elif ts := str(entry.get("updated") or ""):
-            rec_t[rv] = max(rec_t.get(rv, ""), _ts_key(ts))
-        for lk in entry.get("links") or ():
-            if (not is_note or lk["to"] != rv) and (tgt := norm(str(lk["to"]))):
-                incoming.setdefault(tgt, set()).add(rv)
+    note_entries: list[dict[str, Any]] = []
+    note_time: dict[str, str] = {}
+    incoming: dict[str, set[str]] = {}
+
+    for folder in cfg.notes:
+        mem_path = records.memory_file(folder)
+        if not store.exists(mem_path):
+            continue
+        try:
+            for _, obj in records.iter_jsonl(store, mem_path):
+                if obj.get("kind") != "note" or not isinstance(obj.get("ref"), str):
+                    continue
+                ref_val = str(obj["ref"])
+                note_entries.append(obj)
+                if upd := _note_updated(obj):
+                    note_time[ref_val] = _ts_key(upd)
+                for lk in obj.get("links") or ():
+                    if isinstance(lk, dict) and isinstance(lk.get("to"), str):
+                        tgt = norm(str(lk["to"]))
+                        if tgt and tgt != ref_val:
+                            incoming.setdefault(tgt, set()).add(ref_val)
+        except Error as err:
+            problems.append(str(err))
+
+    rec_time: dict[str, str] = {}
+    for src in records.valid_record_sources(store, "memories", cfg.notes, skipped=problems):
+        if src in notes_set:
+            continue
+        mem_path = records.memory_file(src)
+        try:
+            for idx, raw_ln in enumerate(store.iter_lines(mem_path, models.MAX_FILE), 1):
+                if not (stripped := raw_ln.strip()):
+                    continue
+                try:
+                    obj = models.decode(stripped, f"{mem_path}:{idx}", check_duplicates=False)
+                except Error as err:
+                    problems.append(str(err))
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                rec_id = str(obj.get("id") or "")
+                ref_val = str(obj.get("ref") or (f"{src}:{rec_id}" if rec_id else ""))
+                if not ref_val:
+                    continue
+                if ts := str(obj.get("updated") or obj.get("time") or ""):
+                    rec_time[ref_val] = max(rec_time.get(ref_val, ""), _ts_key(ts))
+                if isinstance(lks := obj.get("links"), list):
+                    for lk in lks:
+                        if isinstance(lk, dict) and isinstance(lk.get("to"), str) and (tgt := norm(str(lk["to"]))):
+                            incoming.setdefault(tgt, set()).add(ref_val)
+        except (Error, OSError) as err:
+            problems.append(str(err) if isinstance(err, Error) else f"{mem_path}: unreadable file")
 
     stale: list[dict[str, Any]] = []
-    actions_list: list[dict[str, Any]] = []
     tasks_open = 0
     today_iso = today.isoformat()
-    for entry in sorted(note_ent, key=lambda x: str(x["ref"])):
-        ref, st = str(entry["ref"]), str(entry.get("status", "stable"))
-        if st == "deprecated":
+    for entry in sorted(note_entries, key=lambda x: str(x["ref"])):
+        ref, status = str(entry["ref"]), str(entry.get("status") or "stable")
+        if status == "deprecated":
             continue
-        tasks_open += int(entry.get("tasks_open") or 0)
-        if entry["kind"] == "action" and st == "draft":
-            ext = {fk: entry[fk] for fk in ("updated", "summary") if isinstance(entry.get(fk), str) and entry[fk]}
-            actions_list.append({"ref": ref, "title": str(entry.get("title") or ""), **ext})
+        tasks_open += sum(1 for t in (entry.get("tasks") or ()) if isinstance(t, dict) and not t.get("done"))
         reasons: list[str] = []
         newer: list[str] = []
         due = False
-        upd = str(entry.get("updated") or entry.get("evidence_updated") or "")
+        upd = _note_updated(entry)
         if upd and ((len(upd) == 10 and upd > today_iso) or (len(upd) > 10 and _ts_key(upd) > _ts_key(now_iso))):
             reasons.append("future_updated")
         sa = entry.get("stale_after")
@@ -594,100 +619,48 @@ def review(
         elif isinstance(sa, str) and sa:
             due = True
             is_dur = bool(models.DURATION_RE.fullmatch(sa))
-            if rd := (upd if is_dur else sa):
+            if ref_date := (upd if is_dur else sa):
                 try:
-                    dt = datetime.fromisoformat(f"{rd}T00:00:00Z" if len(rd) == 10 else rd).astimezone(UTC)
+                    dt = datetime.fromisoformat(
+                        f"{ref_date}T00:00:00Z" if len(ref_date) == 10 else ref_date
+                    ).astimezone(UTC)
                     due = instant >= (dt + timedelta(seconds=models.parse_duration_seconds(sa)) if is_dur else dt)
                 except Error, OverflowError, ValueError:
                     due = now_iso >= sa
         if due:
             reasons.append("due")
-        if ref in note_t:
-            outs = [lk["to"] for lk in entry.get("links") or () if lk["kind"] in {"note", "record"} and lk["to"] != ref]
-            linked = (
-                {mem_ref.get(t, t) for t in outs} | incoming.get(ref, set()) | incoming.get(str(entry["path"]), set())
-            )
+        if ref in note_time:
+            outs = {
+                norm(str(lk["to"]))
+                for lk in (entry.get("links") or ())
+                if isinstance(lk, dict) and lk.get("kind") in {"note", "record"} and lk.get("to") != ref
+            }
+            linked = outs | incoming.get(ref, set())
             for raw_id in (entry.get("entity"), *(entry["aliases"] if isinstance(entry.get("aliases"), list) else ())):
                 if isinstance(raw_id, str) and raw_id:
                     nr = norm(raw_id)
                     bare = nr.removeprefix("urn:")
                     linked.update(*(incoming.get(k, ()) for k in (nr, bare, f"urn:{bare}")))
-                    if mf := markdown.record_path(bare):
-                        linked |= incoming.get(mf, set())
             linked.discard(ref)
-            if newer := [t for t in sorted(linked) if (rec_t.get(t) or note_t.get(t) or "") > note_t[ref]]:
+            if newer := [t for t in sorted(linked) if (rec_time.get(t) or note_time.get(t) or "") > note_time[ref]]:
                 reasons.append("newer_evidence")
         if reasons:
-            n_d: dict[str, Any] = (
+            newer_d: dict[str, Any] = (
                 {"newer": newer[:5], **({"newer_count": len(newer), "truncated": True} if len(newer) > 5 else {})}
                 if newer
                 else {}
             )
-            stale.append({"ref": ref, "title": str(entry.get("title") or ""), "reasons": reasons, **n_d})
+            stale.append({"ref": ref, "title": str(entry.get("title") or ""), "reasons": reasons, **newer_d})
 
     stale.sort(key=lambda x: (-len(x["reasons"]), -int(x.get("newer_count") or len(x.get("newer", ()))), x["ref"]))
-    actions_list.sort(key=lambda a: (note_t.get(a["ref"], ""), a["ref"]), reverse=True)
-    s_out, a_out = (stale, actions_list) if all_items else (stale[:limit], actions_list[:limit])
-    if wanted is not None:
-        s_out = [{k: it[k] for k in wanted if k in it} for it in s_out]
-        a_out = [{k: it[k] for k in wanted if k in it} for it in a_out]
-    trunc = (not all_items) and (len(stale) > limit or len(actions_list) > limit)
+    stale_out = stale if all_items else stale[:limit]
+    truncated = (not all_items) and len(stale) > limit
     return {
         "ok": not problems,
         "brain": cfg.name,
         "total_stale": len(stale),
-        "total_actions_open": len(actions_list),
         "total_tasks_open": tasks_open,
-        "stale": s_out,
-        "actions_open": a_out,
-        "truncated": trunc,
-        "problems": problems,
+        "stale": stale_out,
+        "truncated": truncated,
+        "problems": list(dict.fromkeys(problems)),
     }
-
-
-def new_note(
-    store: Store,
-    cfg: config.Config | None,
-    kind: str,
-    slug: str,
-    *,
-    title: str = "",
-    status: str = "",
-    note_type: str = "",
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Scaffold a `concept`, `project`, or `action` Markdown note via `Store` and rebuild."""
-    if kind not in _NOTE_KINDS:
-        raise InputError("kind must be concept, project, or action")
-    if not re.fullmatch(r"^[a-z0-9][a-z0-9-]{0,63}$", slug):
-        raise InputError("slug must use lowercase letters, digits, and hyphens (max 64 chars)")
-    resolved = cfg or config.load(store)
-    day = (now or datetime.now(UTC)).astimezone(ZoneInfo(resolved.timezone)).date().isoformat()
-    rel = f"actions/{day}_{slug}/ACTION.md" if kind == "action" else f"{kind}s/{slug}.md"
-    if store.exists(rel):
-        raise Error(f"{rel}: note already exists")
-    try:
-        n_title = models.clean(title.strip(), "title") if title.strip() else slug.replace("-", " ").title()
-        st = models.clean(status.strip(), "status") if status.strip() else ("draft" if kind == "action" else "stable")
-        nt = models.clean(note_type.strip(), "type") if note_type.strip() else ("guide" if kind == "concept" else kind)
-        raw = f"---\n{config.dump_yaml({'type': nt, 'status': st, 'updated': day}).decode('utf-8')}---\n\n# {n_title}\n".encode()
-        comp = markdown.compile_note(rel, raw, brain_name=resolved.name)
-    except Error as err:
-        raise InputError(str(err)) from err
-    rec_v = schemas.load_validator(store, "schemas/record.json", schemas.document("record"))
-    con_v = schemas.load_validator(store, "schemas/concepts.json", schemas.document("concepts"))
-    v_probs: list[str] = []
-    _check_rec(comp, rec_v, con_v if kind == "concept" else None, rel, v_probs)
-    if v_probs:
-        raise InputError("; ".join(v_probs))
-    store.write(rel, raw)
-    built = build(store, now=now)
-    compiled_path = markdown.compiled_note_path(rel)
-    out: dict[str, Any] = {
-        "ok": bool(built["ok"]),
-        "brain": resolved.name,
-        "kind": kind,
-        "path": rel,
-        "compiled": compiled_path,
-    }
-    return {**out, "problems": built["problems"]} if built["problems"] else out

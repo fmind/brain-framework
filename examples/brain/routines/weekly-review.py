@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a weekly-review summary memory record from pure JSON memories."""
+"""Generate a weekly-review summary memory record from JSONL memories."""
 
 from __future__ import annotations
 
@@ -8,8 +8,6 @@ import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-
-AUTHORED = {"projects", "concepts", "actions"}
 
 
 def main() -> int:
@@ -21,25 +19,26 @@ def main() -> int:
     open_tasks: list[str] = []
 
     if memories.is_dir() and not memories.is_symlink():
-        for path in sorted(memories.rglob("*.json")):
+        for path in sorted(memories.glob("*.jsonl")):
             if path.is_symlink() or not path.is_file():
                 continue
-            rel = path.relative_to(memories).parts
-            if not rel:
-                continue
-            doc = json.loads(path.read_bytes())
-            if not isinstance(doc, dict):
-                continue
-            if rel[0] in AUTHORED:
-                notes += 1
-                ref = str(doc.get("ref") or doc.get("id") or path.stem)
-                open_tasks.extend(
-                    f"- `{ref}`: {task['text']}"
-                    for task in (doc.get("tasks") or ())
-                    if isinstance(task, dict) and not task.get("done") and task.get("text")
-                )
-            elif rel[0] != "weekly-review":
-                records += 1
+            source = path.stem
+            for raw_line in path.read_bytes().splitlines():
+                if not (stripped := raw_line.strip()):
+                    continue
+                doc = json.loads(stripped.decode("utf-8"))
+                if not isinstance(doc, dict):
+                    continue
+                if doc.get("kind") == "note":
+                    notes += 1
+                    ref = str(doc.get("ref") or doc.get("id") or source)
+                    open_tasks.extend(
+                        f"- `{ref}`: {task['text']}"
+                        for task in (doc.get("tasks") or ())
+                        if isinstance(task, dict) and not task.get("done") and task.get("text")
+                    )
+                elif source != "weekly-review":
+                    records += 1
 
     task_lines = "\n".join(open_tasks) if open_tasks else "- None."
     body = (

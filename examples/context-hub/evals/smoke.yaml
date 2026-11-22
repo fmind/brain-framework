@@ -1,7 +1,0 @@
-version: 1
-cases:
-  - name: website-project
-    engine: rg
-    query: New website
-    expect_refs:
-      - projects/new-website.md

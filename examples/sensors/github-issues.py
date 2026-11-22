@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Collect one GitHub repository's issues updated in the window through the owner's gh CLI.
 
-Usage: github-issues.py OWNER/REPO START END
+Usage: github-issues.py OWNER/REPO [START END]
 """
 
 from __future__ import annotations
@@ -33,9 +33,10 @@ _PEM_TAG = r"[A-Z0-9 ]{0,32}PRIVATE KEY-----"
 _PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,16384}}"
 _KV_KEY = (
     r"(?i:(?<![A-Za-z0-9])(?:password|passwd|(?:client[_-]?)?secret(?:[_-]?access[_-]?key|[_-]?key)?"
-    r"|private[_-]?key|api[_-]?key|(?:access|refresh|auth|api|session|id|bot|private)[_-]?token))"
+    r"|private[_-]?key|api[_-]?key"
+    r"|(?:access|refresh|auth|api|session|id|bot|private|gh|github|oauth|bearer)[_-]?token))"
 )
-_KV_VAL = r'(?:\\?"[^"\r\n]{1,512}"|\\?\'[^\'\r\n]{1,512}\'|[^\s"\',;}{\]]{1,512})'
+_KV_VAL = r'(?:\\?"[^"\r\n]{1,8192}"?|\\?\'[^\'\r\n]{1,8192}\'?|[^\s"\',;}{\]]{1,8192})'
 _SECRET_PATTERNS = re.compile(
     r"(?:gh[pousr]_[A-Za-z0-9_]{20,}"
     r"|github_pat_[A-Za-z0-9_]{20,}"
@@ -301,11 +302,13 @@ def collect(repository: str, start_arg: str, end_arg: str) -> list[dict[str, Any
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("repository", help="OWNER/REPO")
-    parser.add_argument("start", help="window start timestamp with timezone")
-    parser.add_argument("end", help="window end timestamp with timezone")
+    parser.add_argument("start", nargs="?", default="", help="window start timestamp (default: BF_START)")
+    parser.add_argument("end", nargs="?", default="", help="window end timestamp (default: BF_END)")
     args = parser.parse_args()
+    start_raw = args.start or os.environ.get("BF_START", "")
+    end_raw = args.end or os.environ.get("BF_END", "")
     cli(
-        lambda: emit(collect(args.repository, args.start, args.end), max_bytes=MAX_BYTES),
+        lambda: emit(collect(args.repository, start_raw, end_raw), max_bytes=MAX_BYTES),
         "GitHub issue collection failed",
         "check gh authentication and the repository",
     )

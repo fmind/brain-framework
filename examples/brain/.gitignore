@@ -1,7 +1,7 @@
-/.agents/
 /.bf/
 /.env
 /logs/
 /memories/
-/originals/
-/inputs/
+!/memories/*.forgotten
+/usages/
+!/usages/*.forgotten

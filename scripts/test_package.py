@@ -83,7 +83,7 @@ def main() -> None:
                 "UV_LINK_MODE": "copy",
                 "UV_CACHE_DIR": cache,
             }
-            for unset_key in ("BF_BRAIN", "DEFAULT_BRAIN_PATH", "PYTHONPATH", "UV_PROJECT_ENVIRONMENT"):
+            for unset_key in ("BF_BRAIN", "BRAIN_LOCATION", "PYTHONPATH", "UV_PROJECT_ENVIRONMENT"):
                 env.pop(unset_key, None)
             run(UV, "venv", "--python", args.python, str(venv), cwd=home, env=env)
             python = str(venv / "bin/python")
@@ -107,13 +107,8 @@ from typing import get_args
 import bf
 from bf.schemas import Kind, document
 
-assert get_args(Kind) == ("brain", "record", "concepts", "evals")
-for kind, title in [
-    ("brain", "Config"),
-    ("record", "Record"),
-    ("concepts", "Concept"),
-    ("evals", "Eval"),
-]:
+assert get_args(Kind) == ("bf", "record")
+for kind, title in [("bf", "Config"), ("record", "Record")]:
     assert document(kind)["title"] == title
 installed = distribution("brain-framework")
 assert installed.metadata["Name"] == "brain-framework"
@@ -135,29 +130,46 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             ):
                 raise SystemExit(f"{artifact.name}: bf --version mismatch")
             init_reply = json.loads(run(bf, "init", str(brain), cwd=home, env=env, capture=True))
-            if init_reply.get("brain") != "brain":
+            if not init_reply.get("ok") or init_reply.get("brain") != "brain":
                 raise SystemExit(f"{artifact.name}: unexpected bf init reply: {init_reply}")
             starter_yaml = (brain / "bf.yaml").read_text()
-            if "version: 16" not in starter_yaml or "loops:" not in starter_yaml:
+            if "version: 17" not in starter_yaml or "loops:" not in starter_yaml:
                 raise SystemExit(f"{artifact.name}: unexpected starter bf.yaml: {starter_yaml}")
+            for required_schema in (
+                "schemas/concepts.json",
+                "schemas/projects.json",
+                "schemas/actions.json",
+                "schemas/usages.json",
+            ):
+                if not (brain / required_schema).is_file():
+                    raise SystemExit(f"{artifact.name}: missing starter schema {required_schema}")
             for retired in (
                 "schemas/bf.schema.json",
                 "schemas/record.json",
-                "schemas/concepts.json",
                 "schemas/evals.json",
-                "docs/index.md",
+                "skills/bf/SKILL.md",
             ):
                 if (brain / retired).exists():
                     raise SystemExit(f"{artifact.name}: unexpected retired starter file {retired}")
             schema_reply = json.loads(run(bf, "schema", "bf", cwd=home, env=env, capture=True))
             if schema_reply.get("title") != "Config":
                 raise SystemExit(f"{artifact.name}: unexpected bf schema bf reply: {schema_reply}")
-            new_reply = json.loads(
-                run(bf, "new", "concept", "pkg-note", "--title", "Package note", cwd=brain, env=env, capture=True)
-            )
-            if not new_reply.get("ok") or new_reply.get("path") != "concepts/pkg-note.md":
-                raise SystemExit(f"{artifact.name}: unexpected bf new reply: {new_reply}")
 
+            usage_sample = json.dumps(
+                [{"id": "u1", "title": "Session 1", "harness": "agy", "input_tokens": 120, "output_tokens": 45}]
+            )
+            usage_reply = json.loads(
+                run(bf, "ingest", "--to", "usages", "agy", cwd=brain, env=env, capture=True, input_text=usage_sample)
+            )
+            if not usage_reply.get("ok") or usage_reply.get("target") != "usages" or usage_reply.get("added") != 1:
+                raise SystemExit(f"{artifact.name}: unexpected usages ingest reply: {usage_reply}")
+            status_text = run(bf, "status", "--format", "text", cwd=brain, env=env, capture=True)
+            if "HEALTHY" not in status_text or "usages=1" not in status_text:
+                raise SystemExit(f"{artifact.name}: unexpected status --format text: {status_text}")
+
+            (brain / "schemas/workspace.json").write_text(
+                json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}) + "\n"
+            )
             sample_records = json.dumps(
                 [
                     {
@@ -172,54 +184,51 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             ingest_reply = json.loads(
                 run(bf, "ingest", "workspace", cwd=brain, env=env, capture=True, input_text=sample_records)
             )
-            if ingest_reply.get("added") != 1 or ingest_reply.get("records") != 1:
+            if not ingest_reply.get("ok") or ingest_reply.get("added") != 1 or ingest_reply.get("records") != 1:
                 raise SystemExit(f"{artifact.name}: unexpected bf ingest reply: {ingest_reply}")
 
             (brain / "projects/package.md").write_text(
                 "---\ntype: project\nstatus: draft\nupdated: 2026-09-25\n---\n# Package check\n\n"
                 "## Next {#next owner=alice}\n\n"
-                "See [brief](../memories/workspace/29a8825bd242f14386ee528d76e0e8f1e38f3c8c4047d7b2d6df7493368a17d0.json){rel=cites} and [welcome](../concepts/welcome.md#conventions).\n"
-                "{: #decision-1 confidence=high}\n\n"
+                "See [brief](workspace:brief){rel=cites} and [welcome](../concepts/welcome.md#conventions).\n\n"
                 "- [ ] Inspect the compiled note record.\n"
             )
             build_reply = json.loads(run(bf, "build", cwd=brain, env=env, capture=True))
-            val_reply = json.loads(run(bf, "check", "--validate", cwd=brain, env=env, capture=True))
-            rev_reply = json.loads(run(bf, "review", cwd=brain, env=env, capture=True))
-            eval_reply = json.loads(run(bf, "check", "--eval", cwd=brain, env=env, capture=True))
             check_reply = json.loads(run(bf, "check", cwd=brain, env=env, capture=True))
+            rev_reply = json.loads(run(bf, "review", cwd=brain, env=env, capture=True))
             emit_reply = json.loads(
                 run(bf, "emit", "pkg.smoke", "--data", '{"id":"s1"}', cwd=brain, env=env, capture=True)
             )
             status_reply = json.loads(run(bf, "status", cwd=brain, env=env, capture=True))
-            run_reply = json.loads(run(bf, "run", "--dry-run", "build", cwd=brain, env=env, capture=True))
+            run_reply = json.loads(run(bf, "run", "--all", "--dry-run", cwd=brain, env=env, capture=True))
             read_reply = json.loads(run(bf, "read", "bf:///projects/package.md#next", cwd=brain, env=env, capture=True))
+            note_reply = json.loads(run(bf, "read", "projects/package.md", cwd=brain, env=env, capture=True))
             if (
                 build_reply.get("problems")
-                or not val_reply.get("ok")
-                or rev_reply.get("total_tasks_open") != 1
-                or not eval_reply.get("ok")
                 or not check_reply.get("ok")
+                or rev_reply.get("total_tasks_open") != 1
                 or not emit_reply.get("ok")
                 or not status_reply.get("inside_brain")
                 or not run_reply.get("ok")
                 or "Inspect the compiled note record" not in read_reply.get("text", "")
+                or note_reply.get("kind") != "note"
+                or note_reply.get("record", {}).get("kind") != "note"
             ):
-                raise SystemExit(
-                    f"{artifact.name}: smoke check failed: {build_reply} / {val_reply} / {rev_reply} / {eval_reply}"
-                )
-            proj = json.loads((brain / "memories/projects/package.json").read_text())
+                raise SystemExit(f"{artifact.name}: smoke check failed: {build_reply} / {check_reply} / {rev_reply}")
+            proj_lines = [
+                json.loads(ln) for ln in (brain / "memories/projects.jsonl").read_text().splitlines() if ln.strip()
+            ]
+            proj = next(r for r in proj_lines if r["ref"] == "projects/package.md")
             if (
-                proj["headings"][1]["meta"] != {"owner": "alice"}
-                or proj["anchors"].get("next") != {"owner": "alice"}
-                or proj["anchors"].get("decision-1") != {"confidence": "high"}
-                or "package-check" in proj["anchors"]
+                proj["kind"] != "note"
+                or proj["headings"][1]["meta"] != {"owner": "alice"}
+                or proj["links"][0]["to"] != "workspace:brief"
                 or proj["links"][0]["meta"] != {"rel": "cites"}
-                or proj["elements"][0]["meta"] != {"confidence": "high"}
             ):
-                raise SystemExit(f"{artifact.name}: compiled package.json missing attr_list metadata: {proj}")
+                raise SystemExit(f"{artifact.name}: compiled projects.jsonl mismatch: {proj}")
+            run(python, str(brain / "evals/smoke.py"), cwd=brain, env={**env, "PATH": f"{venv / 'bin'}:{env['PATH']}"})
 
-            # Exercise `bf query`, `bf query --jq`, and `bf check --eval` through wrapper-script and `mise`-style shims on PATH
-            # (catches regressions hidden inside `mise run`, where real ELF binaries precede shims on PATH).
+            # Exercise `bf query` and `bf query --jq` through wrapper-script and `mise`-style shims on PATH.
             for label, mode in (("wrapper", "script"), ("mise-shim", "mise")):
                 shim_dir = home / f"shims-{label}"
                 shim_dir.mkdir()
@@ -253,9 +262,8 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                 q_jq = json.loads(
                     run(bf, "query", "--jq", "[$ENV, env]", "-n", "1", cwd=brain, env=shim_env, capture=True)
                 )
-                q_ev = json.loads(run(bf, "check", "--eval", cwd=brain, env=shim_env, capture=True))
-                if q_rg.get("count", 0) < 1 or q_jq.get("items") != [[{}, {}]] or not q_ev.get("ok"):
-                    raise SystemExit(f"{artifact.name} ({label}): shim smoke failed: {q_rg} / {q_jq} / {q_ev}")
+                if q_rg.get("count", 0) < 1 or q_jq.get("items") != [[{}, {}]]:
+                    raise SystemExit(f"{artifact.name} ({label}): shim smoke failed: {q_rg} / {q_jq}")
 
 
 if __name__ == "__main__":

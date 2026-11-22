@@ -1,7 +1,0 @@
-version: 1
-cases:
-  - name: retention-concept
-    engine: rg
-    query: upstream content can disappear
-    expect_refs:
-      - concepts/retention.md

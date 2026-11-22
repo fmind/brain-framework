@@ -1,56 +1,39 @@
 # yaml-language-server: $schema=https://fmind.github.io/brain-framework/bf.schema.json
 # https://fmind.github.io/brain-framework/reference/
-version: 16
+version: 17
 name: example
-description: Runnable example brain with offline sensors, routines, hooks, and loops.
+description: Runnable example brain with offline sensors, routines, and loops.
 timezone: UTC
+concurrency: 4
 env:
   EXAMPLE_MODE: "local"
+defaults:
+  timeout: 5m
 loops:
   demo:
     description: Snapshot fictional evidence records from the local demo sensor.
-    on:
-      schedules: 1h
-    run: [python3, sensors/demo.py, "{{start}}", "{{end}}"]
+    when: 1h
     ingest: snapshot
-  build:
-    description: Recompile Markdown notes on pre-commit or after demo ingestion.
-    on:
-      hooks: pre-commit
-      events:
-        kind: records.ingested
-        source: demo
-    run: [bf, build]
   weekly-review:
-    description: Save a weekly summary of notes, records, and open tasks into memories/weekly-review/.
-    on:
-      schedules: "0 8 * * 0"
-    run: [python3, routines/weekly-review.py]
+    description: Save a weekly summary of notes, records, and open tasks into memories/weekly-review.jsonl.
+    when:
+      cron: "0 8 * * 0"
     ingest: snapshot
   local:
     description: Stream local inbox messages as loop.message events.
-    on: daemon
-    run: [python3, loops/local.py, listen]
+    when: daemon
+    run: [python3, routines/local.py, listen]
     emit: loop.message
     enabled: false
   assistant:
     description: Run a scheduled or chat-triggered digest assistant.
-    on:
-      schedules:
-        - 1d
-        - "0 8 * * 1"
-      events:
-        kind: loop.message
-        source: local
-    window:
-      backfill: 1d
-    run: [claude, -p, "Prompt: prompts/digest.md Context: {{context}}"]
+    when:
+      - every: 1d
+        backfill: 1d
+      - cron: "0 8 * * 1"
+        backfill: 1w
+      - event:
+          kind: loop.message
+          source: local
+    run: [claude, -p, "Read prompts/digest.md and the context JSON from stdin."]
     enabled: false
-  check:
-    description: Validate schemas, notes, records, and links before commit.
-    on:
-      hooks: pre-commit
-    run: [bf, check, --validate]
-watch:
-  interval: 5s
-  concurrency: 4

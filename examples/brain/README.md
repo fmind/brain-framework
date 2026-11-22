@@ -1,6 +1,6 @@
 # Runnable example brain
 
-A fictional project, OKF concepts, resumable actions, `attr_list` metadata, bundled JSON Schemas (`bf schema`), deterministic evals (`evals/smoke.yaml`), `/bf` skill (`skills/bf/SKILL.md`), and local `sensors/`, `routines/`, `loops/`, `prompts/`, and unified `loops:` entries demonstrate the end-to-end workflow without credentials or network access.
+A fictional project, concepts, universal `index.md` action bundles, heading/link `attr_list` metadata, required per-source JSON Schemas (`schemas/*.json`), runnable Python eval (`evals/smoke.py`), and local `sensors/`, `routines/`, `prompts/`, and convention `loops:` entries demonstrate the end-to-end workflow without credentials or network access.
 
 Run on a disposable copy from the repository checkout after `uv sync --locked`:
 
@@ -11,37 +11,36 @@ cp -R examples/brain "$bf_demo/brain"
 cd "$bf_demo/brain"
 bf() { uv run --project "$bf_checkout" bf "$@"; }
 
-python3 sensors/demo.py 2026-09-18T09:00:00Z 2026-09-18T10:00:00Z | bf ingest demo
+BF_START=2026-09-18T09:00:00Z BF_END=2026-09-18T10:00:00Z python3 sensors/demo.py | bf ingest demo
+bf build
 bf check
 bf review
 bf run weekly-review
 ```
 
-`bf check` returns `"ok":true` (`6` OKF notes, `1` memory record), and `bf build` writes individual JSON files under `memories/{concepts,projects,actions}/*.json` alongside `memories/demo/<sha256>.json`.
+`bf build` writes flat JSONL files (`memories/{concepts,projects,actions}.jsonl`) alongside `memories/demo.jsonl`, and read-only `bf check` returns `"ok":true` (`6` notes, `1` memory record).
 
-## Query pure JSON records (`bf query`, `rg`, `jq`)
+## Query JSONL records (`bf query`, `rg`, `jq`)
 
 ```bash
-# Full-text search across all JSON records via rg
+# Full-text search across all JSONL records via rg
 bf query "upstream content can disappear"
 
 # Query heading attr_list metadata (## Intention {#intention owner=maintainer state=waiting}) via jq
 bf query --jq '. as $r | .headings[]? | select(.meta.state == "waiting") | {ref: $r.ref, id, title, meta}'
 
-# Query keyed attr_list map directly
-bf query --jq 'select(.anchors.intention != null) | {ref, intention: .anchors.intention}'
-
-# Find notes citing memories/demo/8e220124401da6e1a0288a86b48eb316d254cd2a9b9399cfc9a07a2fbc0253e8.json with relation metadata via jq
-bf query --jq 'select(.kind != "memory") | .ref as $n | .links[]? | select(.to == "memories/demo/8e220124401da6e1a0288a86b48eb316d254cd2a9b9399cfc9a07a2fbc0253e8.json") | {from_note: $n, rel: .meta.rel, to: .to}'
+# Find notes citing demo:retention with relation metadata via jq
+bf query --jq 'select(.kind == "note") | .ref as $n | .links[]? | select(.to == "demo:retention") | {from_note: $n, rel: .meta.rel, to: .to}'
 ```
 
 ## Share a draft concept with an isolated team brain
 
-`actions/2026-09-25_retention-review/outputs/shared-procedure.md` is a self-contained draft concept without private source-brain citations. Copy it into a fresh brain and validate:
+`actions/2026-09-25_retention-review/outputs/shared-procedure.md` is a self-contained draft concept without private source-brain citations. Copy it into a fresh brain, compile, and validate:
 
 ```bash
 bf init "$bf_demo/team" --name example-team
 cp actions/2026-09-25_retention-review/outputs/shared-procedure.md "$bf_demo/team/concepts/selected-evidence.md"
+bf build --brain "$bf_demo/team"
 bf check --brain "$bf_demo/team"
 ```
 

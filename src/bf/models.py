@@ -8,12 +8,29 @@ import math
 import re
 from datetime import UTC, date, datetime
 
-FORMAT = 16
-EVAL_FORMAT = 1
-AUTHORED = ("projects", "concepts", "actions")
-_RES_EXTRA = ("memories", "notes", "record", "logs", "evals", "bf", "loops")
-RESERVED_SOURCES = frozenset((*AUTHORED, *_RES_EXTRA))
-MAX_FILE = 64 << 20
+FORMAT = 17
+DEFAULT_NOTES = ("concepts", "projects", "actions")
+RECORD_DIRS = ("memories", "usages")
+RESERVED_SOURCES = frozenset(
+    (
+        "memories",
+        "usages",
+        "notes",
+        "record",
+        "logs",
+        "evals",
+        "schemas",
+        "skills",
+        "bf",
+        "loops",
+        "sensors",
+        "routines",
+        "agents",
+        "clients",
+        "prompts",
+    )
+)
+MAX_FILE = 256 << 20
 MAX_BATCH = 16 << 20
 MAX_NOTE = 4 << 20
 MAX_SCHEMA = 1 << 20
@@ -54,8 +71,6 @@ _SECRET_RE = re.compile(
     r"|(?:gh[pousr]_|github_pat_|AKIA|ASIA|AIza|ya29\.|sk-|xox[baprs]-)[A-Za-z0-9._-]{8,}"
     rf"|-----BEGIN {_PEM_TAG}{_PEM_BODY}(?:-----END {_PEM_TAG})?|{_KV_KEY}(?:\\?[\"'])?\s*[:=]\s*{_KV_VAL}"
 )
-
-
 _KV_KEY_RE = re.compile(rf"(?:{_KV_KEY}|(?i:(?<![A-Za-z0-9])(?:proxy[_-]?)?authorization))$")
 
 
@@ -69,17 +84,18 @@ def redact_value(val: object) -> object:
     if isinstance(val, str):
         return redact_secrets(val)
     if isinstance(val, list):
-        return [redact_value(x) for x in val]
+        return [redact_value(item) for item in val]
     if isinstance(val, dict):
         out: dict[object, object] = {}
-        for k, v in val.items():
-            rk, sec = redact_secrets(k) if isinstance(k, str) else k, isinstance(k, str) and bool(_KV_KEY_RE.search(k))
-            if sec and isinstance(v, str) and v:
-                out[rk] = "[REDACTED]"
-            elif sec and isinstance(v, list) and v and all(isinstance(x, str) for x in v):
-                out[rk] = ["[REDACTED]" for _ in v]
+        for key, item in val.items():
+            redacted_key = redact_secrets(key) if isinstance(key, str) else key
+            is_secret = isinstance(key, str) and bool(_KV_KEY_RE.search(key))
+            if is_secret and isinstance(item, str) and item:
+                out[redacted_key] = "[REDACTED]"
+            elif is_secret and isinstance(item, list) and item and all(isinstance(x, str) for x in item):
+                out[redacted_key] = ["[REDACTED]" for _ in item]
             else:
-                out[rk] = redact_value(v)
+                out[redacted_key] = redact_value(item)
         return out
     return val
 
@@ -103,13 +119,13 @@ class FormatError(Error):
 FAILURES = (Error, OSError, UnicodeError)
 
 
-def check_version(value: dict[str, object], name: str, *, expected: int = FORMAT) -> None:
-    """Require `version: expected` before validating fields."""
-    if (found := value.get("version")) == expected and type(found) is int:
+def check_version(value: dict[str, object], name: str) -> None:
+    """Require `version: FORMAT` before validating fields."""
+    if (found := value.get("version")) == FORMAT and type(found) is int:
         return
     ver = f"version {found}" if type(found) is int and 0 <= found < 1000 else "an invalid version"
     why = "has no version" if "version" not in value else f"declares {ver}"
-    raise FormatError(f"{name} {why}; this release reads version: {expected}")
+    raise FormatError(f"{name} {why}; this release reads version: {FORMAT}")
 
 
 def parse_duration_seconds(
@@ -237,7 +253,7 @@ def now_utc(now: datetime | None = None) -> str:
 def log_line(message: str, *, severity: str = "INFO", time_iso: str = "", **fields: object) -> bytes:
     """Render one structured UTF-8 JSON log line (`time`, `severity`, `message`)."""
     payload = {"time": time_iso or now_utc(), "severity": severity.upper(), "message": message}
-    return terminal({**payload, **{k: v for k, v in fields.items() if v is not None}})
+    return terminal({**payload, **{key: val for key, val in fields.items() if val is not None}})
 
 
 def failure(error: BaseException) -> str:
@@ -246,7 +262,7 @@ def failure(error: BaseException) -> str:
         return str(error)
     if isinstance(error, UnicodeError):
         return (
-            "a file is not valid UTF-8; run bf check --validate to locate it"
+            "a file is not valid UTF-8; run bf check to locate it"
             if isinstance(error, UnicodeDecodeError)
             else "arguments and terminal locale must use UTF-8"
         )

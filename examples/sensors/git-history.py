@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Collect bounded local Git history as Brain Framework records; no provider authentication.
 
-Usage: git-history.py ROOT START END [--skip RELATIVE_REPO]...
+Usage: git-history.py ROOT [START END] [--skip RELATIVE_REPO]...
 Requires Git 2.37 or later on PATH.
 Scans checkouts one or two levels below ROOT and collects each repository once, however many of its worktrees
 are there. Automated history stays out: hidden repositories (such as ~/.codex/memories), repositories named
@@ -521,11 +521,19 @@ def collect(
 
 
 def main() -> None:
-    options = sys.argv[4:]
-    if len(sys.argv) < 4 or len(options) % 2 or any(flag != "--skip" for flag in options[::2]):
-        raise InvalidError("expected ROOT START END [--skip RELATIVE_REPO]...")
+    args = sys.argv[1:]
+    if not args:
+        raise InvalidError("expected ROOT [START END] [--skip RELATIVE_REPO]...")
+    root_arg = args[0]
+    rest = args[1:]
+    if len(rest) >= 2 and not rest[0].startswith("--") and not rest[1].startswith("--"):
+        start_raw, end_raw, options = rest[0], rest[1], rest[2:]
+    else:
+        start_raw, end_raw, options = os.environ.get("BF_START", ""), os.environ.get("BF_END", ""), rest
+    if not start_raw or not end_raw or len(options) % 2 or any(flag != "--skip" for flag in options[::2]):
+        raise InvalidError("expected ROOT [START END] [--skip RELATIVE_REPO]... (or BF_START/BF_END env)")
     # Git starts from /: a relative ROOT names a folder below the brain, where BF runs this sensor.
-    result, skipped = collect(Path(sys.argv[1]).absolute(), sys.argv[2], sys.argv[3], frozenset(options[1::2]))
+    result, skipped = collect(Path(root_arg).absolute(), start_raw, end_raw, frozenset(options[1::2]))
     emit(result, max_bytes=MAX_BYTES)
     if skipped:
         print(f"Git history skipped {skipped} unreadable, non-UTF-8 or control-character folders.", file=sys.stderr)

@@ -1,10 +1,8 @@
-# Disposable state, local secrets, compiled Markdown note records, runtime logs, and action attachments stay out of Git.
-/.agents/skills
+# Disposable locks/cursors, local secrets, compiled/ingested JSONL records, and runtime logs stay out of Git.
 /.bf/
 /.env
-/memories/concepts/
-/memories/projects/
-/memories/actions/
-/actions/*/inputs/
-/actions/*/outputs/
 /logs/
+/memories/
+!/memories/*.forgotten
+/usages/
+!/usages/*.forgotten

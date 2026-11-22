@@ -304,12 +304,14 @@ def collect(start: str, end: str, query: str = "") -> list[dict[str, object]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("start")
-    parser.add_argument("end")
+    parser.add_argument("start", nargs="?", default="", help="window start timestamp (default: BF_START)")
+    parser.add_argument("end", nargs="?", default="", help="window end timestamp (default: BF_END)")
     parser.add_argument("--query", default="", help="A Gmail search, such as '-category:promotions'.")
     arguments = parser.parse_args()
+    start_raw = arguments.start or os.environ.get("BF_START", "")
+    end_raw = arguments.end or os.environ.get("BF_END", "")
     cli(
-        lambda: emit(collect(arguments.start, arguments.end, arguments.query), max_bytes=MAX_BYTES),
+        lambda: emit(collect(start_raw, end_raw, arguments.query), max_bytes=MAX_BYTES),
         "Gmail collection failed",
         "check gws authentication and the requested window",
     )

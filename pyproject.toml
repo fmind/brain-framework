@@ -1,8 +1,8 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "31.0.0"
-description = "Brain Framework is a local-first brain for you and your AI agents. It compiles OKF Markdown notes into JSON records, validates notes, records, and evals against JSON Schemas, orchestrates unified loops, and queries offline with rg and jq."
+version = "32.0.0"
+description = "Brain Framework is a local-first brain for you and your AI agents. It compiles OKF Markdown notes into JSONL records, enforces required per-source JSON Schemas, orchestrates convention loops, and queries offline with rg, jq, and DuckDB."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
@@ -20,8 +20,6 @@ keywords = [
   "knowledge-graph",
   "knowledge-management",
   "local-first",
-  "mcp",
-  "model-context-protocol",
   "personal-knowledge-management",
   "python",
   "second-brain",
@@ -42,9 +40,7 @@ dependencies = [
   "croniter>=6.0.0,<8",
   "jsonschema>=4.26.0,<5",
   "markdown>=3.11,<4",
-  "mcp>=2.1.1,<3",
   "pyyaml>=6.0.3,<7",
-  "rich>=15.0.0,<16",
   "watchfiles>=1.1.0,<2",
 ]
 
@@ -140,6 +136,16 @@ ignore = [
   "S603", # Adapters invoke provider CLIs with literal argv lists; no shell is involved.
   "S607", # Provider CLIs are resolved by bare name on PATH.
   "T201", # Adapters print JSON records to stdout.
+]
+"examples/*/evals/**" = [
+  "S101", # Eval scripts assert expected retrieval outcomes.
+  "S603", # Eval scripts invoke the bf CLI directly.
+  "S607", # Eval scripts invoke bf on PATH.
+]
+"src/bf/starter/evals/**" = [
+  "S101", # Starter eval script asserts expected retrieval outcomes.
+  "S603", # Starter eval script invokes the bf CLI directly.
+  "S607", # Starter eval script invokes bf on PATH.
 ]
 "tests/**" = [
   "BLE001", # Worker-thread test helpers record any exception so the test thread can assert on it.

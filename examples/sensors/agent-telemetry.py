@@ -27,9 +27,10 @@ _PEM_TAG = r"[A-Z0-9 ]{0,32}PRIVATE KEY-----"
 _PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,16384}}"
 _KV_KEY = (
     r"(?i:(?<![A-Za-z0-9])(?:password|passwd|(?:client[_-]?)?secret(?:[_-]?access[_-]?key|[_-]?key)?"
-    r"|private[_-]?key|api[_-]?key|(?:access|refresh|auth|api|session|id|bot|private)[_-]?token))"
+    r"|private[_-]?key|api[_-]?key"
+    r"|(?:access|refresh|auth|api|session|id|bot|private|gh|github|oauth|bearer)[_-]?token))"
 )
-_KV_VAL = r'(?:\\?"[^"\r\n]{1,512}"|\\?\'[^\'\r\n]{1,512}\'|[^\s"\',;}{\]]{1,512})'
+_KV_VAL = r'(?:\\?"[^"\r\n]{1,8192}"?|\\?\'[^\'\r\n]{1,8192}\'?|[^\s"\',;}{\]]{1,8192})'
 REDACT = re.compile(
     r"(?:(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{8,}|\bauthorization\s*[:=]\s*basic\s+[A-Za-z0-9+/=-]{8,})"
     r"|(?<=://)[^/\s:@]{1,64}:[^/\s@]{1,128}(?=@)"
@@ -167,8 +168,8 @@ def collect(harness: str, root: Path, start: datetime, end: datetime) -> list[di
                 elif isinstance(parsed, list):
                     items = [m for m in parsed if isinstance(m, dict)]
             else:
-                for line in text.splitlines():
-                    if stripped := line.strip():
+                for raw_ln in raw.splitlines():
+                    if stripped := raw_ln.decode("utf-8").strip():
                         parsed_line = json.loads(stripped)
                         if isinstance(parsed_line, dict):
                             items.append(parsed_line)
@@ -219,15 +220,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("harness", help="lowercase harness label (e.g. claude, agy, codex)")
     parser.add_argument("root", type=Path, help="local harness session directory")
-    parser.add_argument("start", help="inclusive window start (ISO 8601 UTC)")
-    parser.add_argument("end", help="exclusive window end (ISO 8601 UTC)")
+    parser.add_argument("start", nargs="?", default="", help="inclusive window start (default: BF_START)")
+    parser.add_argument("end", nargs="?", default="", help="exclusive window end (default: BF_END)")
     args = parser.parse_args()
+    start_raw = args.start or os.environ.get("BF_START", "")
+    end_raw = args.end or os.environ.get("BF_END", "")
     try:
+        if not start_raw or not end_raw:
+            raise InvalidError("START and END are required (positional or BF_START/BF_END env)")
         out = collect(
             args.harness,
             args.root,
-            parse_window_iso(args.start, "START"),
-            parse_window_iso(args.end, "END"),
+            parse_window_iso(start_raw, "START"),
+            parse_window_iso(end_raw, "END"),
         )
         payload = (json.dumps({"records": out}, ensure_ascii=False) + "\n").encode("utf-8")
         if len(payload) > MAX_BYTES:
