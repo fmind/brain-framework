@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 from collections.abc import Generator, Iterable
 from contextlib import nullcontext, suppress
 from datetime import datetime
@@ -12,7 +11,7 @@ from typing import Any, Literal
 
 from bf import models
 from bf.models import DEFAULT_NOTES, RESERVED_SOURCES, Error, InputError, clean, decode, encode, now_utc
-from bf.storage import Store, open_regular, private_dir, tail_lines, writer
+from bf.storage import Store, append_regular, private_dir, tail_lines, writer
 
 Target = Literal["memories", "usages"]
 Mode = Literal["upsert", "snapshot"]
@@ -248,23 +247,7 @@ def append_event(
         raw_line = encode(event)
         if len(raw_line) > MAX_EVENT_LINE:
             raise Error(f"logs/events.jsonl: event exceeds {MAX_EVENT_LINE} bytes")
-        with logs_dir.parent("events.jsonl", create=True) as (parent, leaf):
-            fd = open_regular(parent, leaf, "logs/events.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with os.fdopen(fd, "wb", buffering=0) as stream:
-                if not stat.S_ISREG((info := os.fstat(stream.fileno())).st_mode):
-                    raise Error("logs/events.jsonl: expected a regular file")
-                os.fchmod(stream.fileno(), 0o600)
-                view = memoryview(raw_line)
-                try:
-                    while view:
-                        if not (written := stream.write(view)):
-                            raise Error("logs/events.jsonl: short write")
-                        view = view[written:]
-                except BaseException:
-                    with suppress(OSError):
-                        os.ftruncate(stream.fileno(), info.st_size)
-                    raise
-                size_after = info.st_size + len(raw_line)
+        size_after = append_regular(logs_dir, "events.jsonl", raw_line, mode=0o600, label="logs/events.jsonl")
         if size_after > COMPACT_BYTES or (seq > MAX_EVENTS and seq % 200 == 0):
             all_lines = logs_dir.read("events.jsonl", 32 << 20).splitlines(keepends=True)
             if len(all_lines) > MAX_EVENTS or size_after > COMPACT_BYTES:

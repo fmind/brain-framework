@@ -10,7 +10,7 @@ bf status --all
 bf review --limit 10
 ```
 
-- `bf status` returns compact `counts` (`notes`, `records`, `usages`, `sources`, `loops`), `"inside_brain"` (true only when CWD is inside the selected brain), `events_seq`, failing `attention` loops, `orphaned_states`, and `unbuilt_notes` (authored folders missing compiled `memories/<dir>.jsonl`). Pass `--format text` for a calm bird's-eye table (or `watch -n 2 bf status --format text`), `--all` for full JSON loop details, or `--check` to exit `1` on failures.
+- `bf status` returns compact `counts` (`notes`, `records`, `usages`, `sources`, `loops`), `"inside_brain"` (true only when CWD is inside the selected brain), `events_seq`, failing `attention` loops, `orphaned_states`, and `unbuilt_notes` (authored folders whose `memories/<dir>.jsonl` is missing or out of sync with Markdown edits). Pass `--format text` for a calm bird's-eye table (or `watch -n 2 bf status --format text`), `--all` for full JSON loop details, or `--check` to exit `1` on failures.
 - `bf review` streams `memories/*.jsonl` directly to report bounded `stale` notes (`newer_evidence` capped to 5 items per note with `newer_count`, `due`, `future_updated`) and `total_tasks_open` (`--limit 20` default, `--all`, `--format json|jsonl|text`).
 
 ## 2. Read uniformly (`bf read`)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
@@ -40,6 +41,54 @@ def _loop_trigger_label(loop: LoopSpec) -> str:
         ev0 = loop.events[0].kind or loop.events[0].source or "event"
         parts.append(f"on {ev0}" if len(loop.events) == 1 else f"on {len(loop.events)} events")
     return " · ".join(parts) or "manual"
+
+
+def unbuilt_note_dirs(store: Store, folders: Iterable[str], authored: Iterable[str] | None = None) -> list[str]:
+    """Return sorted note folders whose `memories/<dir>.jsonl` is missing or out of sync with Markdown files."""
+    dirs = tuple(dict.fromkeys(folders))
+    if not dirs:
+        return []
+    by_dir: dict[str, list[str]] = {d: [] for d in dirs}
+    if authored is not None:
+        for path in authored:
+            if (d := path.split("/", 1)[0]) in by_dir:
+                by_dir[d].append(path)
+    out: list[str] = []
+    for folder in dirs:
+        if authored is None:
+            try:
+                notes = markdown.authored_notes(store, (folder,), skipped=[])
+            except Error:
+                out.append(folder)
+                continue
+        else:
+            notes = by_dir[folder]
+        mem_file = records.memory_file(folder)
+        has_mem = store.exists(mem_file)
+        if not notes:
+            if has_mem:
+                out.append(folder)
+            continue
+        if not has_mem:
+            out.append(folder)
+            continue
+        try:
+            built: dict[str, str] = {}
+            bad = False
+            for _, obj in records.iter_jsonl(store, mem_file):
+                if not isinstance(ref := obj.get("ref"), str) or ref in built:
+                    bad = True
+                    break
+                built[ref] = str(obj.get("sha256") or "")
+            if (
+                bad
+                or set(built) != set(notes)
+                or any(models.digest(store.read(p, models.MAX_NOTE)) != built[p] for p in notes)
+            ):
+                out.append(folder)
+        except Error, OSError:
+            out.append(folder)
+    return sorted(out)
 
 
 def status_summary(store: Store, *, all_units: bool = False) -> dict[str, Any]:
@@ -83,7 +132,7 @@ def status_summary(store: Store, *, all_units: bool = False) -> dict[str, Any]:
     notes_set = frozenset(cfg.notes)
     authored_list = markdown.authored_notes(store, cfg.notes)
     notes_total = len(authored_list)
-    unbuilt_notes = sorted({d for p in authored_list if not store.exists(records.memory_file(d := p.split("/", 1)[0]))})
+    unbuilt_notes = unbuilt_note_dirs(store, cfg.notes, authored_list)
     rec_total = usage_total = 0
     rec_sources: set[str] = set()
     for bucket in models.RECORD_DIRS:
@@ -194,8 +243,9 @@ def format_status_text(summary: dict[str, Any], *, color: bool = False, now: dat
                 ts = str(d.get("last_start" if st == "running" else "last_end") or d.get("last_success") or "")
                 when = _fmt_age(ts, instant, live=st == "running")
                 trig = printable(str(d.get("trigger") or d.get("mode") or ""))
+                st_disp = printable(st)[:16]
                 lines.append(
-                    f"  {printable(name):<{w_n}}  {trig:<{w_t}}  {st_c}{st:<8}{c_rst}  {when:<8}  {_fmt_detail(d)}"
+                    f"  {printable(name):<{w_n}}  {trig:<{w_t}}  {st_c}{st_disp:<8}{c_rst}  {when:<8}  {_fmt_detail(d)}"
                 )
         disabled = sum(1 for d in loops_map.values() if not d.get("enabled", True))
         if disabled:

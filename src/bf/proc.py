@@ -338,6 +338,12 @@ def prepare_unit(
         if not store.exists(cleaned):
             raise Error(f"{name}: command {argv[0]} does not exist inside brain")
         argv[0] = str(store.root.joinpath(*parts))
+    for tok in argv[1:]:
+        cleaned = tok.removeprefix(f"{store.root}/")
+        while cleaned.startswith("./"):
+            cleaned = cleaned[2:]
+        if cleaned.startswith(("sensors/", "routines/", "agents/")) and not store.exists(cleaned):
+            raise Error(f"{name}: script {cleaned} must be a regular file inside brain")
 
     env: dict[str, str] = {key: val for key in _ENV_ALLOWLIST if (val := os.environ.get(key))}
     env |= dict(base_env or {}) | dict(unit_env or {}) | config.load_dotenv(store)

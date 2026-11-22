@@ -572,12 +572,51 @@ def test_query_readonly_jq_and_max_bytes(tmp_path: Path) -> None:
     assert not st.exists("memories/projects.jsonl")
     engine.build(st)
     assert query.query(st, "needle-beta", kind="note")["items"][0]["ref"] == "projects/unbuilt.md"
+    assert "unbuilt_notes" not in query.query(st, "needle-beta", kind="note")
+
+    # Editing, adding, deleting, or corrupting compiled notes surfaces `unbuilt_notes` in both status and query.
+    from bf import status as status_m
+
     st.write(
         "concepts/unbuilt2.md",
         b"---\ntype: guide\nstatus: stable\n---\n# Unbuilt Two\n\nneedle-alpha\n",
     )
+    assert status_m.status_summary(st)["unbuilt_notes"] == ["concepts"]
+    assert query.query(st, "needle-alpha", scope="concepts")["unbuilt_notes"] == ["concepts"]
     engine.build(st)
+    assert status_m.status_summary(st)["unbuilt_notes"] == []
     assert query.query(st, "needle-alpha", scope="concepts/unbuilt2.md")["items"][0]["ref"] == "concepts/unbuilt2.md"
+
+    st.write(
+        "concepts/unbuilt2.md",
+        b"---\ntype: guide\nstatus: stable\n---\n# Unbuilt Two\n\nneedle-alpha edited\n",
+    )
+    assert status_m.status_summary(st)["unbuilt_notes"] == ["concepts"]
+    assert query.query(st, "edited", scope="concepts")["unbuilt_notes"] == ["concepts"]
+    engine.build(st)
+    assert status_m.status_summary(st)["unbuilt_notes"] == []
+
+    st.delete("projects/unbuilt.md")
+    assert status_m.status_summary(st)["unbuilt_notes"] == ["projects"]
+    engine.build(st)
+    assert status_m.status_summary(st)["unbuilt_notes"] == []
+
+    st.write("memories/concepts.jsonl", b"{corrupt\n")
+    assert status_m.status_summary(st)["unbuilt_notes"] == ["concepts"]
+    engine.build(st)
+    assert status_m.status_summary(st)["unbuilt_notes"] == []
+
+    # Duplicate or ref-less JSONL rows also trigger `unbuilt_notes`, and scan errors stay isolated per folder.
+    raw_c = st.read("memories/concepts.jsonl")
+    st.write("memories/concepts.jsonl", raw_c + raw_c.splitlines(keepends=True)[0])
+    assert status_m.unbuilt_note_dirs(st, ("concepts",)) == ["concepts"]
+    st.write("memories/concepts.jsonl", raw_c + b'{"title":"no-ref"}\n')
+    assert status_m.unbuilt_note_dirs(st, ("concepts",)) == ["concepts"]
+    engine.build(st)
+    deep_act = "/".join(f"d{i}" for i in range(66))
+    (b_root / "actions" / deep_act).mkdir(parents=True)
+    assert status_m.unbuilt_note_dirs(st, ("concepts", "actions")) == ["actions"]
+    shutil.rmtree(b_root / "actions" / "d0")
 
     # 2. Direct streaming `jq` evaluates rich expressions and sensor `.updated` faithfully.
     st.write(

@@ -22,6 +22,7 @@ UNNAMED = "file name is not valid UTF-8 or contains a backslash; rename it"
 LINKED = "symlinks are not followed; replace the link with the file or folder itself"
 _WRITE_BUSY = "another writer is active for this brain; retry after it finishes"
 _LOG_LOCK = threading.Lock()
+_LOG_APPENDS: dict[tuple[Path, str], int] = {}
 
 
 def _shown(name: str) -> str | None:
@@ -50,6 +51,28 @@ def open_regular(dir_fd: int, leaf: str, name: str, flags: int = os.O_RDONLY, mo
         if error.errno in {errno.ENXIO, errno.EOPNOTSUPP}:
             raise Error(f"{name}: expected a regular file") from error
         raise
+
+
+def append_regular(store: Store, name: str, data: bytes, *, mode: int = 0o600, label: str = "") -> int:
+    """Atomically append `data` to a regular file via `O_APPEND | O_NOFOLLOW`, rolling back on write errors."""
+    tag = label or name
+    with store.parent(name, create=True) as (parent, leaf):
+        fd = open_regular(parent, leaf, tag, os.O_WRONLY | os.O_CREAT | os.O_APPEND, mode)
+        with os.fdopen(fd, "wb", buffering=0) as stream:
+            if not stat.S_ISREG((info := os.fstat(stream.fileno())).st_mode):
+                raise Error(f"{tag}: expected a regular file")
+            os.fchmod(stream.fileno(), mode)
+            view = memoryview(data)
+            try:
+                while view:
+                    if not (written := stream.write(view)):
+                        raise Error(f"{tag}: short write")
+                    view = view[written:]
+            except BaseException:
+                with suppress(OSError):
+                    os.ftruncate(stream.fileno(), info.st_size)
+                raise
+            return info.st_size + len(data)
 
 
 def tail_lines(lines: list[bytes], max_lines: int, budget: int) -> list[bytes]:
@@ -93,7 +116,10 @@ def _atomic_replace(parent: int, temporary: str, leaf: str, name: str, *, durabl
 class Store:
     """Confined directory store opening every descendant through `O_NOFOLLOW` descriptors."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, _base: Path | None = None, _private: tuple[str, ...] = ()) -> None:
+        if _base is not None:
+            self._base, self._private, self.root = _base, _private, _base.joinpath(*_private)
+            return
         try:
             self.root = root.resolve(strict=True)
             info = self.root.stat()
@@ -101,12 +127,15 @@ class Store:
             raise Error("brain directory does not exist; pass an existing --brain or BRAIN_LOCATION") from error
         if not stat.S_ISDIR(info.st_mode):
             raise Error("brain must be a directory")
+        self._base, self._private = self.root, ()
 
     def _open_dir(self, parts: tuple[str, ...], *, create: bool = False) -> int:
-        fd = os.open(self.root, _DIR)
+        fd = os.open(self._base, _DIR)
+        all_parts = (*self._private, *parts)
+        priv_n = len(self._private)
         try:
-            for number, part in enumerate(parts, 1):
-                if create:
+            for number, part in enumerate(all_parts, 1):
+                if create and number > priv_n:
                     with suppress(FileExistsError):
                         os.mkdir(part, 0o755, dir_fd=fd)
                         os.fsync(fd)
@@ -115,12 +144,16 @@ class Store:
                 except OSError as error:
                     if error.errno not in {errno.ELOOP, errno.ENOTDIR}:
                         raise
-                    loc = "/".join(parts[:number])
+                    if number <= priv_n:
+                        raise Error("state directory must be a real directory without symlinks") from error
+                    loc = "/".join(parts[: number - priv_n])
                     if stat.S_ISREG(os.stat(part, dir_fd=fd, follow_symlinks=False).st_mode):
                         raise Error(f"{loc}: expected a directory, found a file") from error
                     raise Error(f"{loc}: expected a directory; symlinks and special files are not followed") from error
                 os.close(fd)
                 fd = child
+                if number <= priv_n and ((pinfo := os.fstat(fd)).st_uid != os.geteuid() or pinfo.st_mode & 0o077):
+                    raise Error(f"state directory {'/'.join(self._private)} must be owned by you with mode 700")
             return fd
         except BaseException:
             os.close(fd)
@@ -328,18 +361,28 @@ class Store:
         return (tail.split(b"\n", 1)[1] if b"\n" in tail else b"") if off else tail, off
 
     def append_log(self, name: str, line: bytes, *, max_lines: int = 500, max_bytes: int = 2 << 20) -> None:
-        """Append one private (`0600`) JSONL line to `logs/<name>.jsonl`, retaining up to `max_lines` / `max_bytes`."""
+        """Append one private (`0600`) JSONL line to `logs/<name>.jsonl` via `O_APPEND` with amortized compaction."""
         leaf_name, path = f"{name}.jsonl", f"logs/{name}.jsonl"
         entry = line if line.endswith(b"\n") else line + b"\n"
         if len(entry) > max_bytes:
             raise Error(f"{path}: log entry exceeds {max_bytes} bytes")
-        logs_store, kept = private_dir(self, "logs"), []
+        key = (self.root, leaf_name)
         with _LOG_LOCK, writer(self, name="logs.lock"):
-            if max_lines > 1:
-                with suppress(FileNotFoundError):
-                    tail, _ = logs_store.read_tail(leaf_name, max_bytes, label=path)
-                    kept = tail_lines(tail.splitlines(keepends=True), max_lines - 1, max_bytes - len(entry))
-            logs_store.write(leaf_name, b"".join([*kept, entry]), mode=0o600, durable=False)
+            logs_store = private_dir(self, "logs")
+            size_after = append_regular(logs_store, leaf_name, entry, mode=0o600, label=path)
+            if key not in _LOG_APPENDS and len(_LOG_APPENDS) >= 256:
+                _LOG_APPENDS.pop(next(iter(_LOG_APPENDS)))
+            count = _LOG_APPENDS.get(key, 0) + 1
+            _LOG_APPENDS[key] = count
+            stride = max(1, max_lines // 4)
+            limit = max_lines if max_lines <= 16 else max_lines + stride
+            check_lines = max_lines <= 16 or count == 1 or count % stride == 0
+            if size_after > max_bytes or check_lines:
+                tail, off = logs_store.read_tail(leaf_name, max_bytes + 1, label=path)
+                raw_lines = tail.splitlines(keepends=True)
+                if off > 0 or size_after > max_bytes or len(raw_lines) > limit:
+                    kept = tail_lines(raw_lines, max_lines, max_bytes) or ([entry] if max_lines > 0 else [])
+                    logs_store.write(leaf_name, b"".join(kept), mode=0o600, durable=False)
 
 
 def expand(path: Path) -> Path:
@@ -378,7 +421,7 @@ def private_dir(store: Store, *parts: str, create: bool = True) -> Store:
                 raise Error(f"state directory {'/'.join(target)} must be owned by you with mode 700")
     finally:
         os.close(fd)
-    return Store(store.root.joinpath(*target))
+    return Store(store.root, _base=store.root, _private=tuple(target))
 
 
 @contextmanager

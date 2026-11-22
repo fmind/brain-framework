@@ -59,11 +59,14 @@ def format_watch_line(event: str, payload: dict[str, Any], *, color: bool = Fals
             if isinstance(sm := payload.get("summary"), dict):
                 if "records" in sm:
                     diffs = " ".join(
-                        f"{s}{v}" for s, k in (("+", "added"), ("~", "updated"), ("-", "removed")) if (v := sm.get(k))
+                        f"{s}{printable(str(v))[:16]}"
+                        for s, k in (("+", "added"), ("~", "updated"), ("-", "removed"))
+                        if (v := sm.get(k))
                     )
-                    detail = f"{diffs} · {sm['records']} records" if diffs else f"{sm['records']} unchanged"
+                    recs = printable(str(sm["records"]))[:16]
+                    detail = f"{diffs} · {recs} records" if diffs else f"{recs} unchanged"
                 elif "emitted" in sm:
-                    detail = f"{sm['emitted']} emitted"
+                    detail = f"{printable(str(sm['emitted']))[:16]} emitted"
             return f"{c_dim}{ts}{c_rst}  {c_ok}ok     {c_rst}  {name}  {detail}  {c_dim}{dur}{c_rst}\n"
         err = printable(str(payload.get("error") or st))
         return f"{c_dim}{ts}{c_rst}  {c_err}fail   {c_rst}  {name}  {err}  {c_dim}{dur}{c_rst}\n"
@@ -352,32 +355,52 @@ def _serve_locked(
             q.append(now_m)
             return True
 
+    def _daemon_sig(unit: LoopSpec, base_env: Mapping[str, str], dotenv_sig: str) -> object:
+        resolved_argv: tuple[str, ...] = ()
+        scripts: list[tuple[str, str]] = []
+        with suppress(Error, OSError):
+            resolved_argv, _, _, _, _ = loops.resolve_loop(store, unit)
+            for tok in resolved_argv:
+                cleaned = tok.removeprefix("{{brain}}/").removeprefix(f"{store.root}/")
+                while cleaned.startswith("./"):
+                    cleaned = cleaned[2:]
+                if cleaned.startswith(("sensors/", "routines/", "agents/")):
+                    sig = models.digest(store.read(cleaned, models.MAX_NOTE)) if store.exists(cleaned) else "invalid"
+                    scripts.append((cleaned, sig))
+        return (unit, models.digest(models.encode(dict(base_env))), dotenv_sig, resolved_argv, tuple(scripts))
+
     def reconcile_config() -> None:
         nonlocal cfg
         prev_key = (cfg.name, cfg.notes)
         try:
             new_cfg = config.load(store)
+            dotenv_sig = models.digest(models.encode(config.load_dotenv(store)))
         except models.FAILURES as err:
             emit_event("watch.error", {"ok": False, "error": printable(failure(err))})
             return
         if (new_cfg.name, new_cfg.notes) != prev_key:
             note_dirty.set()
-        desired = {u.name: (u, new_cfg.env) for u in new_cfg.loops.values() if u.enabled and u.daemon}
+        desired = {
+            u.name: (_daemon_sig(u, new_cfg.env, dotenv_sig), u, new_cfg.env)
+            for u in new_cfg.loops.values()
+            if u.enabled and u.daemon
+        }
         with reconcile_lock:
             cfg = new_cfg
             stale = (
-                [] if stop_ev.is_set() else [daemons.pop(k) for k in list(daemons) if desired.get(k) != daemons[k][0]]
+                []
+                if stop_ev.is_set()
+                else [daemons.pop(k) for k in list(daemons) if k not in desired or desired[k][0] != daemons[k][0]]
             )
         for _, u_stop, d_stream in stale:
             u_stop.set()
             d_stream.terminate()
         with reconcile_lock:
-            for key, spec_pair in () if stop_ev.is_set() else desired.items():
+            for key, (sig, unit, base_env) in () if stop_ev.is_set() else desired.items():
                 if key not in daemons:
-                    unit, base_env = spec_pair
                     u_stop = threading.Event()
                     stream = DaemonStream(store, unit, u_stop, wake_event, base_env=base_env, on_event=emit_event)
-                    daemons[key] = (spec_pair, u_stop, stream)
+                    daemons[key] = (sig, u_stop, stream)
                     stream.start()
 
     def _classify(raw_path: str) -> str:
@@ -390,7 +413,7 @@ def _serve_locked(
             return ""
         if (parts[0] in cfg.notes and rel.endswith(".md")) or (parts[0] == "schemas" and rel.endswith(".json")):
             return "note"
-        if rel == "bf.yaml":
+        if rel in {"bf.yaml", ".env"} or parts[0] in {"sensors", "routines", "agents"}:
             return "config"
         if rel == "logs/events.jsonl":
             return "wake"

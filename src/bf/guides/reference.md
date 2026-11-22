@@ -39,7 +39,7 @@ Brain selection resolves `--brain PATH` -> nearest enclosing `bf.yaml` -> `BF_BR
 - **Notes (`notes:`):** `concepts/`, `projects/`, `actions/` (flat `<slug>.md` or `<slug>/index.md` bundles).
 - **Loops (`loops:`):** `sensors/` (auto-ingested collectors), `routines/` (maintenance/reports/daemons), `agents/` (LLM/harness tasks).
 - **Records (JSONL):** `memories/` (`<source>.jsonl` + `.forgotten`), `usages/` (`<source>.jsonl` + `.forgotten`), `logs/` (`0700` private: `0600` `logs/<loop>.jsonl` + `logs/events.jsonl`).
-- **Supporting & runtime:** `schemas/` (`<source>.json`, `usages.json`), `evals/` (user Python/pytest evals), optional `clients/` & `prompts/` (convention-only), optional gitignored `0600` `.env`, and disposable `0700` `.bf/` (`write.lock`, `watch.lock`, `<loop>.json`, `<loop>/`).
+- **Supporting & runtime:** `schemas/` (`<source>.json`, `usages.json`), `evals/` (user Python/pytest evals), optional `clients/` & `prompts/` (convention-only), optional gitignored `0600` `.env`, and disposable `0700` `.bf/` (`write.lock`, `watch.lock`, `logs.lock`, `<loop>.json`, `<loop>/`).
 
 ## `bf.yaml` schema {#bf-yaml-schema}
 

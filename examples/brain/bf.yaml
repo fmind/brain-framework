@@ -14,6 +14,12 @@ loops:
     description: Snapshot fictional evidence records from the local demo sensor.
     when: 1h
     ingest: snapshot
+  usage-demo:
+    description: Snapshot fictional FinOps telemetry records into usages/usage-demo.jsonl.
+    when: 1d
+    ingest:
+      target: usages
+      mode: snapshot
   weekly-review:
     description: Save a weekly summary of notes, records, and open tasks into memories/weekly-review.jsonl.
     when:
@@ -26,7 +32,7 @@ loops:
     emit: loop.message
     enabled: false
   assistant:
-    description: Run a scheduled or chat-triggered digest assistant.
+    description: Run a scheduled or chat-triggered digest assistant (agents/assistant.py, 15m default timeout).
     when:
       - every: 1d
         backfill: 1d
@@ -35,5 +41,4 @@ loops:
       - event:
           kind: loop.message
           source: local
-    run: [claude, -p, "Read prompts/digest.md and the context JSON from stdin."]
     enabled: false

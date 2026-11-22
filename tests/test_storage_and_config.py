@@ -690,10 +690,17 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     with pytest.raises(Error, match="not a regular file owned by you"):
         config.select()
 
-    # `Store.iter_lines` & `Store.append_log` bounded trimming + `0700`/`0600` permissions:
+    # `Store.iter_lines` & `Store.append_log` `O_APPEND` inode stability, bounded trimming, and `0700`/`0600` perms:
     log_store = Store(b1)
+    log_store.append_log("stream", b'{"n":1}')
+    ino_first = (b1 / "logs" / "stream.jsonl").stat().st_ino
+    log_store.append_log("stream", b'{"n":2}')
+    assert (b1 / "logs" / "stream.jsonl").stat().st_ino == ino_first
+    assert [ln.decode() for ln in log_store.read("logs/stream.jsonl").splitlines()] == ['{"n":1}', '{"n":2}']
     log_store.append_log("sample", b'{"msg":"one"}', max_lines=2, max_bytes=80)
+    ino_sample = (b1 / "logs" / "sample.jsonl").stat().st_ino
     log_store.append_log("sample", b'{"msg":"two"}', max_lines=2, max_bytes=80)
+    assert (b1 / "logs" / "sample.jsonl").stat().st_ino == ino_sample
     log_store.append_log("sample", b'{"msg":"three"}', max_lines=2, max_bytes=80)
     assert oct((b1 / "logs").stat().st_mode & 0o777) == "0o700"
     assert oct((b1 / "logs" / "sample.jsonl").stat().st_mode & 0o777) == "0o600"
@@ -706,8 +713,19 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
     big_bytes = log_store.read("logs/big.jsonl")
     assert len(big_bytes) <= 80
     assert big_bytes.endswith(b'{"n":40}\n')
-    log_store.append_log("sample", b'{"msg":"012345678901234567890"}', max_lines=5, max_bytes=35)
-    assert log_store.read("logs/sample.jsonl") == b'{"msg":"012345678901234567890"}\n'
+    exact_entry = b'{"msg":"012345678901234567890123"}\n'
+    assert len(exact_entry) == 35
+    log_store.append_log("sample", exact_entry, max_lines=5, max_bytes=35)
+    assert log_store.read("logs/sample.jsonl") == exact_entry
+    # Amortized `max_lines > 16` compaction across simulated separate CLI processes (`_LOG_APPENDS` reset).
+    from bf import storage as st_m
+
+    for i in range(26):
+        st_m._LOG_APPENDS.clear()  # noqa: SLF001 - simulate fresh CLI invocation per append
+        log_store.append_log("multi", f'{{"n":{i}}}'.encode(), max_lines=20, max_bytes=4096)
+    multi_lines = log_store.read("logs/multi.jsonl").splitlines()
+    assert len(multi_lines) == 20
+    assert multi_lines[-1] == b'{"n":25}'
     with pytest.raises(Error, match="exceeds 20 bytes"):
         log_store.append_log("sample", b"x" * 25, max_bytes=20)
     os.mkfifo(b1 / "logs" / "fifo.jsonl")

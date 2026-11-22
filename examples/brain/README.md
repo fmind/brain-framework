@@ -1,6 +1,6 @@
 # Runnable example brain
 
-A fictional project, concepts, universal `index.md` action bundles, heading/link `attr_list` metadata, required per-source JSON Schemas (`schemas/*.json`), runnable Python eval (`evals/smoke.py`), and local `sensors/`, `routines/`, `prompts/`, and convention `loops:` entries demonstrate the end-to-end workflow without credentials or network access.
+A fictional 3x3 brain with notes (`concepts/`, `projects/`, `actions/` with `index.md` bundles), convention loops (`sensors/`, `routines/`, `agents/`), and JSONL records (`memories/`, `usages/`, `logs/`), plus required per-source JSON Schemas (`schemas/*.json`), reusable `prompts/`, and a runnable Python eval (`evals/smoke.py`) without credentials or network access.
 
 Run on a disposable copy from the repository checkout after `uv sync --locked`:
 
@@ -12,13 +12,14 @@ cd "$bf_demo/brain"
 bf() { uv run --project "$bf_checkout" bf "$@"; }
 
 BF_START=2026-09-18T09:00:00Z BF_END=2026-09-18T10:00:00Z python3 sensors/demo.py | bf ingest demo
+bf run usage-demo
 bf build
 bf check
 bf review
 bf run weekly-review
 ```
 
-`bf build` writes flat JSONL files (`memories/{concepts,projects,actions}.jsonl`) alongside `memories/demo.jsonl`, and read-only `bf check` returns `"ok":true` (`6` notes, `1` memory record).
+`bf build` writes flat JSONL files (`memories/{concepts,projects,actions}.jsonl`) alongside `memories/demo.jsonl` and `usages/usage-demo.jsonl`, and read-only `bf check` returns `"ok":true` (`6` notes, `1` memory record, `1` usage record).
 
 ## Query JSONL records (`bf query`, `rg`, `jq`)
 

@@ -128,6 +128,10 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     wr = loops.run_loops(store, ("weekly-review",), now=now_ex)
     assert wr["ok"], wr
     assert wr["results"][0]["summary"]["records"] == 1
+    ud = loops.run_loops(store, ("usage-demo",), now=now_ex)
+    assert ud["ok"], ud
+    assert ud["results"][0]["summary"]["target"] == "usages"
+    assert query.query(store, "demo-model", kind="usage")["count"] == 1
     assert engine.validate(store)["ok"]
 
     local_state = b_root / ".bf" / "local"
@@ -188,25 +192,25 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
         check=True,
     )
     records.append_event(store, "loop.message", "local", json.loads(listen.stdout.strip()))
-    (b_root / "routines" / "fake_harness.py").write_text(
-        "import json, pathlib, subprocess, sys\n"
-        "ctx = json.loads(sys.stdin.read())\n"
-        "prompt_path = pathlib.Path(sys.argv[1])\n"
-        "assert 'Digest prompt' in prompt_path.read_text() and ctx['events']\n"
-        "msg = {'text': 'Digest from ' + prompt_path.name}\n"
-        f"subprocess.run([{sys.executable!r}, 'routines/local.py', 'send'], input=json.dumps(msg).encode(), check=True)\n"
-    )
     bf_txt = store.read("bf.yaml").decode()
     bf_txt = bf_txt.replace(
-        'run: [claude, -p, "Read prompts/digest.md and the context JSON from stdin."]\n    enabled: false',
-        f"run: [{sys.executable!r}, routines/fake_harness.py, prompts/digest.md]\n    enabled: true",
+        "      - event:\n          kind: loop.message\n          source: local\n    enabled: false",
+        "      - event:\n          kind: loop.message\n          source: local\n    enabled: true",
     )
     store.write("bf.yaml", bf_txt.encode())
+    from bf import config as cfg_m
+
+    ex_cfg = cfg_m.load(store)
+    a_argv, a_ing, _, _, a_timeout = loops.resolve_loop(store, ex_cfg.loops["assistant"], ex_cfg.reserved_sources)
+    assert a_argv == ("agents/assistant.py",)
+    assert a_ing == ""
+    assert a_timeout == 900
     due_res = loops.run_loops(store, due_only=True, now=now_ex)
-    assert due_res["ran"] == 3
-    assert {r["loop"] for r in due_res["results"]} == {"demo", "weekly-review", "assistant"}
+    assert due_res["ran"] == 4
+    assert {r["loop"] for r in due_res["results"]} == {"demo", "usage-demo", "weekly-review", "assistant"}
     assert due_res["ok"]
     assert "Digest from digest.md" in (local_state / "outbox.jsonl").read_text()
+    assert "assistant.digest" in store.read("logs/assistant.jsonl").decode()
     assert engine.validate(store)["ok"]
 
     bench = subprocess.run(  # noqa: S603

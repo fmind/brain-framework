@@ -358,7 +358,7 @@ def query(
 
     unbuilt: list[str] = []
     if kind in {"", "note"}:
-        from bf import markdown as md
+        from bf.status import unbuilt_note_dirs
 
         sc = scope.strip().rstrip("/")
         if not sc or sc == "memories":
@@ -372,11 +372,7 @@ def query(
         else:
             head = sc.split("/", 1)[0]
             cand_dirs = [head] if head in cfg.notes else []
-        missing_dirs = [f for f in cand_dirs if not store.exists(records.memory_file(f))]
-        if missing_dirs:
-            with suppress(Error):
-                found_dirs = {p.split("/", 1)[0] for p in md.authored_notes(store, missing_dirs, skipped=[])}
-                unbuilt = sorted(f for f in missing_dirs if f in found_dirs)
+        unbuilt = unbuilt_note_dirs(store, cand_dirs)
     return {
         "ok": True,
         "brain": cfg.name,

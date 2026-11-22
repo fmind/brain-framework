@@ -1204,6 +1204,61 @@ def test_batched_jq_filters_stop_event_due_isolation_and_live_reload(
         while time.monotonic() < stop_dl and loops.load_unit_state(live_store, "added")["status"] != "stopped":
             time.sleep(0.05)
         assert loops.load_unit_state(live_store, "added")["status"] == "stopped"
+
+        # Editing `.env` or a daemon script under `routines/` restarts the daemon live with new env/code.
+        live_store.write(
+            "routines/live_d.py",
+            b"import json, os, time\n"
+            b"print(json.dumps({'id': 'v1-' + os.environ.get('D_TAG', 'none'), 'kind': 'daemon.ver'}), flush=True)\n"
+            b"time.sleep(10)\n",
+        )
+        live_store.write(".env", b"D_TAG=init\n", mode=0o600)
+        live_store.write(
+            "bf.yaml",
+            f"version: {FORMAT}\nname: live-reload\nloops:\n  live-d:\n"
+            f"    when: daemon\n    run: [{sys.executable!r}, routines/live_d.py]\n    emit: loop.event\n".encode(),
+        )
+
+        def wait_event_id(target_id: str) -> bool:
+            dl = time.monotonic() + 8.0
+            while time.monotonic() < dl:
+                evs, _ = records.read_events(live_store)
+                if any(e.get("kind") == "daemon.ver" and e.get("data", {}).get("id") == target_id for e in evs):
+                    return True
+                time.sleep(0.05)
+            return False
+
+        assert wait_event_id("v1-init")
+        live_store.write(".env", b"D_TAG=rotated\n", mode=0o600)
+        assert wait_event_id("v1-rotated")
+        live_store.write(
+            "routines/live_d.py",
+            b"import json, os, time\n"
+            b"print(json.dumps({'id': 'v2-' + os.environ.get('D_TAG', 'none'), 'kind': 'daemon.ver'}), flush=True)\n"
+            b"time.sleep(10)\n",
+        )
+        assert wait_event_id("v2-rotated")
+        # Invalid `.env` (non-0600 permissions) emits `watch.error` without stopping the running daemon.
+        live_store.write(".env", b"D_TAG=bad\n", mode=0o644)
+        err_dl = time.monotonic() + 8.0
+        saw_env_err = False
+        while time.monotonic() < err_dl:
+            if "mode 600" in capsys.readouterr().out:
+                saw_env_err = True
+                break
+            time.sleep(0.05)
+        assert saw_env_err
+        assert loops.load_unit_state(live_store, "live-d")["status"] == "running"
+        live_store.write(".env", b"D_TAG=fixed\n", mode=0o600)
+        assert wait_event_id("v2-fixed")
+
+        # Symlinked interpreter-prefixed script is rejected fail-closed by `proc.prepare_unit`.
+        ext_script = tmp_path / "external.py"
+        ext_script.write_text("print('evil')\n")
+        (live_root / "routines" / "sym.py").symlink_to(ext_script)
+        with pytest.raises(Error, match="must be a regular file inside brain"):
+            proc.prepare_unit(live_store, "sym", (sys.executable, "routines/sym.py"), "r1", "2026-11-22T00:00:00Z")
+        (live_root / "routines" / "sym.py").unlink()
     finally:
         stop_live.set()
         live_t.join(timeout=6.0)

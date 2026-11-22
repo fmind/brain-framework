@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UsageRecord",
+  "description": "Shared domain schema for token, FinOps, and prompt usage records in usages/*.jsonl.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "harness": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "model": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "input_tokens": { "type": "integer", "minimum": 0 },
+    "output_tokens": { "type": "integer", "minimum": 0 },
+    "cached_tokens": { "type": "integer", "minimum": 0 },
+    "cost_usd": { "type": "number", "minimum": 0 },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "prompts": { "type": "integer", "minimum": 0 }
+  }
+}

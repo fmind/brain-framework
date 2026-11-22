@@ -4,6 +4,22 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v33.1.0](https://github.com/fmind/brain-framework/releases/tag/v33.1.0) - 2026-11-22
+
+A minor release adding live daemon reloads on `.env` and daemon script edits in `bf watch`, completing the 3x3 showcase in `examples/brain/`, switching `Store.append_log()` to `O_APPEND` with amortized multi-process compaction (preserving inodes between compactions for `tail -f` / `tail -F`), making `unbuilt_notes` content-accurate, and hardening `private_dir()`, interpreter-prefixed loop script confinement, and status/watch output sanitization. The brain format (`version: 18`), `bf.yaml`, and the published JSON Schemas (`docs/{bf,record}.schema.json`) are unchanged; no brain upgrade step is needed from `v33.0.0`.
+
+### Added
+
+- **Live daemon reloads on `.env` and daemon script edits, plus full 3x3 showcase in `examples/brain/`.** `bf watch` now watches `.env` and `sensors/`/`routines/`/`agents/` scripts and reconciles running daemon loops automatically when `.env` values or a daemon's script contents change (emitting `watch.error` without stopping healthy daemons if `.env` is invalid). `examples/brain/` now includes `agents/assistant.py` (convention discovery + 15m default timeout), `sensors/usage-demo.py`, and `schemas/usages.json` to demonstrate all 9 cells of the 3x3 layout offline.
+
+### Fixed
+
+- **Switched `Store.append_log()` to `O_APPEND` with amortized compaction and made `unbuilt_notes` detect edited/added/deleted notes.** `logs/<loop>.jsonl` now appends in place via shared `O_APPEND | O_NOFOLLOW` I/O (matching `logs/events.jsonl`), eliminating per-line file rewrites and preserving inodes between compactions so `tail -f` streams live (use `tail -F` across rotations). `bf status` and `bf query` `unbuilt_notes` now compare authored Markdown digests and row uniqueness against `memories/<dir>.jsonl` instead of only checking whether the JSONL file is missing.
+
+### Security
+
+- **Hardened `private_dir()` TOCTOU checks, interpreter-prefixed loop script confinement, `.env` signature hashing, and TTY status/watch sanitization.** `private_dir()` now returns a `Store` that re-verifies `O_NOFOLLOW` and `0700` `geteuid()` ownership from the brain root on every open (with `Store.append_log()` acquiring `logs.lock` before opening `logs/`); `proc.prepare_unit()` rejects symlinked or non-regular brain-relative `sensors/`/`routines/`/`agents/` script arguments; `bf watch` hashes `.env` and `base_env` instead of retaining plaintext secrets in daemon state; and `format_status_text()` / `format_watch_line()` sanitize loop state and summary fields via `printable()`.
+
 ## [v33.0.0](https://github.com/fmind/brain-framework/releases/tag/v33.0.0) - 2026-11-22
 
 A major release bumping the brain format to `version: 18` to unify `created`/`updated`/`description` metadata across notes and records, scaffold idiomatic per-folder starter note schemas, restore `?key=value` link query metadata and the 7 allowlisted `{{...}}` `run:` placeholders, add fast `bf check --notes` and `--format text` on `bf check` & `bf review`, allow `ingest: false` opt-out for `sensors/`, surface `unbuilt_notes`, and harden link parsing, `agents/` timeouts, `.gitignore` `*.forgotten` rules, and the `git-history.py` example sensor. Existing `version: 17` brains stay compatible once bumped to `version: 18`, with `summary` -> `description` and `time` -> `created` renamed and notes rebuilt; back up your brain before migrating and follow the manual upgrade steps below.
