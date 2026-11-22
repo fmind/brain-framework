@@ -1,10 +1,11 @@
 ---
 type: project
 tags: [retention, evidence]
-status: stable
+status: active
+created: 2026-09-19
 updated: 2026-09-19
 stale_after: 90d
-summary: Demonstrate collecting fictional evidence and querying unified JSONL records locally.
+description: Demonstrate collecting fictional evidence and querying unified JSONL records locally.
 ---
 
 # Example project
@@ -21,11 +22,11 @@ The source is a local deterministic script with no credentials or network access
 
 ## Next actions
 
-- [ ] Run the [retention action](../actions/2026-09-19_retention/index.md). {: priority=p1}
+- [ ] Run the [retention action](../actions/retention/index.md). {: priority=p1}
 
 ## Intention {#intention owner=maintainer state=waiting}
 
-When the [archive policy](../concepts/archive-policy.md#retention){rel=depends-on} changes from the revision reviewed on 2026-09-25, review the [retention decision](../actions/2026-09-25_retention-review/outputs/decision.md).
+When the [archive policy](../concepts/archive-policy.md#retention){rel=depends-on} changes from the revision reviewed on 2026-09-25, review the [retention decision](../actions/retention-review/outputs/decision.md).
 
 ## Unknown {#unknown state=unresolved}
 

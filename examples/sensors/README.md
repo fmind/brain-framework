@@ -33,11 +33,11 @@ python3 sensors/agent-telemetry.py claude ~/.claude/projects 2026-11-01T00:00:00
 #       target: usages
 ```
 
-Scripts placed under `sensors/<name>.py` automatically imply `ingest: upsert` into `memories/<name>.jsonl` (override with `ingest: snapshot` for complete catalogs like `local-documents.py`). See [Operations](../../docs/operations.md) and [Reference](../../docs/reference.md).
+Scripts placed under `sensors/<name>.py` automatically imply `ingest: upsert` into `memories/<name>.jsonl` (override with `ingest: false` to opt out, `ingest: snapshot` for complete catalogs like `local-documents.py`, or `ingest: {target: usages}` for FinOps/telemetry). See [Operations](../../docs/operations.md) and [Reference](../../docs/reference.md).
 
 ## Required per-sensor JSON Schemas
 
-Every ingested record is validated against the bundled `record` schema (`bf schema record`) plus the required `schemas/<source>.json` file and stored in `memories/<source>.jsonl`. Tighten `schemas/<source>.json` to enforce domain fields, types, or enums before `bf ingest` writes records.
+Every ingested record is validated against the bundled `record` schema (`bf schema record`) plus the required `schemas/<source>.json` (for `memories/<source>.jsonl`) or `schemas/usages.json` (for `usages/<source>.jsonl`). Tighten `schemas/<source>.json` to enforce domain fields, types, or enums before `bf ingest` writes records.
 
 ## Provider safety and failure rules
 

@@ -28,7 +28,7 @@ def test_models_sanitization_json_and_dates() -> None:
     with pytest.raises(Error, match="forbidden control"):
         models.clean_text("bad\x00byte")
 
-    assert models.FORMAT == 17
+    assert models.FORMAT == 18
     assert not models.invisible("plain-ascii")
     assert not models.invisible("éàü")
     assert models.invisible("bidir\u202eattack")
@@ -489,7 +489,7 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
             (f"version: {models.FORMAT}\nname: badwatch\nwatch:\n  interval: 1s\n", "unknown property 'watch'"),
             (
                 f"version: {models.FORMAT}\nname: badcron\nloops:\n  l1:\n    when: 'not a cron'\n    run: [echo]\n",
-                "duration .*, @macro, or 5-field cron",
+                "failed schema rule anyOf",
             ),
             (
                 f"version: {models.FORMAT}\nname: legon\nloops:\n  l1:\n    on:\n      schedules: 5m\n    run: [echo]\n",
@@ -625,6 +625,22 @@ def test_yaml_object_and_brain_selection(tmp_path: Path, monkeypatch: pytest.Mon
             (f"version: {models.FORMAT}\nname: emptynotes\nnotes: []\n", "violates minItems 1"),
             (f"version: {models.FORMAT}\nname: resnotes\nnotes: [memories]\n", "value is reserved"),
             (f"version: {models.FORMAT}\nname: dupnotes\nnotes: [wiki, wiki]\n", "unique"),
+            (
+                f"version: {models.FORMAT}\nname: badph\nloops:\n  l1:\n    run: [echo, '{{{{unknown}}}}']\n",
+                "unknown placeholder",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: badphspace\nloops:\n  l1:\n    run: [echo, '{{{{ start }}}}']\n",
+                "unknown placeholder",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: badphempty\nloops:\n  l1:\n    run: [echo, '{{{{}}}}']\n",
+                "unknown placeholder",
+            ),
+            (
+                f"version: {models.FORMAT}\nname: badphcmd\nloops:\n  l1:\n    run: ['{{{{brain}}}}/sensors/s.py']\n",
+                "placeholders are not allowed in executable name",
+            ),
         )
     ):
         bad_dir = tmp_path / f"bad-{idx}"

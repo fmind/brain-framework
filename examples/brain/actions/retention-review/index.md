@@ -1,8 +1,9 @@
 ---
 type: action
-status: draft
+status: open
+created: 2026-09-25
 updated: 2026-09-25
-summary: Review a fictional retention decision after its supporting policy changes.
+description: Review a fictional retention decision after its supporting policy changes.
 ---
 
 # Review retention

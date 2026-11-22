@@ -147,5 +147,5 @@ Guides = [
   { "operations.md" = "Compose loops with sensors/, routines/, and agents/ conventions, stdout/stderr JSONL streams, when triggers, and bf watch in bf.yaml, ingest atomically, and enforce security boundaries." },
 ]
 Reference = [
-  { "reference.md" = "Complete contract lookup for bf CLI commands, exit codes, 3x3 brain layout, bf.yaml v17, and published JSON Schemas." },
+  { "reference.md" = "Complete contract lookup for bf CLI commands, exit codes, 3x3 brain layout, bf.yaml v18, and published JSON Schemas." },
 ]

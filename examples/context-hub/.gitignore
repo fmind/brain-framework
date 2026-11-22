@@ -1,4 +1,7 @@
 /.bf/
 /.env
 /logs/
-/memories/
+/memories/*
+!/memories/*.forgotten
+/usages/*
+!/usages/*.forgotten

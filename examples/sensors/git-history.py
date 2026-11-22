@@ -62,6 +62,7 @@ class ProviderError(Exception):
 def run(argv: Sequence[str], *, timeout: float, max_bytes: int) -> bytes:
     """Execute Git from / without inherited hook GIT_* overrides, with bounded output and process-group reaping."""
     env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV}
+    env.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_TERMINAL_PROMPT": "0"})
     try:
         proc = subprocess.Popen(
             list(argv),
@@ -183,7 +184,7 @@ def make_record(
         "title": line(title, identifier),
         "type": item_type.lower(),
         "text": text,
-        "time": iso_utc(time_value),
+        "created": iso_utc(time_value),
     }
     if attributes:
         out["attributes"] = attributes
@@ -429,6 +430,11 @@ def history(repository: Path, start: str, end: str) -> list[str]:
     payload = run(
         [
             "git",
+            "--no-pager",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "protocol.allow=never",
             "-C",
             str(repository),
             "log",

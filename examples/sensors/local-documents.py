@@ -448,7 +448,7 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
                     "type": "document",
                     "title": " ".join(relative.split()),
                     "text": content[:TEXT_BYTES].decode(errors="ignore"),
-                    "time": when,
+                    "created": when,
                     "updated": when,
                     **({"url": url} if len(url) <= MAX_REF else {}),
                     "attributes": {

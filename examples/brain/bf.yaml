@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://fmind.github.io/brain-framework/bf.schema.json
 # https://fmind.github.io/brain-framework/reference/
-version: 17
+version: 18
 name: example
 description: Runnable example brain with offline sensors, routines, and loops.
 timezone: UTC

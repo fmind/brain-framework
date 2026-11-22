@@ -70,10 +70,12 @@ def test_cli_commands_and_exit_codes(
         capsys.readouterr()
 
     # Universal bundle `<slug>/index.md` builds cleanly and ignores sibling attachments!
-    act_dir = target / "actions" / "2026-11-16_audit-cli"
+    act_dir = target / "actions" / "audit-cli"
     (act_dir / "inputs").mkdir(parents=True)
     (act_dir / "inputs" / "raw.md").write_text("# Ignored attachment\n")
-    (act_dir / "index.md").write_text("---\ntype: action\nstatus: draft\n---\n\n# Audit CLI\n\n- [ ] Check help text\n")
+    (act_dir / "index.md").write_text(
+        "---\ntype: action\nstatus: open\ncreated: 2026-11-16\n---\n\n# Audit CLI\n\n- [ ] Check help text\n"
+    )
     assert cli.run(["build", "--brain", str(target)]) == 0
     assert json.loads(capsys.readouterr().out)["notes"] == 2
 
@@ -294,7 +296,7 @@ def test_cli_schema_read_query_review_and_hygiene(
     (b / "concepts" / "topic-a.md").write_text("---\ntype: architecture\nstatus: draft\n---\n\n# Topic A\n")
     (b / "projects" / "bundle-proj").mkdir(parents=True)
     (b / "projects" / "bundle-proj" / "index.md").write_text(
-        "---\ntype: project\nstatus: stable\n---\n\n# Bundle Proj\n"
+        "---\ntype: project\nstatus: active\ncreated: 2026-11-15\n---\n\n# Bundle Proj\n"
     )
     (b / "concepts" / "stale-tab.md").write_text(
         "---\ntype: guide\nstatus: stable\nupdated: 2020-01-01\nstale_after: 30d\n---\n\n# Stale\tTab\n"
@@ -332,6 +334,12 @@ def test_cli_schema_read_query_review_and_hygiene(
     chk = json.loads(capsys.readouterr().out)
     assert chk["ok"] is True
     assert chk["notes"] == 4
+    assert cli.run(["check", "--notes", "--format", "text", "--brain", str(b)]) == 0
+    assert "[OK]" in capsys.readouterr().out
+    assert cli.run(["review", "--format", "text", "--brain", str(b)]) == 0
+    rev_txt = capsys.readouterr().out
+    assert "STALE" in rev_txt
+    assert "concepts/stale-tab.md" in rev_txt
     assert cli.run(["check", "-n", "10", "--all", "--brain", str(b)]) == 2
     capsys.readouterr()
 
@@ -340,10 +348,22 @@ def test_cli_schema_read_query_review_and_hygiene(
     before_jsonl = (b / "memories" / "concepts.jsonl").read_bytes()
     assert cli.run(["check", "--brain", str(b)]) == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False
+    assert cli.run(["check", "--format", "text", "--brain", str(b)]) == 1
+    assert "FAILED" in capsys.readouterr().out
     assert (b / "memories" / "concepts.jsonl").read_bytes() == before_jsonl
     (b / "concepts" / "unbuilt.md").unlink()
     assert cli.run(["build", "--brain", str(b)]) == 0
     capsys.readouterr()
+
+    # Unbuilt folder hint on `bf status` (JSON & text) and `bf query` stderr:
+    (b / "actions" / "fresh.md").write_text("---\ntype: action\nstatus: open\ncreated: 2026-11-22\n---\n# Fresh\n")
+    assert cli.run(["status", "--format", "text", "--brain", str(b)]) == 0
+    assert "unbuilt notes: actions" in capsys.readouterr().out
+    assert cli.run(["query", "--kind", "note", "--brain", str(b)]) == 0
+    q_unbuilt = capsys.readouterr()
+    assert "unbuilt notes in actions" in q_unbuilt.err
+    assert json.loads(q_unbuilt.out)["unbuilt_notes"] == ["actions"]
+    (b / "actions" / "fresh.md").unlink()
 
     assert cli.run(["emit", "BAD_KIND", "--brain", str(b)]) == 2
     capsys.readouterr()

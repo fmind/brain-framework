@@ -1,9 +1,10 @@
 ---
 type: project
-status: draft
+status: active
+created: 2026-09-22
 updated: 2026-09-22
 tags: [launch, web]
-summary: Launch a product website that explains the product before signup.
+description: Launch a product website that explains the product before signup.
 ---
 
 # New website

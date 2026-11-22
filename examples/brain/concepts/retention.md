@@ -2,9 +2,11 @@
 type: concept
 tags: [retention, evidence]
 status: stable
+created: 2026-09-19
 updated: 2026-09-19
-sources:
-  - resource: "demo:retention"
+description: Why original upstream evidence is retained locally alongside derived Markdown notes.
+links:
+  - demo:retention?rel=source
 ---
 
 # Retention

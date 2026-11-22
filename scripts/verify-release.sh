@@ -82,9 +82,10 @@ brain="${work}/brain"
 cat >"${brain}/projects/new-website.md" <<'EOF'
 ---
 type: project
-status: draft
+status: active
+created: 2026-09-25
 updated: 2026-09-25
-summary: Launch a product website that helps visitors understand the product.
+description: Launch a product website that helps visitors understand the product.
 ---
 
 # New website
@@ -94,7 +95,7 @@ summary: Launch a product website that helps visitors understand the product.
 Start with a single product page because visitors need a clear explanation before signing up. Evidence: [brief](workspace:brief).
 EOF
 printf '{"type":"object"}\n' >"${brain}/schemas/workspace.json"
-printf '%s\n' '[{"id":"brief","title":"Website brief","text":"Single product page.","time":"2026-09-20T09:00:00Z"}]' |
+printf '%s\n' '[{"id":"brief","title":"Website brief","text":"Single product page.","created":"2026-09-20T09:00:00Z"}]' |
   "${bf}" ingest workspace --brain "${brain}" | grep -F '"added":1' > /dev/null ||
   fail "bf ingest rejected the sample record"
 "${bf}" build --brain "${brain}" | grep -F '"problems":[]' > /dev/null || fail "bf build failed on the sample brain"

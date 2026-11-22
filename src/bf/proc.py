@@ -273,6 +273,27 @@ def exec_argv(
         return (1, b"", ov_msg) if ov_ev.is_set() else (rc, bytes(out_buf), err_s)
 
 
+def check_jq_filter(flt: str, label: str) -> str:
+    """Validate a `jq` event filter expression against an empty input in a confined subprocess."""
+    try:
+        jq_bin = resolve_tool("jq")
+        wrapped = f"{JQ_PRELUDE}\ntry ([\n{flt}\n] | length > 0) catch false"
+        cp = subprocess.run(  # noqa: S603
+            [jq_bin, "-n", "-L", "/dev/null", "--", wrapped],
+            capture_output=True,
+            cwd="/",
+            env=safe_env(jq_bin),
+            timeout=5,
+            check=False,
+        )
+    except (Error, subprocess.TimeoutExpired) as err:
+        return f"{label}: {err}"
+    if cp.returncode != 0:
+        err_t = cp.stderr.decode("utf-8", "replace").strip()
+        return f"{label}: invalid jq event filter ({err_t.splitlines()[-1] if err_t else 'jq exited nonzero'})"
+    return ""
+
+
 def prepare_unit(
     store: Store,
     name: str,
@@ -299,7 +320,16 @@ def prepare_unit(
             "events": list(events),
         }
     )
-    argv = list(base_argv)
+    tokens = {
+        "brain": str(store.root),
+        "loop": name,
+        "state": state_dir,
+        "start": start_iso,
+        "end": effective_end,
+        "trigger": trigger,
+        "run": run_id,
+    }
+    argv = [models.PLACEHOLDER_RE.sub(lambda m: tokens.get(m[1], m[0]), tok) for tok in base_argv]
     if argv and argv[0] == "bf":
         argv = [sys.executable, "-m", "bf", *argv[1:]]
     elif argv and "/" in argv[0] and not Path(argv[0]).is_absolute():

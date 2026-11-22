@@ -17,22 +17,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 from bf import config, engine, models, proc, records
-from bf.config import Config, EventMatch, LoopSpec, ScheduleSpec
-from bf.config import due_schedule as due_schedule
+from bf.config import Config, EventMatch, LoopSpec, ScheduleSpec, due_schedule
 from bf.models import Error, InputError, decode, encode, now_utc
-from bf.proc import prepare_unit as prepare_unit
-from bf.records import (
-    emit_output_events as emit_output_events,
-)
-from bf.records import (
-    find_orphans,
-    load_unit_state,
-    mark_unit_state,
-    save_unit_state,
-)
-from bf.records import (
-    parse_emitted_event as parse_emitted_event,
-)
+from bf.proc import prepare_unit
+from bf.records import emit_output_events, find_orphans, load_unit_state, mark_unit_state, save_unit_state
 from bf.storage import Store, private_dir, writer
 
 _GLOB_CHARS = frozenset("*?[")
@@ -56,7 +44,7 @@ def _script_folder(argv: Sequence[str]) -> str:
         for tok in argv[1:]:
             if tok.startswith("-") or (exe == "uv" and tok == "run"):
                 continue
-            cleaned = tok.removeprefix("./")
+            cleaned = tok.removeprefix("{{brain}}/").removeprefix("./")
             return next((f for f in _LOOP_DIRS if cleaned.startswith(f"{f}/")), "")
     return ""
 
@@ -94,7 +82,11 @@ def resolve_loop(
         else:
             raise Error(f"loops.{loop.name}: {cand} is not executable; run chmod +x {cand}")
 
-    timeout = _AGENT_DEFAULT_TIMEOUT if (folder == "agents" and not loop.explicit_timeout) else loop.timeout
+    timeout = (
+        max(_AGENT_DEFAULT_TIMEOUT, loop.timeout)
+        if (folder == "agents" and not loop.explicit_timeout)
+        else loop.timeout
+    )
     if loop.explicit_ingest:
         return argv, loop.ingest, loop.target, loop.mode, timeout
     if folder == "sensors" and not loop.daemon and not loop.emit:
@@ -602,6 +594,25 @@ def run_loops(
     return {**out, "problems": list(built["problems"])} if built and built["problems"] else out
 
 
+def _delete_states(store: Store, names: Sequence[str], *, dry_run: bool) -> list[str]:
+    unique = list(dict.fromkeys(names))
+    if dry_run or not unique:
+        with suppress(FileNotFoundError):
+            bf_dir = private_dir(store, create=False)
+            return [name for name in unique if bf_dir.exists(f"{name}.json")]
+        return []
+    removed: list[str] = []
+    with writer(store), suppress(FileNotFoundError):
+        bf_dir = private_dir(store, create=False)
+        for name in unique:
+            if bf_dir.exists(f"{name}.json"):
+                bf_dir.delete(f"{name}.json", durable=False)
+                removed.append(name)
+        if removed:
+            store.sync_dirs([".bf"])
+    return removed
+
+
 def reset_loops(store: Store, names: Sequence[str], *, dry_run: bool = False) -> dict[str, Any]:
     """Reset `.bf/<loop>.json` state for named loops back to idle."""
     cfg = config.load(store)
@@ -609,37 +620,12 @@ def reset_loops(store: Store, names: Sequence[str], *, dry_run: bool = False) ->
         raise InputError("--reset requires one or more loop names")
     if bad := next((w for w in names if w not in cfg.loops), ""):
         raise InputError(f"unknown loop {bad!r} in bf.yaml")
-    reset_done: list[str] = []
-    if dry_run:
-        with suppress(FileNotFoundError):
-            bf_dir = private_dir(store, create=False)
-            existing = [name for name in dict.fromkeys(names) if bf_dir.exists(f"{name}.json")]
-            return {"ok": True, "brain": cfg.name, "reset": existing, "dry_run": True}
-        return {"ok": True, "brain": cfg.name, "reset": [], "dry_run": True}
-    with writer(store), suppress(FileNotFoundError):
-        bf_dir = private_dir(store, create=False)
-        for name in dict.fromkeys(names):
-            if bf_dir.exists(f"{name}.json"):
-                bf_dir.delete(f"{name}.json", durable=False)
-                reset_done.append(name)
-        if reset_done:
-            store.sync_dirs([".bf"])
-    return {"ok": True, "brain": cfg.name, "reset": reset_done, "dry_run": False}
+    return {"ok": True, "brain": cfg.name, "reset": _delete_states(store, names, dry_run=dry_run), "dry_run": dry_run}
 
 
 def prune_state(store: Store, *, dry_run: bool = False) -> dict[str, Any]:
     """Delete orphaned `.bf/<loop>.json` state files."""
     cfg = config.load(store)
     orphans = find_orphans(store, set(cfg.loops))
-    if dry_run or not orphans:
-        return {"ok": True, "brain": cfg.name, "pruned": orphans, "dry_run": dry_run}
-    pruned: list[str] = []
-    with writer(store), suppress(FileNotFoundError):
-        bf_dir = private_dir(store, create=False)
-        for name in orphans:
-            if bf_dir.exists(f"{name}.json"):
-                bf_dir.delete(f"{name}.json", durable=False)
-                pruned.append(name)
-        if pruned:
-            store.sync_dirs([".bf"])
-    return {"ok": True, "brain": cfg.name, "pruned": sorted(pruned), "dry_run": False}
+    pruned = orphans if (dry_run or not orphans) else sorted(_delete_states(store, orphans, dry_run=False))
+    return {"ok": True, "brain": cfg.name, "pruned": pruned, "dry_run": dry_run}

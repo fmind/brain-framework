@@ -188,10 +188,6 @@ def _check_tz(tz: str, label: str) -> str:
     return tz
 
 
-def _str_tuple(raw: object) -> tuple[str, ...]:
-    return tuple(str(item) for item in raw) if isinstance(raw, list) else ()
-
-
 def _check_env(key: str, val: str, label: str, key_err: str) -> str:
     if not _ENV_KEY_RE.fullmatch(key):
         raise Error(key_err)
@@ -341,14 +337,6 @@ def _parse_trigger_window(item: Mapping[str, object], label: str) -> tuple[int |
     return backfill, overlap
 
 
-def _parse_event_value(raw: object) -> EventMatch:
-    if isinstance(raw, str):
-        return EventMatch(kind=raw)
-    if isinstance(raw, dict):
-        return EventMatch(str(raw.get("kind", "")), str(raw.get("source", "")), str(raw.get("filter", "")))
-    return EventMatch()
-
-
 def _parse_when(raw_when: object, label: str) -> tuple[bool, tuple[ScheduleSpec, ...], tuple[EventMatch, ...]]:
     if raw_when is None:
         return False, (), ()
@@ -377,7 +365,12 @@ def _parse_when(raw_when: object, label: str) -> tuple[bool, tuple[ScheduleSpec,
                 bf_w, ov_w = _parse_trigger_window(item, label)
                 add_sched(ScheduleSpec(f"cron:{expr}", cron=expr, backfill=bf_w, overlap=ov_w))
             elif "event" in item:
-                events.append(_parse_event_value(item["event"]))
+                ev = item["event"]
+                events.append(
+                    EventMatch(kind=ev)
+                    if isinstance(ev, str)
+                    else EventMatch(str(ev.get("kind", "")), str(ev.get("source", "")), str(ev.get("filter", "")))
+                )
         elif type(item) is int or (isinstance(item, str) and bool(models.DURATION_RE.fullmatch(item.strip()))):
             secs = models.parse_duration(item, label)
             add_sched(ScheduleSpec(f"every:{str(item).strip()}", every=secs))
@@ -406,7 +399,9 @@ def _parse_loop(
     raw_ingest = raw.get("ingest")
     explicit_ingest = raw_ingest is not None
     target: Literal["memories", "usages"] = "memories"
-    if isinstance(raw_ingest, str):
+    if raw_ingest is False:
+        ingest, mode = "", "upsert"
+    elif isinstance(raw_ingest, str):
         ingest, mode = name, cast("Literal['upsert', 'snapshot']", raw_ingest)
     elif isinstance(raw_ingest, dict):
         ingest = str(raw_ingest.get("source") or name)
@@ -417,14 +412,23 @@ def _parse_loop(
     if ingest and ingest in reserved:
         raise Error(f"{label}.ingest: source {ingest!r} is reserved")
 
+    raw_run = raw.get("run")
+    run = tuple(str(item) for item in raw_run) if isinstance(raw_run, list) else ()
+    for idx, arg in enumerate(run):
+        for match in models.PLACEHOLDER_RE.finditer(arg):
+            if idx == 0:
+                raise Error(f"{label}.run[0]: placeholders are not allowed in executable name; use a relative path")
+            if match[0] != f"{{{{{match[1]}}}}}" or match[1] not in models.PLACEHOLDERS:
+                allowed = ", ".join(f"{{{{{k}}}}}" for k in sorted(models.PLACEHOLDERS))
+                raise Error(f"{label}.run: unknown placeholder {match[0]}; allowed: {allowed}")
     def_win = dw if isinstance(dw := defaults.get("window"), dict) else {}
     own_win = rw if isinstance(rw := raw.get("window"), dict) else {}
     win = {**def_win, **own_win}
-    explicit_timeout = "timeout" in raw or "timeout" in defaults
+    explicit_timeout = "timeout" in raw
     timeout_val = raw["timeout"] if "timeout" in raw else defaults.get("timeout", 300)
     return LoopSpec(
         name=name,
-        run=_str_tuple(raw.get("run")),
+        run=run,
         description=models.clean_text(str(raw.get("description") or ""), f"{label}.description"),
         daemon=daemon,
         ingest=ingest,

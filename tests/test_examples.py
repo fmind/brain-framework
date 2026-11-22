@@ -49,10 +49,11 @@ def test_context_hub_walkthrough(tmp_path: Path) -> None:
         "projects/new-website.md",
         b"---\n"
         b"type: project\n"
-        b"status: draft\n"
+        b"status: active\n"
+        b"created: 2026-09-22\n"
         b"updated: 2026-09-27\n"
         b"tags: [launch, web]\n"
-        b"summary: Launch a product website that explains the product before signup.\n"
+        b"description: Launch a product website that explains the product before signup.\n"
         b"---\n\n"
         b"# New website\n\n"
         b"## Decision {#decision owner=product}\n\n"
@@ -296,7 +297,11 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert "[REDACTED]" in at.stdout
     assert "Old turn" not in at.stdout
     assert "Boundary turn" not in at.stdout
-    assert records.ingest(store, "agent-telemetry", at.stdout.encode())["added"] == 1
+    assert records.ingest(store, "agent-telemetry", at.stdout.encode(), target="usages")["added"] == 1
+    tel_rec = json.loads(store.read("usages/agent-telemetry.jsonl").decode().splitlines()[0])
+    assert tel_rec["harness"] == "claude"
+    assert tel_rec["prompts"] >= 1
+    assert tel_rec["session_id"].startswith("claude-")
 
     bad_json_dir = tmp_path / "bad-telemetry"
     bad_json_dir.mkdir()

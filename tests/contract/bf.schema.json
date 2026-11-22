@@ -1,7 +1,7 @@
 {
   "$defs": {
     "Argv": {
-      "description": "Literal argv without a shell.",
+      "description": "Literal argv without a shell (supports {{brain}}, {{loop}}, {{state}}, {{start}}, {{end}}, {{trigger}}, {{run}}).",
       "items": { "maxLength": 4096, "minLength": 1, "type": "string" },
       "maxItems": 64,
       "minItems": 1,
@@ -24,6 +24,7 @@
           "description": "5-field cron expression or @macro.",
           "maxLength": 128,
           "minLength": 1,
+          "pattern": "^(?:@[A-Za-z]+|[^\\s]+(?:[ \\t]+[^\\s]+){4})$",
           "type": "string"
         },
         "overlap": {
@@ -190,7 +191,7 @@
       "description": "One loop entry.",
       "properties": {
         "description": {
-          "description": "Short summary of what this loop does for humans and AI agents.",
+          "description": "Short description of what this loop does for humans and AI agents.",
           "maxLength": 512,
           "type": "string"
         },
@@ -213,8 +214,12 @@
           "type": ["object", "null"]
         },
         "ingest": {
-          "anyOf": [{ "enum": ["upsert", "snapshot"], "type": "string" }, { "$ref": "#/$defs/Ingest" }],
-          "description": "Ingest stdout JSONL into memories/ or usages/ ('upsert'|'snapshot' or {source?, target?, mode?})."
+          "anyOf": [
+            { "const": false },
+            { "enum": ["upsert", "snapshot"], "type": "string" },
+            { "$ref": "#/$defs/Ingest" }
+          ],
+          "description": "Ingest stdout JSONL into memories/ or usages/ ('upsert'|'snapshot'|{source?, target?, mode?}), or false to disable sensors/ auto-ingest."
         },
         "run": { "$ref": "#/$defs/Argv" },
         "timeout": {
@@ -233,7 +238,13 @@
                 {
                   "anyOf": [
                     { "maximum": 315576000, "minimum": 1, "type": "integer" },
-                    { "maxLength": 128, "minLength": 1, "type": "string" }
+                    { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" },
+                    {
+                      "maxLength": 128,
+                      "minLength": 1,
+                      "pattern": "^(?:@[A-Za-z]+|[^\\s]+(?:[ \\t]+[^\\s]+){4})$",
+                      "type": "string"
+                    }
                   ]
                 },
                 { "$ref": "#/$defs/EveryTrigger" },
@@ -247,7 +258,13 @@
                   {
                     "anyOf": [
                       { "maximum": 315576000, "minimum": 1, "type": "integer" },
-                      { "maxLength": 128, "minLength": 1, "type": "string" }
+                      { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" },
+                      {
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "pattern": "^(?:@[A-Za-z]+|[^\\s]+(?:[ \\t]+[^\\s]+){4})$",
+                        "type": "string"
+                      }
                     ]
                   },
                   { "$ref": "#/$defs/EveryTrigger" },
@@ -313,7 +330,7 @@
     },
     "defaults": { "$ref": "#/$defs/Defaults" },
     "description": {
-      "description": "Short summary of this brain's scope for humans and AI agents.",
+      "description": "Short description of this brain's scope for humans and AI agents.",
       "maxLength": 1024,
       "type": "string"
     },
@@ -372,7 +389,7 @@
       "minLength": 1,
       "type": "string"
     },
-    "version": { "const": 17, "description": "Brain configuration format version.", "type": "integer" }
+    "version": { "const": 18, "description": "Brain configuration format version.", "type": "integer" }
   },
   "required": ["version", "name"],
   "title": "Config",

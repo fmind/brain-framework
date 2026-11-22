@@ -4,7 +4,7 @@ Answer one question across Google Workspace, Jira, GitHub, and Google Cloud fixt
 
 | Path                      | Purpose                                                                                               |
 | ------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `bf.yaml`                 | YAML configuration (`version: 17`, `name: context-demo`).                                             |
+| `bf.yaml`                 | YAML configuration (`version: 18`, `name: context-demo`).                                             |
 | `schemas/*.json`          | Required per-source JSON Schemas (`projects`, `workspace`, `jira`, `github`, `gcloud`).               |
 | `fixtures/*.json`         | Offline JSON fixtures for `workspace`, `jira`, `github`, `gcloud`, plus `jira-done.json`.             |
 | `projects/new-website.md` | Authoritative Markdown project note with heading `#id` anchors, link `{rel=...}` metadata, and tasks. |
@@ -58,10 +58,11 @@ Update `projects/new-website.md` dated `2026-09-27` citing all four records with
 cat > projects/new-website.md <<'EOF'
 ---
 type: project
-status: draft
+status: active
+created: 2026-09-22
 updated: 2026-09-27
 tags: [launch, web]
-summary: Launch a product website that explains the product before signup.
+description: Launch a product website that explains the product before signup.
 ---
 
 # New website

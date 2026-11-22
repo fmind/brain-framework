@@ -119,7 +119,7 @@ def _extract_snippet(rec: dict[str, Any], rx: re.Pattern[str] | None, width: int
                 ):
                     anc, cur = str(heading.get("id") or ""), ix + len(str(t0))
             return center(txt), anc
-        priority = ("title", "summary")
+        priority = ("title", "description")
         stack: list[tuple[str, Any]] = [(k, rec[k]) for k in priority if k in rec]
         stack.extend((k, v) for k, v in rec.items() if k not in {"sha256", "kind", "source", *priority})
         while stack:
@@ -130,7 +130,7 @@ def _extract_snippet(rec: dict[str, Any], rx: re.Pattern[str] | None, width: int
                 return center(snip, None if fk in {"id", "ref"} else rx), ""
             if isinstance(val, (list, dict)):
                 stack.extend(((fk, x) for x in val) if isinstance(val, list) else val.items())
-    return center(str(rec.get("summary") or rec.get("title") or rec.get("text") or rec.get("ref") or "")), ""
+    return center(str(rec.get("description") or rec.get("title") or rec.get("text") or rec.get("ref") or "")), ""
 
 
 def _summary_row(rec: dict[str, Any], *, snippet: str = "", anchor: str = "") -> dict[str, Any]:
@@ -140,12 +140,12 @@ def _summary_row(rec: dict[str, Any], *, snippet: str = "", anchor: str = "") ->
         "kind": rec.get("kind", "memory"),
         "title": rec.get("title", ""),
     }
-    if upd := rec.get("updated") or rec.get("time"):
+    if upd := rec.get("updated") or rec.get("created"):
         row["updated"] = upd
     if snippet:
         row["snippet"] = snippet
-    elif summ := rec.get("summary"):
-        row["summary"] = summ
+    elif desc := rec.get("description"):
+        row["description"] = desc
     if anchor:
         row["anchor"] = anchor
     return row
@@ -181,8 +181,10 @@ def _rg_run(
     flags.extend(("--json", "-i") if json_out else ("--no-filename", "--no-line-number", "-i"))
     cmd = [rg_bin, *flags, "-e", pattern, *(str(store.root / f) for f in files)]
     hits: list[tuple[bytes, str]] = []
+    hit_bytes = 0
 
     def read_rg(stdout: IO[bytes]) -> bool:
+        nonlocal hit_bytes
         while ln := stdout.readline(MAX_BATCH + 1):
             if len(ln) > MAX_BATCH:
                 raise Error(f"rg output line exceeds {MAX_BATCH} bytes")
@@ -221,6 +223,9 @@ def _rg_run(
                 if not isinstance(parsed, dict) or not _ref_matches(parsed, scope_ref):
                     continue
             hits.append((line_b, sub))
+            hit_bytes += len(line_b)
+            if limit is None and (len(hits) > models.MAX_TOTAL_FILES or hit_bytes > models.MAX_FILE):
+                raise Error("rg+jq match buffer exceeded safety limit; narrow PATTERN or --scope")
             if limit is not None and len(hits) > limit:
                 return False
         return True
@@ -351,6 +356,27 @@ def query(
             if trunc:
                 break
 
+    unbuilt: list[str] = []
+    if kind in {"", "note"}:
+        from bf import markdown as md
+
+        sc = scope.strip().rstrip("/")
+        if not sc or sc == "memories":
+            cand_dirs = list(cfg.notes)
+        elif sc == "usages" or sc.startswith("usages/"):
+            cand_dirs = []
+        elif sc.startswith("memories/"):
+            rest = sc.removeprefix("memories/")
+            src = rest.removesuffix(".jsonl")
+            cand_dirs = [src] if "/" not in rest and src in cfg.notes else []
+        else:
+            head = sc.split("/", 1)[0]
+            cand_dirs = [head] if head in cfg.notes else []
+        missing_dirs = [f for f in cand_dirs if not store.exists(records.memory_file(f))]
+        if missing_dirs:
+            with suppress(Error):
+                found_dirs = {p.split("/", 1)[0] for p in md.authored_notes(store, missing_dirs, skipped=[])}
+                unbuilt = sorted(f for f in missing_dirs if f in found_dirs)
     return {
         "ok": True,
         "brain": cfg.name,
@@ -360,6 +386,7 @@ def query(
         "count": len(items),
         "truncated": trunc,
         "items": items,
+        **({"unbuilt_notes": unbuilt} if unbuilt else {}),
     }
 
 
@@ -461,12 +488,14 @@ def read_target(store: Store, raw_target: str, *, raw: bool = False, max_bytes: 
     def rec_out(hp: str, hr: dict[str, Any], default_ref: str) -> dict[str, Any]:
         if raw:
             raise InputError("--raw applies only to Markdown notes or plain files")
+        rec_kind = str(hr.get("kind", "memory"))
+        rec_ref = str(hr.get("ref", default_ref))
         return {
             "ok": True,
             "brain": cfg.name,
-            "kind": str(hr.get("kind", "memory")),
-            "ref": str(hr.get("ref", default_ref)),
-            "path": hp,
+            "kind": rec_kind,
+            "ref": rec_ref,
+            "path": rec_ref if rec_kind == "note" else hp,
             "record": hr,
         }
 
@@ -518,7 +547,7 @@ def read_target(store: Store, raw_target: str, *, raw: bool = False, max_bytes: 
                 "brain": cfg.name,
                 "kind": "note",
                 "ref": to,
-                "path": records.memory_file(to.split("/")[0]),
+                "path": to,
                 "record": comp,
             }
     return _cap_json_bytes(out, max_bytes) if max_bytes is not None else out

@@ -2,7 +2,7 @@
 
 Use only for an explicitly authorized release. [CD](../../../../.github/workflows/cd.yml) owns PyPI and GitHub publication: never create a competing release, move a tag, or replace published assets. Keep private-brain details out of outgoing commits and release notes. [`scripts/release.py`](../../../../scripts/release.py) runs the mechanical steps; this checklist owns the judgment between them. Run long steps in the background.
 
-1. **Write the changelog**: In the primary checkout, complete `## Unreleased` and open it with one paragraph naming what stays unchanged and the upgrade step: “A documentation release. The brain format (`version: 17`), `bf.yaml`, and the published JSON Schemas are unchanged; no upgrade step is needed.” A breaking change makes the release a major and needs manual upgrade steps.
+1. **Write the changelog**: In the primary checkout, complete `## Unreleased` and open it with one paragraph naming what stays unchanged and the upgrade step: “A documentation release. The brain format (`version: 18`), `bf.yaml`, and the published JSON Schemas are unchanged; no upgrade step is needed.” A breaking change makes the release a major and needs manual upgrade steps.
 1. **Prepare the clone**: From the primary checkout on `main`, name the changed paths the release ships, or `--all` when every change belongs to it. Other sessions may hold uncommitted work there, so name paths whenever in doubt:
 
    ```bash

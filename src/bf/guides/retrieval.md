@@ -10,8 +10,8 @@ bf status --all
 bf review --limit 10
 ```
 
-- `bf status` returns compact `counts` (`notes`, `records`, `usages`, `sources`, `loops`), `"inside_brain"` (true only when CWD is inside the selected brain), `events_seq`, failing `attention` loops, and `orphaned_states`. Pass `--format text` for a calm bird's-eye table (or `watch -n 2 bf status --format text`), `--all` for full JSON loop details, or `--check` to exit `1` on failures.
-- `bf review` streams `memories/*.jsonl` directly to report bounded `stale` notes (`newer_evidence` capped to 5 items per note with `newer_count`, `due`, `future_updated`) and `total_tasks_open` (`--limit 20` default, `--all`, `--format json|jsonl`).
+- `bf status` returns compact `counts` (`notes`, `records`, `usages`, `sources`, `loops`), `"inside_brain"` (true only when CWD is inside the selected brain), `events_seq`, failing `attention` loops, `orphaned_states`, and `unbuilt_notes` (authored folders missing compiled `memories/<dir>.jsonl`). Pass `--format text` for a calm bird's-eye table (or `watch -n 2 bf status --format text`), `--all` for full JSON loop details, or `--check` to exit `1` on failures.
+- `bf review` streams `memories/*.jsonl` directly to report bounded `stale` notes (`newer_evidence` capped to 5 items per note with `newer_count`, `due`, `future_updated`) and `total_tasks_open` (`--limit 20` default, `--all`, `--format json|jsonl|text`).
 
 ## 2. Read uniformly (`bf read`)
 
@@ -38,7 +38,7 @@ bf read "workspace:brief" | jq '.record'
 
 ## 3. Search, filter, and analyze (`bf query`, `rg`, `jq`, DuckDB)
 
-`bf query` is strictly read-only (`bf build` compiles notes explicitly) and streams `memories/*.jsonl` by default (pass `--kind usage` or `--scope usages` to inspect `usages/*.jsonl`). Filter-only queries return compact summary rows (`ref`, `source`, `kind`, `title`, `updated`, `summary`); `--format jsonl` warns on `stderr` whenever results are truncated by `-n/--limit`:
+`bf query` is strictly read-only (`bf build` compiles notes explicitly) and streams `memories/*.jsonl` by default (pass `--kind usage` or `--scope usages` to inspect `usages/*.jsonl`). Filter-only queries return compact summary rows (`ref`, `source`, `kind`, `title`, `updated`, `description`); `--format jsonl` warns on `stderr` whenever results are truncated by `-n/--limit`, and queries against unbuilt note folders print a `bf build` hint on `stderr`:
 
 ```bash
 # Lexical search via ripgrep (rg) with kind/scope filters
@@ -61,7 +61,7 @@ duckdb -c "SELECT harness, sum(cost_usd) FROM read_json_auto('usages/*.jsonl', u
 
 ## 4. Validation (`bf check`) and Python evals (`evals/`)
 
-- **`bf check`**: strictly read-only validation of `bf.yaml`, `.env`, required schemas (`schemas/<source>.json`, `schemas/usages.json`), compiled-note sync, `memories/*.jsonl`, `usages/*.jsonl`, enabled `loops:` (scripts, ingest schemas, `jq` event filters), links, `#anchor` headings, and declared cross-brain targets (`--limit 50`, `--all`, `--strict`).
+- **`bf check`**: strictly read-only validation of `bf.yaml`, `.env`, required schemas (`schemas/<source>.json`, `schemas/usages.json`), compiled-note sync, `memories/*.jsonl`, `usages/*.jsonl`, enabled `loops:` (scripts, ingest schemas, `jq` event filters), links, `#anchor` headings, and declared cross-brain targets (`--notes` for fast note/config/link validation without scanning historical sensor/usage JSONL, `--limit 50`, `--all`, `--strict`, `--format json|text`).
 - **`evals/`**: user-owned Python/pytest scripts (`evals/smoke.py`) that invoke `bf` and assert domain/retrieval contracts (`python3 evals/smoke.py` or `pytest evals/`).
 
 ## Trust boundary

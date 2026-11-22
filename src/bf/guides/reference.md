@@ -1,6 +1,6 @@
 # Reference
 
-Complete contract lookup for Brain Framework (`bf`), 3x3 brain layout, `bf.yaml` (`version: 17`), JSONL records (`memories/`, `usages/`, `logs/`), required JSON Schemas, and exit codes.
+Complete contract lookup for Brain Framework (`bf`), 3x3 brain layout, `bf.yaml` (`version: 18`), JSONL records (`memories/`, `usages/`, `logs/`), required JSON Schemas, and exit codes.
 
 ## CLI commands
 
@@ -9,16 +9,16 @@ Every command writes one compact UTF-8 JSON object with `"ok"` to `stdout` (exce
 **Strictly read-only commands (never mutate disk):**
 
 - `bf --version`: print the installed package version.
-- `bf status [--all] [--format json|text] [--check] [--brain PATH]`: inspect `"inside_brain"`, compact `counts` (`notes`, `records`, `usages`, `sources`, `loops`), failing `attention` loops, `orphaned_states`, and optional `loops` (`--all`). Pass `--format text` for a bird's-eye overview table or `--check` to exit `1` on failures.
-- `bf review [-n/--limit N | --all] [--format json|jsonl] [--brain PATH]`: scan `memories/*.jsonl` and report `stale` notes (`newer_evidence`, `due`, `future_updated`) and `total_tasks_open` (`--limit` default `20`).
+- `bf status [--all] [--format json|text] [--check] [--brain PATH]`: inspect `"inside_brain"`, compact `counts` (`notes`, `records`, `usages`, `sources`, `loops`), failing `attention` loops, `orphaned_states`, `unbuilt_notes`, and optional `loops` (`--all`). Pass `--format text` for a bird's-eye overview table or `--check` to exit `1` on failures.
+- `bf review [-n/--limit N | --all] [--format json|jsonl|text] [--brain PATH]`: scan `memories/*.jsonl` and report `stale` notes (`newer_evidence`, `due`, `future_updated`) and `total_tasks_open` (`--limit` default `20`).
 - `bf read TARGET [--raw] [--max-bytes N] [--brain PATH]`: resolve a note, `#anchor` heading section, `source:id` record (in `memories/` or `usages/`), alias, or declared cross-brain `bf://<host>/<ref>`.
 - `bf query [PATTERN] [--jq EXPR] [--kind note|memory|usage] [-s/--scope PATH] [-n/--limit N] [--format json|jsonl] [--brain PATH]`: run `rg`, `jq`, combined `rg` + `jq`, or compact summary listing over `memories/*.jsonl` (or `usages/*.jsonl` via `--kind usage` / `--scope usages`; `--limit` `1..5000`, default `20`).
-- `bf check [-n/--limit N | --all] [--strict] [--brain PATH]`: strictly read-only validation of `bf.yaml`, `.env`, schemas, compiled-note sync, `memories/*.jsonl`, `usages/*.jsonl`, enabled `loops:` (scripts, ingest schemas, `jq` filters), links, `#anchor` headings, and declared cross-brain targets (`--limit` default `50`).
+- `bf check [--notes] [-n/--limit N | --all] [--strict] [--format json|text] [--brain PATH]`: strictly read-only validation of `bf.yaml`, `.env`, schemas, compiled-note sync, `memories/*.jsonl`, `usages/*.jsonl`, enabled `loops:` (scripts, ingest schemas, `jq` filters), links, `#anchor` headings, and declared cross-brain targets (`--notes` skips per-line sensor/usage JSONL validation for fast authoring checks; `--limit` default `50`).
 - `bf schema [bf|record]`: print one or both bundled Draft 2020-12 JSON Schemas (no brain required).
 
 **Explicit write commands:**
 
-- `bf init PATH [--name NAME] [--description TEXT]`: scaffold a `version: 17` brain with 3x3 folders (`concepts/`, `projects/`, `actions/`, `sensors/`, `routines/`, `agents/`, `memories/`, `usages/`, `logs/`), starter schemas (`schemas/{concepts,projects,actions,usages}.json`), `evals/smoke.py`, and compiled `memories/concepts.jsonl`.
+- `bf init PATH [--name NAME] [--description TEXT]`: scaffold a `version: 18` brain with 3x3 folders (`concepts/`, `projects/`, `actions/`, `sensors/`, `routines/`, `agents/`, `memories/`, `usages/`, `logs/`), idiomatic starter schemas (`schemas/{concepts,projects,actions,usages}.json`), `evals/smoke.py`, and compiled `memories/concepts.jsonl`.
 - `bf build [--brain PATH]`: compile Markdown notes across configured `notes:` folders into `memories/<dir>.jsonl` (`kind: "note"`), preserving prior output on partial failure.
 - `bf ingest SOURCE [--to memories|usages] [--input FILE] [--mode upsert|snapshot] [--allow-removal] [--dry-run] [--brain PATH]`: validate records against bundled `record` + required `schemas/<source>.json` (or `schemas/usages.json`), write `<target>/<source>.jsonl`, and emit `records.ingested`.
 - `bf run [LOOP ...] [--all | --due | --reset | --prune] [--dry-run] [--brain PATH] [-- EXTRA_ARGS...]`: execute named/glob, `--all`, or `--due` cycle loops, reset `.bf/<loop>.json` state (`--reset`), or prune orphaned `.bf/<loop>.json` files (`--prune`; `--dry-run` works across all modes).
@@ -47,9 +47,9 @@ Published at [`bf.schema.json`](https://fmind.github.io/brain-framework/bf.schem
 
 ```yaml
 # yaml-language-server: $schema=https://fmind.github.io/brain-framework/bf.schema.json
-version: 17
+version: 18
 name: my-brain
-description: Short summary for humans and AI agents.
+description: Short description for humans and AI agents.
 notes: [concepts, projects, actions]
 brains:
   team-brain: ../team-brain

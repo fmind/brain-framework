@@ -26,7 +26,7 @@ Every memory source requires `schemas/<source>.json` (fail closed); every usage 
 
 ```bash
 printf '{"type":"object"}\n' > schemas/workspace.json
-printf '%s\n' '[{"id":"brief","title":"Website brief","text":"Visitors need one clear product page before signup.","time":"2026-09-20T09:00:00Z"}]' | bf ingest workspace
+printf '%s\n' '[{"id":"brief","title":"Website brief","text":"Visitors need one clear product page before signup.","created":"2026-09-20T09:00:00Z"}]' | bf ingest workspace
 
 # Track token/FinOps usage separately under usages/
 printf '%s\n' '{"id":"sess-1","title":"Kickoff","harness":"agy","model":"gemini","input_tokens":1200,"output_tokens":340,"cost_usd":0.01}' | bf ingest --to usages agy
@@ -38,10 +38,11 @@ Write `projects/new-website.md` with heading anchors and typed links, compile wi
 cat > projects/new-website.md <<'EOF'
 ---
 type: project
-status: draft
+status: active
+created: 2026-09-25
 updated: 2026-09-25
 tags: [launch, web]
-summary: Launch a single-page product site.
+description: Launch a single-page product site.
 ---
 
 # New website

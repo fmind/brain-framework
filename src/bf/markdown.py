@@ -10,7 +10,7 @@ import threading
 from collections.abc import Iterable, Mapping
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from bf import models, storage
 from bf.config import yaml_object
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     import xml.etree.ElementTree as ET
 
 _RESERVED_FM = frozenset(("id", "ref", "source", "kind", "text", "headings", "tasks", "sha256"))
-_OMIT_OPT = frozenset(("tags", "aliases", "entity", "stale_after", "summary", "links", "headings", "tasks"))
+_OMIT_OPT = frozenset(("tags", "aliases", "entity", "stale_after", "description", "links", "headings", "tasks"))
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 _CONFLICT = re.compile(r"^(?:<{7,}|>{7,}|\|{7,}|={7,})(?: |$)")
 _BAD_ATTR = re.compile(r"\{#[A-Za-z0-9_.-]+\?[^}\r\n]+\}")
@@ -140,7 +140,8 @@ def authored_notes(
 def parse_record_ref(ref: str, reserved: frozenset[str] = _DEFAULT_RESERVED) -> tuple[str, str] | None:
     """Return `(source, id)` when `ref` is a valid `<source>:<id>` record reference, else `None`."""
     src, sep, rec_id = ref.partition(":")
-    if not sep or not rec_id or rec_id.startswith("//") or "#" in rec_id:
+    is_http = rec_id.lower().startswith(("https://", "http://"))
+    if not sep or not rec_id or rec_id.startswith("//") or "#" in rec_id or ("?" in rec_id and not is_http):
         return None
     if not models.NAME_RE.fullmatch(src) or src in reserved:
         return None
@@ -283,15 +284,27 @@ def _unquote(val: str, src: str) -> str:
     return dec
 
 
-def _split_target_parts(src: str, raw: str, msg: str, *, unquote_lhs: bool = True) -> tuple[str, str]:
+def _split_target_parts(src: str, raw: str, msg: str) -> tuple[str, str]:
     head, has_hash, raw_frag = raw.partition("#")
     if re.search(r"\s", head) or (has_hash and not raw_frag):
         raise Error(f"{src}: {msg}")
     frag = clean(_unquote(raw_frag, src), "anchor") if raw_frag else ""
-    out_lhs = _unquote(head, src) if unquote_lhs else head
-    if re.search(r"\s", out_lhs):
-        raise Error(f"{src}: {msg}")
-    return out_lhs, frag
+    return head, frag
+
+
+def _parse_query(raw_query: str, src: str) -> dict[str, str]:
+    if not raw_query:
+        raise Error(f"{src}: invalid link query; use ?key=value or {{key=value}}")
+    try:
+        pairs = parse_qsl(raw_query, keep_blank_values=True, strict_parsing=True, max_num_fields=32, errors="strict")
+    except ValueError:
+        raise Error(f"{src}: invalid link query; use ?key=value or {{key=value}}") from None
+    meta: dict[str, str] = {}
+    for key, val in pairs:
+        if not _META_KEY.fullmatch(key) or key in meta:
+            raise Error(f"{src}: link query keys must be unique identifiers")
+        meta[key] = _clean_vis(val, f"{src}: link parameter {key}")
+    return meta
 
 
 def record_link_problem(
@@ -307,13 +320,15 @@ def record_link_problem(
     if kind == "record" and not is_record_ref(target, res):
         return f"record link {target!r} must use <source>:<id>"
     note_prefixes = tuple(f"{folder}/" for folder in dirs)
-    bad_note = bad_ch or ":" in target or _bad_rel(target) or not target.startswith(note_prefixes)
+    bad_note = bad_ch or ":" in target or "?" in target or _bad_rel(target) or not target.startswith(note_prefixes)
     if kind == "note" and (bad_note or is_private_path(target)):
         return f"note link {target!r} must target a configured note directory"
     if kind == "brain":
         bad_brain = bad_ch or not target.startswith("bf://") or not sib_host or "\\" in sib_host or not sib_path
         sib_rec = is_record_ref(sib_path, RESERVED_SOURCES)
-        sib_note = ":" not in sib_path and not _bad_rel(sib_path) and not is_private_path(sib_path)
+        sib_note = (
+            ":" not in sib_path and "?" not in sib_path and not _bad_rel(sib_path) and not is_private_path(sib_path)
+        )
         if bad_brain or not (sib_rec or sib_note):
             return f"cross-brain link {target!r} must use bf://<brain>/<ref>"
         if anchor and sib_rec:
@@ -341,12 +356,15 @@ def parse_link(
     if len(target := _clean_vis(raw_target, f"{source_path}: link target").strip()) > 8192:
         raise Error(f"{source_path}: link exceeds 8192 characters")
 
-    def make_link(to: str, kind: str, anchor: str = "") -> dict[str, Any]:
-        meta: dict[str, str] = {}
+    def make_link(to: str, kind: str, anchor: str = "", q_meta: Mapping[str, str] | None = None) -> dict[str, Any]:
+        meta: dict[str, str] = dict(q_meta or {})
         for key, val in (attr_meta or {}).items():
             if not _META_KEY.fullmatch(key):
                 raise Error(f"{source_path}: invalid link attribute {key!r}")
-            meta[key] = clean(val, f"{source_path}: link attribute {key}")
+            cleaned = clean(val, f"{source_path}: link attribute {key}")
+            if key in meta and meta[key] != cleaned:
+                raise Error(f"{source_path}: conflicting link attribute {key!r}")
+            meta[key] = cleaned
         return {"to": to, "kind": kind, "anchor": anchor, "meta": meta, "section": clean_sec}
 
     def canonical_rec(src_s: str, rid_s: str, err_lbl: str, res_set: frozenset[str]) -> str:
@@ -364,26 +382,28 @@ def parse_link(
     if scheme == "bf":
         if not target.lower().startswith("bf://") or re.search(r"%(?![0-9a-fA-F]{2})", target):
             raise Error(f"{source_path}: invalid bf:// URI")
-        head, anchor = _split_target_parts(
-            source_path, target, "invalid bf:// URI or empty # fragment", unquote_lhs=False
-        )
-        uri = urlsplit(head)
-        if uri.query:
-            raw_rest_q = uri.path.lstrip("/")
-            if not (":" in raw_rest_q and raw_rest_q.partition(":")[2].lower().startswith(("https://", "http://"))):
-                raise Error(f"{source_path}: link query parameters are not supported; use {{rel=...}} or {{to, meta}}")
+        head, anchor = _split_target_parts(source_path, target, "invalid bf:// URI or empty # fragment")
+        has_q, uri = "?" in head, urlsplit(head)
         _unquote(uri.netloc, source_path)
         raw_rest, netloc = uri.path.lstrip("/"), uri.netloc
         is_local = netloc in {"", brain_name}
         if netloc in reserved:
             raise Error(f"{source_path}: use bf:///{netloc}/... instead of bf://{netloc}/...")
         src_part, sep, raw_id = raw_rest.partition(":")
+        q_meta: dict[str, str] = {}
         if is_rec := bool(sep and "/" not in src_part):
             is_http = raw_id.lower().startswith(("https://", "http://"))
-            rec_id = f"{raw_id}?{uri.query}" if is_http and uri.query else raw_id
+            if is_http and has_q:
+                rec_id = f"{raw_id}?{uri.query}" if uri.query else f"{raw_id}?"
+            else:
+                rec_id = raw_id
+                if has_q:
+                    q_meta = _parse_query(uri.query, source_path)
             canon = canonical_rec(src_part, rec_id, raw_rest, reserved if is_local else RESERVED_SOURCES)
             rest = canon
         else:
+            if has_q:
+                q_meta = _parse_query(uri.query, source_path)
             rest = _unquote(raw_rest, source_path)
             if not rest or re.search(r"\s", rest):
                 raise Error(f"{source_path}: expected bf:///path or bf://brain/path")
@@ -394,10 +414,10 @@ def parse_link(
             canon = ""
         if is_local:
             if is_rec:
-                return make_link(canon, "record", anchor)
+                return make_link(canon, "record", anchor, q_meta)
             to = _normalize_note_path(source_path, rest, dirs, relative_base=False)
-            return make_link(to, "note", anchor)
-        return make_link(f"bf://{netloc}/{canon if is_rec else rest}", "brain", anchor)
+            return make_link(to, "note", anchor, q_meta)
+        return make_link(f"bf://{netloc}/{canon if is_rec else rest}", "brain", anchor, q_meta)
     if scheme and scheme_m is not None:
         raw_src, rhs = scheme_m[1], scheme_m[2]
         if rhs.startswith("//"):
@@ -405,19 +425,26 @@ def parse_link(
         if not models.NAME_RE.fullmatch(raw_src) or not rhs:
             raise Error(f"{source_path}: invalid record reference {target!r}")
         bad_r = f"invalid record reference {target!r}"
-        rec_id, anchor = _split_target_parts(source_path, rhs, bad_r, unquote_lhs=False)
+        rec_id, anchor = _split_target_parts(source_path, rhs, bad_r)
+        q_meta = {}
+        if not rec_id.lower().startswith(("https://", "http://")) and "?" in rec_id:
+            rec_id, _, raw_q = rec_id.partition("?")
+            q_meta = _parse_query(raw_q, source_path)
         if not rec_id:
             raise Error(f"{source_path}: record id must be nonempty")
-        return make_link(canonical_rec(raw_src, rec_id, target, reserved), "record", anchor)
+        return make_link(canonical_rec(raw_src, rec_id, target, reserved), "record", anchor, q_meta)
     if require_uri:
         raise Error(f"{source_path}: links must use <source>:<id>, bf://, or https:// URLs")
-    dec_p, anchor = _split_target_parts(source_path, target, "invalid Markdown link target or trailing #")
-    if "?" in dec_p:
-        raise Error(f"{source_path}: link query parameters are not supported; use {{rel=...}} or {{to, meta}}")
+    raw_lhs, anchor = _split_target_parts(source_path, target, "invalid Markdown link target or trailing #")
+    raw_p, has_q, raw_q = raw_lhs.partition("?")
+    q_meta = _parse_query(raw_q, source_path) if has_q else {}
+    dec_p = _unquote(raw_p, source_path)
+    if re.search(r"\s", dec_p):
+        raise Error(f"{source_path}: invalid Markdown link target or trailing #")
     if not dec_p and not anchor:
         raise Error(f"{source_path}: empty link target")
     to = _normalize_note_path(source_path, dec_p, dirs, relative_base=relative_base)
-    return make_link(to, "note", anchor)
+    return make_link(to, "note", anchor, q_meta)
 
 
 def add_link(seen: set[tuple[Any, ...]], out: list[dict[str, Any]], parsed: dict[str, Any]) -> None:

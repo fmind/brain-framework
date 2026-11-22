@@ -72,7 +72,7 @@ def main() -> None:
                 "id": str(n),
                 "title": f"Decision {n}",
                 "text": background + "\nRetain evidence.",
-                "time": f"2026-{n % 12 + 1:02d}-01T00:00:00Z",
+                "created": f"2026-{n % 12 + 1:02d}-01T00:00:00Z",
                 "updated": "2026-09-01T00:00:00Z",
             }
             for n in range(args.records)

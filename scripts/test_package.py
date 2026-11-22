@@ -133,7 +133,7 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             if not init_reply.get("ok") or init_reply.get("brain") != "brain":
                 raise SystemExit(f"{artifact.name}: unexpected bf init reply: {init_reply}")
             starter_yaml = (brain / "bf.yaml").read_text()
-            if "version: 17" not in starter_yaml or "loops:" not in starter_yaml:
+            if "version: 18" not in starter_yaml or "loops:" not in starter_yaml:
                 raise SystemExit(f"{artifact.name}: unexpected starter bf.yaml: {starter_yaml}")
             for required_schema in (
                 "schemas/concepts.json",
@@ -176,7 +176,7 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                         "id": "brief",
                         "title": "Launch brief",
                         "text": "Explain who the product helps before signup.",
-                        "time": "2026-09-20T09:00:00Z",
+                        "created": "2026-09-20T09:00:00Z",
                         "updated": "2026-09-20T09:00:00Z",
                     }
                 ]
@@ -188,14 +188,17 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                 raise SystemExit(f"{artifact.name}: unexpected bf ingest reply: {ingest_reply}")
 
             (brain / "projects/package.md").write_text(
-                "---\ntype: project\nstatus: draft\nupdated: 2026-09-25\n---\n# Package check\n\n"
+                "---\ntype: project\nstatus: active\ncreated: 2026-09-25\nupdated: 2026-09-25\n---\n# Package check\n\n"
                 "## Next {#next owner=alice}\n\n"
                 "See [brief](workspace:brief){rel=cites} and [welcome](../concepts/welcome.md#conventions).\n\n"
                 "- [ ] Inspect the compiled note record.\n"
             )
             build_reply = json.loads(run(bf, "build", cwd=brain, env=env, capture=True))
             check_reply = json.loads(run(bf, "check", cwd=brain, env=env, capture=True))
+            check_notes = json.loads(run(bf, "check", "--notes", cwd=brain, env=env, capture=True))
+            check_text = run(bf, "check", "--format", "text", cwd=brain, env=env, capture=True)
             rev_reply = json.loads(run(bf, "review", cwd=brain, env=env, capture=True))
+            rev_text = run(bf, "review", "--format", "text", cwd=brain, env=env, capture=True)
             emit_reply = json.loads(
                 run(bf, "emit", "pkg.smoke", "--data", '{"id":"s1"}', cwd=brain, env=env, capture=True)
             )
@@ -206,12 +209,16 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             if (
                 build_reply.get("problems")
                 or not check_reply.get("ok")
+                or not check_notes.get("ok")
+                or "[OK]" not in check_text
                 or rev_reply.get("total_tasks_open") != 1
+                or "Review:" not in rev_text
                 or not emit_reply.get("ok")
                 or not status_reply.get("inside_brain")
                 or not run_reply.get("ok")
                 or "Inspect the compiled note record" not in read_reply.get("text", "")
                 or note_reply.get("kind") != "note"
+                or note_reply.get("path") != "projects/package.md"
                 or note_reply.get("record", {}).get("kind") != "note"
             ):
                 raise SystemExit(f"{artifact.name}: smoke check failed: {build_reply} / {check_reply} / {rev_reply}")

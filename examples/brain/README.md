@@ -35,11 +35,11 @@ bf query --jq 'select(.kind == "note") | .ref as $n | .links[]? | select(.to == 
 
 ## Share a draft concept with an isolated team brain
 
-`actions/2026-09-25_retention-review/outputs/shared-procedure.md` is a self-contained draft concept without private source-brain citations. Copy it into a fresh brain, compile, and validate:
+`actions/retention-review/outputs/shared-procedure.md` is a self-contained draft concept without private source-brain citations. Copy it into a fresh brain, compile, and validate:
 
 ```bash
 bf init "$bf_demo/team" --name example-team
-cp actions/2026-09-25_retention-review/outputs/shared-procedure.md "$bf_demo/team/concepts/selected-evidence.md"
+cp actions/retention-review/outputs/shared-procedure.md "$bf_demo/team/concepts/selected-evidence.md"
 bf build --brain "$bf_demo/team"
 bf check --brain "$bf_demo/team"
 ```

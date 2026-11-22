@@ -8,7 +8,7 @@
 
 Brain Framework (`bf`) turns a 3x3 folder of human-authored Markdown notes, shell/Python loops, and JSONL records (`memories/<source>.jsonl`, `usages/<source>.jsonl`, `logs/<loop>.jsonl`) into a schema-validated, UNIX-native knowledge brain with zero database or external indexer, ready for humans and AI coding harnesses to query offline with `rg`, `jq`, and DuckDB.
 
-- **Three formats, one job each.** **YAML for config** (`bf.yaml` `version: 17` + note frontmatter), **Markdown for humans** (`concepts/`, `projects/`, `actions/` with flat `<slug>.md` and universal `<slug>/index.md` bundles), and **JSONL for records** (`memories/`, `usages/`, and private `logs/`, validated by bundled `bf`/`record` schemas plus `schemas/<source>.json` and `schemas/usages.json`).
+- **Three formats, one job each.** **YAML for config** (`bf.yaml` `version: 18` + note frontmatter), **Markdown for humans** (`concepts/`, `projects/`, `actions/` with flat `<slug>.md` and universal `<slug>/index.md` bundles), and **JSONL for records** (`memories/`, `usages/`, and private `logs/`, validated by bundled `bf`/`record` schemas plus `schemas/<source>.json` and `schemas/usages.json`).
 - **Strict read/write boundary & UNIX composability.** `bf status`, `bf review`, `bf read`, `bf query`, `bf check`, and `bf schema` are strictly read-only and never mutate disk; flat JSONL files stay directly inspectable with `rg`, `jq`, and DuckDB.
 - **Convention-first `loops:` with zero built-in LLMs.** Under 6,500 lines of Python with just 5 minimal runtime dependencies (`croniter`, `jsonschema`, `markdown`, `pyyaml`, `watchfiles`), unifying deterministic collectors (`sensors/`), routines (`routines/`), coding-harness agents (`agents/`), and daemons (`when: daemon`) via `BF_*` env + `stdin` JSON, `stdout` JSONL data/events, `stderr` structured JSONL logs, and `logs/events.jsonl`.
 
@@ -16,7 +16,7 @@ Brain Framework (`bf`) turns a 3x3 folder of human-authored Markdown notes, shel
 
 ## Try it
 
-Requires Linux or macOS, [uv](https://docs.astral.sh/uv/getting-started/installation/), [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), and [jq](https://jqlang.org/), no model or cloud account needed:
+Requires Linux or macOS, [uv](https://docs.astral.sh/uv/getting-started/installation/), [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), and [jq](https://jqlang.org/), with no model or cloud account needed:
 
 ```bash
 uv tool install --python 3.14 brain-framework
@@ -49,6 +49,6 @@ Explore the [four-tool walkthrough](https://github.com/fmind/brain-framework/blo
 
 1. **Local-first and private.** Zero global config (`--brain` -> enclosing `bf.yaml` -> `BF_BRAIN` -> `$BRAIN_LOCATION` -> `~/brain`), `O_NOFOLLOW` path confinement, disposable `0700` `.bf/` (locks + loop cursors), and private `0700` `logs/` ([Operations](https://fmind.github.io/brain-framework/operations/)).
 2. **Harnesses reason; BF verifies.** Coding agents orient with `bf status` and `bf review`, author Markdown notes directly, emit events via `bf emit`, and verify with `bf build && bf check` plus Python/pytest suites in `evals/` ([Example brain](https://github.com/fmind/brain-framework/blob/main/examples/brain/README.md)).
-3. **Git-native collaboration.** Track notes, `bf.yaml`, `schemas/`, `sensors/`, `routines/`, `agents/`, `clients/`, `prompts/`, and `evals/` in Git while ignoring `memories/` (keeping `*.forgotten`), `usages/`, `logs/`, and `.bf/`.
+3. **Git-native collaboration.** Track notes, `bf.yaml`, `schemas/`, `sensors/`, `routines/`, `agents/`, `clients/`, `prompts/`, and `evals/` in Git while ignoring `memories/` and `usages/` (keeping `*.forgotten`), `logs/`, and `.bf/`.
 
 [Documentation](https://fmind.github.io/brain-framework/) · [Reference](https://fmind.github.io/brain-framework/reference/) · [Issues](https://github.com/fmind/brain-framework/issues) · [Contribute](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md) · [Governance](https://github.com/fmind/brain-framework/blob/main/GOVERNANCE.md) · [Security](https://github.com/fmind/brain-framework/blob/main/SECURITY.md) · [MIT License](https://github.com/fmind/brain-framework/blob/main/LICENSE) · [Third-party notices](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md)

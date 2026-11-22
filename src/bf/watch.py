@@ -44,7 +44,12 @@ def format_watch_line(event: str, payload: dict[str, Any], *, color: bool = Fals
     if event == "watch.build":
         ok = bool(payload.get("ok", True))
         tag = f"{c_ok}build  {c_rst}" if ok else f"{c_err}build  {c_rst}"
-        return f"{c_dim}{ts}{c_rst}  {tag}  {payload.get('notes', 0)} notes ({payload.get('written', 0)} built)\n"
+        probs = payload.get("problems") or []
+        tail = ""
+        if not ok and probs:
+            first = printable(" ".join(str(probs[0]).split()))[:100]
+            tail = f"  {first}" + (f" (+{len(probs) - 1} more; run bf check)" if len(probs) > 1 else "")
+        return f"{c_dim}{ts}{c_rst}  {tag}  {payload.get('notes', 0)} notes ({payload.get('written', 0)} built){tail}\n"
     if event == "watch.loop":
         name = printable(str(payload.get("loop") or ""))
         st = str(payload.get("status") or "")
@@ -135,7 +140,7 @@ class DaemonStream:
             run_id = f"{self.unit.name}-{int(now_dt.timestamp())}-{os.urandom(3).hex()}"
             try:
                 cmd, _, _, _, _ = loops.resolve_loop(self.store, self.unit)
-                argv, env, _ = loops.prepare_unit(
+                argv, env, _ = proc.prepare_unit(
                     self.store,
                     self.unit.name,
                     cmd,
@@ -205,7 +210,7 @@ class DaemonStream:
                             if not (stripped := ln.strip()) or not self.emit:
                                 continue
                             try:
-                                ev_k, payload = loops.parse_emitted_event(stripped, self.emit, label)
+                                ev_k, payload = records.parse_emitted_event(stripped, self.emit, label)
                                 records.append_event(self.store, ev_k, self.unit.name, payload, dedupe=True)
                                 self.wake_event.set()
                             except Error as err:
@@ -303,9 +308,9 @@ def _serve_locked(
     rate_lock = threading.Lock()
     event_rates: dict[str, deque[float]] = {}
     emit_lock = threading.Lock()
-    is_tty = sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
+    is_tty = sys.stdout.isatty()
     use_text = (fmt == "text") or (fmt == "auto" and is_tty)
-    use_color = use_text and is_tty and not os.environ.get("NO_COLOR", "")
+    use_color = use_text and is_tty and os.environ.get("TERM", "") != "dumb" and not os.environ.get("NO_COLOR", "")
     last_summary = {"brain": cfg.name, "time": now_utc(), "built": 0, "loops_ran": 0, "ok": True}
     root_pfx = f"{store.root}/"
 
@@ -315,6 +320,10 @@ def _serve_locked(
                 sys.stdout.buffer.write(data)
                 sys.stdout.flush()
             except BrokenPipeError:
+                with suppress(OSError):
+                    devnull = os.open(os.devnull, os.O_WRONLY)
+                    os.dup2(devnull, 1)
+                    os.close(devnull)
                 stop_ev.set(), wake_event.set()
             except OSError:
                 pass

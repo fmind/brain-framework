@@ -188,8 +188,8 @@ def test_query_rg_jq_streaming_and_limits(brain: Store, monkeypatch: pytest.Monk
     assert _t.monotonic() - t_rd2 < 2.0
 
     # Scope prefix boundary: `--scope projects/api` does NOT match sibling `projects/api-v2.md`!
-    brain.write("projects/api.md", b"---\ntype: project\nstatus: stable\n---\n# API\n\nneedle-scope\n")
-    brain.write("projects/api-v2.md", b"---\ntype: project\nstatus: stable\n---\n# API v2\n\nneedle-scope\n")
+    brain.write("projects/api.md", b"---\ntype: project\nstatus: active\n---\n# API\n\nneedle-scope\n")
+    brain.write("projects/api-v2.md", b"---\ntype: project\nstatus: active\n---\n# API v2\n\nneedle-scope\n")
     engine.build(brain)
     assert [it["ref"] for it in query.query(brain, "needle-scope", scope="projects/api")["items"]] == [
         "projects/api.md"
@@ -458,16 +458,35 @@ def test_tool_shims_proc_drain_tail_and_corrupt_jsonl(
     assert proc.resolve_tool("jq") == str(target_b)
 
 
-def test_read_modes_and_query_v17(brain: Store) -> None:
+def test_read_modes_and_query_v18(brain: Store) -> None:
     # Uniform read shapes: default compiled record, `--raw` Markdown text, `#anchor` section, and `--max-bytes`.
     rec_rd = query.read_target(brain, "projects/offline.md")
     assert rec_rd["ref"] == "projects/offline.md"
     assert rec_rd["kind"] == "note"
-    assert rec_rd["path"] == "memories/projects.jsonl"
+    assert rec_rd["path"] == "projects/offline.md"
     assert rec_rd["record"]["title"] == "Offline retrieval"
     raw = query.read_target(brain, "projects/offline.md", raw=True)
     assert "text" in raw
     assert "record" not in raw
+
+    # Alias lookup for a note also reports the live Markdown file path rather than `memories/<dir>.jsonl`.
+    brain.write(
+        "concepts/aliased.md",
+        b"---\ntype: guide\nstatus: stable\nentity: urn:example:aliased\n---\n# Aliased\n",
+    )
+    engine.build(brain)
+    alias_rd = query.read_target(brain, "urn:example:aliased")
+    assert alias_rd["kind"] == "note"
+    assert alias_rd["path"] == "concepts/aliased.md"
+
+    # Unbuilt note hints respect `scope` and do not crash read-only queries on broken symlinks in unbuilt folders.
+    brain.write("actions/pending.md", b"---\ntype: action\nstatus: open\ncreated: 2026-11-22\n---\n# Pending\n")
+    (brain.root / "actions" / "badlink.md").symlink_to(brain.root / "concepts" / "aliased.md")
+    assert "unbuilt_notes" not in query.query(brain, "decision", scope="meetings")
+    assert "unbuilt_notes" not in query.query(brain, "decision", scope="usages")
+    assert query.query(brain, "Pending", scope="actions")["unbuilt_notes"] == ["actions"]
+    (brain.root / "actions" / "badlink.md").unlink()
+    brain.delete("actions/pending.md")
 
     capped = query.read_target(brain, "projects/offline.md", max_bytes=120)
     assert capped["truncated"] is True
@@ -545,9 +564,11 @@ def test_query_readonly_jq_and_max_bytes(tmp_path: Path) -> None:
     # 1. `query()` is strictly read-only: unbuilt notes stay unbuilt until explicit `engine.build(st)`.
     st.write(
         "projects/unbuilt.md",
-        b"---\ntype: project\nstatus: draft\n---\n# Unbuilt\n\nneedle-beta in fresh project.\n",
+        b"---\ntype: project\nstatus: active\n---\n# Unbuilt\n\nneedle-beta in fresh project.\n",
     )
-    assert query.query(st, "needle-beta", kind="note")["items"] == []
+    unbuilt_q = query.query(st, "needle-beta", kind="note")
+    assert unbuilt_q["items"] == []
+    assert unbuilt_q["unbuilt_notes"] == ["projects"]
     assert not st.exists("memories/projects.jsonl")
     engine.build(st)
     assert query.query(st, "needle-beta", kind="note")["items"][0]["ref"] == "projects/unbuilt.md"
@@ -566,10 +587,10 @@ def test_query_readonly_jq_and_max_bytes(tmp_path: Path) -> None:
     )
     engine.build(st)
     st.write("schemas/cal.json", OBJ_SCHEMA)
-    records.ingest(st, "cal", b'[{"id":"ev1","title":"Meet","time":"2026-08-01T10:00:00Z"}]')
+    records.ingest(st, "cal", b'[{"id":"ev1","title":"Meet","created":"2026-08-01T10:00:00Z"}]')
     st.write(
         "memories/cal.jsonl",
-        b'{"id":"ev1","source":"cal","kind":"memory","ref":"cal:ev1","title":"Meet","time":"2026-08-01T10:00:00Z"}\n',
+        b'{"id":"ev1","source":"cal","kind":"memory","ref":"cal:ev1","title":"Meet","created":"2026-08-01T10:00:00Z"}\n',
     )
 
     shorthand = query.query(st, None, jq_expr='select(.kind == "note" and .ref == "concepts/rich.md") | {ref, text}')[
@@ -680,33 +701,33 @@ def test_query_jq_parity_and_ordering(tmp_path: Path) -> None:
     )
     st.write(
         "projects/empty-upd.md",
-        b'---\ntype: project\nstatus: draft\nupdated: ""\n---\n# Empty Upd\n\nValid empty updated.\n',
+        b"---\ntype: project\nstatus: active\ncreated: 2026-09-02\n---\n# Empty Upd\n\nValid empty updated.\n",
     )
     st.write(
-        "actions/2026-10-01_act/index.md",
-        b"---\ntype: action\nstatus: draft\n---\n# Act One\n\nAction body.\n",
+        "actions/act/index.md",
+        b"---\ntype: action\nstatus: open\ncreated: 2026-10-01\n---\n# Act One\n\nAction body.\n",
     )
     assert engine.build(st)["ok"]
     assert engine.validate(st)["ok"]
     st.write("schemas/projects.json", OBJ_SCHEMA)
     st.write(
         "projects/empty-status.md",
-        b'---\ntype: project\nstatus: draft\nupdated: ""\n---\n# Empty Status\n\nCompiled empty updated.\n',
+        b'---\ntype: project\nstatus: active\nupdated: ""\n---\n# Empty Status\n\nCompiled empty updated.\n',
     )
     assert engine.build(st)["ok"]
 
     st.write("schemas/cal.json", OBJ_SCHEMA)
-    records.ingest(st, "cal", b'[{"id":"ev1","title":"Meet","summary":""},{"id":"a@b_c","title":"AtUnderscore"}]')
+    records.ingest(st, "cal", b'[{"id":"ev1","title":"Meet","description":""},{"id":"a@b_c","title":"AtUnderscore"}]')
     cal_lines = st.read("memories/cal.jsonl")
     st.write(
         "memories/cal.jsonl",
         cal_lines + b'{"id":"empty-fields","source":"cal","kind":"memory","ref":"cal:empty-fields",'
-        b'"title":"","status":"","entity":"","stale_after":"","summary":"","updated":""}\n',
+        b'"title":"","status":"","entity":"","stale_after":"","description":"","updated":""}\n',
     )
 
     # Extensionless bundle resolution for `index.md`!
-    assert query.read_target(st, "actions/2026-10-01_act")["ref"] == "actions/2026-10-01_act/index.md"
-    st.write("projects/bnd/index.md", b"---\ntype: project\nstatus: stable\n---\n# Bundle P\n")
+    assert query.read_target(st, "actions/act")["ref"] == "actions/act/index.md"
+    st.write("projects/bnd/index.md", b"---\ntype: project\nstatus: active\n---\n# Bundle P\n")
     engine.build(st)
     assert query.read_target(st, "projects/bnd")["ref"] == "projects/bnd/index.md"
 

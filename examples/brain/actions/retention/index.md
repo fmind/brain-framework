@@ -1,7 +1,9 @@
 ---
 type: action
 tags: [retention]
-status: draft
+status: open
+created: 2026-09-19
+description: Explain why original evidence must be retained using local evidence.
 ---
 
 # Explain the retention policy

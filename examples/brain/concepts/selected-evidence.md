@@ -1,8 +1,9 @@
 ---
 type: concept
 status: draft
-sources:
-  - resource: bf:///actions/2026-09-25_retention-review/outputs/decision.md
+created: 2026-09-25
+links:
+  - bf:///actions/retention-review/outputs/decision.md
 ---
 
 # Selected evidence capture

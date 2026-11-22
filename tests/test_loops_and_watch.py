@@ -181,13 +181,13 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
     # Invalid emitted output fails atomically with zero partial commits.
     seq_before = records.latest_event_seq(store)
     with pytest.raises(Error, match="must be a JSON object"):
-        loops.emit_output_events(store, "ev-emitter", "loop.event", b'{"kind":"ok.ev","id":"p0"}\n[1,2]\n')
+        records.emit_output_events(store, "ev-emitter", "loop.event", b'{"kind":"ok.ev","id":"p0"}\n[1,2]\n')
     assert records.latest_event_seq(store) == seq_before
     with pytest.raises(Error, match="event kind must be a string"):
-        loops.emit_output_events(store, "ev-emitter", "loop.event", b'{"kind":123}\n')
+        records.emit_output_events(store, "ev-emitter", "loop.event", b'{"kind":123}\n')
     assert records.latest_event_seq(store) == seq_before
     with pytest.raises(Error, match="exceeds"):
-        loops.emit_output_events(store, "ev-emitter", "loop.event", b"x" * (models.MAX_BATCH + 1))
+        records.emit_output_events(store, "ev-emitter", "loop.event", b"x" * (models.MAX_BATCH + 1))
 
     # Reactive `loops.assistant` triggered via `run_loops(due_only=True)` on `loop.message`!
     records.append_event(
@@ -443,10 +443,10 @@ def test_concurrency_nonblocking_watch_adaptive_delay_and_multi_schedule(tmp_pat
     s_day = config.ScheduleSpec("cron:30 7 * * 1", cron="30 7 * * 1", backfill=604_800, overlap=0)
     multi = config.LoopSpec(name="work", run=("echo",), schedules=(s_hour, s_day))
     mon_0731 = datetime(2026, 11, 16, 7, 31, tzinfo=UTC)
-    assert loops.due_schedule(multi, {"schedule_last": {}}, mon_0731) == s_day
-    assert loops.due_schedule(multi, {"schedule_last": {"every:1h": "2026-11-16T07:15:00Z"}}, mon_0731) == s_day
+    assert config.due_schedule(multi, {"schedule_last": {}}, mon_0731) == s_day
+    assert config.due_schedule(multi, {"schedule_last": {"every:1h": "2026-11-16T07:15:00Z"}}, mon_0731) == s_day
     assert (
-        loops.due_schedule(
+        config.due_schedule(
             multi,
             {"schedule_last": {"every:1h": "2026-11-16T07:31:00Z", "cron:30 7 * * 1": "2026-11-16T07:31:00Z"}},
             mon_0731 + timedelta(minutes=10),
@@ -561,8 +561,8 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
     cfg = config.load(store)
     flaky_state = loops.load_unit_state(store, "flaky")
     assert flaky_state["consecutive_failures"] == 1
-    assert loops.due_schedule(cfg.loops["flaky"], flaky_state, t0 + timedelta(seconds=10)) is None
-    assert loops.due_schedule(cfg.loops["flaky"], flaky_state, t0 + timedelta(seconds=65)) is not None
+    assert config.due_schedule(cfg.loops["flaky"], flaky_state, t0 + timedelta(seconds=10)) is None
+    assert config.due_schedule(cfg.loops["flaky"], flaky_state, t0 + timedelta(seconds=65)) is not None
 
     assert status.status_summary(store, all_units=True)["loops"]["warn-ok"]["last_run"]["added"] == 1
     records.append_event(store, "loop.message", "chat", {"id": "ev-b1", "text": "ping"}, now=t0)
@@ -945,12 +945,12 @@ def test_status_text_formatting_sanitization_and_watch_text_stream(
     )
     pre_dst = datetime(2026, 3, 29, 0, 59, tzinfo=UTC)
     assert (
-        loops.due_schedule(paris_cfg, {"last_scheduled": "2026-03-28T01:00:00Z"}, pre_dst, tz_name="Europe/Paris")
+        config.due_schedule(paris_cfg, {"last_scheduled": "2026-03-28T01:00:00Z"}, pre_dst, tz_name="Europe/Paris")
         is None
     )
     post_dst = datetime(2026, 3, 29, 1, 5, tzinfo=UTC)
     assert (
-        loops.due_schedule(paris_cfg, {"last_scheduled": "2026-03-28T01:00:00Z"}, post_dst, tz_name="Europe/Paris")
+        config.due_schedule(paris_cfg, {"last_scheduled": "2026-03-28T01:00:00Z"}, post_dst, tz_name="Europe/Paris")
         is not None
     )
 
@@ -1414,11 +1414,11 @@ def test_loops_argv0_confinement_cli_order_redaction_and_note_counts(tmp_path: P
     # Relative `argv[0]` with `/` fails closed on `..` traversal, missing file, or symlink escape.
     for bad_cmd in ("../outside.sh", "sensors/escape.sh", "sensors/missing.sh"):
         with pytest.raises(Error):
-            loops.prepare_unit(store, "bad", (bad_cmd,), "r1", "2026-11-20T00:00:00Z")
+            proc.prepare_unit(store, "bad", (bad_cmd,), "r1", "2026-11-20T00:00:00Z")
 
     # `parse_emitted_event` enforces `EVENT_KIND_RE`.
     with pytest.raises(Error, match="invalid event kind"):
-        loops.parse_emitted_event(b'{"kind":"BAD KIND"}', "loop.event", "loops.x")
+        records.parse_emitted_event(b'{"kind":"BAD KIND"}', "loop.event", "loops.x")
 
     # Explicit loop names execute in CLI argument order (not `bf.yaml` order), and returned JSON summaries are redacted.
     store.write(
@@ -1712,9 +1712,9 @@ def test_v32_watch_text_rate_limit_self_trigger_and_structured_stderr(
         stop_sat.set()
         t_sat.join(timeout=5.0)
     # `prepare_unit` rewrites `bf` argv and `./` relative script paths cleanly.
-    bf_argv, _, _ = loops.prepare_unit(store, "b", ("bf", "build"), "r1", "2026-11-20T00:00:00Z")
+    bf_argv, _, _ = proc.prepare_unit(store, "b", ("bf", "build"), "r1", "2026-11-20T00:00:00Z")
     assert bf_argv[:3] == [sys.executable, "-m", "bf"]
-    rel_argv, _, _ = loops.prepare_unit(store, "t", ("./sensors/toks.py",), "r1", "2026-11-20T00:00:00Z")
+    rel_argv, _, _ = proc.prepare_unit(store, "t", ("./sensors/toks.py",), "r1", "2026-11-20T00:00:00Z")
     assert rel_argv[0].endswith("/sensors/toks.py")
     other_b = tmp_path / "other-brain"
     engine.init_brain(other_b, name="other-brain")
@@ -1766,3 +1766,78 @@ def test_v32_watch_text_rate_limit_self_trigger_and_structured_stderr(
     out_text = capsys.readouterr().out
     assert "Watching rl-watch" in out_text
     assert "ev-burst" in out_text
+
+
+def test_sensor_ingest_false_and_agent_timeout_with_defaults(tmp_path: Path) -> None:
+    root = tmp_path / "conv-opt"
+    engine.init_brain(root, name="conv-opt")
+    store = Store(root)
+    store.write("sensors/custom.py", b"print('custom-output')\n")
+    store.write("agents/worker.py", b"print('ok')\n")
+    store.write("agents/fast.py", b"print('ok')\n")
+    store.write(
+        "bf.yaml",
+        (
+            f"version: {FORMAT}\nname: conv-opt\n"
+            "defaults:\n  timeout: 5m\n"
+            "loops:\n"
+            "  custom:\n    ingest: false\n"
+            "  worker: {}\n"
+            "  fast:\n    timeout: 2m\n"
+        ).encode(),
+    )
+    cfg = config.load(store)
+    _, ing_src, _, _, _ = loops.resolve_loop(store, cfg.loops["custom"], cfg.reserved_sources)
+    assert ing_src == ""
+    assert loops.effective_ingest(store, cfg.loops["custom"], cfg.reserved_sources)[0] == ""
+    assert loops.resolve_loop(store, cfg.loops["worker"], cfg.reserved_sources)[4] == 900
+    assert loops.resolve_loop(store, cfg.loops["fast"], cfg.reserved_sources)[4] == 120
+    assert engine.validate(store)["ok"] is True
+    ran = loops.run_loops(store, ["custom"])
+    assert ran["ok"] is True
+    assert not store.exists("memories/custom.jsonl")
+
+    # Explicit `{{...}}` placeholders in `run:` expand to exact runtime values in both dry-run and execution!
+    store.write(
+        "bf.yaml",
+        (
+            f"version: {FORMAT}\nname: conv-opt\nloops:\n"
+            "  ph:\n"
+            f"    run: [{sys.executable!r}, -c, 'import json, sys; print(json.dumps({{\"args\": sys.argv[1:]}}))', "
+            "'{{brain}}', '{{loop}}', '{{state}}', '{{start}}', '{{end}}', '{{trigger}}', '{{run}}']\n"
+        ).encode(),
+    )
+    now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+    dry = loops.run_loops(store, ["ph"], dry_run=True, now=now)
+    dry_argv = dry["results"][0]["argv"]
+    assert dry_argv[3] == str(store.root)
+    assert dry_argv[4] == "ph"
+    assert dry_argv[5].endswith("/.bf/ph")
+    assert dry_argv[6] == "2026-11-21T12:00:00Z"
+    assert dry_argv[7] == "2026-11-22T12:00:00Z"
+    assert dry_argv[8] == "manual"
+    assert dry_argv[9].startswith("ph-")
+    exec_res = loops.run_loops(store, ["ph"], now=now)
+    assert exec_res["ok"] is True
+    got_args = exec_res["results"][0]["summary"]["args"]
+    assert got_args[:6] == [
+        str(store.root),
+        "ph",
+        str(store.root / ".bf" / "ph"),
+        "2026-11-21T12:00:00Z",
+        "2026-11-22T12:00:00Z",
+        "manual",
+    ]
+    assert got_args[6].startswith("ph-")
+
+    # Interpreter-prefixed `{{brain}}/sensors/...` retains `sensors/` auto-ingest convention detection.
+    store.write(
+        "bf.yaml",
+        (
+            f"version: {FORMAT}\nname: conv-opt\nloops:\n"
+            f"  bph:\n    run: [{sys.executable!r}, '{{{{brain}}}}/sensors/custom.py']\n"
+        ).encode(),
+    )
+    cfg_bph = config.load(store)
+    _, ing_src, ing_tgt, ing_mode, _ = loops.resolve_loop(store, cfg_bph.loops["bph"], cfg_bph.reserved_sources)
+    assert (ing_src, ing_tgt, ing_mode) == ("bph", "memories", "upsert")

@@ -81,7 +81,9 @@ def status_summary(store: Store, *, all_units: bool = False) -> dict[str, Any]:
     events_seq = records.latest_event_seq(store)
     orphaned_states = loops.find_orphans(store, set(cfg.loops))
     notes_set = frozenset(cfg.notes)
-    notes_total = len(markdown.authored_notes(store, cfg.notes))
+    authored_list = markdown.authored_notes(store, cfg.notes)
+    notes_total = len(authored_list)
+    unbuilt_notes = sorted({d for p in authored_list if not store.exists(records.memory_file(d := p.split("/", 1)[0]))})
     rec_total = usage_total = 0
     rec_sources: set[str] = set()
     for bucket in models.RECORD_DIRS:
@@ -111,7 +113,13 @@ def status_summary(store: Store, *, all_units: bool = False) -> dict[str, Any]:
     }
     desc_d = {"description": cfg.description} if cfg.description else {}
     head = {"brain": cfg.name, **desc_d, "ok": not problems, "inside_brain": inside, "events_seq": events_seq}
-    tail = {"counts": counts, "attention": attention, "orphaned_states": orphaned_states, "problems": problems}
+    tail = {
+        "counts": counts,
+        "attention": attention,
+        "orphaned_states": orphaned_states,
+        "unbuilt_notes": unbuilt_notes,
+        "problems": problems,
+    }
     return {**head, **tail, **({"loops": loops_out} if all_units else {})}
 
 
@@ -136,15 +144,17 @@ def _fmt_detail(entry: dict[str, Any]) -> str:
     if st == "ok" and isinstance(lr := entry.get("last_run"), dict):
         if "records" in lr:
             diffs = " ".join(
-                f"{s}{v}" for s, k in (("+", "added"), ("~", "updated"), ("-", "removed")) if (v := lr.get(k))
+                f"{s}{printable(str(v))}"
+                for s, k in (("+", "added"), ("~", "updated"), ("-", "removed"))
+                if (v := lr.get(k))
             )
-            tot = int(lr.get("records") or 0)
+            tot = printable(str(lr.get("records") or 0))
             return f"{diffs} ({tot} total)" if diffs else f"{tot} unchanged"
         if "emitted" in lr:
-            return f"{lr['emitted']} emitted"
+            return f"{printable(str(lr['emitted']))} emitted"
         if "notes" in lr:
-            return f"{lr['notes']} notes ({lr.get('written', 0)} built)"
-    return str(entry.get("description") or "")[:64]
+            return f"{printable(str(lr['notes']))} notes ({printable(str(lr.get('written', 0)))} built)"
+    return printable(" ".join(str(entry.get("description") or "").split()))[:64]
 
 
 def format_status_text(summary: dict[str, Any], *, color: bool = False, now: datetime | None = None) -> str:
@@ -173,22 +183,81 @@ def format_status_text(summary: dict[str, Any], *, color: bool = False, now: dat
             if d.get("enabled", True)
         ]
         rows.sort(key=lambda r: (r[0], r[1]))
-        w_n = max((len(n) for _, n, _ in rows), default=4)
-        w_t = max((len(printable(str(d.get("trigger") or d.get("mode") or ""))) for _, _, d in rows), default=7)
-        lines.append("")
-        lines.append(f"  {c_dim}{'LOOP':<{w_n}}  {'TRIGGER':<{w_t}}  {'STATE':<8}  {'WHEN':<8}  DETAIL{c_rst}")
-        for _, name, d in rows:
-            st = str(d.get("status") or "idle")
-            st_c = c_err if st == "failed" else (c_run if st == "running" else (c_ok if st == "ok" else c_dim))
-            ts = str(d.get("last_start" if st == "running" else "last_end") or d.get("last_success") or "")
-            when = _fmt_age(ts, instant, live=st == "running")
-            trig = printable(str(d.get("trigger") or d.get("mode") or ""))
-            lines.append(
-                f"  {printable(name):<{w_n}}  {trig:<{w_t}}  {st_c}{st:<8}{c_rst}  {when:<8}  {_fmt_detail(d)}"
-            )
+        if rows:
+            w_n = max((len(n) for _, n, _ in rows), default=4)
+            w_t = max((len(printable(str(d.get("trigger") or d.get("mode") or ""))) for _, _, d in rows), default=7)
+            lines.append("")
+            lines.append(f"  {c_dim}{'LOOP':<{w_n}}  {'TRIGGER':<{w_t}}  {'STATE':<8}  {'WHEN':<8}  DETAIL{c_rst}")
+            for _, name, d in rows:
+                st = str(d.get("status") or "idle")
+                st_c = c_err if st == "failed" else (c_run if st == "running" else (c_ok if st == "ok" else c_dim))
+                ts = str(d.get("last_start" if st == "running" else "last_end") or d.get("last_success") or "")
+                when = _fmt_age(ts, instant, live=st == "running")
+                trig = printable(str(d.get("trigger") or d.get("mode") or ""))
+                lines.append(
+                    f"  {printable(name):<{w_n}}  {trig:<{w_t}}  {st_c}{st:<8}{c_rst}  {when:<8}  {_fmt_detail(d)}"
+                )
         disabled = sum(1 for d in loops_map.values() if not d.get("enabled", True))
         if disabled:
             lines.append(f"  {c_dim}({disabled} disabled loop(s)){c_rst}")
+    if unbuilt := summary.get("unbuilt_notes"):
+        lines.append(f"  unbuilt notes: {', '.join(printable(str(u)) for u in unbuilt)} (run: bf build)")
     if orphans := summary.get("orphaned_states"):
-        lines.append(f"  orphaned states: {', '.join(str(o) for o in orphans)} (run: bf run --prune)")
+        lines.append(f"  orphaned states: {', '.join(printable(str(o)) for o in orphans)} (run: bf run --prune)")
+    return "\n".join(lines) + "\n"
+
+
+def format_check_text(res: dict[str, Any], *, color: bool = False, notes_only: bool = False) -> str:
+    """Format a compact, calm human summary for `bf check --format text`."""
+    c_ok, c_err, c_dim, c_rst = ("\033[32m", "\033[31;1m", "\033[2m", "\033[0m") if color else ("", "", "", "")
+    ok = bool(res.get("ok"))
+    errs, warns = int(res.get("errors_count") or 0), int(res.get("warnings_count") or 0)
+    badge = f"{c_ok}OK{c_rst}" if ok else f"{c_err}FAILED ({errs} errors, {warns} warnings){c_rst}"
+    mem_v = "skipped" if notes_only else res.get("records", 0)
+    use_v = "skipped" if notes_only else res.get("usages", 0)
+    lines = [
+        f"Check: {printable(str(res.get('brain', '')))}  [{badge}]",
+        f"  notes={res.get('notes', 0)}  memories={mem_v}  usages={use_v}  errors={errs}  warnings={warns}",
+    ]
+    if probs := res.get("problems"):
+        lines.append("")
+        lines.extend(f"  - {printable(str(p))}" for p in probs)
+    sm = res.get("summary") or {}
+    if sm.get("truncated"):
+        lines.append(f"  {c_dim}(truncated; pass --all for full list){c_rst}")
+    return "\n".join(lines) + "\n"
+
+
+def format_review_text(res: dict[str, Any], *, color: bool = False) -> str:
+    """Format a compact, calm human summary for `bf review --format text`."""
+    c_ok, c_err, c_dim, c_rst = ("\033[32m", "\033[31;1m", "\033[2m", "\033[0m") if color else ("", "", "", "")
+    ok = bool(res.get("ok", True))
+    probs = res.get("problems") or []
+    stale = res.get("stale") or []
+    total_stale, open_tasks = int(res.get("total_stale") or 0), int(res.get("total_tasks_open") or 0)
+    if not ok:
+        badge = f"{c_err}FAILED ({len(probs)} problems){c_rst}" if probs else f"{c_err}FAILED{c_rst}"
+    elif total_stale == 0:
+        badge = f"{c_ok}FRESH{c_rst}"
+    else:
+        badge = f"{c_err}STALE ({total_stale}){c_rst}"
+    lines = [
+        f"Review: {printable(str(res.get('brain', '')))}  [{badge}]",
+        f"  stale={total_stale}  open_tasks={open_tasks}",
+    ]
+    if stale:
+        lines.append("")
+        w_r = max((len(printable(str(it.get("ref", "")))) for it in stale), default=3)
+        lines.append(f"  {c_dim}{'REF':<{w_r}}  {'REASONS':<22}  DETAIL{c_rst}")
+        for it in stale:
+            ref = printable(str(it.get("ref", "")))
+            reasons = ",".join(str(r) for r in (it.get("reasons") or ()))
+            newer = [printable(str(n)) for n in (it.get("newer") or ())]
+            detail = f"newer: {', '.join(newer)}" if newer else printable(str(it.get("title") or ""))
+            lines.append(f"  {ref:<{w_r}}  {reasons:<22}  {detail}")
+    if res.get("truncated"):
+        lines.append(f"  {c_dim}(truncated; pass --all for full list){c_rst}")
+    if probs:
+        lines.append("")
+        lines.extend(f"  ! {printable(str(p))}" for p in probs)
     return "\n".join(lines) + "\n"

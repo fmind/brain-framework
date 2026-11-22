@@ -21,7 +21,7 @@ def test_schemas_compile_and_describe_all_validation_rules(brain: Store) -> None
         doc = schemas.document(kind)
         assert doc["$schema"].endswith("2020-12/schema")
 
-    assert schemas.BF_SCHEMA["properties"]["version"]["const"] == 17
+    assert schemas.BF_SCHEMA["properties"]["version"]["const"] == 18
     assert schemas.get_schema("bf") == schemas.document("bf")
     assert schemas.get_schema("record.schema.json") == schemas.document("record")
     assert set(schemas.export_schemas()) == {"bf", "record"}
@@ -52,11 +52,13 @@ def test_schemas_compile_and_describe_all_validation_rules(brain: Store) -> None
         for e in schemas.validate_instance(rec_val, {**compact_note, "kind": "memory"}, "mem")
     )
     for bad_dt in ("2026-02-31", "2026-04-31", "2026-13-01", "2026-00-10"):
+        assert schemas.validate_instance(rec_val, {**compact_note, "created": bad_dt}, "note")
         assert schemas.validate_instance(rec_val, {**compact_note, "updated": bad_dt}, "note")
         assert schemas.validate_instance(rec_val, {**compact_note, "stale_after": bad_dt}, "note")
-    for bad_tm in ("2026-04-30", "2026-02-31T10:00:00Z", "2026-04-31T00:00:00Z"):
-        assert schemas.validate_instance(rec_val, {**compact_note, "time": bad_tm}, "note")
+    for bad_tm in ("2026-02-31T10:00:00Z", "2026-04-31T00:00:00Z"):
+        assert schemas.validate_instance(rec_val, {**compact_note, "created": bad_tm}, "note")
     for good_dt in ("2026-04-30", "2024-02-29", "2026-04-30T12:00:00Z"):
+        assert schemas.validate_instance(rec_val, {**compact_note, "created": good_dt}, "note") == []
         assert schemas.validate_instance(rec_val, {**compact_note, "updated": good_dt}, "note") == []
 
     with pytest.raises(Error, match="must be a JSON object"):
@@ -67,6 +69,14 @@ def test_schemas_compile_and_describe_all_validation_rules(brain: Store) -> None
     assert schemas.load_validator(brain, "schemas/nonexistent.json") is None
     with pytest.raises(Error, match="missing required schema"):
         schemas.require_validator(brain, "nonexistent")
+
+    # Non-HTTP record IDs reject `?` and `//` prefixes, while HTTP URL record IDs preserve `?`.
+    brain.write("schemas/web.json", b'{"type":"object"}\n')
+    with pytest.raises(Error, match="non-URL"):
+        records.ingest(brain, "web", b'[{"id":"WEB-1?v=2","title":"Bad"}]')
+    with pytest.raises(Error, match="'//' prefix"):
+        records.ingest(brain, "web", b'[{"id":"//foo","title":"Bad"}]')
+    assert records.ingest(brain, "web", b'[{"id":"https://example.com/p?a=1","title":"OK"}]')["added"] == 1
 
     strict = schemas.compile_schema(
         {
@@ -277,7 +287,7 @@ def test_ingest_jsonl_forgotten_incomplete_snapshot_and_events(brain: Store) -> 
         ("valid", "upsert", b'[{"id":"1","title":"t","kind":"concept"}]', Error, "kind must equal 'memory'"),
         ("valid", "upsert", b'[{"id":"1","title":"t","text":123}]', Error, "text must be a string"),
         ("valid", "upsert", b'[{"id":"1","title":"t","url":123}]', Error, "url must be a string"),
-        ("valid", "upsert", b'[{"id":"1","title":"t","time":123}]', Error, "time must be an ISO"),
+        ("valid", "upsert", b'[{"id":"1","title":"t","created":123}]', Error, "created must be an ISO"),
         ("valid", "upsert", b'[{"id":"1","title":"t","updated":123}]', Error, "updated must be an ISO"),
         ("valid", "upsert", b'[{"id":"1","title":"t","links":"bad"}]', Error, "links must be a list"),
         ("valid", "upsert", b'[{"id":"1","title":"t","links":[""]}]', Error, "nonempty link targets"),

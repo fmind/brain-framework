@@ -29,6 +29,9 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
         assert (root / "schemas" / starter_schema).is_file()
     assert (root / "evals" / "smoke.py").is_file()
     assert not (root / "evals" / "smoke.yaml").exists()
+    gi = (root / ".gitignore").read_text()
+    assert "/memories/*\n!/memories/*.forgotten" in gi
+    assert "/usages/*\n!/usages/*.forgotten" in gi
     for folder in (
         "projects",
         "concepts",
@@ -49,10 +52,12 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     assert engine.build(store)["ok"]
 
     # Universal `index.md` bundle: sibling files and subdirs (even symlinks) inside a bundle dir are never recursed!
-    (root / "actions" / "2026-11-15_ship-jsonl" / "inputs").mkdir(parents=True)
-    (root / "actions" / "2026-11-15_ship-jsonl" / "inputs" / "ext-link").symlink_to(tmp_path)
-    store.write("actions/2026-11-15_ship-jsonl/index.md", b"---\ntype: action\nstatus: draft\n---\n\n# Ship JSONL\n")
-    store.write("actions/2026-11-15_ship-jsonl/notes.md", b"# Ignored sibling\n")
+    (root / "actions" / "ship-jsonl" / "inputs").mkdir(parents=True)
+    (root / "actions" / "ship-jsonl" / "inputs" / "ext-link").symlink_to(tmp_path)
+    store.write(
+        "actions/ship-jsonl/index.md", b"---\ntype: action\nstatus: open\ncreated: 2026-11-15\n---\n\n# Ship JSONL\n"
+    )
+    store.write("actions/ship-jsonl/notes.md", b"# Ignored sibling\n")
     built_action = engine.build(store)
     assert built_action["ok"]
     assert store.exists("memories/actions.jsonl")
@@ -93,9 +98,7 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     tampered = json.loads(store.read("memories/actions.jsonl").decode().strip())
     tampered["title"] = "Tampered Title"
     store.write("memories/actions.jsonl", encode(tampered))
-    assert any(
-        "out of sync with actions/2026-11-15_ship-jsonl/index.md" in p for p in engine.validate(store)["problems"]
-    )
+    assert any("out of sync with actions/ship-jsonl/index.md" in p for p in engine.validate(store)["problems"])
     assert engine.build(store)["written"] == 1
     assert engine.validate(store)["ok"]
 
@@ -108,7 +111,7 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     assert engine.build(store)["ok"]
 
     # Deleting the last note in a folder removes its `memories/<dir>.jsonl` completely (never 0-byte JSONL)!
-    store.write("projects/temp.md", b"---\ntype: project\nstatus: draft\n---\n# Temp\n")
+    store.write("projects/temp.md", b"---\ntype: project\nstatus: active\n---\n# Temp\n")
     engine.build(store)
     assert store.exists("memories/projects.jsonl")
     store.delete("projects/temp.md")
@@ -217,9 +220,9 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
     brain.write("concepts/incomplete.md", b"---\ntype: guide\n---\n\n# Missing status\n")
 
     # Attachment Markdown file for non-OKF anchor checking.
-    brain.write("actions/2026-11-15_demo/index.md", b"---\ntype: action\nstatus: draft\n---\n\n# Demo\n")
-    brain.write("actions/2026-11-15_demo/outputs/report.md", b"# Report\n\n## Summary {#summary}\n")
-    brain.write("actions/2026-11-15_demo/outputs/bad.md", b"\xff\xfe")
+    brain.write("actions/demo/index.md", b"---\ntype: action\nstatus: open\ncreated: 2026-11-15\n---\n\n# Demo\n")
+    brain.write("actions/demo/outputs/report.md", b"# Report\n\n## Summary {#summary}\n")
+    brain.write("actions/demo/outputs/bad.md", b"\xff\xfe")
 
     # JSONL memory errors: stray non-jsonl, subdir under memories/, reserved source, missing schema, corrupt jsonl, duplicate id + mismatched source/ref.
     brain.write("memories/stray.txt", b"bad")
@@ -299,9 +302,9 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
         b"- [Good memory](repos:r1)\n"
         b"- [Bad rec frag](repos:r1#.title)\n"
         b"- [Missing memory](repos:missing)\n"
-        b"- [Good attachment](../actions/2026-11-15_demo/outputs/report.md#summary)\n"
-        b"- [Bad attachment anchor](../actions/2026-11-15_demo/outputs/report.md#missing)\n"
-        b"- [Unreadable attachment](../actions/2026-11-15_demo/outputs/bad.md#sec)\n"
+        b"- [Good attachment](../actions/demo/outputs/report.md#summary)\n"
+        b"- [Bad attachment anchor](../actions/demo/outputs/report.md#missing)\n"
+        b"- [Unreadable attachment](../actions/demo/outputs/bad.md#sec)\n"
         b"- [Missing note](../concepts/ghost.md)\n"
         b"- [Missing anchor](../concepts/welcome.md#no-such-heading)\n"
         b"- [Unknown brain](bf://undeclared/concepts/x.md)\n"
@@ -344,8 +347,8 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
         "memories/wrongkind.jsonl:1: kind must equal 'memory'",
         "bf.yaml brains.missing-sib:",
         "record links do not support #anchor fragments",
-        "missing anchor #missing in actions/2026-11-15_demo/outputs/report.md",
-        "actions/2026-11-15_demo/outputs/bad.md: note is not UTF-8",
+        "missing anchor #missing in actions/demo/outputs/report.md",
+        "actions/demo/outputs/bad.md: note is not UTF-8",
         "broken link to concepts/ghost.md",
         "broken link to repos:missing",
         "missing anchor #no-such-heading in concepts/welcome.md",
@@ -365,28 +368,40 @@ def test_review_computes_newer_evidence_due_future_updated_and_tasks(brain: Stor
     now = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
 
     brain.write(
-        "actions/2026-10-01_old/index.md",
-        b"---\ntype: action\nstatus: deprecated\nupdated: 2026-01-01\nstale_after: 1d\n---\n\n# Old\n\n- [ ] Ignored\n",
+        "concepts/old-dep.md",
+        b"---\ntype: guide\nstatus: deprecated\nupdated: 2026-01-01\nstale_after: 1d\n---\n\n# Old\n\n- [ ] Ignored\n",
     )
     brain.write(
-        "actions/2026-11-10_active/index.md",
-        b"---\ntype: action\nstatus: draft\nupdated: '2026-11-10T12:00:00+02:00'\nsummary: Ship v1\n---\n\n# Ship v1\n\n- [ ] Task A\n",
+        "projects/done-proj.md",
+        b"---\ntype: project\nstatus: done\nupdated: 2026-01-01\nstale_after: 1d\n---\n\n# Done\n\n- [ ] Ignored\n",
+    )
+    brain.write(
+        "projects/archived-proj.md",
+        b"---\ntype: project\nstatus: archived\nupdated: 2026-01-01\nstale_after: 1d\n---\n\n# Archived\n\n- [ ] Ignored\n",
+    )
+    brain.write(
+        "actions/cancelled-act/index.md",
+        b"---\ntype: action\nstatus: cancelled\ncreated: 2026-01-01\nstale_after: 1d\n---\n\n# Cancelled\n\n- [ ] Ignored\n",
+    )
+    brain.write(
+        "actions/active/index.md",
+        b"---\ntype: action\nstatus: open\ncreated: 2026-11-10\nupdated: '2026-11-10T12:00:00+02:00'\ndescription: Ship v1\n---\n\n# Ship v1\n\n- [ ] Task A\n",
     )
     brain.write(
         "projects/future.md",
-        b"---\ntype: project\nstatus: draft\nupdated: 2026-12-01\nstale_after: 2026-11-01T10:00:00+02:00\n---\n\n# Future\n",
+        b"---\ntype: project\nstatus: active\nupdated: 2026-12-01\nstale_after: 2026-11-01T10:00:00+02:00\n---\n\n# Future\n",
     )
     brain.write(
         "projects/overdue.md",
-        b"---\ntype: project\nstatus: stable\nupdated: 2026-10-01\nstale_after: 14d\nentity: bf:///projects/overdue.md\n---\n\n# Overdue\n",
+        b"---\ntype: project\nstatus: active\nupdated: 2026-10-01\nstale_after: 14d\nentity: bf:///projects/overdue.md\n---\n\n# Overdue\n",
     )
     brain.write(
         "projects/fresh-hours.md",
-        b"---\ntype: project\nstatus: stable\nupdated: '2026-11-15T06:00:00Z'\nstale_after: 12h\n---\n\n# Fresh Hours\n",
+        b"---\ntype: project\nstatus: active\nupdated: '2026-11-15T06:00:00Z'\nstale_after: 12h\n---\n\n# Fresh Hours\n",
     )
     brain.write(
         "projects/overflow-dur.md",
-        b"---\ntype: project\nstatus: stable\nupdated: 2026-11-15\nstale_after: 9999y\n---\n\n# Overflow Dur\n",
+        b"---\ntype: project\nstatus: active\nupdated: 2026-11-15\nstale_after: 9999y\n---\n\n# Overflow Dur\n",
     )
     brain.write("schemas/jira.json", OBJ_SCHEMA)
     records.ingest(
@@ -422,17 +437,13 @@ def test_review_computes_newer_evidence_due_future_updated_and_tasks(brain: Stor
 
     brain.write(
         "projects/aliased.md",
-        b"---\ntype: project\nstatus: stable\nupdated: 2026-11-09\n"
+        b"---\ntype: project\nstatus: active\nupdated: 2026-11-09\n"
         b"aliases: [repo:acme/web, https://example.com/acme/web]\n---\n\n# Aliased\n\n"
         b"Self reference to <https://example.com/acme/web>.\n",
     )
     brain.write(
-        "concepts/retrieved-only.md",
-        b"---\ntype: guide\nstatus: stable\nstale_after: 30d\nsources:\n"
-        b"  - resource: https://example.com/unretrieved\n"
-        b"  - resource: https://example.com/old\n    retrieved: '2026-11-08'\n"
-        b"  - resource: https://example.com/spec\n    retrieved: '2026-11-10T12:00:00+02:00'\n"
-        b"  - resource: https://example.com/draft\n    retrieved: unknown\n---\n\n# Retrieved Only\n",
+        "concepts/created-only.md",
+        b"---\ntype: guide\nstatus: stable\ncreated: '2026-11-10T12:00:00+02:00'\nstale_after: 30d\n---\n\n# Created Only\n",
     )
     brain.write(
         "concepts/tz-upd.md",
@@ -454,7 +465,7 @@ def test_review_computes_newer_evidence_due_future_updated_and_tasks(brain: Stor
                     "updated": "2026-11-10T11:00:00Z",
                     "links": [
                         {"to": "urn:repo:acme/web", "meta": {"rel": "repo"}},
-                        {"to": "bf:///concepts/retrieved-only.md", "meta": {"rel": "topic"}},
+                        {"to": "bf:///concepts/created-only.md", "meta": {"rel": "topic"}},
                     ],
                 }
             ]
@@ -497,9 +508,9 @@ def test_review_computes_newer_evidence_due_future_updated_and_tasks(brain: Stor
         "reasons": ["newer_evidence"],
         "newer": ["concepts/newer-note.md", "github:pr-7"],
     }
-    assert stale_by_ref["concepts/retrieved-only.md"] == {
-        "ref": "concepts/retrieved-only.md",
-        "title": "Retrieved Only",
+    assert stale_by_ref["concepts/created-only.md"] == {
+        "ref": "concepts/created-only.md",
+        "title": "Created Only",
         "reasons": ["newer_evidence"],
         "newer": ["github:pr-7"],
     }
@@ -575,13 +586,13 @@ def test_engine_edge_paths_and_validated_cache_guards(tmp_path: Path) -> None:
     sib = engine.init_brain(tmp_path / "sib")
     sib_store = Store(Path(sib["path"]))
     sib_store.write("schemas/ev.json", OBJ_SCHEMA)
-    records.ingest(sib_store, "ev", b'[{"id":"e1","title":"E1","time":"2026-11-18T10:00:00Z"}]')
+    records.ingest(sib_store, "ev", b'[{"id":"e1","title":"E1","created":"2026-11-18T10:00:00Z"}]')
 
     main = engine.init_brain(tmp_path / "main")
     store = Store(Path(main["path"]))
     store.write("bf.yaml", f"version: {FORMAT}\nname: main\nbrains:\n  sib: ../sib\n".encode())
     store.write("schemas/ev.json", OBJ_SCHEMA)
-    records.ingest(store, "ev", b'[{"id":"r1","title":"R1","time":"2026-11-18T10:00:00Z"}]')
+    records.ingest(store, "ev", b'[{"id":"r1","title":"R1","created":"2026-11-18T10:00:00Z"}]')
     store.write(
         "concepts/edges.md",
         b"---\ntype: guide\nstatus: stable\nupdated: 2026-11-10\n---\n# Edges\n\n"
@@ -608,7 +619,7 @@ def test_engine_edge_paths_and_validated_cache_guards(tmp_path: Path) -> None:
     now = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
     inv_store.write(
         "projects/sub/roadmap.md",
-        b"---\ntype: project\nstatus: stable\nupdated: 2026-10-01\nstale_after: 14d\n---\n\n# Roadmap\n\n- [ ] Nested task\n",
+        b"---\ntype: project\nstatus: active\nupdated: 2026-10-01\nstale_after: 14d\n---\n\n# Roadmap\n\n- [ ] Nested task\n",
     )
     assert engine.build(inv_store, now=now)["ok"]
     assert engine.validate(inv_store)["ok"]
@@ -788,3 +799,90 @@ def test_validate_checks_loops_scripts_jq_filters_and_usages_schema(tmp_path: Pa
     assert "kind must equal 'usage'" in joined_u
     assert "usages/noid.jsonl:1: source must equal 'noid'" in joined_u
     assert "usages/noid.jsonl:1: kind must equal 'usage'" in joined_u
+
+
+def test_validate_notes_only_and_text_formatters(tmp_path: Path) -> None:
+    root = tmp_path / "fastcheck"
+    engine.init_brain(root, name="fastcheck")
+    store = Store(root)
+    store.write("schemas/feed.json", OBJ_SCHEMA)
+    store.write("memories/feed.jsonl", b"{corrupt\n")
+    assert not engine.validate(store)["ok"]
+    notes_rep = engine.validate(store, notes_only=True)
+    assert notes_rep["ok"] is True
+    assert notes_rep["records"] == 0
+
+    # Text formatters cover OK, FAILED, truncated, FRESH, STALE (with newer & title detail), problems, and ANSI color.
+    chk_ok_txt = status.format_check_text(notes_rep, color=True, notes_only=True)
+    assert "OK" in chk_ok_txt
+    assert "memories=skipped" in chk_ok_txt
+    assert "usages=skipped" in chk_ok_txt
+    assert "\033[32m" in chk_ok_txt
+    chk_fail_txt = status.format_check_text(
+        {
+            "ok": False,
+            "brain": "b",
+            "notes": 1,
+            "records": 0,
+            "usages": 0,
+            "errors_count": 2,
+            "warnings_count": 0,
+            "problems": ["p1"],
+            "summary": {"truncated": True},
+        },
+        color=False,
+    )
+    assert "FAILED (2 errors, 0 warnings)" in chk_fail_txt
+    assert "truncated" in chk_fail_txt
+
+    rev_fresh = status.format_review_text(
+        {"ok": True, "brain": "b", "total_stale": 0, "total_tasks_open": 0, "stale": []}
+    )
+    assert "[FRESH]" in rev_fresh
+    rev_fail = status.format_review_text(
+        {"ok": False, "brain": "b", "total_stale": 0, "total_tasks_open": 0, "stale": [], "problems": ["broken.jsonl"]},
+        color=True,
+    )
+    assert "FAILED (1 problems)" in rev_fail
+    assert "FRESH" not in rev_fail
+    assert "broken.jsonl" in rev_fail
+    rev_stale = status.format_review_text(
+        {
+            "ok": True,
+            "brain": "b",
+            "total_stale": 2,
+            "total_tasks_open": 3,
+            "stale": [
+                {"ref": "concepts/a.md", "title": "A", "reasons": ["due"]},
+                {"ref": "projects/p.md", "title": "P", "reasons": ["newer_evidence"], "newer": ["jira:1"]},
+            ],
+            "truncated": True,
+        },
+        color=True,
+    )
+    assert "STALE (2)" in rev_stale
+    assert "newer: jira:1" in rev_stale
+    assert "truncated" in rev_stale
+
+    # All-disabled loops omit the table header; multi-line descriptions and orphan names stay sanitized.
+    all_off = status.format_status_text(
+        {
+            "brain": "b",
+            "ok": True,
+            "counts": {"notes": 1, "records": 0, "usages": 0, "sources": 0, "loops": 1},
+            "events_seq": 0,
+            "orphaned_states": ["bad\nname"],
+            "loops": {"off": {"enabled": False, "status": "idle", "description": "line1\nline2"}},
+        }
+    )
+    assert "LOOP" not in all_off
+    assert "(1 disabled loop(s))" in all_off
+    assert "bad name" in all_off or "bad\\nname" not in all_off
+
+    from bf import watch
+
+    bad_build_ln = watch.format_watch_line(
+        "watch.build", {"ok": False, "notes": 1, "written": 0, "problems": ["bad note", "second"]}, color=False
+    )
+    assert "bad note" in bad_build_ln
+    assert "+1 more" in bad_build_ln

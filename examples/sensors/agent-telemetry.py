@@ -202,10 +202,13 @@ def collect(harness: str, root: Path, start: datetime, end: datetime) -> list[di
                     "type": "agent-session",
                     "title": f"{harness}: {prompts[0][:80]}",
                     "text": joined,
-                    "time": when_iso,
+                    "created": when_iso,
                     "updated": when_iso,
                     "tags": ["telemetry", harness],
-                    "attributes": {"harness": harness, "session_file": rel, "prompts": len(prompts)},
+                    "harness": harness,
+                    "session_id": f"{harness}-{rec_hash}",
+                    "prompts": len(prompts),
+                    "attributes": {"session_file": rel},
                 }
             )
 

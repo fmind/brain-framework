@@ -149,7 +149,7 @@ def brain(tmp_path: Path) -> Store:
                     "id": "decision-1",
                     "title": "Preserve durable evidence",
                     "text": "The team chose offline JSONL retrieval.",
-                    "time": "2026-08-31T12:00:00Z",
+                    "created": "2026-08-31T12:00:00Z",
                     "updated": "2026-08-31T12:00:00Z",
                     "links": ["bf:///projects/offline.md"],
                 },
@@ -157,7 +157,7 @@ def brain(tmp_path: Path) -> Store:
                     "id": "lunch",
                     "title": "Lunch plans",
                     "text": "Meet for lunch on Tuesday.",
-                    "time": "2026-08-30T12:00:00Z",
+                    "created": "2026-08-30T12:00:00Z",
                     "updated": "2026-08-30T12:00:00Z",
                 },
             ]
@@ -165,7 +165,7 @@ def brain(tmp_path: Path) -> Store:
     )
     store.write(
         "projects/offline.md",
-        b"---\ntype: project\nstatus: draft\nupdated: 2026-09-01\ntags: [retention]\n---\n\n"
+        b"---\ntype: project\nstatus: active\ncreated: 2026-09-01\nupdated: 2026-09-01\ntags: [retention]\n---\n\n"
         b"# Offline retrieval\n\n"
         b"Keep stored reads offline. Decided in [the meeting](meetings:decision-1){rel=cites}.\n"
         b"{: #summary confidence=high}\n\n"

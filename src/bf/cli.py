@@ -19,6 +19,11 @@ class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         raise InputError(message)
 
+    def _print_message(self, message: str, file: Any = None) -> None:
+        super()._print_message(message, file)
+        if message and (target := file or sys.stderr) is not None:
+            target.flush()
+
 
 def _add_brain_opt(parser: argparse.ArgumentParser, dest: str = "brain") -> None:
     parser.add_argument(
@@ -100,7 +105,9 @@ def _build_parser() -> _Parser:
     rv_lim = sp.add_mutually_exclusive_group()
     rv_lim.add_argument("-n", "--limit", type=int, default=None, metavar="N", help="Max stale items (default: 20).")
     rv_lim.add_argument("--all", dest="all_items", action="store_true", help="Return all stale notes.")
-    sp.add_argument("--format", choices=("json", "jsonl"), default="json", help="Output format (default: json).")
+    sp.add_argument(
+        "--format", choices=("json", "jsonl", "text"), default="json", help="Output format (default: json)."
+    )
 
     sp = cmd("check", "Validate bf.yaml, schemas, notes, JSONL records, loops, and links (read-only).")
     ck_lim = sp.add_mutually_exclusive_group()
@@ -109,8 +116,14 @@ def _build_parser() -> _Parser:
         "--all", dest="all_problems", action="store_true", help="Return all problems without truncation."
     )
     sp.add_argument(
+        "--notes",
+        action="store_true",
+        help="Validate config, schemas, loops, notes, and note links without validating sensor/usage JSONL.",
+    )
+    sp.add_argument(
         "--strict", action="store_true", help="Fail validation on warnings (snapshot or forgotten targets)."
     )
+    sp.add_argument("--format", choices=("json", "text"), default="json", help="Output format (default: json).")
 
     sp = cmd("schema", "Print bundled Draft 2020-12 JSON Schemas.", with_brain=False)
     sp.add_argument("name", nargs="?", default=None, help="Schema name: bf or record.")
@@ -182,20 +195,27 @@ def _read_in(spec: str) -> bytes:
     return data
 
 
+def _use_color() -> bool:
+    return sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb" and not os.environ.get("NO_COLOR", "")
+
+
+def _write_text(text: str) -> None:
+    sys.stdout.buffer.write(text.encode("utf-8"))
+    sys.stdout.flush()
+
+
 def _emit(payload: object) -> None:
-    with suppress(BrokenPipeError):
-        sys.stdout.buffer.write(terminal(payload))
-        sys.stdout.flush()
+    sys.stdout.buffer.write(terminal(payload))
+    sys.stdout.flush()
 
 
 def _emit_fmt(res: dict[str, Any], fmt: str, *, review: bool = False) -> None:
     if fmt == "json":
         return _emit(res)
     rows = res["stale"] if review else res["items"]
-    with suppress(BrokenPipeError):
-        for row in rows:
-            sys.stdout.buffer.write(terminal(row))
-        sys.stdout.flush()
+    for row in rows:
+        sys.stdout.buffer.write(terminal(row))
+    sys.stdout.flush()
     if res.get("truncated"):
         flag = "--all" if review else "-n/--limit"
         sys.stderr.write(f"bf: warning: truncated to {len(rows)} items; pass {flag} for more\n")
@@ -244,12 +264,7 @@ def _dispatch(args: argparse.Namespace, extra: list[str]) -> int:
 
         res = status.status_summary(store, all_units=args.all_units or args.format == "text")
         if args.format == "text":
-            use_color = (
-                sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb" and not os.environ.get("NO_COLOR", "")
-            )
-            with suppress(BrokenPipeError):
-                sys.stdout.buffer.write(status.format_status_text(res, color=use_color).encode("utf-8"))
-                sys.stdout.flush()
+            _write_text(status.format_status_text(res, color=_use_color()))
         else:
             _emit(res)
         return 0 if (not args.check or res.get("ok", True)) else 1
@@ -264,31 +279,32 @@ def _dispatch(args: argparse.Namespace, extra: list[str]) -> int:
         if args.data == "-":
             if sys.stdin.isatty():
                 raise InputError("stdin is a terminal; pipe JSON object or pass --data JSON")
-            raw_in = _read_in("-")
-            try:
-                raw_data = models.decode(raw_in, "--data") if raw_in.strip() else {}
-            except Error as err:
-                raise InputError(str(err)) from err
+            raw_in: bytes | str = _read_in("-")
         else:
-            try:
-                raw_data = models.decode(args.data, "--data") if args.data else {}
-            except Error as err:
-                raise InputError(str(err)) from err
+            raw_in = args.data or ""
+        try:
+            raw_data = models.decode(raw_in, "--data") if raw_in.strip() else {}
+        except Error as err:
+            raise InputError(str(err)) from err
         if not isinstance(raw_data, dict):
             raise InputError("--data must be a JSON object")
         ev = records.append_event(store, args.kind, args.source, raw_data, dedupe=args.dedupe)
         _emit({"ok": True, "brain": brain_name, "event": ev})
         return 0
     if cmd == "check":
-        from bf import engine
+        from bf import engine, status
 
         res = engine.validate(
             store,
             limit=50 if args.limit is None else args.limit,
             all_problems=args.all_problems,
             strict=args.strict,
+            notes_only=args.notes,
         )
-        _emit(res)
+        if args.format == "text":
+            _write_text(status.format_check_text(res, color=_use_color(), notes_only=args.notes))
+        else:
+            _emit(res)
         return 0 if res["ok"] else 1
     if cmd == "run":
         from bf import loops
@@ -335,6 +351,8 @@ def _dispatch(args: argparse.Namespace, extra: list[str]) -> int:
 
         res = query.query(store, args.pattern, jq_expr=args.jq, scope=args.scope, kind=args.kind, limit=args.limit)
         _emit_fmt(res, args.format, review=False)
+        if unbuilt := res.get("unbuilt_notes"):
+            sys.stderr.write(f"bf: hint: unbuilt notes in {', '.join(unbuilt)}; run bf build\n")
         return 0
     if cmd == "build":
         from bf import engine
@@ -343,12 +361,15 @@ def _dispatch(args: argparse.Namespace, extra: list[str]) -> int:
         _emit(res)
         return 0 if res["ok"] else 1
 
-    from bf import engine
+    from bf import engine, status
 
     res = engine.review(store, limit=20 if args.limit is None else args.limit, all_items=args.all_items)
-    _emit_fmt(res, args.format, review=True)
-    if args.format != "json" and not res["ok"] and res.get("problems"):
-        sys.stderr.write(f"bf: {printable('; '.join(str(p) for p in res['problems']))}\n")
+    if args.format == "text":
+        _write_text(status.format_review_text(res, color=_use_color()))
+    else:
+        _emit_fmt(res, args.format, review=True)
+        if args.format != "json" and not res["ok"] and res.get("problems"):
+            sys.stderr.write(f"bf: {printable('; '.join(str(p) for p in res['problems']))}\n")
     return 0 if res["ok"] else 1
 
 

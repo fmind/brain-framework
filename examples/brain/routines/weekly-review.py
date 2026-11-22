@@ -52,8 +52,8 @@ def main() -> int:
     record = {
         "id": f"weekly-review-{today}",
         "title": f"Weekly review ({today})",
-        "summary": f"{notes} notes, {records} records, {len(open_tasks)} open tasks.",
-        "time": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "description": f"{notes} notes, {records} records, {len(open_tasks)} open tasks.",
+        "created": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
         "text": body,
         "attributes": {"notes": notes, "records": records, "open_tasks": len(open_tasks)},
     }

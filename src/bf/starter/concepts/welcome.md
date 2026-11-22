@@ -1,9 +1,10 @@
 ---
 type: guide
 status: stable
+created: 2026-11-15
 updated: 2026-11-15
 tags: [getting-started]
-summary: Starter concept showing YAML frontmatter, heading anchors, unified links, and JSONL memories.
+description: Starter concept showing YAML frontmatter, heading anchors, unified links, and JSONL memories.
 ---
 
 # Welcome

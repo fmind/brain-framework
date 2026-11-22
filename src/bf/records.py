@@ -65,12 +65,16 @@ def iter_jsonl(store: Store, path: str, *, check_duplicates: bool = False) -> Ge
         yield stripped, parsed
 
 
-def _forgotten_ids(store: Store, source: str, target: Target = "memories") -> set[str]:
+def forgotten_ids(store: Store, source: str, target: Target = "memories") -> set[str]:
     try:
         raw = store.read(f"{target}/{source}.forgotten", models.MAX_NOTE)
     except FileNotFoundError:
         return set()
-    return {ln.strip() for ln in raw.decode("utf-8").splitlines() if ln.strip() and not ln.lstrip().startswith("#")}
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Error(f"{target}/{source}.forgotten: file is not valid UTF-8") from None
+    return {ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")}
 
 
 def load_unit_state(store: Store, name: str) -> dict[str, Any]:
@@ -386,8 +390,15 @@ def _prepare_record(
     if not isinstance(raw_title := rec.get("title"), str):
         raise Error(f"{label}: missing required string 'title'")
     rec_id = clean(raw_id, f"{label}.id")
-    if any(ch.isspace() for ch in rec_id) or "#" in rec_id or models.invisible(rec_id):
-        raise Error(f"{label}.id must contain no whitespace, '#', or invisible format characters")
+    is_http_id = rec_id.lower().startswith(("https://", "http://"))
+    if (
+        any(ch.isspace() for ch in rec_id)
+        or "#" in rec_id
+        or rec_id.startswith("//")
+        or ("?" in rec_id and not is_http_id)
+        or models.invisible(rec_id)
+    ):
+        raise Error(f"{label}.id must contain no whitespace, '#', '//' prefix, non-URL '?', or invisible characters")
     exp_kind = "usage" if target == "usages" else "memory"
     rec["id"], rec["title"], exp_ref = rec_id, clean(raw_title, f"{label}.title"), f"{source}:{rec_id}"
     for key, exp in (("source", source), ("ref", exp_ref), ("kind", exp_kind)):
@@ -404,14 +415,14 @@ def _prepare_record(
         if not isinstance(rec["url"], str):
             raise Error(f"{label}.url must be a string")
         clean(rec["url"], f"{label}.url") if rec["url"] else rec.pop("url")
-    for field_name in ("time", "updated"):
+    for field_name in ("created", "updated"):
         if field_name in rec:
             if not isinstance(val := rec[field_name], str):
-                raise Error(f"{label}.{field_name} must be an ISO 8601 string")
+                raise Error(f"{label}.{field_name} must be an ISO 8601 date or timestamp string")
             if not val:
                 del rec[field_name]
             else:
-                norm = models.normalize_date if field_name == "updated" and len(val) == 10 else models.normalize_time
+                norm = models.normalize_date if len(val) == 10 else models.normalize_time
                 rec[field_name] = norm(val, f"{label}.{field_name}")
     if isinstance(sa := rec.get("stale_after"), str) and models.DURATION_RE.fullmatch(sa):
         models.parse_duration_seconds(sa, f"{label}.stale_after")
@@ -511,7 +522,7 @@ def ingest(
 
     target_file = record_file(source, target)
     with nullcontext() if dry_run else writer(store):
-        forgotten = _forgotten_ids(store, source, target)
+        forgotten = forgotten_ids(store, source, target)
         existing: dict[str, tuple[bytes, dict[str, Any]]] = {}
         with suppress(FileNotFoundError):
             for raw_ln, parsed in iter_jsonl(store, target_file):

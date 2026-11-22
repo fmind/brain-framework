@@ -19,7 +19,7 @@ sys.stdout.write(
                 "title": "Retention decision",
                 "type": "decision",
                 "text": "Keep original evidence because upstream content can disappear.",
-                "time": start.isoformat(),
+                "created": start.isoformat(),
                 "updated": start.isoformat(),
                 "links": ["bf:///projects/example.md"],
             }

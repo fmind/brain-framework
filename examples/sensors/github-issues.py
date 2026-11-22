@@ -210,7 +210,7 @@ def make_record(
         "title": line(title, identifier),
         "type": item_type.lower(),
         "text": text,
-        "time": iso_utc(time_value),
+        "created": iso_utc(time_value),
     }
     if isinstance(attributes.get("status"), str) and attributes["status"]:
         out["status"] = attributes["status"]

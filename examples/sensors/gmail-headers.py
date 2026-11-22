@@ -169,7 +169,7 @@ def make_record(
         "title": line(title, identifier),
         "type": "email" if item_type == "EmailMessage" else item_type.lower(),
         "text": text,
-        "time": when.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "created": when.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
     if valid_url := reference(url):
         out["url"] = valid_url

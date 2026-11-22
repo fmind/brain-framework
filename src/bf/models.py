@@ -8,7 +8,7 @@ import math
 import re
 from datetime import UTC, date, datetime
 
-FORMAT = 17
+FORMAT = 18
 DEFAULT_NOTES = ("concepts", "projects", "actions")
 RECORD_DIRS = ("memories", "usages")
 RESERVED_SOURCES = frozenset(
@@ -40,6 +40,8 @@ NAME = r"^[a-z][a-z0-9-]{0,63}$"
 NAME_RE = re.compile(NAME)
 EVENT_KIND_PAT = r"^[a-z][a-z0-9._-]{0,127}$"
 EVENT_KIND_RE = re.compile(EVENT_KIND_PAT)
+PLACEHOLDERS = frozenset(("brain", "loop", "state", "start", "end", "trigger", "run"))
+PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z0-9_.-]*)\s*\}\}")
 DURATION_PAT = r"^(?:[0-9]+(?:\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$"
 DURATION_ZERO_PAT = r"^(?:0|(?:[0-9]+(?:\.[0-9]+)?(?:ms|s|m|h|d|w|y))+)$"
 DURATION_RE = re.compile(DURATION_PAT)

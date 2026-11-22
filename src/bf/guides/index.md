@@ -16,4 +16,4 @@ Brain Framework (`bf`) is a UNIX-native, local-first knowledge brain built on th
 - [Authoring](authoring.md): organize Markdown across `notes:` folders (flat notes and `<slug>/index.md` bundles), heading `#id` anchors, universal `ref` & `bf://` links, and required JSON Schemas.
 - [Retrieval](retrieval.md): orient with read-only `bf status` and `bf review`, resolve refs with `bf read`, query `memories/*.jsonl` and `usages/*.jsonl` via `rg`, `jq`, and DuckDB (`bf query`), and verify with `bf check`.
 - [Operations](operations.md): compose `loops:` with `sensors/`, `routines/`, and `agents/` conventions, `stdout`/`stderr` JSONL streams, `logs/events.jsonl`, `bf watch`, and security boundaries.
-- [Reference](reference.md): exact CLI commands (strict read/write split), exit codes, 3x3 layout, `bf.yaml` (`version: 17`), and published JSON Schemas (`bf schema`).
+- [Reference](reference.md): exact CLI commands (strict read/write split), exit codes, 3x3 layout, `bf.yaml` (`version: 18`), and published JSON Schemas (`bf schema`).

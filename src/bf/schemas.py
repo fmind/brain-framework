@@ -8,7 +8,7 @@ from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
 from bf import models
-from bf.models import Error, InputError, decode, digest, encode
+from bf.models import Error, InputError, decode, digest
 from bf.storage import Store
 
 if TYPE_CHECKING:
@@ -24,7 +24,6 @@ _CAL_DATE = (
 )
 _TS_HMS = r"[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})"
 _ISO_DT = rf"^(?:{_CAL_DATE}(?:T{_TS_HMS})?)?$"
-_OPT_TS = rf"^(?:{_CAL_DATE}T{_TS_HMS})?$"
 _BOOL = {"type": "boolean"}
 _NAME_REF = {"type": "string", "pattern": models.NAME}
 
@@ -80,7 +79,8 @@ _LOOP_KEY = {"pattern": models.NAME, "not": {"enum": ["events"]}}
 _SRC_REF = {**_NAME_REF, "not": {"enum": sorted(models.RESERVED_SOURCES)}}
 _EVENT_KIND_STR = _str(128, min_len=1, pat=models.EVENT_KIND_PAT)
 _EVENT_VAL = {"anyOf": [_EVENT_KIND_STR, {"$ref": "#/$defs/EventMatch"}]}
-_TRIG_SCALAR = {"anyOf": [_int(1, 315576000), _str(128, min_len=1)]}
+_CRON_STR = _str(128, min_len=1, pat=r"^(?:@[A-Za-z]+|[^\s]+(?:[ \t]+[^\s]+){4})$")
+_TRIG_SCALAR = {"anyOf": [_int(1, 315576000), _DUR_STR, _CRON_STR]}
 _TRIG_ITEM = {
     "anyOf": [
         _TRIG_SCALAR,
@@ -90,15 +90,16 @@ _TRIG_ITEM = {
     ]
 }
 _WHEN_VAL = {"anyOf": [{"const": "daemon"}, _TRIG_ITEM, _arr(_TRIG_ITEM, min_items=1, max_items=32)]}
-_INGEST_VAL = {"anyOf": [_enum("upsert", "snapshot"), {"$ref": "#/$defs/Ingest"}]}
+_INGEST_VAL = {"anyOf": [{"const": False}, _enum("upsert", "snapshot"), {"$ref": "#/$defs/Ingest"}]}
 
 _LOOP_PROPS: dict[str, Any] = {
-    "description": _desc(_str(512), "Short summary of what this loop does for humans and AI agents."),
+    "description": _desc(_str(512), "Short description of what this loop does for humans and AI agents."),
     "when": _desc(_WHEN_VAL, "When the loop runs: 'daemon', a trigger, a list of triggers, or omit for manual."),
     "window": {"$ref": "#/$defs/Window"},
     "run": {"$ref": "#/$defs/Argv"},
     "ingest": _desc(
-        _INGEST_VAL, "Ingest stdout JSONL into memories/ or usages/ ('upsert'|'snapshot' or {source?, target?, mode?})."
+        _INGEST_VAL,
+        "Ingest stdout JSONL into memories/ or usages/ ('upsert'|'snapshot'|{source?, target?, mode?}), or false to disable sensors/ auto-ingest.",
     ),
     "emit": _desc(_EVENT_KIND_STR, "Default event kind emitted from stdout JSONL to logs/events.jsonl."),
     "timeout": _desc(_TIMEOUT, "Max cycle runtime before terminating the process group.", default="5m"),
@@ -117,7 +118,7 @@ _LOOP_RULES = [{"if": _EMIT_SET, "then": {"not": {"required": ["ingest"]}}}, {"i
 _BRAIN_PROPS: dict[str, Any] = {
     "version": _desc({"type": "integer", "const": models.FORMAT}, "Brain configuration format version."),
     "name": _desc(_NAME_REF, "Stable lowercase identifier for this brain."),
-    "description": _desc(_str(1024), "Short summary of this brain's scope for humans and AI agents."),
+    "description": _desc(_str(1024), "Short description of this brain's scope for humans and AI agents."),
     "timezone": _desc(_str(128, min_len=1), "IANA timezone for cron schedules.", default="UTC"),
     "notes": _desc(
         _arr(_SRC_REF, min_items=1, max_items=32, unique=True),
@@ -136,10 +137,12 @@ _WIN_PROPS = {
 }
 _BRAIN_DEFS = {
     "Argv": _desc(
-        _arr(_str(4096, min_len=1), min_items=1, max_items=64), "Literal argv without a shell.", title="Argv"
+        _arr(_str(4096, min_len=1), min_items=1, max_items=64),
+        "Literal argv without a shell (supports {{brain}}, {{loop}}, {{state}}, {{start}}, {{end}}, {{trigger}}, {{run}}).",
+        title="Argv",
     ),
     "CronTrigger": _obj(
-        {"cron": _desc(_str(128, min_len=1), "5-field cron expression or @macro."), **_WIN_PROPS},
+        {"cron": _desc(_CRON_STR, "5-field cron expression or @macro."), **_WIN_PROPS},
         req=("cron",),
         title="CronTrigger",
         desc="Cron schedule trigger with optional per-trigger window.",
@@ -193,14 +196,14 @@ _RECORD_PROPS: dict[str, Any] = {
     "title": _desc(_str(4096, min_len=1), "Human-readable title."),
     "entity": _desc(_str(4096, min_len=1), "Canonical entity URI or source:id alias."),
     "type": _desc(_str(128, min_len=1), "Domain subtype (e.g. guide, project, issue, session)."),
-    "status": _desc(_str(128, min_len=1), "Lifecycle status (e.g. draft, stable, deprecated)."),
-    "summary": _desc(_str(16384), "Short summary of the note or record."),
+    "status": _desc(_str(128, min_len=1), "Lifecycle status (e.g. draft, stable, active, open, done)."),
+    "description": _desc(_str(16384), "Short description of the note or record."),
     "ref": _desc(_str(4200, min_len=1), "Universal brain-local reference (note path or source:id)."),
     "source": _desc(_NAME_REF, "Owning source name (<bucket>/<source>.jsonl)."),
     "kind": _desc(_enum("note", "memory", "usage"), "Top-level record kind (note, memory, or usage)."),
     "text": _desc(_str(4 << 20), "Plain or Markdown body text."),
     "url": _desc(_str(8192), "Canonical external URL."),
-    "time": _desc({"type": "string", "pattern": _OPT_TS}, "Event or creation UTC/offset ISO 8601 timestamp."),
+    "created": _desc({"type": "string", "pattern": _ISO_DT}, "Creation or event ISO date (YYYY-MM-DD) or timestamp."),
     "updated": _desc({"type": "string", "pattern": _ISO_DT}, "Last-updated ISO date (YYYY-MM-DD) or timestamp."),
     "stale_after": _desc({"anyOf": _STALE_ANY}, "Review freshness threshold (days, duration, or ISO date)."),
     "tags": _desc(_TAG_ITEMS, "Unique tags without whitespace or slashes."),
@@ -249,19 +252,31 @@ RECORD_SCHEMA = _doc(
 _SCHEMAS: dict[Kind, dict[str, Any]] = {"bf": BF_SCHEMA, "record": RECORD_SCHEMA}
 
 
+_STARTER_STATUSES: dict[str, tuple[str, ...]] = {
+    "concepts": ("draft", "stable", "deprecated"),
+    "projects": ("active", "paused", "done", "archived"),
+    "actions": ("open", "done", "cancelled"),
+}
+
+
 def starter_note_schema(folder: str) -> dict[str, Any]:
-    """Return a minimal Draft 2020-12 OKF note schema for `schemas/<folder>.json`."""
+    """Return an idiomatic Draft 2020-12 OKF note schema for `schemas/<folder>.json`."""
     label = folder.replace("-", " ").title()
+    statuses = _STARTER_STATUSES.get(folder, ("draft", "stable", "deprecated"))
+    required = ["type", "status", "created"] if folder == "actions" else ["type", "status"]
     return {
         "$schema": _DRAFT,
         "title": f"{label}Note",
         "description": f"Domain schema for authored Markdown notes in {folder}/.",
         "type": "object",
-        "required": ["type", "status"],
+        "required": required,
         "additionalProperties": True,
         "properties": {
             "type": {"type": "string", "minLength": 1, "maxLength": 128},
-            "status": {"type": "string", "enum": ["draft", "stable", "deprecated"]},
+            "status": {"type": "string", "enum": list(statuses)},
+            "description": {"type": "string", "maxLength": 16384},
+            "created": {"type": "string", "minLength": 10, "pattern": _ISO_DT},
+            "updated": {"type": "string", "minLength": 10, "pattern": _ISO_DT},
         },
     }
 
@@ -332,19 +347,17 @@ _VALIDATORS: dict[str, Validator] = {}
 _VALIDATORS_LOCK = threading.Lock()
 
 
-def load_validator(store: Store, path: str, fallback: dict[str, Any] | None = None) -> Validator | None:
-    """Load and compile `path` from `store`, falling back to `fallback` when the file is absent."""
-    raw: bytes | None = None
+def load_validator(store: Store, path: str) -> Validator | None:
+    """Load and compile `path` from `store`, returning `None` when the file is absent."""
     try:
         raw = store.read(path, models.MAX_SCHEMA)
     except FileNotFoundError:
-        if fallback is None:
-            return None
-    key = f"fallback:{digest(encode(fallback))}" if raw is None else digest(raw)
+        return None
+    key = digest(raw)
     with _VALIDATORS_LOCK:
         cached = _VALIDATORS.get(key)
     if cached is None:
-        compiled = compile_schema(fallback if raw is None else decode(raw, path), path)
+        compiled = compile_schema(decode(raw, path), path)
         with _VALIDATORS_LOCK:
             if len(_VALIDATORS) >= 64:
                 _VALIDATORS.pop(next(iter(_VALIDATORS)))

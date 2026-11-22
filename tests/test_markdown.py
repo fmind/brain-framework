@@ -314,8 +314,16 @@ def test_parse_link_variants_and_rejections() -> None:
         ("concepts//x.md", "invalid relative or brain-root link path"),
         ("concepts/../x.md", "must not contain . or .."),
         ("../../escape.md", "leaves the brain"),
-        ("concepts/x.md?rel=a", "link query parameters are not supported"),
-        ("bf:///concepts/x.md?rel=a", "link query parameters are not supported"),
+        ("concepts/x.md?", "invalid link query"),
+        ("bf:///concepts/x.md?", "invalid link query"),
+        ("concepts/x.md?bad", "invalid link query"),
+        ("concepts/x.md?rel=", "must be nonempty"),
+        ("concepts/x.md?1bad=", "unique identifiers"),
+        ("concepts/x.md?1bad=a", "unique identifiers"),
+        ("concepts/x.md?rel=a&rel=b", "unique identifiers"),
+        ("concepts/x.md?rel=a&rel=", "unique identifiers"),
+        ("concepts/%20bad.md?rel=a", "invalid Markdown link target"),
+        ("jira:?rel=a", "record id must be nonempty"),
     ):
         with pytest.raises(Error, match=match):
             markdown.parse_link("projects/web.md", bad_target, "my-brain")
@@ -326,8 +334,44 @@ def test_parse_link_variants_and_rejections() -> None:
         markdown.parse_link("projects/web.md", "concepts/x.md", "my-brain", section="bad\u202esec")
     with pytest.raises(Error, match="invalid link attribute"):
         markdown.parse_link("projects/web.md", "concepts/x.md", "my-brain", attr_meta={"1bad": "v"})
+    with pytest.raises(Error, match="conflicting link attribute"):
+        markdown.parse_link("projects/web.md", "concepts/x.md?rel=a", "my-brain", attr_meta={"rel": "b"})
     with pytest.raises(Error, match="fragment-only link"):
         markdown.parse_link("projects/web.md", "#only-frag", "my-brain", relative_base=False)
+
+    # Query-param shorthand `?key=value` on note, `bf://`, cross-brain, and non-URL `source:id` links.
+    q_note = markdown.parse_link("projects/web.md", "bf:///projects/fmind-dev.md?rel=related-to#sec", "my-brain")
+    assert q_note == {
+        "to": "projects/fmind-dev.md",
+        "kind": "note",
+        "anchor": "sec",
+        "meta": {"rel": "related-to"},
+        "section": "",
+    }
+    q_rel = markdown.parse_link("projects/web.md", "../concepts/a.md?rel=cites&weight=high", "my-brain")
+    assert q_rel["to"] == "concepts/a.md"
+    assert q_rel["meta"] == {"rel": "cites", "weight": "high"}
+    q_rec = markdown.parse_link("projects/web.md", "jira:WEB-1?rel=blocks", "my-brain")
+    assert q_rec["to"] == "jira:WEB-1"
+    assert q_rec["meta"] == {"rel": "blocks"}
+    q_bf_rec = markdown.parse_link("projects/web.md", "bf://team/jira:WEB-2?rel=depends-on", "my-brain")
+    assert q_bf_rec["to"] == "bf://team/jira:WEB-2"
+    assert q_bf_rec["kind"] == "brain"
+    assert q_bf_rec["meta"] == {"rel": "depends-on"}
+    q_url_rec = markdown.parse_link("projects/web.md", "web:https://example.com/p?a=1&b=2", "my-brain")
+    assert q_url_rec["to"] == "web:https://example.com/p?a=1&b=2"
+    assert q_url_rec["meta"] == {}
+    q_bf_url_rec = markdown.parse_link("projects/web.md", "bf://team/web:https://example.com/p?a=1", "my-brain")
+    assert q_bf_url_rec["to"] == "bf://team/web:https://example.com/p?a=1"
+    assert q_bf_url_rec["meta"] == {}
+    q_merge = markdown.parse_link(
+        "projects/web.md", "concepts/a.md?rel=cites", "my-brain", attr_meta={"owner": "alice"}
+    )
+    assert q_merge["meta"] == {"rel": "cites", "owner": "alice"}
+    assert markdown.record_link_problem({"kind": "note", "to": "concepts/a.md?rel=cites", "anchor": ""})
+    assert markdown.record_link_problem({"kind": "brain", "to": "bf://team/concepts/a.md?rel=cites", "anchor": ""})
+    assert markdown.record_link_problem({"kind": "record", "to": "jira:WEB-1?rel=cites", "anchor": ""})
+    assert markdown.record_link_problem({"kind": "brain", "to": "bf://team/jira:WEB-1?rel=cites", "anchor": ""})
 
 
 def test_anchor_ids_handles_frontmatter_and_rejects_bad_files() -> None:

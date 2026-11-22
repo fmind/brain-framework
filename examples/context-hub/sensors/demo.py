@@ -24,7 +24,7 @@ record_type, project_key, status_key = SCHEMAS[args.tool]
 raw_project = str(attrs.pop(project_key))
 project_note = f"projects/{raw_project.removeprefix('project:')}.md"
 status = str(attrs.pop(status_key))
-updated = args.end if attrs.get("updated") == "now" else raw["time"]
+updated = args.end if attrs.get("updated") == "now" else raw["created"]
 
 record = {
     "id": raw["id"],
@@ -33,7 +33,7 @@ record = {
     "status": status,
     "links": [f"bf:///{project_note}"],
     "text": raw["text"],
-    "time": raw["time"],
+    "created": raw["created"],
     "updated": updated,
     "url": raw["url"],
 }

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from importlib import resources
@@ -17,6 +16,7 @@ from bf.models import DEFAULT_NOTES, FORMAT, MAX_TOTAL_FILES, Error, InputError,
 from bf.storage import Store, expand, private_dir, writer
 
 _WARN_FORGOTTEN = "snapshot_or_forgotten"
+_TERMINAL_STATUSES = frozenset(("deprecated", "done", "archived", "cancelled"))
 
 
 def _starter_bf_yaml(name: str, description: str) -> bytes:
@@ -170,39 +170,19 @@ def build(store: Store, *, now: datetime | None = None) -> dict[str, Any]:
     }
 
 
-def _load_source_refs(store: Store, source: str, cache: dict[str, set[str]]) -> set[str]:
-    if source not in cache:
-        refs: set[str] = set()
-        for target in models.RECORD_DIRS:
-            with suppress(FileNotFoundError, Error, OSError):
-                for _, obj in records.iter_jsonl(store, records.record_file(source, target)):
-                    if isinstance(r := obj.get("ref"), str) and r:
-                        refs.add(r)
-        cache[source] = refs
-    return cache[source]
+def _load_source_refs(store: Store, source: str) -> set[str]:
+    refs: set[str] = set()
+    for target in models.RECORD_DIRS:
+        with suppress(FileNotFoundError, Error, OSError):
+            for _, obj in records.iter_jsonl(store, records.record_file(source, target)):
+                if isinstance(r := obj.get("ref"), str) and r:
+                    refs.add(r)
+    return refs
 
 
-def _check_jq_filter(flt: str, label: str) -> str:
-    try:
-        jq_bin = proc.resolve_tool("jq")
-        wrapped = f"{proc.JQ_PRELUDE}\ntry ([\n{flt}\n] | length > 0) catch false"
-        cp = subprocess.run(  # noqa: S603
-            [jq_bin, "-n", "-L", "/dev/null", "--", wrapped],
-            capture_output=True,
-            cwd="/",
-            env=proc.safe_env(jq_bin),
-            timeout=5,
-            check=False,
-        )
-    except (Error, subprocess.TimeoutExpired) as err:
-        return f"{label}: {err}"
-    if cp.returncode != 0:
-        err_t = cp.stderr.decode("utf-8", "replace").strip()
-        return f"{label}: invalid jq event filter ({err_t.splitlines()[-1] if err_t else 'jq exited nonzero'})"
-    return ""
-
-
-def validate(store: Store, *, limit: int = 50, all_problems: bool = False, strict: bool = False) -> dict[str, Any]:
+def validate(
+    store: Store, *, limit: int = 50, all_problems: bool = False, strict: bool = False, notes_only: bool = False
+) -> dict[str, Any]:
     """Strictly read-only config, schemas, JSONL records (`memories/` & `usages/`), notes, loops, and link checks."""
     from bf import loops as lp_m
 
@@ -287,14 +267,11 @@ def validate(store: Store, *, limit: int = 50, all_problems: bool = False, stric
                     add(errors, "memory", f"{rec_path}: invalid or reserved source {src!r}")
                     continue
                 try:
-                    raw_fg = store.read(rec_path, models.MAX_NOTE).decode("utf-8").splitlines()
                     forgotten_map.setdefault(src, set()).update(
-                        f"{src}:{line}" for ln in raw_fg if (line := ln.strip()) and not line.startswith("#")
+                        f"{src}:{fid}" for fid in records.forgotten_ids(store, src, bucket)
                     )
-                except (Error, UnicodeDecodeError) as err:
-                    add(
-                        errors, "memory", str(err) if isinstance(err, Error) else f"{rec_path}: file is not valid UTF-8"
-                    )
+                except Error as err:
+                    add(errors, "memory", str(err))
                 continue
             if not leaf.endswith(".jsonl"):
                 add(errors, "memory", f"{rec_path}: {bucket}/ holds flat <source>.jsonl files")
@@ -316,6 +293,8 @@ def validate(store: Store, *, limit: int = 50, all_problems: bool = False, stric
                             built_notes[src][ref_s] = obj
                 except Error as err:
                     add(errors, "note", str(err))
+                continue
+            if notes_only:
                 continue
 
             if bucket == "usages":
@@ -383,7 +362,7 @@ def validate(store: Store, *, limit: int = 50, all_problems: bool = False, stric
                 elif ing_tgt == "memories" and ing_src not in validators:
                     add(errors, "schema", f"loops.{lp_name}: missing required schemas/{ing_src}.json")
         for ev_rule in loop.events:
-            if ev_rule.filter and (jq_err := _check_jq_filter(ev_rule.filter, f"loops.{lp_name}")):
+            if ev_rule.filter and (jq_err := proc.check_jq_filter(ev_rule.filter, f"loops.{lp_name}")):
                 add(errors, "loop", jq_err)
 
     anchors: dict[tuple[str, str], set[str]] = {}
@@ -454,8 +433,7 @@ def validate(store: Store, *, limit: int = 50, all_problems: bool = False, stric
                             s_src = parsed_r[0]
                             s_key = (sib_name, s_src)
                             if s_key not in sib_refs:
-                                tmp: dict[str, set[str]] = {}
-                                sib_refs[s_key] = _load_source_refs(sib, s_src, tmp)
+                                sib_refs[s_key] = _load_source_refs(sib, s_src)
                             if rest not in sib_refs[s_key]:
                                 add(errors, "link", f"{origin}: broken cross-brain link bf://{sib_name}/{rest}")
                     elif not sib.exists(rest):
@@ -470,8 +448,9 @@ def validate(store: Store, *, limit: int = 50, all_problems: bool = False, stric
                     add(errors, "link", f"{origin}: invalid record link {to}")
                 else:
                     src = parsed_r[0]
-                    refs_set = _load_source_refs(store, src, source_refs)
-                    if to not in refs_set:
+                    if src not in source_refs:
+                        source_refs[src] = _load_source_refs(store, src)
+                    if to not in source_refs[src]:
                         if src in snap_srcs or to in forgotten_map.get(src, ()):
                             add(
                                 warnings,
@@ -515,19 +494,6 @@ def _ts_key(raw: str) -> str:
     return raw
 
 
-def _note_updated(rec: dict[str, Any]) -> str:
-    if upd := str(rec.get("updated") or ""):
-        return upd
-    if isinstance(srcs := rec.get("sources"), list):
-        rets = [
-            str(r)
-            for s in srcs
-            if isinstance(s, dict) and isinstance(r := s.get("retrieved"), str) and len(r) >= 10 and r[:4].isdigit()
-        ]
-        return max(rets, default="")
-    return ""
-
-
 def review(store: Store, *, now: datetime | None = None, limit: int = 20, all_items: bool = False) -> dict[str, Any]:
     """Read-only staleness (`newer_evidence`, `due`, `future_updated`) and open task summary over JSONL."""
     if not all_items and limit < 1:
@@ -558,7 +524,7 @@ def review(store: Store, *, now: datetime | None = None, limit: int = 20, all_it
                     continue
                 ref_val = str(obj["ref"])
                 note_entries.append(obj)
-                if upd := _note_updated(obj):
+                if upd := str(obj.get("updated") or obj.get("created") or ""):
                     note_time[ref_val] = _ts_key(upd)
                 for lk in obj.get("links") or ():
                     if isinstance(lk, dict) and isinstance(lk.get("to"), str):
@@ -588,7 +554,7 @@ def review(store: Store, *, now: datetime | None = None, limit: int = 20, all_it
                 ref_val = str(obj.get("ref") or (f"{src}:{rec_id}" if rec_id else ""))
                 if not ref_val:
                     continue
-                if ts := str(obj.get("updated") or obj.get("time") or ""):
+                if ts := str(obj.get("updated") or obj.get("created") or ""):
                     rec_time[ref_val] = max(rec_time.get(ref_val, ""), _ts_key(ts))
                 if isinstance(lks := obj.get("links"), list):
                     for lk in lks:
@@ -602,13 +568,13 @@ def review(store: Store, *, now: datetime | None = None, limit: int = 20, all_it
     today_iso = today.isoformat()
     for entry in sorted(note_entries, key=lambda x: str(x["ref"])):
         ref, status = str(entry["ref"]), str(entry.get("status") or "stable")
-        if status == "deprecated":
+        if status in _TERMINAL_STATUSES:
             continue
         tasks_open += sum(1 for t in (entry.get("tasks") or ()) if isinstance(t, dict) and not t.get("done"))
         reasons: list[str] = []
         newer: list[str] = []
         due = False
-        upd = _note_updated(entry)
+        upd = str(entry.get("updated") or entry.get("created") or "")
         if upd and ((len(upd) == 10 and upd > today_iso) or (len(upd) > 10 and _ts_key(upd) > _ts_key(now_iso))):
             reasons.append("future_updated")
         sa = entry.get("stale_after")
