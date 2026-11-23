@@ -135,6 +135,8 @@ _WIN_PROPS = {
     "backfill": _desc(_DURATION, "Initial BF_START window on first run (now - backfill).", default="1d"),
     "overlap": _desc(_OVERLAP, "Rewind on later runs (last_anchor - overlap).", default=0),
 }
+
+
 _BRAIN_DEFS = {
     "Argv": _desc(
         _arr(_str(4096, min_len=1), min_items=1, max_items=64),
@@ -261,46 +263,39 @@ _STARTER_STATUSES: dict[str, tuple[str, ...]] = {
 
 def starter_note_schema(folder: str) -> dict[str, Any]:
     """Return an idiomatic Draft 2020-12 OKF note schema for `schemas/<folder>.json`."""
-    label = folder.replace("-", " ").title()
-    statuses = _STARTER_STATUSES.get(folder, ("draft", "stable", "deprecated"))
-    required = ["type", "status", "created"] if folder == "actions" else ["type", "status"]
+    label, statuses = folder.replace("-", " ").title(), _STARTER_STATUSES.get(folder, ("draft", "stable", "deprecated"))
+    dt = {"type": "string", "minLength": 10, "pattern": _ISO_DT}
+    props = {
+        "type": _str(128, min_len=1),
+        "status": _enum(*statuses),
+        "description": _str(16384),
+        "created": dt,
+        "updated": dt,
+    }
+    req = ("type", "status", "created") if folder == "actions" else ("type", "status")
     return {
         "$schema": _DRAFT,
-        "title": f"{label}Note",
-        "description": f"Domain schema for authored Markdown notes in {folder}/.",
-        "type": "object",
-        "required": required,
-        "additionalProperties": True,
-        "properties": {
-            "type": {"type": "string", "minLength": 1, "maxLength": 128},
-            "status": {"type": "string", "enum": list(statuses)},
-            "description": {"type": "string", "maxLength": 16384},
-            "created": {"type": "string", "minLength": 10, "pattern": _ISO_DT},
-            "updated": {"type": "string", "minLength": 10, "pattern": _ISO_DT},
-        },
+        **_obj(
+            props,
+            req=req,
+            extra=True,
+            title=f"{label}Note",
+            desc=f"Domain schema for authored Markdown notes in {folder}/.",
+        ),
     }
 
 
 def starter_usages_schema() -> dict[str, Any]:
     """Return a Draft 2020-12 FinOps/prompt telemetry schema for `schemas/usages.json`."""
-    return {
-        "$schema": _DRAFT,
-        "title": "UsageRecord",
-        "description": "Shared domain schema for token, FinOps, and prompt usage records in usages/*.jsonl.",
-        "type": "object",
-        "additionalProperties": True,
-        "properties": {
-            "harness": {"type": "string", "minLength": 1, "maxLength": 128},
-            "model": {"type": "string", "minLength": 1, "maxLength": 256},
-            "session_id": {"type": "string", "minLength": 1, "maxLength": 256},
-            "input_tokens": {"type": "integer", "minimum": 0},
-            "output_tokens": {"type": "integer", "minimum": 0},
-            "cached_tokens": {"type": "integer", "minimum": 0},
-            "cost_usd": {"type": "number", "minimum": 0},
-            "duration_ms": {"type": "integer", "minimum": 0},
-            "prompts": {"type": "integer", "minimum": 0},
-        },
+    props: dict[str, Any] = {
+        "harness": _str(128, min_len=1),
+        "model": _str(256, min_len=1),
+        "session_id": _str(256, min_len=1),
+        **dict.fromkeys(("input_tokens", "output_tokens", "cached_tokens", "duration_ms", "prompts"), _int()),
+        "cost_usd": {"type": "number", "minimum": 0},
     }
+    desc = "Shared domain schema for token, FinOps, and prompt usage records in usages/*.jsonl."
+    return {"$schema": _DRAFT, **_obj(props, extra=True, title="UsageRecord", desc=desc)}
 
 
 def document(kind: Kind) -> dict[str, Any]:

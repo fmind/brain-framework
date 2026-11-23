@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -1896,3 +1898,274 @@ def test_sensor_ingest_false_and_agent_timeout_with_defaults(tmp_path: Path) -> 
     cfg_bph = config.load(store)
     _, ing_src, ing_tgt, ing_mode, _ = loops.resolve_loop(store, cfg_bph.loops["bph"], cfg_bph.reserved_sources)
     assert (ing_src, ing_tgt, ing_mode) == ("bph", "memories", "upsert")
+
+
+def test_watch_tui_renderer_keys_and_live_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify zero-dep ANSI TUI clipping, key decoding, shortcuts, scrolling, filter/sort, and live `fmt='tui'`."""
+    # ANSI-aware single-line clipper sanitizes non-SGR escapes, prevents width overflow, and always closes open SGR.
+    assert status.clip_ansi("hello", 0) == ""
+    assert status.clip_ansi("hello", 10) == "hello"
+    assert status.clip_ansi("\033[31;1mabcdef\033[0m", 4) == "\033[31;1mabc…\033[0m"
+    assert status.clip_ansi("\033[31;1mabcdef", 1) == "\033[31;1ma\033[0m"
+    assert status.clip_ansi("\033[32mabc\033[0mdef", 3) == "\033[32mab…\033[0m"
+    assert status.clip_ansi("\033[32mhi", 10) == "\033[32mhi\033[0m"
+    assert status.clip_ansi("abcdef", 3) == "ab…"
+    sanitized_esc = status.clip_ansi("\033[2Jevil\r\n\033]52;c;xx\x07", 80)
+    assert "\x1b" not in sanitized_esc
+    assert "\r" not in sanitized_esc
+    assert "\n" not in sanitized_esc
+    assert "\x07" not in sanitized_esc
+    wl_san = watch.format_watch_line("watch.build", {"time": "2026-11-22T\x1b[2J", "notes": "1\x1b[31m", "written": 0})
+    assert "\x1b" not in wl_san
+
+    # Key decoder over an OS pipe handles plain keys, Ctrl+C, arrow/page/home/end, 6-byte CSI, SGR mouse wheel/click, and EOF.
+    r_fd, w_fd = os.pipe()
+    try:
+        os.write(
+            w_fd,
+            b"jk b gGfserq\x03\x1b[A\x1b[B\x1b[5~\x1b[6~\x1b[H\x1b[F\x1bOH\x1bOF\x1b[9~\x1b[1;5A\x1b[<64;12;5M\x1b[<65;12;5M\x1b[<0;12;5Mx",
+        )
+        got_keys = [status.read_tui_key(r_fd) for _ in range(26)]
+        assert got_keys == [
+            "down",
+            "up",
+            "pgdn",
+            "pgup",
+            "pgdn",
+            "home",
+            "end",
+            "filter",
+            "sort",
+            "errors",
+            "refresh",
+            "quit",
+            "quit",
+            "up",
+            "down",
+            "pgup",
+            "pgdn",
+            "home",
+            "end",
+            "home",
+            "end",
+            "",
+            "",
+            "up",
+            "down",
+            "",
+        ]
+        assert status.read_tui_key(r_fd) == ""  # 'x' is unbound
+        os.close(w_fd)
+        w_fd = -1
+        assert status.read_tui_key(r_fd) == "eof"
+    finally:
+        os.close(r_fd)
+        if w_fd != -1:
+            os.close(w_fd)
+
+    # Shortcut state transitions (scroll, page, home/end, filter, sort, errors, refresh, quit, noop).
+    assert status.apply_tui_key("down", 0, 5, False, True) == (1, False, True, False, "")
+    assert status.apply_tui_key("up", 0, 5, False, True) == (0, False, True, False, "")
+    assert status.apply_tui_key("pgdn", 1, 5, False, True) == (6, False, True, False, "")
+    assert status.apply_tui_key("pgup", 3, 5, False, True) == (0, False, True, False, "")
+    assert status.apply_tui_key("end", 0, 5, False, True) == (10**9, False, True, False, "")
+    assert status.apply_tui_key("home", 9, 5, False, True) == (0, False, True, False, "")
+    assert status.apply_tui_key("filter", 4, 5, False, True) == (0, True, True, False, "")
+    assert status.apply_tui_key("sort", 4, 5, True, True) == (0, True, False, False, "")
+    assert status.apply_tui_key("errors", 3, 5, False, True, False) == (3, False, True, True, "")
+    assert status.apply_tui_key("refresh", 2, 5, False, True) == (2, False, True, False, "refresh")
+    assert status.apply_tui_key("quit", 2, 5, False, True) == (2, False, True, False, "quit")
+    assert status.apply_tui_key("noop", 2, 5, False, True) == (2, False, True, False, "")
+
+    # Cached corpus_counts matches status_summary and format_watch_screen scrolls, filters, sorts, and clips cleanly.
+    root = tmp_path / "tui-brain"
+    engine.init_brain(root, name="tui-brain")
+    store = Store(root)
+    (root / "schemas" / "items.json").write_text('{"type":"object"}\n')
+    records.ingest(store, "items", b'[{"id":"1","title":"One"}]\n')
+    records.ingest(store, "u1", b'[{"id":"u1","title":"Usage 1"}]\n', target="usages")
+    loops_yaml = "\n".join(
+        [f"  lp-{i:02d}:\n    when: 1h\n    run: [{sys.executable!r}, -c, 'pass']" for i in range(10)]
+        + [f"  off:\n    enabled: false\n    run: [{sys.executable!r}, -c, 'pass']"]
+    )
+    store.write("bf.yaml", f"version: {FORMAT}\nname: tui-brain\nloops:\n{loops_yaml}\n".encode())
+    cfg = config.load(store)
+    cached = status.corpus_counts(store, cfg)
+    assert cached[0] == {"notes": 1, "records": 1, "usages": 1, "sources": 2, "loops": 11}
+    assert cached[1] == []
+
+    now = datetime(2026, 11, 22, 14, 0, tzinfo=UTC)
+    loops.save_unit_state(
+        store,
+        {
+            "kind": "loop",
+            "name": "lp-02",
+            "status": "failed",
+            "updated": "2026-11-22T13:59:00Z",
+            "last_start": "2026-11-22T13:59:00Z",
+            "last_end": "2026-11-22T13:59:00Z",
+            "consecutive_failures": 2,
+            "error": "boom timeout",
+        },
+    )
+    loops.save_unit_state(
+        store,
+        {
+            "kind": "loop",
+            "name": "lp-05",
+            "status": "ok",
+            "updated": "2026-11-22T13:58:00Z",
+            "last_start": "2026-11-22T13:58:00Z",
+            "last_end": "2026-11-22T13:58:00Z",
+            "last_success": "2026-11-22T13:58:00Z",
+            "last_run": {"records": 10, "added": 3, "updated": 1, "removed": 0},
+        },
+    )
+    loops.save_unit_state(
+        store,
+        {
+            "kind": "loop",
+            "name": "lp-01",
+            "status": "ok",
+            "updated": "2026-11-22T13:50:00Z",
+            "last_start": "2026-11-22T13:50:00Z",
+            "last_end": "2026-11-22T13:50:00Z",
+            "last_success": "2026-11-22T13:50:00Z",
+            "last_run": {"records": 4, "added": 0, "updated": 0, "removed": 0},
+        },
+    )
+    private_dir(store).write("ghost.json", b'{"kind":"loop","name":"ghost","status":"idle"}\n')
+    sm = status.status_summary(store, all_units=True, counts_cache=cached)
+    assert sm["orphaned_states"] == ["ghost"]
+    assert sm["counts"] == {"notes": 1, "records": 1, "usages": 1, "sources": 2, "loops": 11}
+
+    # Scrollable viewport clamps offset and shows pagination + recent activity + alerts.
+    recent = [f"14:00:0{i}  ok     lp-0{i}  +1 · 2 records  12ms" for i in range(6)]
+    frame_top, off0, page0 = status.format_watch_screen(
+        sm, recent, cols=90, rows=20, offset=0, only_active=False, sort_recent=True, color=True, now=now
+    )
+    assert off0 == 0
+    assert page0 == 5
+    assert "Brain: tui-brain" in frame_top
+    assert "ATTENTION (1)" in frame_top
+    assert "orphans: ghost (bf run --prune)" in frame_top
+    assert "lp-02" in frame_top
+    assert "(2x) boom timeout" in frame_top
+    assert "showing 1-" in frame_top
+    assert "1 disabled" in frame_top
+    assert "Recent activity:" in frame_top
+    assert frame_top.index("lp-05") < frame_top.index("lp-01")  # recent-first order among ok loops
+
+    # End scroll clamps to last page; A-Z sort puts lp-01 before lp-05; active filter keeps only lp-02 & lp-05.
+    frame_end, off_end, _ = status.format_watch_screen(
+        sm, recent, cols=90, rows=16, offset=999, only_active=False, sort_recent=False, color=False, now=now
+    )
+    assert off_end > 0
+    assert "[A-Z]" in frame_end
+    assert "lp-09" in frame_end
+    frame_act, off_act, _ = status.format_watch_screen(
+        sm, recent, cols=90, rows=24, offset=0, only_active=True, sort_recent=True, color=False, now=now
+    )
+    assert off_act == 0
+    assert "[active]" in frame_act
+    act_table = frame_act.split("Recent activity:")[0]
+    assert "lp-02" in act_table
+    assert "lp-05" in act_table
+    assert "lp-01" not in act_table
+    assert "of 10 enabled" in act_table
+
+    # Empty active filter and empty brain messages + compact terminal height (`rows=10` and `rows=8`).
+    sm_idle = {**sm, "ok": True, "attention": [], "loops": {"lp-00": {"enabled": True, "status": "idle"}}}
+    f_no_act, _, _ = status.format_watch_screen(sm_idle, [], cols=80, rows=12, only_active=True, now=now)
+    assert "no active/failing loops (press f for all)" in f_no_act
+    f_empty, _, _ = status.format_watch_screen({**sm_idle, "loops": {}}, recent, cols=60, rows=8, now=now)
+    assert "no enabled loops in bf.yaml" in f_empty
+    assert "Recent activity:" not in f_empty
+    f_mid, _, _ = status.format_watch_screen(sm_idle, recent, cols=80, rows=11, now=now)
+    assert "Recent activity:" in f_mid
+    assert len(f_mid.splitlines()) <= 11
+
+    # Error-inspect toggle (`show_errors=True`) renders full wrapped error detail or healthy empty state.
+    long_err = "HTTP 403 rate limit exceeded " + ("x" * 95) + " TAIL_END"
+    sm_errs = {
+        **sm,
+        "attention": [
+            {"name": "lp-02", "consecutive_failures": 3, "error": long_err},
+            {"name": "lp-03", "consecutive_failures": 1, "error": "other"},
+        ],
+    }
+    f_err, _, _ = status.format_watch_screen(sm_errs, recent, cols=70, rows=20, show_errors=True, now=now)
+    assert "[errors]" in f_err
+    assert "Error (lp-02 · 3x · +1 more):" in f_err
+    assert "TAIL_END" in f_err
+    f_no_err, _, _ = status.format_watch_screen(sm_idle, recent, cols=80, rows=16, show_errors=True, now=now)
+    assert "Errors: (no failing loops)" in f_no_err
+
+    # Live `watch.serve(fmt="tui")` enters/exits alt-screen + SGR mouse mode, restores termios on quit AND EOF!
+    live_root = tmp_path / "tui-live"
+    engine.init_brain(live_root, name="tui-live")
+    live_store = Store(live_root)
+    (live_root / "concepts" / "extra.md").write_text("---\ntype: concept\nstatus: draft\n---\n\n# Extra\n")
+    restored: list[tuple[int, Any]] = []
+    kr_fd, kw_fd = os.pipe()
+    fake_in = os.fdopen(kr_fd, "r", encoding="latin1", closefd=True)
+    key_timer = threading.Timer(0.15, lambda: os.write(kw_fd, b"ferq"))
+    try:
+        monkeypatch.setattr(fake_in, "isatty", lambda: True)
+        monkeypatch.setattr(sys, "stdin", fake_in)
+        monkeypatch.setattr(watch.termios, "tcgetattr", lambda _fd: ["saved-term"])
+        monkeypatch.setattr(watch.termios, "tcsetattr", lambda fd, _when, attrs: restored.append((fd, attrs)))
+        monkeypatch.setattr(watch.tty, "setcbreak", lambda _fd: None)
+        monkeypatch.setattr(watch, "next_due_delay", lambda *_a, **_kw: 0.2)
+        key_timer.start()
+        capsys.readouterr()
+        res_tui = watch.serve(live_store, fmt="tui")
+        assert res_tui["ok"] is True
+        assert restored == [(kr_fd, ["saved-term"])]
+        tui_out = capsys.readouterr().out
+        assert "\033[?1049h\033[?25l\033[?1000h\033[?1006h" in tui_out
+        assert "\033[?1006l\033[?1000l\033[?25h\033[?1049l" in tui_out
+        assert "Brain: tui-live" in tui_out
+    finally:
+        key_timer.cancel()
+        fake_in.close()
+        os.close(kw_fd)
+
+    # EOF on interactive stdin still restores termios via `term_fd` and does not busy-spin until `stop_event` fires.
+    restored.clear()
+    er_fd, ew_fd = os.pipe()
+    os.close(ew_fd)
+    eof_in = os.fdopen(er_fd, "r", encoding="latin1", closefd=True)
+    stop_eof = threading.Event()
+    eof_timer = threading.Timer(0.25, stop_eof.set)
+    try:
+        monkeypatch.setattr(eof_in, "isatty", lambda: True)
+        monkeypatch.setattr(sys, "stdin", eof_in)
+        eof_timer.start()
+        res_eof = watch.serve(live_store, fmt="tui", stop_event=stop_eof)
+        assert res_eof["ok"] is True
+        assert restored == [(er_fd, ["saved-term"])]
+    finally:
+        eof_timer.cancel()
+        eof_in.close()
+
+    # Failing `corpus_counts` caches fallback without double-scanning per tick.
+    count_calls = 0
+
+    def fail_counts(*_a: Any, **_kw: Any) -> Any:
+        nonlocal count_calls
+        count_calls += 1
+        raise Error("boom")
+
+    monkeypatch.setattr(status, "corpus_counts", fail_counts)
+    stop_err = threading.Event()
+    err_timer = threading.Timer(0.25, stop_err.set)
+    try:
+        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+        err_timer.start()
+        assert watch.serve(live_store, fmt="tui", stop_event=stop_err)["ok"] is True
+        assert count_calls == 1
+    finally:
+        err_timer.cancel()

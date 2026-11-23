@@ -159,13 +159,14 @@ def build(store: Store, *, now: datetime | None = None) -> dict[str, Any]:
             ev = {"notes": note_count, "written": written, "removed": removed}
             records.append_event(store, "notes.built", "bf", ev, locked=True, now=now)
 
+    out_pat = f"memories/{{{','.join(cfg.notes)}}}.jsonl"
     return {
         "ok": not problems,
         "brain": cfg.name,
         "notes": note_count,
         "written": written,
         "removed": removed,
-        "output": f"memories/{{{','.join(cfg.notes)}}}.jsonl",
+        "output": out_pat,
         "problems": problems,
     }
 
@@ -204,17 +205,8 @@ def validate(
         cfg = config.load(store)
     except Error as err:
         sm = {"errors": 1, "warnings": 0, "truncated": False, "by_kind": {"config": 1}}
-        return {
-            "ok": False,
-            "brain": store.root.name,
-            "notes": 0,
-            "records": 0,
-            "usages": 0,
-            "errors_count": 1,
-            "warnings_count": 0,
-            "summary": sm,
-            "problems": [str(err)],
-        }
+        base = {"ok": False, "brain": store.root.name, "notes": 0, "records": 0, "usages": 0}
+        return {**base, "errors_count": 1, "warnings_count": 0, "summary": sm, "problems": [str(err)]}
     try:
         config.load_dotenv(store)
     except Error as err:
@@ -465,23 +457,16 @@ def validate(
                 check_anchor(store, "", to, anc, origin)
 
     msgs, err_n, warn_n = [*errors, *warnings], len(errors), len(warnings)
-    summary = {
-        "errors": err_n,
-        "warnings": warn_n,
-        "truncated": not all_problems and len(msgs) > limit,
-        "by_kind": by_kind,
-    }
-    ok_all = err_n == 0 and (not strict or warn_n == 0)
-    shown = msgs if all_problems else msgs[:limit]
+    sm = {"errors": err_n, "warnings": warn_n, "truncated": not all_problems and len(msgs) > limit, "by_kind": by_kind}
+    ok_all, shown = err_n == 0 and (not strict or warn_n == 0), msgs if all_problems else msgs[:limit]
+    cnt = {"notes": len(authored_list), "records": rec_count, "usages": usage_count}
     return {
         "ok": ok_all,
         "brain": cfg.name,
-        "notes": len(authored_list),
-        "records": rec_count,
-        "usages": usage_count,
+        **cnt,
         "errors_count": err_n,
         "warnings_count": warn_n,
-        "summary": summary,
+        "summary": sm,
         "problems": shown,
     }
 
@@ -619,14 +604,6 @@ def review(store: Store, *, now: datetime | None = None, limit: int = 20, all_it
             stale.append({"ref": ref, "title": str(entry.get("title") or ""), "reasons": reasons, **newer_d})
 
     stale.sort(key=lambda x: (-len(x["reasons"]), -int(x.get("newer_count") or len(x.get("newer", ()))), x["ref"]))
-    stale_out = stale if all_items else stale[:limit]
-    truncated = (not all_items) and len(stale) > limit
-    return {
-        "ok": not problems,
-        "brain": cfg.name,
-        "total_stale": len(stale),
-        "total_tasks_open": tasks_open,
-        "stale": stale_out,
-        "truncated": truncated,
-        "problems": list(dict.fromkeys(problems)),
-    }
+    stale_out, truncated = (stale if all_items else stale[:limit]), (not all_items) and len(stale) > limit
+    head = {"ok": not problems, "brain": cfg.name, "total_stale": len(stale), "total_tasks_open": tasks_open}
+    return {**head, "stale": stale_out, "truncated": truncated, "problems": list(dict.fromkeys(problems))}

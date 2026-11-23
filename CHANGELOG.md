@@ -4,6 +4,14 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v33.2.0](https://github.com/fmind/brain-framework/releases/tag/v33.2.0) - 2026-11-23
+
+A minor release restoring a zero-dependency interactive scrollable ANSI dashboard for `bf watch` on TTYs (with cached corpus counts, mouse-wheel and keyboard scrolling, active/failing filtering, recent/name sorting, and a wrapped error-detail toggle) while keeping `--format text` and `--format jsonl` backwards compatible. The brain format (`version: 18`), `bf.yaml`, and the published JSON Schemas (`docs/{bf,record}.schema.json`) are unchanged; no brain upgrade step is needed from `v33.1.0`.
+
+### Added
+
+- **Zero-dependency interactive scrollable ANSI dashboard in `bf watch`.** Running `bf watch` on a TTY (`--format auto` or `--format tui`) now renders a live flicker-free alternate-screen dashboard showing brain health, cached corpus counts (`notes`, `memories`, `usages`, `sources`, `loops`, `events`), `unbuilt`/`orphans` alerts, a scrollable table of all loops with 1-line errors and `+added ~updated -removed` diffs, and recent activity—with mouse-wheel (`SGR 1006`) and keyboard shortcuts (`↑`/`↓`/`j`/`k` scroll, `PgUp`/`PgDn`/`Space` page, `g`/`G` top/end, `f` filter active/failing/changed vs all, `s` sort recent vs name, `e` toggle wrapped top-error detail panel, `r` force refresh, `q`/`Ctrl+C` quit). `--format text` preserves plain scrolling output and `--format jsonl` / piped `auto` preserves structured JSONL for `systemd --user` and log pipelines, with zero new runtime dependencies.
+
 ## [v33.1.0](https://github.com/fmind/brain-framework/releases/tag/v33.1.0) - 2026-11-22
 
 A minor release adding live daemon reloads on `.env` and daemon script edits in `bf watch`, completing the 3x3 showcase in `examples/brain/`, switching `Store.append_log()` to `O_APPEND` with amortized multi-process compaction (preserving inodes between compactions for `tail -f` / `tail -F`), making `unbuilt_notes` content-accurate, and hardening `private_dir()`, interpreter-prefixed loop script confinement, and status/watch output sanitization. The brain format (`version: 18`), `bf.yaml`, and the published JSON Schemas (`docs/{bf,record}.schema.json`) are unchanged; no brain upgrade step is needed from `v33.0.0`.

@@ -61,112 +61,72 @@ def _build_parser() -> _Parser:
     sp.add_argument("path", type=Path, help="Target directory (new or empty).")
     sp.add_argument("--name", default=None, help="Brain identifier (lowercase letters, digits, hyphens).")
     sp.add_argument("--description", default="", help="Short brain description written to bf.yaml.")
-
     cmd("build", "Compile Markdown notes into memories/<dir>.jsonl.")
+    ing_h = "Validate and save JSON/JSONL records into memories/<source>.jsonl or usages/<source>.jsonl."
+    sp = cmd("ingest", ing_h, epilog="Example: sensors/github.sh | bf ingest github-issues --mode upsert")
+    a = sp.add_argument
+    a("source", help="Source name (requires schemas/<source>.json or schemas/usages.json).")
+    a("--to", dest="target", choices=("memories", "usages"), default="memories", help="Target record dir.")
+    a("--input", default="-", metavar="FILE", help="Input JSON/JSONL file path or '-' for stdin.")
+    a("--mode", choices=("upsert", "snapshot"), default="upsert", help="Write mode (default: upsert).")
+    a("--allow-removal", action="store_true", help="Allow snapshot to empty/drop >50%% of 10+ records.")
+    a("--dry-run", action="store_true", help="Validate and preview counts without writing files.")
+    read_h = "Read a note, #anchor section, source:id record, alias, or bf:// URI (read-only)."
+    sp = cmd("read", read_h, epilog="Example: bf read concepts/welcome.md#conventions")
+    a = sp.add_argument
+    a("target", help="Note path, note#anchor, source:id, alias, or bf:// URI.")
+    a("--raw", action="store_true", help="Return raw Markdown or file text wrapped in JSON .text.")
+    a("--max-bytes", type=int, default=None, metavar="N", help="Maximum UTF-8 JSON response size.")
+    q_h = "Search and filter memories/*.jsonl (or usages/*.jsonl) via rg and jq (read-only)."
+    sp = cmd("query", q_h, epilog="Example: bf query 'retention' --kind note --format jsonl")
+    a = sp.add_argument
+    a("pattern", nargs="?", default=None, help="ripgrep regex pattern (optional with --jq or filters).")
+    a("--jq", default=None, metavar="EXPR", help="Isolated jq filter expression.")
+    a("--kind", choices=("note", "memory", "usage"), default="", help="Filter by record kind.")
+    a("-s", "--scope", default="", metavar="PATH", help="Restrict to a note, source, memories/, or usages/.")
+    a("-n", "--limit", type=int, default=20, metavar="N", help="Max results (1..5000, default: 20).")
+    a("--format", choices=("json", "jsonl"), default="json", help="Output format (default: json).")
 
-    sp = cmd(
-        "ingest",
-        "Validate and save JSON/JSONL records into memories/<source>.jsonl or usages/<source>.jsonl.",
-        epilog="Example: sensors/github.sh | bf ingest github-issues --mode upsert",
-    )
-    sp.add_argument("source", help="Source name (requires schemas/<source>.json or schemas/usages.json).")
-    sp.add_argument(
-        "--to", dest="target", choices=("memories", "usages"), default="memories", help="Target record dir."
-    )
-    sp.add_argument("--input", default="-", metavar="FILE", help="Input JSON/JSONL file path or '-' for stdin.")
-    sp.add_argument("--mode", choices=("upsert", "snapshot"), default="upsert", help="Write mode (default: upsert).")
-    sp.add_argument("--allow-removal", action="store_true", help="Allow snapshot to empty/drop >50%% of 10+ records.")
-    sp.add_argument("--dry-run", action="store_true", help="Validate and preview counts without writing files.")
-
-    sp = cmd(
-        "read",
-        "Read a note, #anchor section, source:id record, alias, or bf:// URI (read-only).",
-        epilog="Example: bf read concepts/welcome.md#conventions",
-    )
-    sp.add_argument("target", help="Note path, note#anchor, source:id, alias, or bf:// URI.")
-    sp.add_argument("--raw", action="store_true", help="Return raw Markdown or file text wrapped in JSON .text.")
-    sp.add_argument("--max-bytes", type=int, default=None, metavar="N", help="Maximum UTF-8 JSON response size.")
-
-    sp = cmd(
-        "query",
-        "Search and filter memories/*.jsonl (or usages/*.jsonl) via rg and jq (read-only).",
-        epilog="Example: bf query 'retention' --kind note --format jsonl",
-    )
-    sp.add_argument("pattern", nargs="?", default=None, help="ripgrep regex pattern (optional with --jq or filters).")
-    sp.add_argument("--jq", default=None, metavar="EXPR", help="Isolated jq filter expression.")
-    sp.add_argument("--kind", choices=("note", "memory", "usage"), default="", help="Filter by record kind.")
-    sp.add_argument(
-        "-s", "--scope", default="", metavar="PATH", help="Restrict to a note, source, memories/, or usages/."
-    )
-    sp.add_argument("-n", "--limit", type=int, default=20, metavar="N", help="Max results (1..5000, default: 20).")
-    sp.add_argument("--format", choices=("json", "jsonl"), default="json", help="Output format (default: json).")
+    def add_lim(sp: _Parser, dest: str, default_n: int, what: str) -> None:
+        grp = sp.add_mutually_exclusive_group()
+        grp.add_argument("-n", "--limit", type=int, default=None, metavar="N", help=f"Max {what} ({default_n}).")
+        grp.add_argument("--all", dest=dest, action="store_true", help=f"Return all {what}.")
 
     sp = cmd("review", "Review stale notes, newer linked evidence, and open tasks (read-only).")
-    rv_lim = sp.add_mutually_exclusive_group()
-    rv_lim.add_argument("-n", "--limit", type=int, default=None, metavar="N", help="Max stale items (default: 20).")
-    rv_lim.add_argument("--all", dest="all_items", action="store_true", help="Return all stale notes.")
-    sp.add_argument(
-        "--format", choices=("json", "jsonl", "text"), default="json", help="Output format (default: json)."
-    )
-
+    add_lim(sp, "all_items", 20, "stale items")
+    sp.add_argument("--format", choices=("json", "jsonl", "text"), default="json", help="Output format.")
     sp = cmd("check", "Validate bf.yaml, schemas, notes, JSONL records, loops, and links (read-only).")
-    ck_lim = sp.add_mutually_exclusive_group()
-    ck_lim.add_argument("-n", "--limit", type=int, default=None, metavar="N", help="Max problems (default: 50).")
-    ck_lim.add_argument(
-        "--all", dest="all_problems", action="store_true", help="Return all problems without truncation."
-    )
-    sp.add_argument(
-        "--notes",
-        action="store_true",
-        help="Validate config, schemas, loops, notes, and note links without validating sensor/usage JSONL.",
-    )
-    sp.add_argument(
-        "--strict", action="store_true", help="Fail validation on warnings (snapshot or forgotten targets)."
-    )
-    sp.add_argument("--format", choices=("json", "text"), default="json", help="Output format (default: json).")
-
+    add_lim(sp, "all_problems", 50, "problems")
+    a = sp.add_argument
+    a("--notes", action="store_true", help="Validate config, schemas, loops, notes, and note links only.")
+    a("--strict", action="store_true", help="Fail validation on warnings (snapshot or forgotten targets).")
+    a("--format", choices=("json", "text"), default="json", help="Output format (default: json).")
     sp = cmd("schema", "Print bundled Draft 2020-12 JSON Schemas.", with_brain=False)
     sp.add_argument("name", nargs="?", default=None, help="Schema name: bf or record.")
-
-    sp = cmd(
-        "run",
-        "Execute named/glob, --all, or --due loops, reset loop state, or prune orphaned .bf/ state.",
-        epilog="Pass extra args to one loop with `--`: bf run my-loop -- --verbose",
-    )
-    sp.add_argument("loops", nargs="*", help="Loop names or glob patterns to run sequentially (or reset with --reset).")
+    run_h = "Execute named/glob, --all, or --due loops, reset loop state, or prune orphaned .bf/ state."
+    sp = cmd("run", run_h, epilog="Pass extra args to one loop with `--`: bf run my-loop -- --verbose")
+    sp.add_argument("loops", nargs="*", help="Loop names or glob patterns to run sequentially (or reset).")
     rgrp = sp.add_mutually_exclusive_group()
     rgrp.add_argument("--due", action="store_true", help="Rebuild notes and run scheduled/event-triggered loops.")
     rgrp.add_argument("--all", dest="all_loops", action="store_true", help="Run all enabled cycle loops.")
     rgrp.add_argument("--reset", action="store_true", help="Reset .bf/<loop>.json state for named loops to idle.")
     rgrp.add_argument("--prune", action="store_true", help="Remove orphaned .bf/<loop>.json state files.")
-    sp.add_argument(
-        "--dry-run", action="store_true", help="Validate and preview actions without executing or deleting."
-    )
-
-    sp = cmd(
-        "emit",
-        "Append a custom event to logs/events.jsonl.",
-        epilog='Example: echo \'{"id":"1"}\' | bf emit task.ready --data -',
-    )
-    sp.add_argument("kind", help="Event kind identifier (e.g. task.ready).")
-    sp.add_argument("--source", default="bf", help="Event source name (default: bf).")
-    sp.add_argument("--data", default="", metavar="JSON", help="Optional JSON object payload, or '-' to read stdin.")
-    sp.add_argument("--dedupe", action="store_true", help="Deduplicate on kind, source, and data.id.")
-
+    sp.add_argument("--dry-run", action="store_true", help="Validate and preview actions without writing.")
+    emit_e = 'Example: echo \'{"id":"1"}\' | bf emit task.ready --data -'
+    sp = cmd("emit", "Append a custom event to logs/events.jsonl.", epilog=emit_e)
+    a = sp.add_argument
+    a("kind", help="Event kind identifier (e.g. task.ready).")
+    a("--source", default="bf", help="Event source name (default: bf).")
+    a("--data", default="", metavar="JSON", help="Optional JSON object payload, or '-' to read stdin.")
+    a("--dedupe", action="store_true", help="Deduplicate on kind, source, and data.id.")
     sp = cmd("status", "Inspect brain counts, failing loop attention, and loop health (read-only).")
-    sp.add_argument("--all", dest="all_units", action="store_true", help="Include full per-loop status map.")
-    sp.add_argument(
-        "--format", choices=("json", "text"), default="json", help="Output format (json or bird's-eye text)."
-    )
-    sp.add_argument("--check", action="store_true", help="Exit 1 when any enabled loop requires attention.")
-
+    a = sp.add_argument
+    a("--all", dest="all_units", action="store_true", help="Include full per-loop status map.")
+    a("--format", choices=("json", "text"), default="json", help="Output format (json or bird's-eye text).")
+    a("--check", action="store_true", help="Exit 1 when any enabled loop requires attention.")
     sp = cmd("watch", "Supervise daemon loops, note rebuilds, and concurrent cycle loops.")
-    sp.add_argument(
-        "--format",
-        choices=("auto", "text", "jsonl"),
-        default="auto",
-        help="Output mode: auto (text on TTY, jsonl on pipe), text, or jsonl.",
-    )
+    w_h = "Output mode: auto (interactive TUI on TTY, jsonl on pipe), tui, text (scrolling log), or jsonl."
+    sp.add_argument("--format", choices=("auto", "tui", "text", "jsonl"), default="auto", help=w_h)
     return p
 
 
@@ -237,8 +197,7 @@ def _resolve_brain_arg(args: argparse.Namespace) -> str:
 
 
 def _dispatch(args: argparse.Namespace, extra: list[str]) -> int:
-    cmd = args.command
-    brain_arg = _resolve_brain_arg(args)
+    cmd, brain_arg = args.command, _resolve_brain_arg(args)
     if cmd == "schema":
         from bf import schemas
 
@@ -251,7 +210,6 @@ def _dispatch(args: argparse.Namespace, extra: list[str]) -> int:
             raise InputError("--name must be nonempty")
         _emit(engine.init_brain(args.path, name=args.name or "", description=args.description))
         return 0
-
     from bf import config
 
     store = config.select(brain_arg)
@@ -263,10 +221,7 @@ def _dispatch(args: argparse.Namespace, extra: list[str]) -> int:
         from bf import status
 
         res = status.status_summary(store, all_units=args.all_units or args.format == "text")
-        if args.format == "text":
-            _write_text(status.format_status_text(res, color=_use_color()))
-        else:
-            _emit(res)
+        _write_text(status.format_status_text(res, color=_use_color())) if args.format == "text" else _emit(res)
         return 0 if (not args.check or res.get("ok", True)) else 1
     if cmd == "emit":
         from bf import models, records
@@ -276,12 +231,9 @@ def _dispatch(args: argparse.Namespace, extra: list[str]) -> int:
             raise InputError("event kind must match ^[a-z][a-z0-9._-]{0,127}$")
         if not models.NAME_RE.fullmatch(args.source):
             raise InputError("event source must use lowercase letters, digits, and hyphens")
-        if args.data == "-":
-            if sys.stdin.isatty():
-                raise InputError("stdin is a terminal; pipe JSON object or pass --data JSON")
-            raw_in: bytes | str = _read_in("-")
-        else:
-            raw_in = args.data or ""
+        if args.data == "-" and sys.stdin.isatty():
+            raise InputError("stdin is a terminal; pipe JSON object or pass --data JSON")
+        raw_in: bytes | str = _read_in("-") if args.data == "-" else (args.data or "")
         try:
             raw_data = models.decode(raw_in, "--data") if raw_in.strip() else {}
         except Error as err:
@@ -294,17 +246,13 @@ def _dispatch(args: argparse.Namespace, extra: list[str]) -> int:
     if cmd == "check":
         from bf import engine, status
 
+        lim = 50 if args.limit is None else args.limit
         res = engine.validate(
-            store,
-            limit=50 if args.limit is None else args.limit,
-            all_problems=args.all_problems,
-            strict=args.strict,
-            notes_only=args.notes,
+            store, limit=lim, all_problems=args.all_problems, strict=args.strict, notes_only=args.notes
         )
-        if args.format == "text":
-            _write_text(status.format_check_text(res, color=_use_color(), notes_only=args.notes))
-        else:
-            _emit(res)
+        _write_text(
+            status.format_check_text(res, color=_use_color(), notes_only=args.notes)
+        ) if args.format == "text" else _emit(res)
         return 0 if res["ok"] else 1
     if cmd == "run":
         from bf import loops
@@ -329,17 +277,16 @@ def _dispatch(args: argparse.Namespace, extra: list[str]) -> int:
 
         if args.input == "-" and sys.stdin.isatty():
             raise InputError("stdin is a terminal; pipe JSON records or pass --input FILE")
-        _emit(
-            records.ingest(
-                store,
-                args.source,
-                _read_in(args.input),
-                target=args.target,
-                mode=args.mode,
-                allow_removal=args.allow_removal,
-                dry_run=args.dry_run,
-            )
+        res = records.ingest(
+            store,
+            args.source,
+            _read_in(args.input),
+            target=args.target,
+            mode=args.mode,
+            allow_removal=args.allow_removal,
+            dry_run=args.dry_run,
         )
+        _emit(res)
         return 0
     if cmd == "read":
         from bf import query
@@ -360,7 +307,6 @@ def _dispatch(args: argparse.Namespace, extra: list[str]) -> int:
         res = engine.build(store)
         _emit(res)
         return 0 if res["ok"] else 1
-
     from bf import engine, status
 
     res = engine.review(store, limit=20 if args.limit is None else args.limit, all_items=args.all_items)

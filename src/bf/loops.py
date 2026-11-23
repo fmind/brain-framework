@@ -351,6 +351,7 @@ def execute_one_loop(
     argv, recorded = [*argv, *extra_args], False
     mark_unit_state(store, loop.name, status="running", updated=started_iso, last_start=started_iso)
     try:
+        err_cb = records.make_stderr_logger(store, loop.name, run_id)
         code, out_bytes, err_txt = proc.exec_argv(
             argv,
             cwd=store.root,
@@ -358,7 +359,7 @@ def execute_one_loop(
             timeout=timeout,
             stdin_data=ctx_bytes,
             stop_event=stop_event,
-            on_stderr_line=records.make_stderr_logger(store, loop.name, run_id),
+            on_stderr_line=err_cb,
         )
         if stop_event is not None and stop_event.is_set() and code == 130:
             dur_ms = max(0, int((time.monotonic() - t0) * 1000))
@@ -383,6 +384,7 @@ def execute_one_loop(
                 code, err_msg = 1, (models.redact_secrets(models.failure(error) or "failed")[-1024:] or "failed")
 
         ended, dur_ms = (datetime.now(UTC) if now is None else instant), max(0, int((time.monotonic() - t0) * 1000))
+        s_key = schedule.raw if schedule else ""
         record_run(
             store,
             loop.name,
@@ -397,7 +399,7 @@ def execute_one_loop(
             cursor_seq=cursor_target_seq,
             emit_loop_event=True,
             trigger=trigger,
-            schedule_key=schedule.raw if schedule else "",
+            schedule_key=s_key,
         )
         recorded = True
     finally:

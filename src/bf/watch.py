@@ -1,13 +1,17 @@
-"""Live UNIX supervisor (`bf watch`): startup bird's-eye status + real-time text/JSONL stream, zero TUI deps."""
+"""Live UNIX supervisor (`bf watch`): zero-dep scrollable ANSI dashboard + text/JSONL stream."""
 
 from __future__ import annotations
 
 import os
+import select
+import shutil
 import signal
 import subprocess
 import sys
+import termios
 import threading
 import time
+import tty
 from collections import deque
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -37,44 +41,30 @@ def _fmt_ms(dur_ms: int) -> str:
 
 
 def format_watch_line(event: str, payload: dict[str, Any], *, color: bool = False) -> str:
-    ts = str(payload.get("time") or now_utc())[11:19]
-    c_ok, c_err, c_dim, c_cyn, c_rst = (
-        ("\033[32m", "\033[31;1m", "\033[2m", "\033[36m", "\033[0m") if color else ("", "", "", "", "")
-    )
+    ts = printable(str(payload.get("time") or now_utc())[11:19])
+    c_ok, c_err, c_cyn, c_dim, c_rst = status.ansi_codes(color)
     if event == "watch.build":
-        ok = bool(payload.get("ok", True))
-        tag = f"{c_ok}build  {c_rst}" if ok else f"{c_err}build  {c_rst}"
-        probs = payload.get("problems") or []
+        ok, probs = bool(payload.get("ok", True)), payload.get("problems") or []
         tail = ""
         if not ok and probs:
             first = printable(" ".join(str(probs[0]).split()))[:100]
             tail = f"  {first}" + (f" (+{len(probs) - 1} more; run bf check)" if len(probs) > 1 else "")
-        return f"{c_dim}{ts}{c_rst}  {tag}  {payload.get('notes', 0)} notes ({payload.get('written', 0)} built){tail}\n"
+        n_c, w_c = printable(str(payload.get("notes", 0))), printable(str(payload.get("written", 0)))
+        return f"{c_dim}{ts}{c_rst}  {c_ok if ok else c_err}build  {c_rst}  {n_c} notes ({w_c} built){tail}\n"
     if event == "watch.loop":
-        name = printable(str(payload.get("loop") or ""))
-        st = str(payload.get("status") or "")
+        name, st = printable(str(payload.get("loop") or "")), str(payload.get("status") or "")
         dur = _fmt_ms(int(payload.get("duration_ms") or 0))
+        sm = payload.get("summary")
         if st == "ok":
-            detail = ""
-            if isinstance(sm := payload.get("summary"), dict):
-                if "records" in sm:
-                    diffs = " ".join(
-                        f"{s}{printable(str(v))[:16]}"
-                        for s, k in (("+", "added"), ("~", "updated"), ("-", "removed"))
-                        if (v := sm.get(k))
-                    )
-                    recs = printable(str(sm["records"]))[:16]
-                    detail = f"{diffs} · {recs} records" if diffs else f"{recs} unchanged"
-                elif "emitted" in sm:
-                    detail = f"{printable(str(sm['emitted']))[:16]} emitted"
-            return f"{c_dim}{ts}{c_rst}  {c_ok}ok     {c_rst}  {name}  {detail}  {c_dim}{dur}{c_rst}\n"
-        err = printable(str(payload.get("error") or st))
-        return f"{c_dim}{ts}{c_rst}  {c_err}fail   {c_rst}  {name}  {err}  {c_dim}{dur}{c_rst}\n"
+            tag = f"{c_ok}ok     {c_rst}"
+            detail = status.format_run_detail(sm, compact=True) if isinstance(sm, dict) else ""
+        else:
+            tag, detail = f"{c_err}fail   {c_rst}", printable(str(payload.get("error") or st))
+        return f"{c_dim}{ts}{c_rst}  {tag}  {name}  {detail}  {c_dim}{dur}{c_rst}\n"
     if event == "watch.daemon":
-        name = printable(str(payload.get("loop") or ""))
-        state = str(payload.get("state") or "")
+        name, state = printable(str(payload.get("loop") or "")), printable(str(payload.get("state") or ""))
         detail = printable(str(payload.get("error") or ""))
-        tag = f"{c_cyn}daemon {c_rst}" if state in {"started", "healthy", "stopped"} else f"{c_err}daemon {c_rst}"
+        tag = f"{c_cyn if state in {'started', 'healthy', 'stopped'} else c_err}daemon {c_rst}"
         return f"{c_dim}{ts}{c_rst}  {tag}  {name} {state}{f': {detail}' if detail else ''}\n"
     msg = printable(str(payload.get("error") or payload.get("message") or event))
     return f"{c_dim}{ts}{c_rst}  {c_err}error  {c_rst}  {msg}\n"
@@ -116,9 +106,6 @@ class DaemonStream:
                 "watch.daemon", {"loop": self.unit.name, "state": state, **({"error": error} if error else {})}
             )
 
-    def _mark(self, status_val: str, ts_iso: str, **extra: str) -> None:
-        loops.mark_unit_state(self.store, self.unit.name, status=status_val, updated=ts_iso, **extra)
-
     def _record(self, run_id: str, now_iso: str, t0: float, code: int, err: str, stderr: str = "") -> int:
         ms = max(0, int((time.monotonic() - t0) * 1000))
         loops.record_run(
@@ -136,30 +123,25 @@ class DaemonStream:
         return ms
 
     def _loop(self) -> None:
-        backoff, label = 1.0, f"loops.{self.unit.name}"
+        st, u, name = self.store, self.unit, self.unit.name
+        backoff, label = 1.0, f"loops.{name}"
         while not self.stop_event.is_set():
             now_dt = datetime.now(UTC)
             now_iso, t0, healthy = now_utc(now_dt), time.monotonic(), False
-            run_id = f"{self.unit.name}-{int(now_dt.timestamp())}-{os.urandom(3).hex()}"
+            run_id = f"{name}-{int(now_dt.timestamp())}-{os.urandom(3).hex()}"
             try:
-                cmd, _, _, _, _ = loops.resolve_loop(self.store, self.unit)
+                cmd, _, _, _, _ = loops.resolve_loop(st, u)
                 argv, env, _ = proc.prepare_unit(
-                    self.store,
-                    self.unit.name,
-                    cmd,
-                    run_id,
-                    now_iso,
-                    trigger="daemon",
-                    base_env=self.base_env,
-                    unit_env=self.unit.env,
+                    st, name, cmd, run_id, now_iso, trigger="daemon", base_env=self.base_env, unit_env=u.env
                 )
+                pipe = subprocess.PIPE
                 with subprocess.Popen(  # noqa: S603
                     argv,
-                    cwd=self.store.root,
+                    cwd=st.root,
                     env=env,
                     stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=pipe,
+                    stderr=pipe,
                     start_new_session=True,
                 ) as child:
                     err_stop = threading.Event()
@@ -167,14 +149,12 @@ class DaemonStream:
                         cast("IO[bytes]", child.stderr),
                         65536,
                         err_stop,
-                        on_line=records.make_stderr_logger(self.store, self.unit.name, run_id),
+                        on_line=records.make_stderr_logger(st, name, run_id),
                     )
                     run_lock, exited = threading.Lock(), threading.Event()
 
                     def _mark_healthy(
-                        c: subprocess.Popen[bytes] = child,
-                        lk: threading.Lock = run_lock,
-                        ex: threading.Event = exited,
+                        c: subprocess.Popen[bytes] = child, lk: threading.Lock = run_lock, ex: threading.Event = exited
                     ) -> None:
                         with lk:
                             if ex.is_set() or self.stop_event.is_set() or c.poll() is not None:
@@ -182,8 +162,8 @@ class DaemonStream:
                             ts = now_utc()
                             with suppress(Error, OSError):
                                 loops.mark_unit_state(
-                                    self.store,
-                                    self.unit.name,
+                                    st,
+                                    name,
                                     status="running",
                                     updated=ts,
                                     last_success=ts,
@@ -200,25 +180,24 @@ class DaemonStream:
                         if stopping:
                             proc.stop_proc(child)
                             continue
-                        self._mark("running", now_iso, last_start=now_iso)
+                        loops.mark_unit_state(st, name, status="running", updated=now_iso, last_start=now_iso)
                         self._notify("started")
                         health_timer.start()
                         overflow_err, out_s = "", child.stdout
                         while out_s and not self.stop_event.is_set() and (ln := out_s.readline(models.MAX_BATCH + 1)):
                             if len(ln) > models.MAX_BATCH:
                                 overflow_err = f"output line exceeds {models.MAX_BATCH} bytes"
-                                records.append_loop_stderr(self.store, self.unit.name, run_id, overflow_err.encode())
+                                records.append_loop_stderr(st, name, run_id, overflow_err.encode())
                                 proc.stop_proc(child)
                                 break
                             if not (stripped := ln.strip()) or not self.emit:
                                 continue
                             try:
                                 ev_k, payload = records.parse_emitted_event(stripped, self.emit, label)
-                                records.append_event(self.store, ev_k, self.unit.name, payload, dedupe=True)
+                                records.append_event(st, ev_k, name, payload, dedupe=True)
                                 self.wake_event.set()
                             except Error as err:
-                                msg = printable(failure(err))
-                                records.append_loop_stderr(self.store, self.unit.name, run_id, msg.encode())
+                                records.append_loop_stderr(st, name, run_id, printable(failure(err)).encode())
                         if self.stop_event.is_set() and child.poll() is None:
                             proc.stop_proc(child)
                         rc = child.wait()
@@ -235,18 +214,18 @@ class DaemonStream:
                 if self.stop_event.is_set():
                     t_stop = now_utc()
                     with suppress(Error, OSError):
-                        self.store.append_log(
-                            self.unit.name,
+                        st.append_log(
+                            name,
                             models.log_line(
                                 "loop.stopped",
                                 severity="INFO",
                                 time_iso=t_stop,
-                                loop=self.unit.name,
+                                loop=name,
                                 run=run_id,
                                 trigger="daemon",
                             ),
                         )
-                    self._mark("stopped", t_stop, last_end=t_stop)
+                    loops.mark_unit_state(st, name, status="stopped", updated=t_stop, last_end=t_stop)
                     self._notify("stopped")
                     break
                 rc = (rc or 1) if overflow_err else rc
@@ -287,10 +266,10 @@ def next_due_delay(
 def serve(
     store: Store,
     *,
-    fmt: Literal["auto", "text", "jsonl"] = "auto",
+    fmt: Literal["auto", "tui", "text", "jsonl"] = "auto",
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
-    """Supervise notes, events, daemon loops, and concurrent cycle loops with text or JSONL streaming."""
+    """Supervise notes, events, daemon loops, and concurrent cycle loops with TUI, text, or JSONL output."""
     cfg = config.load(store)
     busy = "another bf watch is already running for this brain; stop it before starting a new one"
     with writer(store, wait=0.0, busy=busy, name="watch.lock"):
@@ -301,21 +280,24 @@ def _serve_locked(
     store: Store,
     cfg: config.Config,
     *,
-    fmt: Literal["auto", "text", "jsonl"] = "auto",
+    fmt: Literal["auto", "tui", "text", "jsonl"] = "auto",
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     stop_ev = stop_event if stop_event is not None else threading.Event()
     wake_event, note_dirty, cfg_dirty = threading.Event(), threading.Event(), threading.Event()
-    reconcile_lock, daemons = threading.Lock(), {}
-    flight_lock, in_flight = threading.Lock(), set()
-    rate_lock = threading.Lock()
-    event_rates: dict[str, deque[float]] = {}
-    emit_lock = threading.Lock()
-    is_tty = sys.stdout.isatty()
-    use_text = (fmt == "text") or (fmt == "auto" and is_tty)
-    use_color = use_text and is_tty and os.environ.get("TERM", "") != "dumb" and not os.environ.get("NO_COLOR", "")
+    ui_dirty, counts_dirty = threading.Event(), threading.Event()
+    reconcile_lock, flight_lock, rate_lock, emit_lock = (threading.Lock() for _ in range(4))
+    daemons, in_flight, event_rates, recent = {}, set(), {}, deque(maxlen=8)
+    is_tty, term_dumb = sys.stdout.isatty(), os.environ.get("TERM", "") == "dumb"
+    use_tui = fmt == "tui" or (fmt == "auto" and is_tty and sys.stdin.isatty() and not term_dumb)
+    use_text = fmt == "text"
+    use_color = (use_tui or use_text) and is_tty and not term_dumb and not os.environ.get("NO_COLOR", "")
     last_summary = {"brain": cfg.name, "time": now_utc(), "built": 0, "loops_ran": 0, "ok": True}
-    root_pfx = f"{store.root}/"
+    root_pfx, term_hit = f"{store.root}/", False
+
+    def _stop_all() -> None:
+        stop_ev.set()
+        wake_event.set()
 
     def write_out(data: bytes) -> None:
         with emit_lock:
@@ -327,22 +309,24 @@ def _serve_locked(
                     devnull = os.open(os.devnull, os.O_WRONLY)
                     os.dup2(devnull, 1)
                     os.close(devnull)
-                stop_ev.set(), wake_event.set()
+                _stop_all()
             except OSError:
                 pass
 
     def emit_event(kind: str, payload: dict[str, Any]) -> None:
-        ts = str(payload.get("time") or now_utc())
-        body = {"brain": cfg.name, **payload}
-        if use_text:
+        ts, body = str(payload.get("time") or now_utc()), {"brain": cfg.name, **payload}
+        if use_tui:
+            line = format_watch_line(kind, {"time": ts, **body}, color=use_color).rstrip("\n")
+            with emit_lock:
+                recent.append(line)
+            if kind == "watch.build" or (isinstance(sm := payload.get("summary"), dict) and "records" in sm):
+                counts_dirty.set()
+            ui_dirty.set()
+        elif use_text:
             write_out(format_watch_line(kind, {"time": ts, **body}, color=use_color).encode("utf-8"))
         else:
-            sev = (
-                "ERROR"
-                if (body.get("ok") is False or body.get("status") == "failed" or kind == "watch.error")
-                else "INFO"
-            )
-            write_out(models.log_line(kind, severity=sev, time_iso=ts, **body))
+            is_err = body.get("ok") is False or body.get("status") == "failed" or kind == "watch.error"
+            write_out(models.log_line(kind, severity="ERROR" if is_err else "INFO", time_iso=ts, **body))
 
     def _allow_event_trigger(name: str) -> bool:
         now_m = time.monotonic()
@@ -380,6 +364,8 @@ def _serve_locked(
             return
         if (new_cfg.name, new_cfg.notes) != prev_key:
             note_dirty.set()
+        counts_dirty.set()
+        ui_dirty.set()
         desired = {
             u.name: (_daemon_sig(u, new_cfg.env, dotenv_sig), u, new_cfg.env)
             for u in new_cfg.loops.values()
@@ -423,13 +409,8 @@ def _serve_locked(
         if (wf := watch_fs) is None:
             from watchfiles import watch as wf
         try:
-            for changes in wf(
-                store.root,
-                watch_filter=lambda _, p: bool(_classify(p)),
-                debounce=_DEBOUNCE_MS,
-                stop_event=stop_ev,
-                raise_interrupt=False,
-            ):
+            wf_kw: dict[str, Any] = {"watch_filter": lambda _, p: bool(_classify(p)), "debounce": _DEBOUNCE_MS}
+            for changes in wf(store.root, **wf_kw, stop_event=stop_ev, raise_interrupt=False):
                 if kinds := {_classify(p) for _, p in changes} - {""}:
                     for k, ev in (("note", note_dirty), ("config", cfg_dirty)):
                         if k in kinds:
@@ -440,10 +421,10 @@ def _serve_locked(
 
     pool = ThreadPoolExecutor(max_workers=32, thread_name_prefix="bf-worker")
 
-    def _record_summary(summary: dict[str, Any]) -> None:
+    def _record_summary(brain: str, *, built: int = 0, loops_ran: int = 0, ok: bool = True) -> None:
         nonlocal last_summary
         with emit_lock:
-            last_summary = summary
+            last_summary = {"brain": brain, "time": now_utc(), "built": built, "loops_ran": loops_ran, "ok": ok}
 
     def _run_bg(
         item: tuple[LoopSpec, str, list[dict[str, Any]], int | None, ScheduleSpec | None], base_env: Mapping[str, str]
@@ -464,7 +445,7 @@ def _serve_locked(
             except models.FAILURES as err:
                 res = loops.record_failure(store, loop.name, trig, err)
             ok_r = res["status"] in {"ok", "dry_run", "stopped"}
-            _record_summary({"brain": cfg.name, "time": now_utc(), "built": 0, "loops_ran": 1, "ok": ok_r})
+            _record_summary(cfg.name, loops_ran=1, ok=ok_r)
             emit_event("watch.loop", {**res, "ok": ok_r, "trigger": trig})
         finally:
             with flight_lock:
@@ -480,15 +461,13 @@ def _serve_locked(
                 reconcile_config()
             if dirty := note_dirty.is_set():
                 note_dirty.clear()
-            tick_ok = True
-            wait_secs = 5.0
+            tick_ok, wait_secs = True, 5.0
             try:
                 cur_cfg = cfg
                 built = engine.build(store) if (first or dirty) else None
                 with flight_lock:
                     busy = frozenset(in_flight)
-                now_dt = datetime.now(UTC)
-                due_items, pre_fails = loops.select_due_loops(store, cur_cfg, sched_now=now_dt, exclude=busy)
+                due_items, pre_fails = loops.select_due_loops(store, cur_cfg, sched_now=datetime.now(UTC), exclude=busy)
                 for pf in pre_fails:
                     emit_event("watch.loop", {**pf, "ok": False})
                 rate_limited: set[str] = set()
@@ -502,57 +481,44 @@ def _serve_locked(
                             continue
                         if it[1] == "event" and not _allow_event_trigger(it[0].name):
                             rate_limited.add(it[0].name)
-                            emit_event(
-                                "watch.error",
-                                {
-                                    "ok": False,
-                                    "loop": it[0].name,
-                                    "error": "event rate limit reached; pausing triggers",
-                                },
-                            )
+                            err_d = {
+                                "ok": False,
+                                "loop": it[0].name,
+                                "error": "event rate limit reached; pausing triggers",
+                            }
+                            emit_event("watch.error", err_d)
                             continue
                         in_flight.add(it[0].name)
                         to_run.append(it)
                     busy_after = frozenset(in_flight) | rate_limited
+                if to_run:
+                    ui_dirty.set()
                 for idx_i, it in enumerate(to_run):
-                    if stop_ev.is_set():
-                        with flight_lock:
-                            for rem_it in to_run[idx_i:]:
-                                in_flight.discard(rem_it[0].name)
-                        break
                     try:
+                        if stop_ev.is_set():
+                            raise StopIteration
                         pool.submit(_run_bg, it, cur_cfg.env)
-                    except BaseException:
+                    except BaseException as exc:
                         with flight_lock:
                             for rem_it in to_run[idx_i:]:
                                 in_flight.discard(rem_it[0].name)
+                        if isinstance(exc, StopIteration):
+                            break
                         raise
-                wait_secs = (
-                    5.0
-                    if slots == 0 and due_items
-                    else next_due_delay(store, cur_cfg, datetime.now(UTC), exclude=busy_after)
-                )
+                nxt = next_due_delay(store, cur_cfg, datetime.now(UTC), exclude=busy_after)
+                wait_secs = 5.0 if slots == 0 and due_items else nxt
                 b_cnt = built["written"] if built else 0
                 ok_t = (built is None or bool(built["ok"])) and not pre_fails
-                summary = {
-                    "brain": cur_cfg.name,
-                    "time": now_utc(),
-                    "built": b_cnt,
-                    "loops_ran": len(pre_fails),
-                    "ok": ok_t,
-                }
-                _record_summary(summary)
+                _record_summary(cur_cfg.name, built=b_cnt, loops_ran=len(pre_fails), ok=ok_t)
                 if built is not None and (b_cnt or not built["ok"]):
-                    emit_event(
-                        "watch.build",
-                        {"ok": built["ok"], "notes": built["notes"], "written": b_cnt, "problems": built["problems"]},
-                    )
+                    b_ev = {"ok": built["ok"], "notes": built["notes"], "written": b_cnt, "problems": built["problems"]}
+                    emit_event("watch.build", b_ev)
             except (*models.FAILURES, RuntimeError, ValueError, KeyError, TypeError) as err:
                 tick_ok = False
                 msg = printable(failure(err)) if isinstance(err, models.FAILURES) else type(err).__name__
                 with emit_lock:
-                    base_b = last_summary["brain"]
-                _record_summary({"brain": base_b, "time": now_utc(), "built": 0, "loops_ran": 0, "ok": False})
+                    base_b = str(last_summary["brain"])
+                _record_summary(base_b, ok=False)
                 emit_event("watch.error", {"ok": False, "error": msg})
             if not tick_ok and dirty:
                 note_dirty.set()
@@ -563,27 +529,127 @@ def _serve_locked(
     tick_thread: threading.Thread | None = None
     on_main = threading.current_thread() is threading.main_thread()
 
-    def _on_term(*_a: object) -> None:
-        stop_ev.set()
-        wake_event.set()
+    def _on_term_sig(*_a: object) -> None:
+        nonlocal term_hit
+        term_hit = True
 
-    prev_term = signal.signal(signal.SIGTERM, _on_term) if on_main else None
+    def _run_tui() -> None:
+        offset, page, only_active, sort_recent, show_errors = 0, 10, False, True, False
+        last_draw, last_fail, winch_hit, alt_on = 0.0, -10.0, False, False
+        counts_cache: tuple[dict[str, int], list[str]] | None = None
+        term_fd: int | None = None
+        read_fd: int | None = None
+        old_term: Any = None
+        prev_winch: Any = None
+        poller: select.poll | None = None
+
+        def _on_winch(*_a: object) -> None:
+            nonlocal winch_hit
+            winch_hit = True
+
+        try:
+            if on_main:
+                prev_winch = signal.signal(signal.SIGWINCH, _on_winch)
+            if sys.stdin.isatty():
+                with suppress(OSError, ValueError, termios.error):
+                    fd = sys.stdin.fileno()
+                    old_term, term_fd = termios.tcgetattr(fd), fd
+                    tty.setcbreak(fd)
+                    poller = select.poll()
+                    poller.register(fd, select.POLLIN)
+                    read_fd = fd
+            alt_on = True
+            write_out(b"\033[?1049h\033[?25l\033[?1000h\033[?1006h")
+            counts_dirty.set(), ui_dirty.set()
+            while not stop_ev.is_set():
+                if term_hit:
+                    _stop_all()
+                    break
+                now_m = time.monotonic()
+                if winch_hit or ui_dirty.is_set() or (now_m - last_draw) >= 1.0:
+                    winch_hit = False
+                    ui_dirty.clear()
+                    cur_cfg = cfg
+                    if counts_dirty.is_set() or (counts_cache is None and (now_m - last_fail) >= 10.0):
+                        counts_dirty.clear()
+                        try:
+                            counts_cache = status.corpus_counts(store, cur_cfg)
+                        except Error, OSError:
+                            last_fail = now_m
+                    z_c = {"notes": 0, "records": 0, "usages": 0, "sources": 0, "loops": len(cur_cfg.loops)}
+                    with suppress(Error, OSError):
+                        sm = status.status_summary(store, all_units=True, counts_cache=counts_cache or (z_c, []))
+                        with emit_lock:
+                            rec_snap = list(recent)
+                        cols, lines = shutil.get_terminal_size((100, 30))
+                        frame, offset, page = status.format_watch_screen(
+                            sm,
+                            rec_snap,
+                            cols=cols,
+                            rows=lines,
+                            offset=offset,
+                            only_active=only_active,
+                            sort_recent=sort_recent,
+                            show_errors=show_errors,
+                            concurrency=cur_cfg.concurrency,
+                            color=use_color,
+                        )
+                        write_out(b"\033[H" + frame.encode("utf-8") + b"\033[J")
+                    last_draw = now_m
+                if read_fd is not None and poller is not None:
+                    try:
+                        if evs := poller.poll(150):
+                            mask = evs[0][1]
+                            bad_ev = bool(mask & (select.POLLERR | select.POLLNVAL)) or (
+                                bool(mask & select.POLLHUP) and not (mask & select.POLLIN)
+                            )
+                            if bad_ev or (key := status.read_tui_key(read_fd)) == "eof":
+                                read_fd = None
+                            elif key:
+                                offset, only_active, sort_recent, show_errors, act = status.apply_tui_key(
+                                    key, offset, page, only_active, sort_recent, show_errors
+                                )
+                                if act == "quit":
+                                    _stop_all()
+                                elif act == "refresh":
+                                    counts_dirty.set(), wake_event.set()
+                                ui_dirty.set()
+                    except OSError, ValueError:
+                        read_fd = None
+                else:
+                    stop_ev.wait(0.15)
+        finally:
+            if alt_on:
+                write_out(b"\033[?1006l\033[?1000l\033[?25h\033[?1049l")
+            if term_fd is not None and old_term is not None:
+                with suppress(OSError, termios.error):
+                    termios.tcsetattr(term_fd, termios.TCSADRAIN, old_term)
+            if on_main and prev_winch is not None:
+                with suppress(OSError, ValueError):
+                    signal.signal(signal.SIGWINCH, prev_winch)
+
+    prev_term = signal.signal(signal.SIGTERM, _on_term_sig) if on_main else None
     try:
         if use_text:
             with suppress(Error):
-                write_out(
-                    status.format_status_text(status.status_summary(store, all_units=True), color=use_color).encode()
-                )
-                write_out(f"Watching {cfg.name} ({cfg.concurrency}w) — Ctrl+C to stop\n".encode())
-        else:
+                st_txt = status.format_status_text(status.status_summary(store, all_units=True), color=use_color)
+                write_out(f"{st_txt}Watching {cfg.name} ({cfg.concurrency}w) — Ctrl+C to stop\n".encode())
+        elif not use_tui:
             emit_event("watch.started", {"ok": True, "concurrency": cfg.concurrency, "loops": len(cfg.loops)})
         reconcile_config()
         threading.Thread(target=watch_files, name="bf-watchfiles", daemon=True).start()
         tick_thread = threading.Thread(target=run_ticks, name="bf-tick", daemon=True)
         tick_thread.start()
-        stop_ev.wait()
+        if use_tui:
+            _run_tui()
+        else:
+            while not stop_ev.is_set():
+                if term_hit:
+                    _stop_all()
+                    break
+                stop_ev.wait(0.2)
     finally:
-        _on_term()
+        _stop_all()
         with reconcile_lock:
             active_daemons = list(daemons.values())
             daemons.clear()
@@ -592,8 +658,8 @@ def _serve_locked(
         if tick_thread is not None and tick_thread.is_alive():
             tick_thread.join(timeout=3)
         pool.shutdown(wait=True, cancel_futures=True)
-        if on_main and prev_term is not None:
-            with suppress(OSError, ValueError):
+        with suppress(OSError, ValueError):
+            if on_main and prev_term is not None:
                 signal.signal(signal.SIGTERM, prev_term)
         for _, _, daemon in active_daemons:
             daemon.terminate()

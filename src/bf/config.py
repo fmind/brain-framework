@@ -424,26 +424,31 @@ def _parse_loop(
     def_win = dw if isinstance(dw := defaults.get("window"), dict) else {}
     own_win = rw if isinstance(rw := raw.get("window"), dict) else {}
     win = {**def_win, **own_win}
-    explicit_timeout = "timeout" in raw
-    timeout_val = raw["timeout"] if "timeout" in raw else defaults.get("timeout", 300)
+    bf_s = models.parse_duration(win.get("backfill", 86400), f"{label}.window.backfill")
+    ov_s = models.parse_duration(win.get("overlap", 0), f"{label}.window.overlap", allow_zero=True)
+    to_s = models.parse_duration(
+        raw["timeout"] if "timeout" in raw else defaults.get("timeout", 300), f"{label}.timeout", maximum=86_400
+    )
+    desc = models.clean_text(str(raw.get("description") or ""), f"{label}.description")
+    env_m = _parse_env_map(raw.get("env"), f"{label}.env")
     return LoopSpec(
-        name=name,
-        run=run,
-        description=models.clean_text(str(raw.get("description") or ""), f"{label}.description"),
-        daemon=daemon,
-        ingest=ingest,
-        target=target,
-        mode=mode,
-        explicit_ingest=explicit_ingest,
-        emit=emit,
-        schedules=schedules,
-        events=events,
-        backfill=models.parse_duration(win.get("backfill", 86400), f"{label}.window.backfill"),
-        overlap=models.parse_duration(win.get("overlap", 0), f"{label}.window.overlap", allow_zero=True),
-        timeout=models.parse_duration(timeout_val, f"{label}.timeout", maximum=86_400),
-        explicit_timeout=explicit_timeout,
-        enabled=bool(raw.get("enabled", True)),
-        env=_parse_env_map(raw.get("env"), f"{label}.env"),
+        name,
+        run,
+        desc,
+        daemon,
+        ingest,
+        target,
+        mode,
+        explicit_ingest,
+        emit,
+        schedules,
+        events,
+        bf_s,
+        ov_s,
+        to_s,
+        "timeout" in raw,
+        bool(raw.get("enabled", True)),
+        env_m,
     )
 
 
@@ -518,20 +523,23 @@ def _open_brain(chosen: str) -> Store:
     return store
 
 
+def _owned_brain(path: Path, owner: int) -> bool:
+    ds, ys = path.stat(), (path / "bf.yaml").lstat()
+    return stat.S_ISDIR(ds.st_mode) and ds.st_uid == owner and stat.S_ISREG(ys.st_mode) and ys.st_uid == owner
+
+
 def select(value: str = "") -> Store:
     """Resolve `--brain PATH` -> enclosing `bf.yaml` -> `BF_BRAIN` -> `BRAIN_LOCATION` -> `~/brain`."""
-    if value.strip():
-        return _open_brain(value.strip())
+    if chosen := value.strip():
+        return _open_brain(chosen)
     if nearest := inside_brain():
         return nearest
-    if env_brain := os.environ.get("BF_BRAIN", "").strip():
-        return _open_brain(env_brain)
-    if location := os.environ.get("BRAIN_LOCATION", "").strip():
-        return _open_brain(location)
+    for env_key in ("BF_BRAIN", "BRAIN_LOCATION"):
+        if chosen := os.environ.get(env_key, "").strip():
+            return _open_brain(chosen)
     with suppress(RuntimeError, OSError):
         default_dir = Path.home() / "brain"
-        info = (default_dir / "bf.yaml").lstat()
-        if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and default_dir.stat().st_uid == os.geteuid():
+        if _owned_brain(default_dir, os.geteuid()):
             return Store(default_dir)
     raise Error("no brain selected; pass --brain PATH, set BRAIN_LOCATION, run inside a brain, or run bf init ~/brain")
 
@@ -544,11 +552,9 @@ def resolve_brain(current: Store, cfg: Config, host: str) -> Store:
         raise InputError(f"brain {host!r} is not declared in bf.yaml brains:")
     raw_t = expand(Path(cfg.brains[host]))
     cand = raw_t if raw_t.is_absolute() else (current.root / raw_t)
-    owner = os.geteuid()
     with suppress(OSError, ValueError):
         res = cand.resolve(strict=True)
-        ds, ys = res.stat(), (res / "bf.yaml").lstat()
-        if stat.S_ISDIR(ds.st_mode) and ds.st_uid == owner and stat.S_ISREG(ys.st_mode) and ys.st_uid == owner:
+        if _owned_brain(res, os.geteuid()):
             target = Store(res)
             load(target)
             return target

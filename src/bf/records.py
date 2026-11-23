@@ -236,14 +236,8 @@ def append_event(
                     ):
                         return dict(parsed)
         seq, ts = prev_seq + 1, now_utc(now)
-        event = {
-            "seq": seq,
-            "id": f"evt-{seq}-{os.urandom(4).hex()}",
-            "time": ts,
-            "kind": kind,
-            "source": source,
-            "data": safe_data,
-        }
+        eid = f"evt-{seq}-{os.urandom(4).hex()}"
+        event = {"seq": seq, "id": eid, "time": ts, "kind": kind, "source": source, "data": safe_data}
         raw_line = encode(event)
         if len(raw_line) > MAX_EVENT_LINE:
             raise Error(f"logs/events.jsonl: event exceeds {MAX_EVENT_LINE} bytes")
@@ -564,18 +558,12 @@ def ingest(
                 "removed": removed,
             }
             append_event(store, "records.ingested", source, ev_data, locked=True, now=now)
-        return {
-            "ok": True,
-            "brain": cfg.name,
-            "source": source,
-            "target": target,
-            "mode": mode,
+        meta = {"ok": True, "brain": cfg.name, "source": source, "target": target, "mode": mode}
+        stats = {
             "records": surviving,
             "added": added,
             "updated": updated_count,
             "unchanged": unchanged,
             "removed": removed,
-            "forgotten": skipped_forgotten,
-            "incomplete": incomplete,
-            "dry_run": dry_run,
         }
+        return {**meta, **stats, "forgotten": skipped_forgotten, "incomplete": incomplete, "dry_run": dry_run}

@@ -12,24 +12,8 @@ FORMAT = 18
 DEFAULT_NOTES = ("concepts", "projects", "actions")
 RECORD_DIRS = ("memories", "usages")
 RESERVED_SOURCES = frozenset(
-    (
-        "memories",
-        "usages",
-        "notes",
-        "record",
-        "logs",
-        "evals",
-        "schemas",
-        "skills",
-        "bf",
-        "loops",
-        "sensors",
-        "routines",
-        "agents",
-        "clients",
-        "prompts",
-    )
-)
+    {"memories", "usages", "notes", "record", "logs", "evals", "schemas", "skills"}
+) | frozenset({"bf", "loops", "sensors", "routines", "agents", "clients", "prompts"})
 MAX_FILE = 256 << 20
 MAX_BATCH = 16 << 20
 MAX_NOTE = 4 << 20

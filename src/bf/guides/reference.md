@@ -23,7 +23,7 @@ Every command writes one compact UTF-8 JSON object with `"ok"` to `stdout` (exce
 - `bf ingest SOURCE [--to memories|usages] [--input FILE] [--mode upsert|snapshot] [--allow-removal] [--dry-run] [--brain PATH]`: validate records against bundled `record` + required `schemas/<source>.json` (or `schemas/usages.json`), write `<target>/<source>.jsonl`, and emit `records.ingested`.
 - `bf run [LOOP ...] [--all | --due | --reset | --prune] [--dry-run] [--brain PATH] [-- EXTRA_ARGS...]`: execute named/glob, `--all`, or `--due` cycle loops, reset `.bf/<loop>.json` state (`--reset`), or prune orphaned `.bf/<loop>.json` files (`--prune`; `--dry-run` works across all modes).
 - `bf emit KIND [--source NAME] [--data JSON|-] [--dedupe] [--brain PATH]`: append a custom event to `logs/events.jsonl` (`--data -` reads JSON from non-TTY stdin).
-- `bf watch [--format auto|text|jsonl] [--brain PATH]`: supervise daemon loops, note rebuilds, and concurrent cycle loops; prints bird's-eye status + live text lines on TTY, or structured JSONL when piped / `--format jsonl`.
+- `bf watch [--format auto|tui|text|jsonl] [--brain PATH]`: supervise daemon loops, note rebuilds, and concurrent cycle loops; renders an interactive scrollable ANSI dashboard on TTY (`auto`/`tui`), plain scrolling log (`text`), or structured JSONL when piped / `--format jsonl`.
 
 Brain selection resolves `--brain PATH` -> nearest enclosing `bf.yaml` -> `BF_BRAIN` -> `$BRAIN_LOCATION` -> `~/brain` (zero global config).
 

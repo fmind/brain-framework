@@ -134,7 +134,7 @@ def _extract_snippet(rec: dict[str, Any], rx: re.Pattern[str] | None, width: int
 
 
 def _summary_row(rec: dict[str, Any], *, snippet: str = "", anchor: str = "") -> dict[str, Any]:
-    row: dict[str, Any] = {
+    row = {
         "ref": rec.get("ref", ""),
         "source": rec.get("source", ""),
         "kind": rec.get("kind", "memory"),
@@ -142,13 +142,9 @@ def _summary_row(rec: dict[str, Any], *, snippet: str = "", anchor: str = "") ->
     }
     if upd := rec.get("updated") or rec.get("created"):
         row["updated"] = upd
-    if snippet:
-        row["snippet"] = snippet
-    elif desc := rec.get("description"):
-        row["description"] = desc
-    if anchor:
-        row["anchor"] = anchor
-    return row
+    if snippet or (desc := rec.get("description")):
+        row["snippet" if snippet else "description"] = snippet or desc
+    return {**row, "anchor": anchor} if anchor else row
 
 
 def _rg_run(
@@ -484,16 +480,8 @@ def read_target(store: Store, raw_target: str, *, raw: bool = False, max_bytes: 
     def rec_out(hp: str, hr: dict[str, Any], default_ref: str) -> dict[str, Any]:
         if raw:
             raise InputError("--raw applies only to Markdown notes or plain files")
-        rec_kind = str(hr.get("kind", "memory"))
-        rec_ref = str(hr.get("ref", default_ref))
-        return {
-            "ok": True,
-            "brain": cfg.name,
-            "kind": rec_kind,
-            "ref": rec_ref,
-            "path": rec_ref if rec_kind == "note" else hp,
-            "record": hr,
-        }
+        rk, rr = str(hr.get("kind", "memory")), str(hr.get("ref", default_ref))
+        return {"ok": True, "brain": cfg.name, "kind": rk, "ref": rr, "path": rr if rk == "note" else hp, "record": hr}
 
     if kind == "url":
         hit = find_by_alias(store, to, cfg.notes) or (
@@ -538,12 +526,5 @@ def read_target(store: Store, raw_target: str, *, raw: bool = False, max_bytes: 
             out = {"ok": True, "brain": cfg.name, "kind": "note" if is_note else "file", "ref": to, "text": text}
         else:
             comp = md.compile_note(to, raw_bytes, brain_name=cfg.name, note_dirs=cfg.notes)
-            out = {
-                "ok": True,
-                "brain": cfg.name,
-                "kind": "note",
-                "ref": to,
-                "path": to,
-                "record": comp,
-            }
+            out = {"ok": True, "brain": cfg.name, "kind": "note", "ref": to, "path": to, "record": comp}
     return _cap_json_bytes(out, max_bytes) if max_bytes is not None else out

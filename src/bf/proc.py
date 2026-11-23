@@ -26,7 +26,7 @@ JQ_PRELUDE = (
 _S_XDG = ("CONFIG", "DATA", "CACHE", "STATE")
 _S_MISE = ("DATA_DIR", "CONFIG_DIR", "CACHE_DIR", "STATE_DIR", "TRUSTED_CONFIG_PATHS")
 _SHIM_ENV = ("PATH", "HOME", *(f"XDG_{k}_HOME" for k in _S_XDG), *(f"MISE_{k}" for k in _S_MISE))
-_ENV_ALLOWLIST = (
+_E1 = (
     "PATH",
     "HOME",
     "USER",
@@ -38,17 +38,14 @@ _ENV_ALLOWLIST = (
     "SSH_AUTH_SOCK",
     "DISPLAY",
     "WAYLAND_DISPLAY",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "XDG_RUNTIME_DIR",
+)
+_E2 = ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "GH_TOKEN", "GITHUB_TOKEN", "CLOUDSDK_CONFIG")
+_E3 = ("GOOGLE_APPLICATION_CREDENTIALS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+_ENV_ALLOWLIST = (
+    *_E1,
+    *_E2,
+    *_E3,
     *(f"XDG_{k}_HOME" for k in _S_XDG),
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-    "CLOUDSDK_CONFIG",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "REQUESTS_CA_BUNDLE",
-    "CURL_CA_BUNDLE",
     *(p for k in ("HTTP", "HTTPS", "NO", "ALL") for p in (f"{k}_PROXY", f"{k.lower()}_proxy")),
 )
 _TOOL_CACHE: dict[tuple[str, ...], str] = {}
