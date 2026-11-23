@@ -2050,6 +2050,11 @@ def test_watch_tui_renderer_keys_and_live_loop(
     assert page0 == 5
     assert "Brain: tui-brain" in frame_top
     assert "ATTENTION (1)" in frame_top
+    assert "sources=" not in frame_top
+    big_txt = status.format_status_text({**sm, "counts": {**sm["counts"], "records": 1250}, "events_seq": 1800})
+    assert "memories=1,250" in big_txt
+    assert "events=1,800" in big_txt
+    assert "sources=" not in big_txt
     assert "orphans: ghost (bf run --prune)" in frame_top
     assert "lp-02" in frame_top
     assert "(2x) boom timeout" in frame_top

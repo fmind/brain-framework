@@ -4,6 +4,14 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v33.2.1](https://github.com/fmind/brain-framework/releases/tag/v33.2.1) - 2026-11-23
+
+A patch release simplifying the human-readable `bf status --format text` and `bf watch` header counts. The brain format (`version: 18`), `bf.yaml`, the published JSON Schemas (`docs/{bf,record}.schema.json`), and JSON CLI outputs are unchanged; no brain upgrade step is needed from `v33.2.0`.
+
+### Changed
+
+- **Cleaner `bf watch` / `bf status --format text` header counts.** Dropped `sources=` from the human text header and formatted counts with thousand separators (`notes=12  memories=1,250  usages=40  loops=6  events=180`) so the header shows pure entity counts without mixing file counts beside record counts (`bf status` JSON still returns `counts.sources`).
+
 ## [v33.2.0](https://github.com/fmind/brain-framework/releases/tag/v33.2.0) - 2026-11-23
 
 A minor release restoring a zero-dependency interactive scrollable ANSI dashboard for `bf watch` on TTYs (with cached corpus counts, mouse-wheel and keyboard scrolling, active/failing filtering, recent/name sorting, and a wrapped error-detail toggle) while keeping `--format text` and `--format jsonl` backwards compatible. The brain format (`version: 18`), `bf.yaml`, and the published JSON Schemas (`docs/{bf,record}.schema.json`) are unchanged; no brain upgrade step is needed from `v33.1.0`.

@@ -263,7 +263,7 @@ def _summary_head(summary: Mapping[str, Any], *, color: bool, suffix: str = "") 
     c_ok, c_err, _, _, c_rst = ansi_codes(color)
     cnt, ok = summary.get("counts") or {}, bool(summary.get("ok", True))
     badge = f"{c_ok}HEALTHY{c_rst}" if ok else f"{c_err}ATTENTION ({len(summary.get('attention') or [])}){c_rst}"
-    c_ln = f"  notes={cnt.get('notes', 0)}  memories={cnt.get('records', 0)}  usages={cnt.get('usages', 0)}  sources={cnt.get('sources', 0)}  loops={cnt.get('loops', 0)}  events={summary.get('events_seq', 0)}"
+    c_ln = f"  notes={int(cnt.get('notes', 0)):,}  memories={int(cnt.get('records', 0)):,}  usages={int(cnt.get('usages', 0)):,}  loops={int(cnt.get('loops', 0)):,}  events={int(summary.get('events_seq') or 0):,}"
     return [f"Brain: {printable(str(summary.get('brain', '')))}  [{badge}]{suffix}", c_ln]
 
 
