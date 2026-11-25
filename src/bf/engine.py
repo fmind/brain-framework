@@ -664,8 +664,8 @@ def validate(
                             )
                         else:
                             add(errors, "link", f"{origin}: broken link to {to}")
-            elif not refs.is_allowed_note_path(to, cfg.notes):
-                add(errors, "link", f"{origin}: link target {to} must be inside configured note directories")
+            elif not refs.is_allowed_link_path(to, cfg.notes):
+                add(errors, "link", f"{origin}: link target {to} must be a non-private brain file without dotfiles")
             elif not exists_cache.setdefault(to, to in exists_cache or store.exists(to)):
                 add(errors, "link", f"{origin}: broken link to {to}")
             elif anc:

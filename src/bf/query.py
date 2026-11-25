@@ -698,7 +698,7 @@ def _read_note_file(
 ) -> dict[str, Any] | str:
     if not store.exists(to) and not to.endswith(".md"):
         for cand in (f"{to}.md", f"{to}/index.md"):
-            if store.exists(cand):
+            if refs.is_allowed_note_path(cand, cfg.notes) and store.exists(cand):
                 to = cand
                 break
     if not store.exists(to):

@@ -4,6 +4,14 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v34.0.1](https://github.com/fmind/brain-framework/releases/tag/v34.0.1) - 2026-11-25
+
+A patch release restoring same-brain Markdown and `bf:///` links from authored notes to tracked non-private repository files (such as `../README.md`, `../AGENTS.md`, `../skills/*/SKILL.md`, and `bf:///bf.yaml`) while keeping `bf read`, ingested memory records, and cross-brain links strictly confined to configured note directories. The brain format (`version: 19`), `bf.yaml`, published JSON Schemas, and CLI outputs are unchanged; no migration is needed from `v34.0.0`.
+
+### Fixed
+
+- **Allow tracked non-private brain-file links in authored notes while tightening `bf read` and cross-brain confinement.** Separated `refs.is_allowed_link_path()` (dot-segment-free brain files outside `logs/`, `memories/`, and `usages/`, respecting custom `notes:` folders) from `refs.is_allowed_note_path()` (strictly inside configured `note_dirs` with a `/` separator, closing bare-directory `<note_dir>.md` expansion in `bf read`), and blocked case-variant private roots (`Logs/`, `Memories/`, `usages/`, `Usages/`) on cross-brain `bf://` links.
+
 ## [v34.0.0](https://github.com/fmind/brain-framework/releases/tag/v34.0.0) - 2026-11-25
 
 A major release bumping the brain format to `version: 19` to unify all records in `memories/`, add a strictly disposable offset-indexed stdlib SQLite FTS5 cache (`.bf/cache/index.sqlite3`) for instant ranked BM25 retrieval and `--links-to` backlinks, remove hidden loop magic in favor of explicit `ingest:`/`timeout:` and per-loop `env_from:` secret allowlists, add always-on multi-assistant orchestration (`concurrency:` pools, `debounce:`, delayed `bf emit --in|--at`, `bf pause`/`bf resume`, `bf events`), and trim the runtime to 3 minimal dependencies (`jsonschema`, `markdown-it-py`, `pyyaml`, Python 3.12+). Authored Markdown notes remain compatible once rebuilt; back up your brain before upgrading and follow the manual upgrade steps below.

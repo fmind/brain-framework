@@ -325,7 +325,20 @@ def test_parse_link_variants_and_rejections() -> None:
     rec_meta = refs.parse_link("projects/web.md", "jira:WEB-1#top", "my-brain", attr_meta={"role": "blocker"})
     assert (rec_meta["to"], rec_meta["anchor"], rec_meta["meta"]) == ("jira:WEB-1", "top", {"role": "blocker"})
 
-    with pytest.raises(Error, match="configured note directories without dotfiles"):
+    repo_link = refs.parse_link("projects/web.md", "../README.md#operations", "my-brain")
+    assert (repo_link["to"], repo_link["kind"], repo_link["anchor"]) == ("README.md", "note", "operations")
+    yaml_link = refs.parse_link("projects/web.md", "bf:///bf.yaml", "my-brain", require_uri=True)
+    assert (yaml_link["to"], yaml_link["kind"]) == ("bf.yaml", "note")
+
+    custom_usage = refs.parse_link(
+        "concepts/a.md", "../usages/metrics.md", "my-brain", note_dirs=("concepts", "usages")
+    )
+    assert (custom_usage["to"], custom_usage["kind"]) == ("usages/metrics.md", "note")
+    assert not refs.is_allowed_note_path("concepts", ("concepts", "projects", "actions"))
+    assert refs.record_link_problem({"kind": "brain", "to": "bf://team-brain/Logs/a.jsonl", "anchor": ""})
+    assert refs.record_link_problem({"kind": "brain", "to": "bf://team-brain/usages/a.jsonl", "anchor": ""})
+
+    with pytest.raises(Error, match="non-private brain file without dotfiles"):
         refs.parse_link("projects/web.md", "../.env.example", "my-brain")
 
     for bad_target, match in (
@@ -337,13 +350,21 @@ def test_parse_link_variants_and_rejections() -> None:
         ("concepts/%20bad.md", "invalid Markdown link target"),
         ("bf:///concepts/%20bad.md", "expected bf:///path"),
         ("bf://%00bad/concepts/x.md", "control characters"),
-        ("../.env", "configured note directories without dotfiles"),
-        ("../.env.local", "configured note directories without dotfiles"),
-        ("../.bf/events.jsonl", "configured note directories without dotfiles"),
-        ("../logs/events.jsonl", "configured note directories without dotfiles"),
-        ("bf:///logs/events.jsonl", "configured note directories without dotfiles"),
+        ("../.env", "non-private brain file without dotfiles"),
+        ("../.env.local", "non-private brain file without dotfiles"),
+        ("../.bf/events.jsonl", "non-private brain file without dotfiles"),
+        ("../logs/events.jsonl", "non-private brain file without dotfiles"),
+        ("bf:///logs/events.jsonl", "non-private brain file without dotfiles"),
+        ("../memories/gmail.jsonl", "non-private brain file without dotfiles"),
+        ("../Memories/gmail.jsonl", "non-private brain file without dotfiles"),
+        ("../usages/telemetry.jsonl", "non-private brain file without dotfiles"),
+        ("bf:///memories/gmail.jsonl", "non-private brain file without dotfiles"),
         ("bf://team-brain/.env", "invalid path in bf://"),
         ("bf://team-brain/logs/events.jsonl", "private or runtime paths"),
+        ("bf://team-brain/Logs/events.jsonl", "private or runtime paths"),
+        ("bf://team-brain/Memories/mail.jsonl", "private or runtime paths"),
+        ("bf://team-brain/usages/telemetry.jsonl", "private or runtime paths"),
+        ("bf://team-brain/Usages/telemetry.jsonl", "private or runtime paths"),
         ("javascript:alert(1)", "unsupported link scheme"),
         ("bf:concepts/x.md", "invalid bf:// URI"),
         ("bf://my-brain/concepts/x.md#", "empty # fragment"),

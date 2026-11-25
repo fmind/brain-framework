@@ -15,6 +15,7 @@ META_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*\Z")
 _SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):(.*)\Z")
 URL_SCHEMES = frozenset({"https", "http", "mailto", "urn"})
 _FORBIDDEN = frozenset({"javascript", "data", "file", "vbscript", "tel"})
+_PRIVATE_LINK_ROOTS = frozenset({"logs", "memories", "usages"})
 _CONTROL_OR_SPACE = re.compile(r"[\x00-\x1f\x7f-\x9f\s]")
 _DEFAULT_RESERVED = RESERVED_SOURCES | frozenset(DEFAULT_NOTES)
 
@@ -75,10 +76,19 @@ def is_record_ref(ref: str, reserved: frozenset[str] = _DEFAULT_RESERVED) -> boo
 
 
 def is_allowed_note_path(path: str, note_dirs: Iterable[str] = DEFAULT_NOTES) -> bool:
-    """Allowlist check: path must be normalized, dot-segment-free, and inside configured `note_dirs`."""
+    """Allowlist check: path must be normalized, dot-segment-free, and strictly inside configured `note_dirs`."""
     if not path or _bad_rel(path) or _has_dot_segment(path):
         return False
-    return path.split("/", 1)[0] in frozenset(note_dirs)
+    head, sep, _ = path.partition("/")
+    return bool(sep) and head in frozenset(note_dirs)
+
+
+def is_allowed_link_path(path: str, note_dirs: Iterable[str] = ()) -> bool:
+    """Allowlist check for same-brain file links: normalized, dot-segment-free, outside private/runtime roots."""
+    if not path or _bad_rel(path) or _has_dot_segment(path):
+        return False
+    head = path.split("/", 1)[0]
+    return head in frozenset(note_dirs) or head.lower() not in _PRIVATE_LINK_ROOTS
 
 
 def _normalize_note_path(src: str, raw_path: str, note_dirs: frozenset[str], *, relative_base: bool) -> str:
@@ -98,8 +108,8 @@ def _normalize_note_path(src: str, raw_path: str, note_dirs: frozenset[str], *, 
         if resolved == ".." or resolved.startswith("../"):
             raise Error(f"{src}: link leaves the brain")
         out = resolved
-    if not is_allowed_note_path(out, note_dirs):
-        raise Error(f"{src}: link target must be inside configured note directories without dotfiles")
+    if not is_allowed_link_path(out, note_dirs):
+        raise Error(f"{src}: link target must be a non-private brain file without dotfiles")
     return out
 
 
@@ -159,12 +169,14 @@ def record_link_problem(
     if kind == "brain":
         bad_brain = bad_ch or not target.startswith("bf://") or not models.NAME_RE.fullmatch(sib_host) or not sib_path
         sib_rec = is_record_ref(sib_path, RESERVED_SOURCES)
+        sib_head = sib_path.split("/", 1)[0]
         sib_note = (
             ":" not in sib_path
             and "?" not in sib_path
             and not _bad_rel(sib_path)
             and not _has_dot_segment(sib_path)
-            and sib_path.split("/", 1)[0] not in RESERVED_SOURCES
+            and sib_head not in RESERVED_SOURCES
+            and sib_head.lower() not in _PRIVATE_LINK_ROOTS
         )
         if bad_brain or not (sib_rec or sib_note):
             return f"cross-brain link {target!r} must use bf://<brain>/<ref>"
@@ -252,7 +264,8 @@ def parse_link(
                 raise Error(f"{source_path}: expected bf:///path or bf://brain/path")
             if _bad_rel(rest) or _has_dot_segment(rest):
                 raise Error(f"{source_path}: invalid path in bf:// URI")
-            if not is_local and rest.split("/", 1)[0] in RESERVED_SOURCES:
+            sib_head = rest.split("/", 1)[0]
+            if not is_local and (sib_head in RESERVED_SOURCES or sib_head.lower() in _PRIVATE_LINK_ROOTS):
                 raise Error(f"{source_path}: private or runtime paths are not allowed in links")
             canon = ""
         if is_local:

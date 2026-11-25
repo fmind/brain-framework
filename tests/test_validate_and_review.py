@@ -1033,3 +1033,48 @@ def test_validation_scale_warning_bool_drift_review_tz_and_anchor_oserror(
     rep_perm = engine.validate(store)
     assert not rep_perm["ok"]
     assert any("unreadable file" in p for p in rep_perm["problems"])
+
+
+def test_authored_note_links_to_tracked_repo_files_validate_while_bf_read_stays_confined(tmp_path: Path) -> None:
+    """Notes may link to non-private repo files (README.md, bf.yaml) while bf read and ingest stay note-dir confined."""
+    from bf import query as query_mod
+    from bf.models import InputError
+
+    engine.init_brain(tmp_path / "repo-brain", name="repo-brain")
+    store = Store(tmp_path / "repo-brain")
+    store.write("README.md", b"# Repo\n\n## Operations {#operations}\n\nDocs.\n")
+    store.write("skills/demo/SKILL.md", b"---\nname: demo\n---\n# Demo\n")
+    store.write(
+        "projects/main.md",
+        (
+            b"---\ntype: project\nstatus: active\nlinks:\n  - bf:///bf.yaml\n---\n\n# Main\n\n"
+            b"See [ops](../README.md#operations) and [skill](../skills/demo/SKILL.md).\n"
+        ),
+    )
+    built = engine.build(store)
+    assert built["ok"]
+    rep = engine.validate(store)
+    assert rep["ok"], rep["problems"]
+
+    # bf read remains strictly confined to configured note directories (including bare dir names).
+    store.write("concepts.md", b"# Root Decoy\n")
+    for denied in ("README.md", "bf:///bf.yaml", "skills/demo/SKILL.md", "bf:///concepts", "concepts?rel=x"):
+        with pytest.raises(InputError, match="only configured note directories are readable"):
+            query_mod.read_target(store, denied)
+
+    # Broken repo file targets, missing Markdown anchors, and symlinks are caught by bf check.
+    (store.root / "LINK.md").symlink_to(store.root / "README.md")
+    store.write(
+        "concepts/bad-repo-links.md",
+        (
+            b"---\ntype: concept\nstatus: draft\n---\n\n# Bad\n\n"
+            b"[miss](../MISSING.md) [anc](../README.md#nope) [sym](../LINK.md)\n"
+        ),
+    )
+    engine.build(store)
+    bad_rep = engine.validate(store)
+    joined = "\n".join(bad_rep["problems"])
+    assert not bad_rep["ok"]
+    assert "broken link to MISSING.md" in joined
+    assert "missing anchor #nope in README.md" in joined
+    assert "broken link to LINK.md" in joined
