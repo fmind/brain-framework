@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "UsageRecord",
-  "description": "Shared domain schema for token, FinOps, and prompt usage records in usages/*.jsonl.",
+  "description": "Optional domain schema for token, FinOps, and prompt telemetry records in memories/*.jsonl (referenced via ingest.schema: usages).",
   "type": "object",
   "additionalProperties": true,
   "properties": {

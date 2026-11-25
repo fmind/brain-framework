@@ -12,10 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bf import cli, engine, loops, query, records
+from bf import cli, engine, loops, query, records, state
 from bf.storage import Store
-
-OBJ_SCHEMA = b'{"type":"object"}\n'
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -71,8 +69,14 @@ def test_context_hub_walkthrough(tmp_path: Path) -> None:
     assert rev_before["stale"] == []
     assert rev_before["total_tasks_open"] == 1
 
-    jq_res = query.query(store, None, jq_expr=".source", limit=20)
-    assert dict(Counter(jq_res["items"])) == {"gcloud": 1, "github": 1, "jira": 1, "projects": 1, "workspace": 1}
+    all_res = query.query(store, None, kind="memory", limit=20)
+    assert dict(Counter(it["source"] for it in all_res["items"])) == {
+        "gcloud": 1,
+        "github": 1,
+        "jira": 1,
+        "workspace": 1,
+    }
+    assert query.query(store, "keyboard navigation")["engine"] == "fts5"
 
     shutil.copy2(hub / "fixtures" / "jira-done.json", hub / "fixtures" / "jira.json")
     done_out = subprocess.run(  # noqa: S603
@@ -120,21 +124,15 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     )
 
     now_ex = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
-    edges = query.query(
-        store, None, jq_expr='select(.kind == "note") | .links[]? | select(.meta.rel != null)', limit=50
-    )
-    assert edges["count"] >= 2
-
     wr = loops.run_loops(store, ("weekly-review",), now=now_ex)
     assert wr["ok"], wr
     assert wr["results"][0]["summary"]["records"] == 1
     ud = loops.run_loops(store, ("usage-demo",), now=now_ex)
     assert ud["ok"], ud
-    assert ud["results"][0]["summary"]["target"] == "usages"
-    assert query.query(store, "demo-model", kind="usage")["count"] == 1
+    assert query.query(store, None, rtype="session", scope="usage-demo")["count"] == 1
     assert engine.validate(store)["ok"]
 
-    local_state = b_root / ".bf" / "local"
+    local_state = b_root / ".bf" / "state" / "local"
     send_res = subprocess.run(  # noqa: S603
         [sys.executable, str(b_root / "routines" / "local.py"), "send"],
         cwd=b_root,
@@ -191,7 +189,7 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
         timeout=15,
         check=True,
     )
-    records.append_event(store, "loop.message", "local", json.loads(listen.stdout.strip()))
+    state.append_event(store, "loop.message", "local", json.loads(listen.stdout.strip()))
     bf_txt = store.read("bf.yaml").decode()
     bf_txt = bf_txt.replace(
         "      - event:\n          kind: loop.message\n          source: local\n    enabled: false",
@@ -201,7 +199,7 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     from bf import config as cfg_m
 
     ex_cfg = cfg_m.load(store)
-    a_argv, a_ing, _, _, a_timeout = loops.resolve_loop(store, ex_cfg.loops["assistant"], ex_cfg.reserved_sources)
+    a_argv, a_ing, _, _, a_timeout = cfg_m.resolve_loop(store, ex_cfg.loops["assistant"], ex_cfg.reserved_sources)
     assert a_argv == ("agents/assistant.py",)
     assert a_ing == ""
     assert a_timeout == 900
@@ -236,6 +234,7 @@ def test_example_brain_and_scale_benchmark(tmp_path: Path) -> None:
     summary = json.loads(bench.stdout)
     assert (summary["corpus"]["records"], summary["corpus"]["notes"]) == (20, 4)
     assert summary["notes_jsonl_bytes"] > 0
+    assert summary["index_sqlite_bytes"] > 0
 
 
 def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path: Path, provider: Any) -> None:
@@ -253,8 +252,6 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert not (brain_dir / ".agents").exists()
     assert not (brain_dir / "skills").exists()
     store = Store(brain_dir)
-    for src in ("agent-telemetry", "local-docs", "github-issues", "gmail", "git-history"):
-        store.write(f"schemas/{src}.json", OBJ_SCHEMA)
 
     # 1. agent-telemetry.py
     tel_dir = tmp_path / "telemetry"
@@ -301,8 +298,8 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert "[REDACTED]" in at.stdout
     assert "Old turn" not in at.stdout
     assert "Boundary turn" not in at.stdout
-    assert records.ingest(store, "agent-telemetry", at.stdout.encode(), target="usages")["added"] == 1
-    tel_rec = json.loads(store.read("usages/agent-telemetry.jsonl").decode().splitlines()[0])
+    assert records.ingest(store, "agent-telemetry", at.stdout.encode())["added"] == 1
+    tel_rec = json.loads(store.read("memories/agent-telemetry.jsonl").decode().splitlines()[0])
     assert tel_rec["harness"] == "claude"
     assert tel_rec["prompts"] >= 1
     assert tel_rec["session_id"].startswith("claude-")
@@ -323,15 +320,16 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     assert at_fail.returncode != 0
     assert at_fail.stdout == ""
 
-    # 2. local-documents.py
+    # 2. local-documents.py (no file:// URL emitted; ingests cleanly with native core validation)
     docs_dir = tmp_path / "docs"
     (docs_dir / "Project Notes").mkdir(parents=True)
     (docs_dir / "Project Notes" / "q4 plan.md").write_text("# Design Note\n\nKeep formats simple.\n")
     ld = provider.run("local-documents.py", "personal", str(docs_dir))
     assert ld.returncode == 0, ld.stderr
+    assert "file://" not in ld.stdout
     assert records.ingest(store, "local-docs", ld.stdout.encode(), mode="snapshot")["added"] == 1
 
-    # 3. github-issues.py
+    # 3. github-issues.py (rejects leading-dash / dotdot repo names)
     provider.install(
         "gh",
         [
@@ -341,7 +339,7 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
                     {
                         "number": 7,
                         "title": "Support attr_list (DB_PASSWORD=topsecretpw)",
-                        "body": "Use Python-Markdown.",
+                        "body": "Use CommonMark. https://:pwonlysecret@git.example.com/repo",
                         "state": "OPEN",
                         "url": "https://github.com/acme/demo/issues/7",
                         "author": {"login": "alice"},
@@ -349,7 +347,31 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
                         "labels": [{"name": "enhancement"}],
                         "createdAt": "2026-11-10T09:00:00Z",
                         "updatedAt": "2026-11-11T10:00:00Z",
-                    }
+                    },
+                    {
+                        "number": 8,
+                        "title": "Bad URL scheme and non-string URL",
+                        "body": "",
+                        "state": "OPEN",
+                        "url": "javascript:alert(1)",
+                        "author": {"login": "alice"},
+                        "assignees": [],
+                        "labels": [],
+                        "createdAt": "2026-11-10T09:00:00Z",
+                        "updatedAt": "2026-11-11T10:00:00Z",
+                    },
+                    {
+                        "number": 9,
+                        "title": "Non-string URL",
+                        "body": "",
+                        "state": "OPEN",
+                        "url": 12345,
+                        "author": {"login": "alice"},
+                        "assignees": [],
+                        "labels": [],
+                        "createdAt": "2026-11-10T09:00:00Z",
+                        "updatedAt": "2026-11-11T10:00:00Z",
+                    },
                 ],
             },
             {"match": ["issue", "list"], "code": 1, "stderr": "rate limit\n"},
@@ -358,11 +380,23 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
     ghi = provider.run("github-issues.py", "acme/demo", "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
     assert ghi.returncode == 0, ghi.stderr
     assert "topsecretpw" not in ghi.stdout
+    assert "pwonlysecret" not in ghi.stdout
+    assert "javascript:" not in ghi.stdout
     assert "[REDACTED]" in ghi.stdout
-    assert records.ingest(store, "github-issues", ghi.stdout.encode())["added"] == 1
+    ghi_recs = json.loads(ghi.stdout)
+    assert len(ghi_recs) == 3
+    assert "url" not in ghi_recs[1]
+    assert "url" not in ghi_recs[2]
+    assert records.ingest(store, "github-issues", ghi.stdout.encode())["added"] == 3
     ghi_fail = provider.run("github-issues.py", "acme/demo", "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z")
     assert ghi_fail.returncode != 0
     assert ghi_fail.stdout == ""
+    assert (
+        provider.run("github-issues.py", "-evil/repo", "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z").returncode != 0
+    )
+    assert (
+        provider.run("github-issues.py", "acme/..bad", "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z").returncode != 0
+    )
 
     # 4. gmail-headers.py
     ts_ms = str(int(datetime(2026, 11, 12, 10, 0, tzinfo=UTC).timestamp() * 1000))
@@ -473,6 +507,15 @@ def test_five_example_sensors_emit_schema_valid_records_and_fail_closed(tmp_path
         in provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z").stderr
     )
     shutil.rmtree(pack_repo)
+
+    rt_repo = repos_root / "escape-reftable"
+    (rt_repo / ".git" / "reftable").mkdir(parents=True)
+    (rt_repo / ".git" / "reftable" / "tables.list").symlink_to(tmp_path)
+    assert (
+        "symlinked git entry"
+        in provider.run("git-history.py", str(repos_root), "2026-11-01T00:00:00Z", "2026-11-15T00:00:00Z").stderr
+    )
+    shutil.rmtree(rt_repo)
 
     alt_repo = repos_root / "escape-alt"
     (alt_repo / ".git" / "objects" / "info").mkdir(parents=True)

@@ -19,16 +19,14 @@ Brain Framework depends on the following non-development Python distributions on
 
 License expressions come from the installed distribution metadata. Legal text is copied from the corresponding installed wheel files and formatted only as Markdown text blocks. The Brain Framework project itself is licensed separately in `LICENSE`.
 """
-# Reviewed expressions for distributions whose metadata declares no SPDX expression; metadata wins once it does.
-LICENSES: dict[str, str] = {}
 SOURCES = ("source", "source code", "repository", "github", "homepage", "home")
 # SPDX identifiers joined by operators, with optional parentheses; unbalanced parentheses are rejected separately.
 IDENTIFIER = r"[A-Za-z0-9.+-]+"
 SPDX = re.compile(rf"\(*{IDENTIFIER}\)*(?: (?:AND|OR|WITH) \(*{IDENTIFIER}\)*)*")
 # Reviewed licenses for distributed dependencies; trivy skips .venv, so a new license fails here until reviewed.
 PERMITTED = {"Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT", "MIT-0", "PSF-2.0"}
-# Reviewed code vendored inside a distribution, keyed by its folder: the component it adapts and that license.
-VENDORED: dict[str, tuple[str, str]] = {}
+# Reviewed unambiguous trove classifiers for wheels using PEP 621 `license = {file = ...}` without `License-Expression`.
+CLASSIFIER_SPDX = {"License :: OSI Approved :: MIT License": "MIT"}
 LEGAL = re.compile(r"(?:LICEN[CS]E|COPYING|NOTICE)[^/]*")
 # Site copies of the licenses in the locked Zensical distributions, keyed by their published name: since Zensical 0.1,
 # its theme (templates, icons and the browser bundle) ships as the separate zensical-ui distribution.
@@ -97,13 +95,17 @@ def permitted(name: str, value: str) -> str:
 
 
 def expression(name: str, distribution: metadata.Distribution) -> str:
-    # A declared expression is authoritative: never fall back past it to a reviewed or legacy value.
+    # A declared expression is authoritative: never fall back past it to a legacy value.
     declared = field(distribution, "License-Expression")
-    value = declared or LICENSES.get(name) or field(distribution, "License")
+    value = declared or field(distribution, "License")
+    if not value:
+        lic_cls = [c for c in (distribution.metadata.get_all("Classifier") or []) if c.startswith("License ::")]
+        if len(lic_cls) == 1 and lic_cls[0] in CLASSIFIER_SPDX:
+            value = CLASSIFIER_SPDX[lic_cls[0]]
     if not (SPDX.fullmatch(value) and value.count("(") == value.count(")")):
         if declared:
             raise SystemExit(f"{name}: review its License-Expression, which the SPDX pattern cannot parse")
-        raise SystemExit(f"{name}: no SPDX license expression; review its legal files and add one to LICENSES")
+        raise SystemExit(f"{name}: no SPDX license expression; review its legal files")
     return permitted(name, value)
 
 
@@ -124,24 +126,18 @@ def block(text: str) -> str:
 
 def notices() -> str:
     sections: list[str] = []
-    reviewed: set[str] = set()
     for distribution in closure():
         name = canonicalize_name(distribution.metadata["Name"])
         own, vendored = legal(distribution)
         if not own:
             raise SystemExit(f"{name}: no installed legal file")
+        if vendored:
+            folders = ", ".join(sorted({file.parent.as_posix() for file in vendored}))
+            raise SystemExit(f"{name}: review the code vendored in {folders}")
         section = f"## {name} {distribution.version}\n\nSource: <{source(name, distribution)}>\n\nLicense: `{expression(name, distribution)}`\n"
-        for folder in sorted({file.parent.as_posix() for file in vendored}):
-            if folder not in VENDORED:
-                raise SystemExit(f"{name}: review the code vendored in {folder}/ and add it to VENDORED")
-            component, spdx = VENDORED[folder]
-            reviewed.add(folder)
-            section += f"\nThe distribution vendors code adapted from {component} in `{folder}/`; its bundled `{permitted(name, spdx)}` license is included below.\n"
-        for file in own + vendored:
+        for file in own:
             section += f"\nEvidence: `{file}`\n\n### {file}\n\n{block(file.read_text(encoding='utf-8'))}"
         sections.append(section)
-    if stale := sorted(VENDORED.keys() - reviewed):
-        raise SystemExit(f"remove VENDORED entries without vendored legal files: {', '.join(stale)}")
     return "\n".join([INTRODUCTION, *sorted(sections, key=lambda text: text.partition("\n")[0].casefold())])
 
 
@@ -155,7 +151,9 @@ def site() -> tuple[str, dict[str, bytes]]:
             f"{SITE.name}: expected the Zensical, Zensical UI and browser bundle version rows, found {rows}"
         )
     return page, {
-        published: (found := distributions[name]).locate_file(installed.format(version=found.version)).read_bytes()
+        published: Path(
+            str((found := distributions[name]).locate_file(installed.format(version=found.version)))
+        ).read_bytes()
         for published, (name, installed) in BUNDLED.items()
     }
 

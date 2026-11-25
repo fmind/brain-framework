@@ -26,30 +26,27 @@ MAX_BYTES = 16 << 20
 MAX_REF = 8192
 TIMEOUT = 60
 FIELDS = "number,title,body,state,stateReason,author,assignees,labels,createdAt,updatedAt,closedAt,url"
-REPOSITORY = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+REPOSITORY = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
+TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
 IDENTITY = re.compile(r"[a-z][a-z0-9+.-]*:\S+")
-_PEM_TAG = r"[A-Z0-9 ]{0,32}PRIVATE KEY-----"
-_PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,16384}}"
+_PEM_TAG = r"[A-Z0-9 ]{0,40}(?:PRIVATE KEY|PRIVATE KEY BLOCK)-----"
+_PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,65536}}"
 _KV_KEY = (
-    r"(?i:(?<![A-Za-z0-9])(?:password|passwd|(?:client[_-]?)?secret(?:[_-]?access[_-]?key|[_-]?key)?"
-    r"|private[_-]?key|api[_-]?key"
-    r"|(?:access|refresh|auth|api|session|id|bot|private|gh|github|oauth|bearer)[_-]?token))"
+    r"(?i:(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]{1,128}(?:\\?[\"'])?\s*[:=])"
+    r"(?:(?:[A-Za-z0-9_-]{0,64}?(?:password|passwd|passphrase|secret|private[_-]?key|api[_-]?key"
+    r"|access[_-]?key|credential[s]?|authorization|cookie)(?:[_-][A-Za-z0-9_-]{1,64}+)?)"
+    r"|(?:(?:[A-Za-z0-9_-]{1,64}?[_-])?(?:token|jwt)))(?![A-Za-z0-9_-]))"
 )
-_KV_VAL = r'(?:\\?"[^"\r\n]{1,8192}"?|\\?\'[^\'\r\n]{1,8192}\'?|[^\s"\',;}{\]]{1,8192})'
+_KV_VAL = r'(?:\\?"(?:[^"\\\r\n]|\\.){1,8192}"?|\\?\'(?:[^\'\\\r\n]|\\.){1,8192}\'?|[^\s"\',;}{\]]{1,8192})'
 _SECRET_PATTERNS = re.compile(
-    r"(?:gh[pousr]_[A-Za-z0-9_]{20,}"
-    r"|github_pat_[A-Za-z0-9_]{20,}"
-    r"|AKIA[0-9A-Z]{16}"
-    r"|ASIA[0-9A-Z]{16}"
-    r"|AIza[0-9A-Za-z_-]{35}"
-    r"|ya29\.[A-Za-z0-9._-]{8,}"
-    r"|xox[baprs]-[0-9A-Za-z-]+"
-    r"|sk-[A-Za-z0-9_-]{20,}"
-    rf"|-----BEGIN {_PEM_TAG}{_PEM_BODY}(?:-----END {_PEM_TAG})?"
-    r"|(?<=://)[^/\s:@]{1,64}:[^/\s@]{1,128}(?=@)"
-    rf"|{_KV_KEY}(?:\\?[\"'])?\s*[:=]\s*{_KV_VAL}"
-    r"|(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{8,}|\bauthorization\s*[:=]\s*basic\s+[A-Za-z0-9+/=-]{8,}))"
+    r"(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"
+    r"|\b(?:proxy[_-]?)?authorization(?:\\?[\"'])?\s*[:=]\s*(?:\\?[\"'])?[A-Za-z0-9._-]+\s+[A-Za-z0-9._~+/=,-]{8,}(?:\\?[\"'])?"
+    r"|\b(?:set-)?cookie(?:\\?[\"'])?\s*[:=]\s*(?:\\?[\"'])?[^\r\n\"']{6,2048}(?:\\?[\"'])?)"
+    r"|(?<=://)[^/\s:@]{0,128}:[^/\s@]{1,4096}(?=@)"
+    r"|(?:gh[pousr]_|github_pat_|glpat-|AKIA|ASIA|AIza|ya29\.|sk-|sk_live_|sk_test_|rk_live_|whsec_|xox[baprs]-|npm_|pypi-|hf_)[A-Za-z0-9._-]{8,}"
+    r"|\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+    rf"|-----BEGIN {_PEM_TAG}{_PEM_BODY}(?:-----END {_PEM_TAG})?|{_KV_KEY}(?:\\?[\"'])?\s*[:=]\s*{_KV_VAL}"
 )
 
 
@@ -154,6 +151,7 @@ def reference(value: str) -> str:
         or len(value) > MAX_REF
         or any(c.isspace() for c in value)
         or CONTROL.search(value)
+        or not value.lower().startswith(("https://", "http://"))
         or not IDENTITY.fullmatch(value)
     ):
         return ""
@@ -263,9 +261,10 @@ def issue(repository: str, item: object, start: datetime, end: datetime) -> dict
         f"{repository}: {redact(title)}",
         item_type="Issue",
         # Issue bodies sometimes quote a pasted token: mask common credential shapes before saving.
-        text="\n".join(lines) + ("\n\n" + redact(body) if isinstance(body, str) and body else ""),
+        text="\n".join(lines)
+        + ("\n\n" + TEXT_CONTROL.sub(" ", redact(body)) if isinstance(body, str) and body else ""),
         time_value=created,
-        url=item.get("url") or "",
+        url=raw_url if isinstance(raw_url := item.get("url"), str) else "",
         attributes={
             "number": number,
             "kind": "issue",
@@ -278,7 +277,7 @@ def issue(repository: str, item: object, start: datetime, end: datetime) -> dict
 
 
 def collect(repository: str, start_arg: str, end_arg: str) -> list[dict[str, Any]]:
-    if not REPOSITORY.fullmatch(repository):
+    if not REPOSITORY.fullmatch(repository) or ".." in repository or repository.split("/", 1)[1].startswith("-"):
         raise InvalidError("repository must be OWNER/REPO")
     repo_name = repository.lower()  # gh accepts any case; keep repository ids lowercase
     start, end = datetime.fromisoformat(start_arg), datetime.fromisoformat(end_arg)
@@ -315,4 +314,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     main()

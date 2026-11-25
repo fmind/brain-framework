@@ -34,8 +34,8 @@ body:
   - type: textarea
     id: status
     attributes:
-      label: Review or validation output
-      description: Redacted output of `bf check` or `bf review`.
+      label: Status, review, or validation output
+      description: Redacted output of `bf status --format text`, `bf check`, or `bf review`.
       render: text
   - type: input
     id: version

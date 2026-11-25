@@ -1,11 +1,11 @@
-"""Tests for `loops.py`, `status.py`, and `watch.py`: ENV+stdin loops, `sensors/`/`routines/`/`agents/` conventions, JSONL logs, and watch."""
+"""Tests for v19 loops, least-privilege env_from, per-loop locks, dead-letter caps, status, and zero-dep headless watch."""
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -17,25 +17,21 @@ from typing import Any
 
 import pytest
 
-from bf import cli, config, engine, loops, models, proc, records, status, watch
-from bf.models import FORMAT, Error, InputError, decode
-from bf.storage import Store, private_dir
-
-OBJ_SCHEMA = b'{"type":"object"}\n'
+from bf import config, cron, engine, index, loops, models, proc, records, render, state, status, watch
+from bf.models import FORMAT, NOTES_FILE, Error, InputError
+from bf.storage import Store, loop_lock, private_dir
 
 
 def _load_jsonl(store: Store, path: str) -> list[dict[str, Any]]:
     return [rec for _, rec in records.iter_jsonl(store, path)]
 
 
-def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Path) -> None:
+def test_loops_schedules_events_where_convention_daemons_emit_and_timeout(tmp_path: Path) -> None:
     root = tmp_path / "orch-brain"
     engine.init_brain(root, name="orch")
     store = Store(root)
     for sub in ("sensors", "services", "routines", "prompts"):
         (root / sub).mkdir(exist_ok=True)
-    for src in ("feed", "conv-sensor", "rel-script"):
-        store.write(f"schemas/{src}.json", OBJ_SCHEMA)
 
     (root / "sensors" / "feed.py").write_text(
         "import json, os\nprint(json.dumps([{'id': 'f1', 'title': 'Feed item', 'text': os.environ['BF_START']}]))\n"
@@ -50,12 +46,12 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
     )
     (root / "routines" / "fake_harness.py").write_text(
         "import json, os, pathlib, sys\n"
-        "ctx = json.loads(sys.stdin.read())\n"
+        "raw = sys.stdin.read()\n"
+        "evs = [json.loads(ln) for ln in raw.splitlines() if ln.strip()]\n"
         "prompt_path = sys.argv[1]\n"
-        "assert ctx['loop'] == os.environ['BF_LOOP'] and os.environ['BF_STATE'].endswith(ctx['loop'])\n"
-        "assert ctx['trigger'] == os.environ['BF_TRIGGER'] and ctx['run'] == os.environ['BF_RUN']\n"
+        "assert os.environ['BF_STATE'].endswith(os.environ['BF_LOOP'])\n"
         "assert pathlib.Path(prompt_path).read_text().startswith('# ')\n"
-        "out = {'trigger': ctx['trigger'], 'events': len(ctx['events']), 'prompt': pathlib.Path(prompt_path).name}\n"
+        "out = {'trigger': os.environ['BF_TRIGGER'], 'events': len(evs), 'prompt': pathlib.Path(prompt_path).name}\n"
         "open('services/sent.jsonl', 'a').write(json.dumps(out) + '\\n')\n"
         "print(json.dumps(out))\n"
     )
@@ -78,9 +74,11 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
         "  feed:\n"
         "    description: Ingest sample feed.\n"
         "    when: 1h\n"
+        "    ingest: upsert\n"
         "    window:\n      backfill: 1d\n      overlap: 10m\n"
         "  conv-sensor:\n"
-        "    description: Convention auto-ingest sensor.\n"
+        "    description: Convention sensor with explicit ingest.\n"
+        "    ingest: upsert\n"
         "  no-script:\n"
         "    enabled: false\n"
         "  rebuild:\n"
@@ -90,19 +88,17 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
         "    when:\n      - 1d\n      - '0 8 * * 0'\n"
         f"    run: [{sys.executable!r}, routines/fake_harness.py, prompts/digest.md]\n"
         "  assistant:\n"
-        "    when:\n      - event:\n          kind: loop.message\n          source: chat\n          filter: '.data.direct == true'\n"
+        "    when:\n      - event:\n          kind: loop.message\n          source: chat\n          where:\n            data.direct: true\n"
         f"    run: [{sys.executable!r}, routines/fake_harness.py, prompts/reply.md]\n"
         "  ev-emitter:\n"
         f"    run: [{sys.executable!r}, routines/emit_events.py]\n"
         "    emit: loop.event\n"
-        "    enabled: false\n"
         "  delegated:\n"
         "    when:\n      - event:\n          kind: task.delegate\n          source: ev-emitter\n"
         f"    run: [{sys.executable!r}, -c, 'print(\"delegated-ok\")']\n"
         "  slow:\n"
         f"    run: [{sys.executable!r}, routines/slow.py]\n"
         "    timeout: 1s\n"
-        "    enabled: false\n"
         "  chat:\n"
         "    when: daemon\n"
         f"    run: [{sys.executable!r}, services/mock_chat.py]\n"
@@ -114,7 +110,7 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
     dry = loops.run_loops(store, ("feed",), dry_run=True, now=t0)
     assert dry["results"][0]["status"] == "dry_run"
 
-    # Convention `sensors/<name>.py` auto-discovers AND implies `ingest: upsert`!
+    # Convention `sensors/<name>.py` locates the script when `run:` is omitted (`ingest:` is declared explicitly).
     conv_res = loops.run_loops(store, ("conv-sensor",), now=t0)
     assert conv_res["ok"]
     assert _load_jsonl(store, records.memory_file("conv-sensor"))[0]["id"] == "c1"
@@ -124,10 +120,10 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
     all_dry = loops.run_loops(store, all_loops=True, dry_run=True, now=t0)
     assert "feed" in [r["loop"] for r in all_dry["results"]]
     assert "chat" not in [r["loop"] for r in all_dry["results"]]
-    assert "slow" not in [r["loop"] for r in all_dry["results"]]
-    with pytest.raises(InputError, match="matched no enabled cycle loops"):
+    assert "no-script" not in [r["loop"] for r in all_dry["results"]]
+    with pytest.raises(InputError, match="matched no matching loops"):
         loops.run_loops(store, ("zzz-*",), now=t0)
-    with pytest.raises(Error, match="no script found in sensors/"):
+    with pytest.raises(InputError, match="is disabled"):
         loops.run_loops(store, ("no-script",), now=t0)
 
     # `bf run` selector guards, daemon rejection, and `-- EXTRA_ARGS` checks.
@@ -144,12 +140,18 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
     with pytest.raises(InputError, match="require a single loop"):
         loops.run_loops(store, ("feed", "brief"), extra_args=("--x",), now=t0)
 
-    # `due_only=True` rebuilds dirty notes first before evaluating scheduled/event-triggered loops!
+    # First-time event-driven loops anchor their cursor at current `latest_event_seq()` before events arrive!
+    # Anchor `rebuild`, `assistant`, and `delegated` by running `due_only=True` at `t0`:
+    # - `bf run --due` does NOT implicitly rebuild dirty notes!
+    # - `brief` fires ONCE and advances BOTH due schedules (`every:86400` and `cron:0 8 * * 0`)!
     store.write("concepts/dirty-due.md", b"---\ntype: guide\nstatus: draft\n---\n\n# Dirty Before Due\n")
+    # Pre-initialize event loop cursors at current seq so upcoming events trigger them cleanly.
+    loops.reset_loops(store, ("rebuild", "assistant", "delegated"))
     due1 = loops.run_loops(store, due_only=True, now=t0)
     assert due1["ok"], due1
     assert [r["loop"] for r in due1["results"]] == ["feed", "brief"]
-    assert "concepts/dirty-due.md" in store.read("memories/concepts.jsonl").decode()
+    assert "concepts/dirty-due.md" not in store.read(NOTES_FILE).decode()
+    assert set(loops.load_unit_state(store, "brief")["schedule_last"]) == {"every:86400", "cron:0 8 * * 0"}
     feed_saved = _load_jsonl(store, records.memory_file("feed"))[0]
     assert feed_saved["id"] == "f1"
     assert feed_saved["text"] == "2026-11-14T09:00:00Z"
@@ -160,39 +162,43 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
     feed_ov = _load_jsonl(store, records.memory_file("feed"))[0]
     assert feed_ov["text"] == "2026-11-15T08:50:00Z"
 
-    # Next tick 5 minutes later: `rebuild` triggers on `records.ingested` and `brief`'s 2nd schedule trigger fires independently!
+    # Next tick 5 minutes later: `rebuild` triggers on `records.ingested` (and rebuilds `concepts/dirty-due.md`), while `brief` already advanced both schedules!
     t1 = t0 + timedelta(minutes=5)
     due2 = loops.run_loops(store, due_only=True, now=t1)
     assert due2["ok"], due2
-    assert [r["loop"] for r in due2["results"]] == ["rebuild", "brief"]
-    assert set(loops.load_unit_state(store, "brief")["schedule_last"]) == {"every:1d", "cron:0 8 * * 0"}
+    assert [r["loop"] for r in due2["results"]] == ["rebuild"]
+    assert "concepts/dirty-due.md" in store.read(NOTES_FILE).decode()
 
     # Third tick 5 minutes later: cursors advanced, nothing due!
     due3 = loops.run_loops(store, due_only=True, now=t1 + timedelta(minutes=5))
     assert due3["results"] == []
 
-    # Cycle loop with `emit: loop.event` publishes JSONL events into `logs/events.jsonl` that wake downstream `delegated`!
+    # Cycle loop with `emit: loop.event` publishes JSONL events into `.bf/state/events.jsonl` that wake downstream `delegated`!
     ev_res = loops.run_loops(store, ("ev-emitter",), now=t1)
     assert ev_res["ok"]
     assert ev_res["results"][0]["summary"] == {"emitted": 2}
-    assert (root / "logs" / "events.jsonl").is_file()
+    assert (root / ".bf" / "state" / state.EVENTS_FILE).is_file()
+    assert not (root / "logs" / "events.jsonl").exists()
     del_res = loops.run_loops(store, due_only=True, now=t1 + timedelta(minutes=6))
     assert [r["loop"] for r in del_res["results"]] == ["delegated"]
     assert del_res["ok"]
 
     # Invalid emitted output fails atomically with zero partial commits.
-    seq_before = records.latest_event_seq(store)
+    seq_before = state.latest_event_seq(store)
     with pytest.raises(Error, match="must be a JSON object"):
-        records.emit_output_events(store, "ev-emitter", "loop.event", b'{"kind":"ok.ev","id":"p0"}\n[1,2]\n')
-    assert records.latest_event_seq(store) == seq_before
+        state.emit_output_events(store, "ev-emitter", "loop.event", b'{"kind":"ok.ev","id":"p0"}\n[1,2]\n')
+    assert state.latest_event_seq(store) == seq_before
     with pytest.raises(Error, match="event kind must be a string"):
-        records.emit_output_events(store, "ev-emitter", "loop.event", b'{"kind":123}\n')
-    assert records.latest_event_seq(store) == seq_before
+        state.emit_output_events(store, "ev-emitter", "loop.event", b'{"kind":123}\n')
+    assert state.latest_event_seq(store) == seq_before
     with pytest.raises(Error, match="exceeds"):
-        records.emit_output_events(store, "ev-emitter", "loop.event", b"x" * (models.MAX_BATCH + 1))
+        state.emit_output_events(store, "ev-emitter", "loop.event", b"x" * (state.MAX_EMIT_BATCH + 1))
 
-    # Reactive `loops.assistant` triggered via `run_loops(due_only=True)` on `loop.message`!
-    records.append_event(
+    # Reactive `loops.assistant` triggered via `run_loops(due_only=True)` on `loop.message` matching `where: {data.direct: true}`!
+    state.append_event(
+        store, "loop.message", "chat", {"id": "ev-msg-ignored", "text": "noise", "direct": False}, now=t1
+    )
+    state.append_event(
         store,
         "loop.message",
         "chat",
@@ -204,8 +210,10 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
     assert tick_out["ok"]
     sent_after_lines = [json.loads(ln) for ln in (root / "services" / "sent.jsonl").read_text().splitlines()]
     assert any(m == {"trigger": "event", "events": 1, "prompt": "reply.md"} for m in sent_after_lines)
+    # Scheduled run received empty stdin (0 events)!
+    assert any(m == {"trigger": "schedule", "events": 0, "prompt": "digest.md"} for m in sent_after_lines)
 
-    # `DaemonStream` captures JSON line output from `loops.chat` into `logs/events.jsonl`!
+    # `DaemonStream` captures JSON line output from `loops.chat` into `.bf/state/events.jsonl`!
     cfg = config.load(store)
     stop_ev, wake_ev = threading.Event(), threading.Event()
     daemon = watch.DaemonStream(store, cfg.loops["chat"], stop_ev, wake_ev)
@@ -213,53 +221,34 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
     assert wake_ev.wait(timeout=5.0)
     stop_ev.set()
     daemon.terminate()
-    ev_items, _ = records.read_events(store)
-    assert not (root / ".bf" / "state").exists()
-    assert not (root / ".bf" / "locks").exists()
+    ev_items, _ = state.read_events(store)
     assert any(
         ev["kind"] == "loop.message" and ev["source"] == "chat" and ev["data"].get("text") == "ping from chat"
         for ev in ev_items
     )
 
-    # Timeout reaps slow process group and records failure in `.bf/slow.json`; `status_summary` includes `counts` + `attention`!
+    # Timeout reaps slow process group and records failure in `.bf/state/slow.json`; `status_summary` includes `counts` + `attention`!
     slow_res = loops.run_loops(store, ("slow",), now=t1)
     assert not slow_res["ok"]
     assert slow_res["results"][0]["exit_code"] == 124
     assert "timed out" in slow_res["results"][0]["error"]
-    st_sum = status.status_summary(store)
-    assert st_sum["ok"]
+    st_sum = status.status_summary(store, now=t1)
+    assert not st_sum["ok"]  # slow is enabled and failed!
     assert st_sum["description"] == "Orchestration test brain."
-    assert set(st_sum["counts"]) == {"notes", "records", "usages", "sources", "loops"}
+    assert set(st_sum["counts"]) == {"notes", "memories", "sources", "loops"}
     assert st_sum["counts"]["notes"] >= 2
-    st_all = status.status_summary(store, all_units=True)
+    st_all = status.status_summary(store, include_loops=True, now=t1)
     assert st_sum["counts"]["loops"] == len(st_all["loops"])
     assert st_all["loops"]["feed"]["description"] == "Ingest sample feed."
     assert st_all["loops"]["feed"]["ingest_mode"] == "upsert"
-    assert st_sum["attention"] == []
-    assert st_sum["orphaned_states"] == []
     assert "loops" not in st_sum
 
     # Bird's-eye status text table renders cleanly with zero external UI deps!
-    rendered = status.format_status_text(status.status_summary(store, all_units=True))
+    rendered = render.format_status_text(st_all, now=t1)
     assert "orch" in rendered
     assert "daemon (loop.message)" in rendered
     assert "2 schedules" in rendered
-    assert "3 disabled" in rendered
-
-    # Non-TTY `watch.serve` automatically emits JSONL lines and rebuilds live edits!
-    serve_stop = threading.Event()
-    serve_thread = threading.Thread(target=lambda: watch.serve(store, stop_event=serve_stop), daemon=True)
-    serve_thread.start()
-    deadline = time.monotonic() + 8.0
-    step = 0
-    while time.monotonic() < deadline and "concepts/live-edit.md" not in store.read("memories/concepts.jsonl").decode():
-        if step % 12 == 2:
-            store.write("concepts/live-edit.md", b"---\ntype: guide\nstatus: stable\n---\n# Live Edit\n")
-        step += 1
-        time.sleep(0.05)
-    serve_stop.set()
-    serve_thread.join(timeout=5)
-    assert "concepts/live-edit.md" in store.read("memories/concepts.jsonl").decode()
+    assert "1 disabled" in rendered
 
     # Builtin `review`/`check`, relative script executable (`ingest: snapshot`), failed loop attention!
     rel_exec = root / "routines" / "exec_rel.py"
@@ -284,14 +273,13 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
     pf_res = loops.run_loops(store, ("exit-fail",), now=t1)
     assert not pf_res["ok"]
     assert "exit code 2" in pf_res["results"][0]["error"]
-    st_fail = status.status_summary(store)
+    st_fail = status.status_summary(store, now=t1)
     assert not st_fail["ok"]
     assert {
-        "kind": "loop",
-        "mode": "cycle",
         "name": "exit-fail",
+        "mode": "cycle",
+        "reason": "failed",
         "status": "failed",
-        "failed": True,
         "consecutive_failures": 1,
         "error": "exit code 2",
     } in st_fail["attention"]
@@ -304,7 +292,7 @@ def test_loops_schedules_events_convention_daemons_emit_and_timeout(tmp_path: Pa
             bad_call()
 
 
-def test_concurrency_nonblocking_watch_adaptive_delay_and_multi_schedule(tmp_path: Path) -> None:
+def test_concurrency_per_loop_locks_dead_letter_and_where_predicates(tmp_path: Path) -> None:
     root = tmp_path / "conc"
     engine.init_brain(root, name="conc")
     store = Store(root)
@@ -330,25 +318,87 @@ def test_concurrency_nonblocking_watch_adaptive_delay_and_multi_schedule(tmp_pat
     assert res["ok"]
     assert [r["loop"] for r in res["results"]] == ["a", "b", "c"]
 
+    # Pure-Python `match_event_where` covers exact (strict bool vs int), `in`, `exists`, and `prefix`!
+    ev_sample = {"kind": "x", "source": "s", "data": {"flag": True, "n": 1, "role": "admin-eu", "nested": {"k": "v"}}}
+    assert loops.match_event_where(ev_sample, {"data.flag": True, "data.n": 1}) is True
+    assert loops.match_event_where(ev_sample, {"data.flag": 1}) is False  # strict bool != int
+    assert loops.match_event_where(ev_sample, {"data.n": True}) is False
+    assert loops.match_event_where(ev_sample, {"data.role": {"prefix": "admin-"}}) is True
+    assert loops.match_event_where(ev_sample, {"data.role": {"prefix": "user-"}}) is False
+    assert loops.match_event_where(ev_sample, {"data.n": {"in": [0, 1, 2]}}) is True
+    assert loops.match_event_where(ev_sample, {"data.n": {"in": [True, 2]}}) is False
+    assert loops.match_event_where(ev_sample, {"data.nested.k": {"exists": True}}) is True
+    assert loops.match_event_where(ev_sample, {"data.missing": {"exists": False}}) is True
+    assert loops.match_event_where(ev_sample, {"data.missing": {"exists": True}}) is False
+
+    # Per-loop lock `.bf/locks/loop-<name>.lock` rejects overlapping execution of the SAME loop cleanly (`BusyError` / `"busy"`).
+    (root / "routines" / "hold.py").write_text(
+        "import pathlib, time\npathlib.Path('routines/hold.up').write_text('1')\ntime.sleep(30)\n"
+    )
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: conc\nloops:\n"
+        f"  hold:\n    when: 1s\n    run: [{sys.executable!r}, routines/hold.py]\n".encode(),
+    )
+    stop_hold = threading.Event()
+    t_hold = threading.Thread(target=lambda: loops.run_loops(store, ("hold",), stop_event=stop_hold), daemon=True)
+    t_hold.start()
+    try:
+        dl = time.monotonic() + 5.0
+        while time.monotonic() < dl and not (root / "routines" / "hold.up").exists():
+            time.sleep(0.02)
+        assert (root / "routines" / "hold.up").exists()
+        with pytest.raises(models.BusyError, match="already running"):
+            loops.run_loops(store, ("hold",))
+        due_busy = loops.run_loops(store, due_only=True)
+        assert due_busy["ok"] is True
+        assert due_busy["results"][0]["status"] == "busy"
+    finally:
+        stop_hold.set()
+        t_hold.join(timeout=5.0)
+
+    # 3-retry poison-pill dead-letter cap advances `event_seq` past the poison event on the 3rd event failure!
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: conc\nloops:\n"
+        f"  poison:\n    when:\n      event: bad.ev\n    run: [{sys.executable!r}, -c, 'import sys; sys.exit(1)']\n".encode(),
+    )
+    loops.reset_loops(store, ("poison",))
+    ev_bad, _ = state.append_event(store, "bad.ev", "test", {"id": "p1"})
+    t_base = datetime(2026, 11, 16, 10, 0, tzinfo=UTC)
+    for attempt in range(1, 4):
+        tick_t = t_base + timedelta(minutes=attempt * 30)
+        r = loops.run_loops(store, due_only=True, now=tick_t)
+        assert r["ran"] == 1
+        assert not r["ok"]
+        st_p = loops.load_unit_state(store, "poison")
+        if attempt < 3:
+            assert st_p["event_seq"] < ev_bad["seq"]
+            assert st_p["event_failures"] == attempt
+        else:
+            assert st_p["event_seq"] >= ev_bad["seq"]
+            assert st_p["event_failures"] == 0
+            assert "dead_letter_seq" in store.read("logs/poison.jsonl").decode()
+    # 4th tick does NOT re-run the dead-lettered event!
+    assert loops.run_loops(store, due_only=True, now=t_base + timedelta(hours=5))["ran"] == 0
+
     # Adaptive `next_due_delay`: clamps to [0.5, 60.0], respects interval, cron, and failure backoff!
-    cfg_conc = config.load(store)
     now_d = datetime(2026, 11, 16, 7, 59, 40, tzinfo=UTC)
-    assert watch.next_due_delay(store, cfg_conc, now_d) == 60.0
     cron_cfg = config.Config(
         name="conc",
         loops={
             "c": config.LoopSpec(
                 name="c", run=("echo",), schedules=(config.ScheduleSpec("cron:0 8 * * *", cron="0 8 * * *"),)
             ),
-            "e": config.LoopSpec(name="e", run=("echo",), schedules=(config.ScheduleSpec("every:30s", every=30),)),
-            "f": config.LoopSpec(name="f", run=("echo",), schedules=(config.ScheduleSpec("every:5m", every=300),)),
+            "e": config.LoopSpec(name="e", run=("echo",), schedules=(config.ScheduleSpec("every:30", every=30),)),
+            "f": config.LoopSpec(name="f", run=("echo",), schedules=(config.ScheduleSpec("every:300", every=300),)),
         },
     )
     loops.save_unit_state(
         store, {**loops.load_unit_state(store, "c"), "schedule_last": {"cron:0 8 * * *": "2026-11-15T08:00:00Z"}}
     )
     loops.save_unit_state(
-        store, {**loops.load_unit_state(store, "e"), "schedule_last": {"every:30s": "2026-11-16T07:59:25Z"}}
+        store, {**loops.load_unit_state(store, "e"), "schedule_last": {"every:30": "2026-11-16T07:59:25Z"}}
     )
     loops.save_unit_state(
         store,
@@ -360,144 +410,10 @@ def test_concurrency_nonblocking_watch_adaptive_delay_and_multi_schedule(tmp_pat
         },
     )
     assert 10.0 <= watch.next_due_delay(store, cron_cfg, now_d) <= 20.0
-    # Overdue cron returns 0.5 immediately instead of sleeping for the next cycle!
     assert watch.next_due_delay(store, cron_cfg, datetime(2026, 11, 16, 8, 0, 5, tzinfo=UTC)) == 0.5
-    with pytest.raises(Error, match="reserved"):
-        loops.resolve_loop(
-            store, config.LoopSpec(name="concepts", run=("sensors/concepts.py",)), cfg_conc.reserved_sources
-        )
-
-    # Bounded concurrency upper bound: `concurrency: 2` with 4 due loops never exceeds 2 active at once.
-    (root / "routines" / "cap.py").write_text(
-        "import fcntl, json, pathlib, sys, time\n"
-        "p = pathlib.Path('routines/cap.state')\n"
-        "lk = pathlib.Path('routines/cap.lock').open('w')\n"
-        "def bump(delta):\n"
-        "    fcntl.flock(lk, fcntl.LOCK_EX)\n"
-        "    st = json.loads(p.read_text()) if p.exists() else {'cur': 0, 'peak': 0, 'seen': 0}\n"
-        "    st['cur'] += delta\n"
-        "    st['peak'] = max(st['peak'], st['cur'])\n"
-        "    if delta > 0:\n"
-        "        st['seen'] += 1\n"
-        "    p.write_text(json.dumps(st))\n"
-        "    fcntl.flock(lk, fcntl.LOCK_UN)\n"
-        "    return st['peak']\n"
-        "bump(1)\n"
-        "dl = time.monotonic() + 5.0\n"
-        "while time.monotonic() < dl:\n"
-        "    if bump(0) >= 2:\n"
-        "        break\n"
-        "    time.sleep(0.01)\n"
-        "time.sleep(0.05)\n"
-        "bump(-1)\n"
-    )
-    cap_loops = "".join(
-        f"  c{i}:\n    when: 1h\n    run: [{sys.executable!r}, routines/cap.py, c{i}]\n" for i in range(4)
-    )
-    store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: conc\nconcurrency: 2\nloops:\n{cap_loops}".encode(),
-    )
-    cap_res = loops.run_loops(store, due_only=True)
-    assert cap_res["ok"]
-    assert cap_res["ran"] == 4
-    cap_stat = json.loads((root / "routines" / "cap.state").read_text())
-    assert cap_stat["peak"] == 2
-
-    # Non-blocking `watch.serve` + per-loop single-flight: slow loop runs once despite repeated wakeups, never blocks fast-ev.
-    (root / "routines" / "slow_bg.py").write_text(
-        "import os, pathlib, time\n"
-        "with pathlib.Path('routines/slow.pids').open('a') as fh:\n"
-        "    fh.write(f'{os.getpid()}\\n')\n"
-        "time.sleep(10)\n"
-    )
-    (root / "routines" / "fast_ev.py").write_text(
-        "import pathlib\npathlib.Path('routines/fast.done').write_text('1')\n"
-    )
-    store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: conc\nconcurrency: 2\nloops:\n"
-        f"  slow-bg:\n    when:\n      - 1s\n      - event: poke.slow\n    run: [{sys.executable!r}, routines/slow_bg.py]\n"
-        f"  fast-ev:\n    when:\n      event: wake.now\n    run: [{sys.executable!r}, routines/fast_ev.py]\n".encode(),
-    )
-    stop_w = threading.Event()
-    wt = threading.Thread(target=lambda: watch.serve(store, fmt="jsonl", stop_event=stop_w), daemon=True)
-    wt.start()
-    try:
-        dl = time.monotonic() + 5.0
-        while time.monotonic() < dl and not (root / "routines" / "slow.pids").exists():
-            time.sleep(0.02)
-        assert (root / "routines" / "slow.pids").exists()
-        records.append_event(store, "poke.slow", "test", {"id": "p1"})
-        records.append_event(store, "wake.now", "test", {"id": "w1"})
-        dl2 = time.monotonic() + 5.0
-        while time.monotonic() < dl2 and not (root / "routines" / "fast.done").exists():
-            time.sleep(0.02)
-        assert (root / "routines" / "fast.done").exists()
-        assert len((root / "routines" / "slow.pids").read_text().splitlines()) == 1
-    finally:
-        stop_w.set()
-        wt.join(timeout=6.0)
-        assert not wt.is_alive()
-
-    # Multi-schedule per-trigger `schedule_last`, widest-backfill tie-breaker, and per-trigger `backfill`/`overlap: 0`!
-    s_hour = config.ScheduleSpec("every:1h", every=3600, backfill=7200, overlap=300)
-    s_day = config.ScheduleSpec("cron:30 7 * * 1", cron="30 7 * * 1", backfill=604_800, overlap=0)
-    multi = config.LoopSpec(name="work", run=("echo",), schedules=(s_hour, s_day))
-    mon_0731 = datetime(2026, 11, 16, 7, 31, tzinfo=UTC)
-    assert config.due_schedule(multi, {"schedule_last": {}}, mon_0731) == s_day
-    assert config.due_schedule(multi, {"schedule_last": {"every:1h": "2026-11-16T07:15:00Z"}}, mon_0731) == s_day
-    assert (
-        config.due_schedule(
-            multi,
-            {"schedule_last": {"every:1h": "2026-11-16T07:31:00Z", "cron:30 7 * * 1": "2026-11-16T07:31:00Z"}},
-            mon_0731 + timedelta(minutes=10),
-        )
-        is None
-    )
-
-    # Execute per-trigger `backfill`, per-trigger `overlap: 0` overriding loop `window.overlap: 10m`, and `started_iso` anchor!
-    (root / "routines" / "echo_win.py").write_text(
-        "import json, os, pathlib\n"
-        "pathlib.Path('routines/win.log').open('a').write(os.environ['BF_START'] + '|' + os.environ['BF_END'] + '\\n')\n"
-        "print(json.dumps({'ok': True}))\n"
-    )
-    store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: conc\nloops:\n"
-        "  win-test:\n"
-        "    window:\n      backfill: 1d\n      overlap: 10m\n"
-        "    when:\n"
-        "      - every: 1h\n        backfill: 2h\n        overlap: 0\n"
-        "      - cron: '30 7 * * 1'\n        backfill: 1w\n        overlap: 5m\n"
-        f"    run: [{sys.executable!r}, routines/echo_win.py]\n".encode(),
-    )
-    t_m0 = datetime(2026, 11, 16, 7, 31, tzinfo=UTC)
-    assert loops.run_loops(store, due_only=True, now=t_m0)["ok"]
-    assert loops.run_loops(store, due_only=True, now=t_m0 + timedelta(minutes=1))["ok"]
-    assert loops.run_loops(store, due_only=True, now=t_m0 + timedelta(hours=1, minutes=1))["ok"]
-    win_lines = (root / "routines" / "win.log").read_text().splitlines()
-    assert win_lines == [
-        "2026-11-09T07:31:00Z|2026-11-16T07:31:00Z",
-        "2026-11-16T05:32:00Z|2026-11-16T07:32:00Z",
-        "2026-11-16T07:32:00Z|2026-11-16T08:32:00Z",
-    ]
-    (root / "routines" / "nap.py").write_text(
-        "import os, pathlib, time\n"
-        "pathlib.Path('routines/nap.end').write_text(os.environ['BF_END'])\n"
-        "time.sleep(1.05)\n"
-    )
-    nap_spec = config.LoopSpec(
-        name="nap", run=(sys.executable, "routines/nap.py"), schedules=(config.ScheduleSpec("every:1h", every=3600),)
-    )
-    nap_res = loops.execute_one_loop(store, nap_spec, trigger="schedule", schedule=nap_spec.schedules[0])
-    assert nap_res["status"] == "ok"
-    nap_st = loops.load_unit_state(store, "nap")
-    assert nap_st["schedule_last"]["every:1h"] == (root / "routines" / "nap.end").read_text()
-    assert nap_st["last_end"] > nap_st["last_start"]
 
 
-def test_failure_backoff_dotenv_env_map_and_dedupe(
+def test_env_from_least_privilege_secret_redaction_and_backoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root = tmp_path / "resilient"
@@ -505,12 +421,10 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
     store = Store(root)
     for sub in ("routines", "services"):
         (root / sub).mkdir(exist_ok=True)
-    for src in ("warn-ok", "loop-override"):
-        store.write(f"schemas/{src}.json", OBJ_SCHEMA)
-    (root / "routines" / "warn_ok.py").write_text(
+    (root / "routines" / "env_probe.py").write_text(
         "import json, os, sys\n"
         "sys.stderr.write('Skipped feed x\\n')\n"
-        "keys = ('GWS_DIR', 'BASE_ONLY', 'GH_TOKEN', 'LOCAL_SECRET', 'LIT_ENV', 'UNALLOW_HOST', 'BF_BRAIN')\n"
+        "keys = ('GWS_DIR', 'BASE_ONLY', 'GH_TOKEN', 'LOCAL_SECRET', 'UNLISTED_DOTENV', 'UNALLOW_HOST', 'BLANKED', 'BF_BRAIN')\n"
         "val = '|'.join(os.environ.get(k, '') for k in keys)\n"
         "print(json.dumps([{'id': 'w1', 'title': val}]))\n"
     )
@@ -522,72 +436,85 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
     )
     store.write(
         ".env",
-        b"LOCAL_SECRET=from-dotenv\nGWS_DIR=override-gws\nLOOP_KEY=from-dotenv\nLIT_ENV=raw-val\n",
+        b"LOCAL_SECRET=dotenv_secret_val\nUNLISTED_DOTENV=must_never_leak\nGH_TOKEN=gh_from_dotenv\n",
         mode=0o600,
     )
     store.write(
         "bf.yaml",
         f"version: {FORMAT}\nname: resilient\n"
-        "env:\n  GWS_DIR: /base/gws\n  BASE_ONLY: /base/only\n  GH_TOKEN: from-yaml\n  LOCAL_SECRET: default-val\n  LOOP_ONLY: from-base\n"
+        "env:\n  GWS_DIR: /base/gws\n  BASE_ONLY: /base/only\n  BLANKED: remove-me\n  GH_TOKEN: yaml-default\n"
         "loops:\n"
-        f"  warn-ok:\n    when: 1h\n    run: [{sys.executable!r}, routines/warn_ok.py]\n    ingest: snapshot\n"
-        f'  loop-override:\n    run: [{sys.executable!r}, -c, \'import json, os, sys; print(json.dumps([{{"id":"lo","title":os.environ["LOOP_KEY"]+"|"+os.environ["LOOP_ONLY"]+"|"+"|".join(sys.argv[1:])}}]))\']\n'
-        "    ingest: upsert\n    env:\n      LOOP_KEY: from-loop\n      LOOP_ONLY: from-loop-only\n"
+        f"  warn-ok:\n    when: 1h\n    run: [{sys.executable!r}, routines/env_probe.py]\n    ingest: snapshot\n"
+        "    env_from: [GH_TOKEN, LOCAL_SECRET]\n"
+        "    env:\n      BLANKED: ''\n"
+        f'  loop-override:\n    run: [{sys.executable!r}, -c, \'import json, os, sys; print(json.dumps([{{"id":"lo","title":os.environ.get("GWS_DIR","")+"|"+os.environ.get("LOCAL_SECRET","")+"|"+"|".join(sys.argv[1:])}}]))\']\n'
+        "    ingest: upsert\n    env:\n      GWS_DIR: /loop/gws\n"
         f"  flaky:\n    when: 5m\n    run: [{sys.executable!r}, routines/fail_fast.py]\n"
         f"  flaky-ev:\n    when:\n      event: loop.message\n    run: [{sys.executable!r}, routines/fail_fast.py]\n"
         f"  chat:\n    when: daemon\n    run: [{sys.executable!r}, services/dup_stream.py]\n    emit: loop.message\n".encode(),
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BF_BRAIN", str(tmp_path / "evil-override"))
-    monkeypatch.setenv("GH_TOKEN", "from-host")
+    monkeypatch.setenv("GH_TOKEN", "gh_from_host")
     monkeypatch.setenv("UNALLOW_HOST", "secret-host-val")
+    monkeypatch.setenv("SSH_AUTH_SOCK", str(tmp_path / "ssh-agent.sock"))
 
-    # Precedence: host allowlist < bf.yaml env < defaults.env < loops.<name>.env < .env < BF_*, plus literal extra_args.
+    # Least-privilege isolation & precedence:
+    # - `GH_TOKEN` allowlisted on `warn-ok` -> `.env` value wins over host AND over `bf.yaml env:` (`gh_from_dotenv`).
+    # - `LOCAL_SECRET` allowlisted only on `warn-ok` -> present on `warn-ok`, absent on `loop-override`!
+    # - `UNLISTED_DOTENV` and `UNALLOW_HOST` are NEVER forwarded!
+    # - `BLANKED: ''` clears inherited `bf.yaml env.BLANKED`!
     ok_res = loops.run_loops(store, ("warn-ok",))
     assert ok_res["ok"]
     warn_saved = _load_jsonl(store, records.memory_file("warn-ok"))[0]
-    assert warn_saved["title"] == f"override-gws|/base/only|from-yaml|from-dotenv|raw-val||{root.resolve()}"
+    assert warn_saved["title"] == f"/base/gws|/base/only|gh_from_dotenv|dotenv_secret_val||||{root.resolve()}"
+
     lo_res = loops.run_loops(store, ("loop-override",), extra_args=("--lit",))
     assert lo_res["ok"]
     lo_saved = _load_jsonl(store, records.memory_file("loop-override"))[0]
-    assert lo_saved["title"] == "from-dotenv|from-loop-only|--lit"
-    warn_lines = [
-        decode(ln, "logs/warn-ok.jsonl") for ln in store.read("logs/warn-ok.jsonl").splitlines() if ln.strip()
-    ]
-    assert isinstance(warn_lines[-1], dict)
-    assert warn_lines[-1]["message"] == "loop.succeeded"
-    assert "Skipped feed x" in warn_lines[-1]["stderr"]
+    assert lo_saved["title"] == "/loop/gws||--lit"
+
+    # Exact forwarded secret literal AND proxy URL password are redacted from loop stderr & error summaries!
+    proxy_tok = "proxy_pass_123456"
+    monkeypatch.setenv("HTTPS_PROXY", "http://alice" + ":" + proxy_tok + "@proxy.example.test:8080")
+    store.write(
+        "bf.yaml",
+        store.read("bf.yaml")
+        + (
+            f"  leak-env:\n    env_from: [LOCAL_SECRET]\n"
+            f'    run: [{sys.executable!r}, -c, \'import os, sys; sys.stderr.write("leaked=" + os.environ["LOCAL_SECRET"] + " p=" + os.environ["HTTPS_PROXY"] + "\\n"); sys.exit(1)\']\n'
+        ).encode(),
+    )
+    leak_res = loops.run_loops(store, ("leak-env",))
+    assert not leak_res["ok"]
+    assert "dotenv_secret_val" not in leak_res["results"][0]["error"]
+    assert "proxy_pass_123456" not in leak_res["results"][0]["error"]
+    assert "dotenv_secret_val" not in store.read("logs/leak-env.jsonl").decode()
+    assert "proxy_pass_123456" not in store.read("logs/leak-env.jsonl").decode()
+    assert "[REDACTED]" in leak_res["results"][0]["error"]
 
     t0 = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
     assert not loops.run_loops(store, ("flaky",), now=t0)["ok"]
     cfg = config.load(store)
     flaky_state = loops.load_unit_state(store, "flaky")
     assert flaky_state["consecutive_failures"] == 1
-    assert config.due_schedule(cfg.loops["flaky"], flaky_state, t0 + timedelta(seconds=10)) is None
-    assert config.due_schedule(cfg.loops["flaky"], flaky_state, t0 + timedelta(seconds=65)) is not None
+    assert cron.due_schedules(cfg.loops["flaky"], flaky_state, t0 + timedelta(seconds=10)) == ()
+    assert cron.due_schedules(cfg.loops["flaky"], flaky_state, t0 + timedelta(seconds=65)) != ()
 
-    assert status.status_summary(store, all_units=True)["loops"]["warn-ok"]["last_run"]["added"] == 1
-    records.append_event(store, "loop.message", "chat", {"id": "ev-b1", "text": "ping"}, now=t0)
+    loops.reset_loops(store, ("flaky-ev",))
+    state.append_event(store, "loop.message", "chat", {"id": "ev-b1", "text": "ping"}, now=t0)
     ev_fail = loops.run_loops(store, due_only=True, now=t0)
-    assert [r["loop"] for r in ev_fail["results"]] == ["warn-ok", "flaky-ev"]
+    assert [r["loop"] for r in ev_fail["results"]] == ["flaky-ev", "warn-ok"]
     assert not ev_fail["ok"]
     assert loops.run_loops(store, due_only=True, now=t0 + timedelta(seconds=5))["results"] == []
-
-    summary = status.status_summary(store, all_units=True)
-    assert summary["loops"]["warn-ok"]["ingest_mode"] == "snapshot"
-    assert summary["loops"]["warn-ok"]["last_run"]["unchanged"] == 1
-    assert "transient err" in summary["loops"]["flaky"]["error"]
 
     stop_ev, wake_ev = threading.Event(), threading.Event()
     daemon = watch.DaemonStream(store, cfg.loops["chat"], stop_ev, wake_ev)
     daemon.start()
     assert wake_ev.wait(timeout=5.0)
-    dup_deadline = time.monotonic() + 5.0
-    while time.monotonic() < dup_deadline and not store.exists("logs/chat.jsonl"):
-        time.sleep(0.02)
     stop_ev.set()
     daemon.terminate()
-    ev_items, _ = records.read_events(store)
+    ev_items, _ = state.read_events(store)
     assert sum(1 for e in ev_items if e["data"].get("id") == "m-dup") == 1
 
     # `watch.serve` catches transient `Error` on a supervisor tick instead of crashing!
@@ -601,96 +528,265 @@ def test_failure_backoff_dotenv_env_map_and_dedupe(
     capsys.readouterr()
     survived = watch.serve(store, fmt="jsonl", stop_event=stop_loop)
     assert not survived["ok"]
-    assert "transient lock busy" in capsys.readouterr().out
+    out_lines = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert any("transient lock busy" in str(ev.get("error", "")) for ev in out_lines)
+    assert any(ev.get("message") == "watch.stopped" for ev in out_lines)
 
 
-def test_proxy_env_reactive_schedule_anchors_and_cursor_self_healing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "hybrid"
-    engine.init_brain(root, name="hybrid")
+def test_convention_explicit_run_decoupling_and_bf_pe_isolation(tmp_path: Path) -> None:
+    root = tmp_path / "conv-brain"
+    engine.init_brain(root, name="conv-brain")
     store = Store(root)
-    (root / "routines").mkdir(exist_ok=True)
-    (root / "routines" / "echo_ctx.py").write_text(
-        "import json, os, pathlib, sys\n"
-        "ctx = json.loads(sys.stdin.read())\n"
-        "px = os.environ.get('HTTPS_PROXY', '') + '|' + os.environ.get('no_proxy', '')\n"
-        "line = f\"{ctx['trigger']}:{ctx['start']}:{px}:{len(ctx['events'])}\"\n"
-        "p = pathlib.Path(f'routines/{sys.argv[1]}.log')\n"
-        "p.write_text((p.read_text() if p.exists() else '') + line + '\\n')\n"
-        "print(line)\n"
+    for d in ("sensors", "routines", "agents"):
+        (root / d).mkdir(exist_ok=True)
+
+    (root / "sensors" / "prio").write_text(
+        f"#!{sys.executable}\nimport json\nprint(json.dumps([{{'id':'p1','title':'From sensor'}}]))\n"
     )
+    (root / "sensors" / "prio").chmod(0o755)
+    (root / "sensors" / "dup.py").write_text("print('[]')\n")
+    (root / "routines" / "dup.sh").write_text("echo hi\n")
+    (root / "sensors" / "exec-py.py").write_text(f"#!{sys.executable}\nprint('[]')\n")
+    (root / "sensors" / "exec-py.py").chmod(0o755)
+    (root / "sensors" / "noexec").write_text("#!/bin/sh\necho '[]'\n")
+    (root / "sensors" / "custom.py").write_text("print('custom-output')\n")
+    (root / "routines" / "r-only.py").write_text("print('routine-ok')\n")
+    (root / "routines" / "sh-only.sh").write_text("echo sh-ok\n")
+    (root / "agents" / "agent-only.sh").write_text("echo agent-ok\n")
+    (root / "agents" / "fast.py").write_text("print('ok')\n")
+    (root / "sensors" / "sym-loop.py").symlink_to(root / "routines" / "r-only.py")
+
     store.write(
         "bf.yaml",
-        f"version: {FORMAT}\nname: hybrid\ntimezone: UTC\nloops:\n"
-        "  bot:\n"
-        "    when:\n      - '0 8 * * *'\n      - event: loop.message\n"
-        f"    run: [{sys.executable!r}, routines/echo_ctx.py, bot]\n"
-        "  cross-alert:\n"
-        "    when:\n      event:\n        kind: loop.message\n        source: chat\n"
-        f"    run: [{sys.executable!r}, routines/echo_ctx.py, alerts]\n"
-        "  sched-every:\n"
-        "    when: 1h\n"
-        f"    run: [{sys.executable!r}, routines/echo_ctx.py, sched]\n".encode(),
+        f"version: {FORMAT}\nname: conv-brain\n"
+        "loops:\n"
+        "  prio:\n    ingest: upsert\n"
+        "  custom: {}\n"
+        "  dup:\n    enabled: false\n"
+        "  exec-py:\n    ingest: upsert\n    enabled: false\n"
+        "  noexec:\n    enabled: false\n"
+        "  r-only:\n    enabled: false\n"
+        "  sh-only:\n    enabled: false\n"
+        "  agent-only:\n    enabled: false\n"
+        "  fast:\n    timeout: 2m\n    enabled: false\n"
+        "  sym-loop:\n    enabled: false\n"
+        "  explicit-sensor:\n    run: [python3, sensors/exec-py.py]\n    enabled: false\n"
+        "  explicit-ingest:\n    run: [python3, sensors/exec-py.py]\n    ingest:\n      source: gh-2026\n      mode: snapshot\n      schema: gh\n".encode(),
     )
-    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.test:8080")
-    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
-
-    t_ev = datetime(2026, 11, 16, 8, 1, tzinfo=UTC)
-    records.append_event(
-        store, "loop.message", "chat", {"id": "in-42", "conversation": "room-1/t-9", "text": "hello"}, now=t_ev
+    cfg = config.load(store)
+    # Convention-only loops (omitted `run:`): zero folder-name magic for `ingest:` or `timeout:`!
+    assert config.resolve_loop(store, cfg.loops["prio"]) == (("sensors/prio",), "prio", "upsert", "prio", 300)
+    assert config.resolve_loop(store, cfg.loops["custom"]) == (
+        (shutil.which("python3") or sys.executable, "sensors/custom.py"),
+        "",
+        "upsert",
+        "",
+        300,
     )
-    r1 = loops.run_loops(store, due_only=True, now=t_ev)
-    assert r1["ok"]
-    assert [r["loop"] for r in r1["results"]] == ["bot", "cross-alert", "sched-every"]
-    bot_lines = (root / "routines" / "bot.log").read_text().splitlines()
-    assert "http://proxy.example.test:8080|localhost,127.0.0.1:1" in bot_lines[0]
+    assert config.resolve_loop(store, cfg.loops["exec-py"]) == (
+        ("sensors/exec-py.py",),
+        "exec-py",
+        "upsert",
+        "exec-py",
+        300,
+    )
+    assert config.resolve_loop(store, cfg.loops["r-only"]) == (
+        (shutil.which("python3") or sys.executable, "routines/r-only.py"),
+        "",
+        "upsert",
+        "",
+        300,
+    )
+    assert config.resolve_loop(store, cfg.loops["sh-only"]) == (("bash", "routines/sh-only.sh"), "", "upsert", "", 300)
+    assert config.resolve_loop(store, cfg.loops["agent-only"]) == (
+        ("bash", "agents/agent-only.sh"),
+        "",
+        "upsert",
+        "",
+        300,
+    )
+    assert config.resolve_loop(store, cfg.loops["fast"])[4] == 120
 
-    man_res = loops.run_loops(store, ("cross-alert",), now=t_ev + timedelta(minutes=30))
-    assert man_res["ok"]
-    alert_lines = (root / "routines" / "alerts.log").read_text().splitlines()
-    assert alert_lines[-1].startswith("manual:2026-11-16T08:01:00Z:")
+    # Explicit `run:` NEVER triggers argv-sniffing auto-ingest magic!
+    assert config.resolve_loop(store, cfg.loops["explicit-sensor"]) == (
+        ("python3", "sensors/exec-py.py"),
+        "",
+        "upsert",
+        "",
+        300,
+    )
+    assert config.resolve_loop(store, cfg.loops["explicit-ingest"]) == (
+        ("python3", "sensors/exec-py.py"),
+        "gh-2026",
+        "snapshot",
+        "gh",
+        300,
+    )
 
-    r2 = loops.run_loops(store, due_only=True, now=t_ev + timedelta(minutes=1))
-    assert r2["ok"]
-    assert [r["loop"] for r in r2["results"]] == ["bot"]
-    bot_lines = (root / "routines" / "bot.log").read_text().splitlines()
-    assert bot_lines[1].startswith("schedule:")
+    with pytest.raises(Error, match="ambiguous convention scripts"):
+        config.resolve_loop(store, cfg.loops["dup"])
+    with pytest.raises(Error, match="expected a regular file"):
+        config.resolve_loop(store, cfg.loops["sym-loop"])
+    with pytest.raises(Error, match="not executable"):
+        config.resolve_loop(store, cfg.loops["noexec"])
 
-    records.append_event(store, "loop.message", "chat", {"id": "in-44"}, now=t_ev)
-    records.append_event(store, "loop.message", "chat", {"id": "in-45"}, now=t_ev)
-    assert [r["loop"] for r in loops.run_loops(store, due_only=True, now=t_ev + timedelta(minutes=5))["results"]] == [
-        "bot",
-        "cross-alert",
+    assert loops.run_loops(store, ("prio", "custom"))["ok"]
+    assert _load_jsonl(store, records.memory_file("prio"))[0]["title"] == "From sensor"
+    assert not store.exists("memories/custom.jsonl")
+
+    # `prepare_unit` runs internal `bf` subcommands via `[sys.executable, "-P", "-E", "-m", "bf", ...]`!
+    bf_argv, _, stdin_b, _ = proc.prepare_unit(store, "b", ("bf", "build"), "r1", "2026-11-20T00:00:00Z")
+    assert bf_argv == [sys.executable, "-P", "-E", "-m", "bf", "build"]
+    assert stdin_b is None
+
+    # `{{...}}` placeholders expand in dry-run and execution; relative scripts & symlink escapes are confined!
+    store.write(
+        "bf.yaml",
+        (
+            f"version: {FORMAT}\nname: conv-brain\nloops:\n"
+            "  ph:\n"
+            f"    run: [{sys.executable!r}, -c, 'import json, sys; print(json.dumps({{\"args\": sys.argv[1:]}}))', "
+            "'{{brain}}', '{{loop}}', '{{state}}', '{{start}}', '{{end}}', '{{trigger}}', '{{run}}']\n"
+        ).encode(),
+    )
+    now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+    dry = loops.run_loops(store, ["ph"], dry_run=True, now=now)
+    assert dry["results"][0]["argv"][3:9] == [
+        str(store.root),
+        "ph",
+        str(store.root / ".bf" / "state" / "ph"),
+        "2026-11-21T12:00:00Z",
+        "2026-11-22T12:00:00Z",
+        "manual",
     ]
-    assert loops.load_unit_state(store, "cross-alert")["event_seq"] >= 8
-    store.delete("logs/events.jsonl")
-    assert loops.run_loops(store, due_only=True, now=t_ev + timedelta(minutes=5, seconds=30))["results"] == []
-    assert loops.load_unit_state(store, "cross-alert")["event_seq"] == 0
-    records.append_event(store, "loop.message", "chat", {"id": "after-reset"}, now=t_ev)
-    healed = loops.run_loops(store, due_only=True, now=t_ev + timedelta(minutes=6))
-    assert [r["loop"] for r in healed["results"]] == ["bot", "cross-alert"]
-    assert loops.load_unit_state(store, "cross-alert")["event_seq"] == 1
+    exec_res = loops.run_loops(store, ["ph"], now=now)
+    assert exec_res["ok"] is True
+    assert exec_res["results"][0]["summary"]["args"][:6] == dry["results"][0]["argv"][3:9]
 
-    # Manual run does NOT advance `schedule_last` or suppress the next scheduled trigger!
-    assert loops.run_loops(store, ("sched-every",), now=t_ev + timedelta(minutes=30))["ok"]
-    assert loops.run_loops(store, due_only=True, now=t_ev + timedelta(minutes=55))["results"] == []
-    due_1h = loops.run_loops(store, due_only=True, now=t_ev + timedelta(minutes=60))
-    assert [r["loop"] for r in due_1h["results"]] == ["sched-every"]
-
-
-def test_watch_supervises_daemon_loop_and_snapshot_memory_loops(tmp_path: Path) -> None:
-    root = tmp_path / "svc-watch"
-    engine.init_brain(root, name="svc-watch")
-    store = Store(root)
-    for sub in ("routines", "services", "prompts"):
-        (root / sub).mkdir(exist_ok=True)
-    store.write("schemas/brief.json", OBJ_SCHEMA)
-    (root / "routines" / "fake_harness.py").write_text(
-        "import json, pathlib, sys\n"
-        "print(json.dumps([{'id': 'latest', 'title': 'Brief from ' + pathlib.Path(sys.argv[1]).name}]))\n"
+    outside = tmp_path / "outside.py"
+    outside.write_text("print('evil')\n")
+    (root / "sensors" / "bad.py").symlink_to(outside)
+    for bad_argv in (
+        ("../outside.py",),
+        ("sensors/bad.py",),
+        (f"{store.root}//sensors/bad.py",),
+        (f"//{store.root.as_posix().lstrip('/')}/sensors/bad.py",),
+        (sys.executable, "concepts/../sensors/bad.py"),
+        (sys.executable, f"//{store.root.as_posix().lstrip('/')}/sensors/bad.py"),
+        (sys.executable, "/{{brain}}/sensors/bad.py"),
+        (sys.executable, "/./{{brain}}/sensors/bad.py"),
+        (sys.executable, "{{state}}/../../sensors/bad.py"),
+        (sys.executable, f"../{store.root.name}/sensors/bad.py"),
+    ):
+        with pytest.raises(Error, match=r"regular file inside brain|leaves|normalized"):
+            proc.prepare_unit(store, "bad", bad_argv, "r1", "2026-11-23T00:00:00Z")
+    # Clean `{{state}}/<file>` targets remain allowed even before runtime creation!
+    ok_state_argv, _, _, _ = proc.prepare_unit(
+        store, "ok-st", (sys.executable, "-c", "print(1)", "{{state}}/cursor.json"), "r1", "2026-11-23T00:00:00Z"
     )
-    (root / "services" / "tcp_srv.py").write_text(
+    assert ok_state_argv[-1].endswith("/.bf/state/ok-st/cursor.json")
+
+
+def test_status_degraded_overdue_orphans_lazy_imports_and_watch_supervisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 1. Lazy import guard: importing core modules must NOT load third-party deps!
+    proc_chk = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, bf.markdown, bf.engine, bf.loops, bf.watch, bf.index; "
+                "bad = {'yaml', 'croniter', 'jsonschema', 'markdown', 'markdown_it', 'rich', 'watchfiles', 'mcp'}; "
+                "assert not (bad & set(sys.modules)), bad & set(sys.modules)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc_chk.returncode == 0, proc_chk.stderr
+
+    # 2. `status_summary` surfaces `failed`, `degraded` (`last_run.incomplete`), and `overdue` scheduled loops!
+    root = tmp_path / "ops-status"
+    engine.init_brain(root, name="ops-status")
+    store = Store(root)
+    now = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+    store.write(
+        "bf.yaml",
+        (
+            f"version: {FORMAT}\nname: ops-status\nloops:\n"
+            "  ing-deg:\n    when: 30m\n    run: [echo]\n    ingest:\n      source: items\n"
+            "  overdue-every:\n    when: 1h\n    run: [echo]\n"
+            "  overdue-cron:\n    when: '0 8 * * *'\n    run: [echo]\n"
+            "  healthy:\n    when: 1h\n    run: [echo]\n"
+            "  failing:\n    when: 5m\n    run: [echo]\n"
+            "  off:\n    run: [echo]\n    enabled: false\n"
+            "  live-d:\n    when: daemon\n    run: [echo]\n    emit: loop.message\n"
+        ).encode(),
+    )
+
+    def save_st(
+        name: str,
+        st_name: str,
+        *,
+        ago_s: int = 10,
+        summary: dict[str, object] | None = None,
+        err: str = "",
+        consec: int = 0,
+    ) -> None:
+        ts = (now - timedelta(seconds=ago_s)).isoformat().replace("+00:00", "Z")
+        loops.save_unit_state(
+            store,
+            {
+                "name": name,
+                "status": st_name,
+                "updated": ts,
+                "last_start": ts,
+                "last_end": "" if st_name == "running" else ts,
+                "last_success": "" if st_name == "failed" else ts,
+                "runs": 2,
+                "failures": consec,
+                "consecutive_failures": consec,
+                "event_failures": 0,
+                "duration_ms": 200,
+                "last_run": summary or {},
+                "error": err,
+            },
+        )
+
+    save_st("ing-deg", "ok", ago_s=60, summary={"records": 5, "added": 2, "incomplete": True})
+    save_st("overdue-every", "ok", ago_s=12000, summary={"records": 2})  # > max(3*3600, 7200) -> overdue!
+    save_st("overdue-cron", "ok", ago_s=86400, summary={"records": 2})  # > 2h past 08:00 UTC fire -> overdue!
+    save_st("healthy", "ok", ago_s=300, summary={"records": 4})
+    save_st("failing", "failed", ago_s=15, err="boom \x1b[31m bad", consec=3)
+    save_st("live-d", "running", ago_s=3600)
+
+    sm = status.status_summary(store, include_loops=True, now=now)
+    assert sm["ok"] is False
+    att_by_name = {a["name"]: a for a in sm["attention"]}
+    assert att_by_name["failing"]["reason"] == "failed"
+    assert att_by_name["ing-deg"]["reason"] == "degraded"
+    assert att_by_name["overdue-every"]["reason"] == "overdue"
+    assert att_by_name["overdue-cron"]["reason"] == "overdue"
+    assert "healthy" not in att_by_name
+    assert sm["loops"]["ing-deg"]["degraded"] is True
+    assert sm["loops"]["overdue-every"]["overdue"] is True
+
+    txt = render.format_status_text(sm, now=now)
+    assert "\x1b" not in txt
+    assert "ATTENTION (4)" in txt
+    assert "degraded" in txt
+    assert "overdue" in txt
+    assert "1 disabled" in txt
+
+    # 3. `watch.serve` supervises TCP daemon, rebuilds authored notes while ignoring bundle attachment `.md`, and reloads live!
+    w_root = tmp_path / "svc-watch"
+    engine.init_brain(w_root, name="svc-watch")
+    w_store = Store(w_root)
+    (w_root / "services").mkdir(exist_ok=True)
+    (w_root / "services" / "tcp_srv.py").write_text(
         "import signal, socket, sys\n"
         "srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
         "srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
@@ -708,794 +804,84 @@ def test_watch_supervises_daemon_loop_and_snapshot_memory_loops(tmp_path: Path) 
         "        pass\n"
         "srv.close()\n"
     )
-    (root / "prompts" / "brief.md").write_text("# Brief\n")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
 
-    store.write(
+    w_store.write(
         "bf.yaml",
-        f"version: {FORMAT}\nname: svc-watch\n"
-        "loops:\n"
-        "  brief:\n"
-        f"    run: [{sys.executable!r}, routines/fake_harness.py, prompts/brief.md]\n"
-        "    ingest: snapshot\n"
-        "  tcp:\n"
-        "    when: daemon\n"
-        f"    run: [{sys.executable!r}, services/tcp_srv.py, '{port}']\n"
-        "    enabled: true\n".encode(),
+        f"version: {FORMAT}\nname: svc-watch\nloops:\n"
+        f"  tcp:\n    when: daemon\n    run: [{sys.executable!r}, services/tcp_srv.py, '{port}']\n".encode(),
     )
-    ran1 = loops.run_loops(store, ("brief",))
-    assert ran1["ok"], ran1
-    assert ran1["results"][0]["summary"]["records"] == 1
-    assert _load_jsonl(store, records.memory_file("brief"))[0]["id"] == "latest"
-    assert engine.validate(store)["ok"]
-
-    conflict_root = tmp_path / "svc-conflict"
-    engine.init_brain(conflict_root, name="svc-conflict")
-    conflict_store = Store(conflict_root)
-    conflict_store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: svc-conflict\n"
-        "loops:\n"
-        "  crash:\n"
-        "    when: daemon\n"
-        f"    run: [{sys.executable!r}, -c, 'import sys; sys.stderr.write(\"bind failed\\\\n\"); sys.exit(1)']\n"
-        "    enabled: true\n"
-        "  missing:\n    when: daemon\n    run: [routines/no-such-script.py]\n".encode(),
-    )
-
-    stop_ev = threading.Event()
-    stop_conflict = threading.Event()
-    srv_thread = threading.Thread(target=lambda: watch.serve(store, fmt="jsonl", stop_event=stop_ev), daemon=True)
-    srv_thread.start()
+    stop_w = threading.Event()
+    capsys.readouterr()
+    wt = threading.Thread(target=lambda: watch.serve(w_store, fmt="jsonl", stop_event=stop_w), daemon=True)
+    wt.start()
     resp_text = ""
-    deadline = time.monotonic() + 8.0
     try:
-        while time.monotonic() < deadline:
+        dl = time.monotonic() + 8.0
+        while time.monotonic() < dl:
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=1) as client:
                     resp_text = client.recv(64).decode("utf-8")
                     break
             except OSError:
                 time.sleep(0.05)
+        assert resp_text == "daemon-ready"
 
-        conflict_thread = threading.Thread(
-            target=lambda: watch.serve(conflict_store, fmt="jsonl", stop_event=stop_conflict), daemon=True
-        )
-        conflict_thread.start()
-        try:
-            c_deadline = time.monotonic() + 8.0
-            while time.monotonic() < c_deadline:
-                st = status.status_summary(conflict_store, all_units=True)
-                if st["loops"]["crash"]["consecutive_failures"] >= 1 and st["loops"]["missing"]["status"] == "failed":
-                    break
-                time.sleep(0.05)
-        finally:
-            stop_conflict.set()
-            conflict_thread.join(timeout=6)
-    finally:
-        stop_ev.set()
-        srv_thread.join(timeout=6)
-
-    assert resp_text == "daemon-ready"
-    assert loops.load_unit_state(store, "tcp")["status"] == "stopped"
-
-    conflict_status = status.status_summary(conflict_store, all_units=True)
-    assert not conflict_status["ok"]
-    assert conflict_status["loops"]["crash"]["status"] == "failed"
-    assert conflict_status["loops"]["crash"]["consecutive_failures"] >= 1
-    assert conflict_status["loops"]["missing"]["status"] == "failed"
-
-
-def test_dual_schedule_and_event_loop_advances_cursor_after_scheduled_run(tmp_path: Path) -> None:
-    root = tmp_path / "dual"
-    engine.init_brain(root, name="dual")
-    store = Store(root)
-    (root / "routines").mkdir(exist_ok=True)
-    (root / "routines" / "count.py").write_text(
-        "import pathlib, sys\npathlib.Path('routines/seen.json').write_text(sys.stdin.read())\n"
-    )
-    store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: dual\n"
-        "loops:\n"
-        "  combo:\n"
-        "    when:\n      - 1h\n      - event: custom.ping\n"
-        f"    run: [{sys.executable!r}, routines/count.py]\n".encode(),
-    )
-
-    ev1 = records.append_event(store, "custom.other", "test", {"id": "o1"})
-    dry = loops.run_loops(store, due_only=True, dry_run=True)
-    assert [item["loop"] for item in dry["results"]] == ["combo"]
-    state_path = root / ".bf" / "combo.json"
-    assert not state_path.exists()
-
-    first = loops.run_loops(store, due_only=True)
-    assert [item["loop"] for item in first["results"]] == ["combo"]
-    assert first["results"][0]["status"] == "ok"
-    seen = decode((root / "routines" / "seen.json").read_bytes(), "seen.json")
-    assert isinstance(seen, dict)
-    assert seen["trigger"] == "schedule"
-    assert seen["events"] == []
-    st1 = decode(state_path.read_bytes(), str(state_path))
-    assert isinstance(st1, dict)
-    assert st1["event_seq"] == ev1["seq"]
-
-    ev2 = records.append_event(store, "custom.other", "test", {"id": "o2"})
-    second = loops.run_loops(store, due_only=True)
-    assert second["ran"] == 0
-    st2 = decode(state_path.read_bytes(), str(state_path))
-    assert isinstance(st2, dict)
-    assert st2["event_seq"] == ev2["seq"]
-
-
-def test_status_text_formatting_sanitization_and_watch_text_stream(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    empty_root = tmp_path / "empty-tui"
-    engine.init_brain(empty_root, name="empty-tui")
-    empty_store = Store(empty_root)
-    empty_store.write("bf.yaml", f"version: {FORMAT}\nname: empty-tui\n".encode())
-    now = datetime(2026, 11, 16, 12, 30, 0, tzinfo=UTC)
-    empty_txt = status.format_status_text(status.status_summary(empty_store, all_units=True), now=now)
-    assert "empty-tui" in empty_txt
-    assert "HEALTHY" in empty_txt
-    assert "loops=0" in empty_txt
-
-    root = tmp_path / "rich-tui"
-    engine.init_brain(root, name="rich-tui")
-    store = Store(root)
-    store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: rich-tui\n"
-        "loops:\n"
-        "  ing-diff:\n    when: 30m\n    run: [echo]\n    ingest:\n      source: items\n"
-        "  ing-same:\n    when: '0 8 * * 1-5'\n    run: [echo]\n    ingest:\n      source: archive\n      mode: snapshot\n"
-        "  b-build:\n    when: '0 9 * * *'\n    run: [bf, build]\n"
-        "  b-val:\n    run: [bf, check]\n"
-        "  b-rev:\n    when:\n      - event: a\n      - event: b\n    run: [bf, review]\n"
-        "  b-emit:\n    run: [echo]\n    emit: loop.event\n"
-        '  ev-san:\n    when:\n      - event:\n          kind: "ev\\u200b"\n    run: [echo]\n'
-        "  idle-ing:\n    run: [echo]\n    ingest: upsert\n"
-        "  idle-plain:\n    run: [echo]\n"
-        "  failing:\n    when: 1m\n    run: [echo]\n"
-        "  off-loop:\n    run: [bf, build]\n    enabled: false\n"
-        "  live-msg:\n    when: daemon\n    run: [echo]\n    emit: loop.message\n"
-        "  live-ev:\n    when: daemon\n    run: [echo]\n    emit: loop.event\n"
-        "  daemon:\n    when: daemon\n    run: [echo]\n"
-        "  halted:\n    when: daemon\n    run: [echo]\n".encode(),
-    )
-
-    def save_state(
-        name: str,
-        st_name: str,
-        *,
-        ago_s: int = 10,
-        summary: dict[str, object] | None = None,
-        err: str = "",
-        consec: int = 0,
-    ) -> None:
-        ts = (now - timedelta(seconds=ago_s)).isoformat().replace("+00:00", "Z")
-        doc: dict[str, object] = {
-            "kind": "loop",
-            "name": name,
-            "status": st_name,
-            "updated": ts,
-            "last_start": ts,
-            "last_end": "" if st_name in {"running", "stopped"} else ts,
-            "last_success": "" if st_name == "failed" else ts,
-            "runs": 2,
-            "failures": consec,
-            "consecutive_failures": consec,
-            "duration_ms": 250,
-            "last_run": summary or {},
-            "error": err,
-        }
-        loops.save_unit_state(store, doc)
-
-    save_state(
-        "ing-diff", "ok", ago_s=2, summary={"records": 5, "added": 2, "updated": 1, "removed": 0, "incomplete": True}
-    )
-    save_state("ing-same", "ok", ago_s=7200, summary={"records": 4, "added": 0, "updated": 0, "removed": 0})
-    save_state("b-build", "ok", ago_s=120, summary={"notes": 3, "written": 1})
-    save_state("b-val", "ok", ago_s=90000, summary={"ok": True, "notes": 3, "records": 5})
-    save_state("b-rev", "ok", ago_s=30, summary={"total_stale": 1, "total_tasks_open": 1})
-    save_state("b-emit", "ok", ago_s=30, summary={"emitted": 2})
-    save_state("ev-san", "ok", ago_s=30, summary={})
-    save_state(
-        "failing",
-        "failed",
-        ago_s=15,
-        err="Traceback (most recent call last):\n  File x.py\nboom \x1b[31m  bad",
-        consec=3,
-    )
-    save_state("live-msg", "running", ago_s=3600)
-    save_state("daemon", "running", ago_s=45)
-    save_state("halted", "stopped", ago_s=300)
-    private_dir(store).write("idle-ing.json", b"{corrupt json")
-
-    out_txt = status.format_status_text(status.status_summary(store, all_units=True), now=now)
-    assert "\x1b" not in out_txt
-    assert "\u200b" not in out_txt
-    assert "ATTENTION (2)" in out_txt
-    assert out_txt.index("failing") < out_txt.index("b-val") < out_txt.index("ing-diff")
-    for expected in (
-        "(3x) Traceback (most recent call last): File x.py boom \\u001b[31m bad",
-        "idle-ing.json: invalid JSON",
-        "on ev\\u200b",
-        "+2 ~1 (5 total)",
-        "now",
-        "4 unchanged",
-        "cron 0 8 * * 1-5",
-        "cron 0 9 * * *",
-        "3 notes (1 built)",
-        "1d ago",
-        "on 2 events",
-        "2 emitted",
-        "daemon (loop.message)",
-        "daemon (loop.event)",
-        "up 1h",
-        "up 45s",
-        "stopped",
-        "1 disabled",
-    ):
-        assert expected in out_txt, f"missing {expected!r} in:\n{out_txt}"
-
-    paris_cfg = config.LoopSpec(
-        name="paris", run=("echo",), schedules=(config.ScheduleSpec("0 2 * * *", None, "0 2 * * *"),)
-    )
-    pre_dst = datetime(2026, 3, 29, 0, 59, tzinfo=UTC)
-    assert (
-        config.due_schedule(paris_cfg, {"last_scheduled": "2026-03-28T01:00:00Z"}, pre_dst, tz_name="Europe/Paris")
-        is None
-    )
-    post_dst = datetime(2026, 3, 29, 1, 5, tzinfo=UTC)
-    assert (
-        config.due_schedule(paris_cfg, {"last_scheduled": "2026-03-28T01:00:00Z"}, post_dst, tz_name="Europe/Paris")
-        is not None
-    )
-
-    # Exercise `watch.serve(fmt="text")`: prints bird's-eye table on startup and live single-line events!
-    stop_txt = threading.Event()
-    calls = 0
-    real_sel = loops.select_due_loops
-
-    def stop_on_second_tick(*a: Any, **kw: Any) -> Any:
-        nonlocal calls
-        calls += 1
-        if calls >= 2:
-            stop_txt.set()
-        return real_sel(*a, **kw)
-
-    monkeypatch.setenv("NO_COLOR", "1")
-    monkeypatch.setattr(loops, "select_due_loops", stop_on_second_tick)
-    monkeypatch.setattr(watch, "next_due_delay", lambda *_a, **_kw: 0.05)
-    capsys.readouterr()
-    res = watch.serve(empty_store, fmt="text", stop_event=stop_txt)
-    assert res["ok"] is True
-    watch_out = capsys.readouterr().out
-    assert "empty-tui" in watch_out
-    assert "Watching empty-tui" in watch_out
-
-    # Daemon loop with `emit: loop.event` streams JSON stdout objects into `logs/events.jsonl` and logs malformed lines!
-    svc_root = tmp_path / "svc-events"
-    engine.init_brain(svc_root, name="svc-events")
-    svc_store = Store(svc_root)
-    svc_store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: svc-events\n"
-        "loops:\n  emitter:\n"
-        "    when: daemon\n"
-        f'    run: [{sys.executable!r}, -c, \'import json, sys; sys.stderr.write(json.dumps({{"severity": "INFO", "message": "daemon boot"}}) + chr(10)); sys.stderr.flush(); print("[1,2]", flush=True); print(json.dumps({{"id": "s1", "kind": "svc.ping"}}), flush=True)\']\n'
-        "    emit: loop.event\n".encode(),
-    )
-    svc_cfg = config.load(svc_store)
-    s_stop, s_wake = threading.Event(), threading.Event()
-    svc_d = watch.DaemonStream(svc_store, svc_cfg.loops["emitter"], s_stop, s_wake)
-    svc_d.start()
-    assert s_wake.wait(timeout=5.0)
-    s_stop.set()
-    svc_d.terminate()
-    svc_evs, _ = records.read_events(svc_store)
-    assert any(ev["kind"] == "svc.ping" and ev["source"] == "emitter" for ev in svc_evs)
-    emitter_logs = svc_store.read("logs/emitter.jsonl").decode()
-    assert "daemon boot" in emitter_logs
-    assert "emitted event must be a JSON object" in emitter_logs
-
-    # Immediate exit-0 daemon does not reset backoff.
-    waits: list[float] = []
-    spin_stop = threading.Event()
-    real_wait = spin_stop.wait
-
-    def spy_wait(timeout: float | None = None) -> bool:
-        if timeout is not None:
-            waits.append(timeout)
-        if len(waits) >= 2:
-            spin_stop.set()
-            return True
-        return real_wait(0.01)
-
-    monkeypatch.setattr(spin_stop, "wait", spy_wait)
-    spin_unit = config.LoopSpec(name="spin0", run=(sys.executable, "-c", "pass"), daemon=True)
-    spin_d = watch.DaemonStream(svc_store, spin_unit, spin_stop, threading.Event())
-    spin_d.start()
-    spin_d.thread.join(timeout=5.0)
-    assert waits == [1.0, 2.0]
-
-    monkeypatch.setattr(models, "MAX_BATCH", 64)
-    svc_store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: svc-events\nloops:\n  huge:\n"
-        "    when: daemon\n"
-        f"    run: [{sys.executable!r}, -c, \"import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_a: sys.exit(0)); print('x' * 120, flush=True); time.sleep(5)\"]\n"
-        "    emit: loop.event\n".encode(),
-    )
-    huge_cfg = config.load(svc_store)
-    h_stop, h_wake = threading.Event(), threading.Event()
-    huge_d = watch.DaemonStream(svc_store, huge_cfg.loops["huge"], h_stop, h_wake)
-    huge_d.start()
-    h_deadline = time.monotonic() + 5.0
-    while time.monotonic() < h_deadline and loops.load_unit_state(svc_store, "huge")["status"] != "failed":
-        time.sleep(0.02)
-    h_stop.set()
-    huge_d.terminate()
-    huge_st = loops.load_unit_state(svc_store, "huge")
-    assert huge_st["status"] == "failed"
-    assert "exceeds 64 bytes" in huge_st["error"]
-
-
-def test_loop_popen_failure_secret_redaction_and_watch_json(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    root = tmp_path / "sec-watch"
-    engine.init_brain(root, name="sec-watch")
-    store = Store(root)
-    store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: sec-watch\n"
-        "loops:\n"
-        "  missing-bin:\n    run: [nonexistent-bf-bin-xyz]\n"
-        "  leaky:\n"
-        f"    run: [{sys.executable!r}, -c, 'import sys; sys.stderr.write(\"Authorization: bearer secret_tok_12345678~v2 ghp_1234567890abcdef\\n-----BEGIN PRIVATE KEY-----\\nABC\\n-----END PRIVATE KEY-----\\n\"); sys.exit(2)']\n".encode(),
-    )
-    cfg = config.load(store)
-
-    missing_res = loops.execute_one_loop(store, cfg.loops["missing-bin"], trigger="manual")
-    assert (missing_res["status"], missing_res["exit_code"]) == ("failed", 127)
-    assert loops.load_unit_state(store, "missing-bin")["status"] == "failed"
-    assert oct((root / "logs").stat().st_mode & 0o777) == "0o700"
-    assert oct((root / "logs" / "missing-bin.jsonl").stat().st_mode & 0o777) == "0o600"
-
-    leaky_res = loops.execute_one_loop(store, cfg.loops["leaky"], trigger="manual")
-    assert leaky_res["status"] == "failed"
-    for secret in ("secret_tok_12345678~v2", "ghp_1234567890abcdef", "BEGIN PRIVATE KEY", "ABC"):
-        assert secret not in leaky_res["error"]
-        assert secret not in loops.load_unit_state(store, "leaky")["error"]
-        assert secret not in (root / "logs" / "leaky.jsonl").read_text()
-    assert "[REDACTED]" in leaky_res["error"]
-
-    # `watch.serve(fmt="jsonl")` emits JSON `watch.tick` lines on stdout.
-    stop_json = threading.Event()
-    real_build = engine.build
-
-    def stop_build(s: Store, **kw: Any) -> dict[str, Any]:
-        out = real_build(s, **kw)
-        stop_json.set()
-        return out
-
-    monkeypatch.setattr(engine, "build", stop_build)
-    capsys.readouterr()
-    res = watch.serve(store, fmt="jsonl", stop_event=stop_json)
-    assert res["ok"] is True
-    lines = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert any(ev.get("message") == "watch.started" and ev.get("brain") == "sec-watch" for ev in lines)
-
-    # Failed first build keeps `first=True` on retry, and `watch_files` logs `OSError` instead of dying silently.
-    calls = 0
-    stop_retry = threading.Event()
-
-    def flaky_build(s: Store, **kw: Any) -> dict[str, Any]:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise Error("transient lock")
-        stop_retry.set()
-        return real_build(s, **kw)
-
-    monkeypatch.setattr(engine, "build", flaky_build)
-    monkeypatch.setattr(watch, "watch_fs", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("inotify limit")))
-    monkeypatch.setattr(watch, "next_due_delay", lambda *_a, **_kw: 0.05)
-    capsys.readouterr()
-    retry_res = watch.serve(store, fmt="jsonl", stop_event=stop_retry)
-    assert retry_res["ok"] is True
-    assert calls >= 2
-    assert "OSError" in capsys.readouterr().out
-
-
-def test_batched_jq_filters_stop_event_due_isolation_and_live_reload(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    root = tmp_path / "hardened-orch"
-    engine.init_brain(root, name="hardened-orch")
-    store = Store(root)
-    (root / "routines").mkdir(exist_ok=True)
-    (root / "routines" / "hang.py").write_text(
-        "import pathlib, time\npathlib.Path('routines/started').write_text('1')\ntime.sleep(30)\n"
-    )
-    store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: hardened-orch\n"
-        "loops:\n"
-        "  broken-rel:\n    when: 1m\n    run: [routines/missing.py]\n"
-        f"  healthy:\n    when: 1m\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n"
-        f"  ev-zero:\n    when:\n      - event:\n          kind: custom.num\n          filter: '.data.n'\n    run: [{sys.executable!r}, -c, 'pass']\n"
-        f"  ev-env:\n    when:\n      - event:\n          kind: custom.num\n          filter: '$ENV.SECRET_VAR != null'\n    run: [{sys.executable!r}, -c, 'pass']\n"
-        f"  hang:\n    run: [{sys.executable!r}, routines/hang.py]\n    enabled: false\n".encode(),
-    )
-
-    t0 = datetime(2026, 11, 17, 10, 0, tzinfo=UTC)
-    due_res = loops.run_loops(store, due_only=True, now=t0)
-    by_loop = {r["loop"]: r["status"] for r in due_res["results"]}
-    assert by_loop == {"broken-rel": "failed", "healthy": "ok"}
-
-    monkeypatch.setenv("SECRET_VAR", "top-secret")
-    records.append_event(store, "custom.num", "src", {"id": "n-false", "n": False}, now=t0)
-    records.append_event(store, "custom.num", "src", {"id": "n-null", "n": None}, now=t0)
-    records.append_event(store, "custom.num", "src", {"id": "n-zero", "n": 0}, now=t0)
-    cfg = config.load(store)
-    matched, _ = loops.pending_events(store, 0, cfg.loops["ev-zero"].events)
-    assert [ev["data"]["id"] for ev in matched] == ["n-zero"]
-    env_matched, _ = loops.pending_events(store, 0, cfg.loops["ev-env"].events)
-    assert env_matched == []
-    bad_spec = config.LoopSpec(
-        name="bad-flt", run=("echo",), events=(config.EventMatch(kind="custom.num", filter='modulemeta("x")'),)
-    )
-    with pytest.raises(Error, match="event filter failed"):
-        loops.pending_events(store, 0, bad_spec.events)
-
-    stop_hang = threading.Event()
-    hang_out: list[dict[str, Any]] = []
-    hang_t = threading.Thread(
-        target=lambda: hang_out.append(loops.run_loops(store, ("hang",), now=t0, stop_event=stop_hang)), daemon=True
-    )
-    hang_t.start()
-    wait_until = time.monotonic() + 5.0
-    while time.monotonic() < wait_until and not (root / "routines" / "started").exists():
-        time.sleep(0.02)
-    stop_hang.set()
-    hang_t.join(timeout=5.0)
-    assert hang_out[0]["results"][0]["status"] == "stopped"
-    hang_state = loops.load_unit_state(store, "hang")
-    assert (hang_state["status"], hang_state["failures"], hang_state["consecutive_failures"]) == ("stopped", 0, 0)
-
-    # Live `bf.yaml` reload in `watch.serve` starts and stops newly added daemon loops cleanly!
-    live_root = tmp_path / "live-reload"
-    engine.init_brain(live_root, name="live-reload")
-    live_store = Store(live_root)
-    live_store.write("bf.yaml", f"version: {FORMAT}\nname: live-reload\n".encode())
-    stop_live = threading.Event()
-    live_t = threading.Thread(target=lambda: watch.serve(live_store, fmt="jsonl", stop_event=stop_live), daemon=True)
-    live_t.start()
-    try:
-        added_yaml = (
-            f"version: {FORMAT}\nname: live-reload\nloops:\n  added:\n"
-            "    when: daemon\n"
-            f'    run: [{sys.executable!r}, -c, \'import json, time; print(json.dumps({{"id": "lr-1", "kind": "reload.ok"}}), flush=True); time.sleep(2)\']\n'
-            "    emit: loop.event\n"
-        ).encode()
-        lr_deadline = time.monotonic() + 8.0
-        found_reload = False
-        while time.monotonic() < lr_deadline:
-            live_store.write("bf.yaml", added_yaml)
-            for _ in range(12):
-                evs, _ = records.read_events(live_store)
-                if any(e.get("kind") == "reload.ok" for e in evs):
-                    found_reload = True
-                    break
-                time.sleep(0.05)
-            if found_reload:
-                break
-        assert found_reload
+        # Single-instance watch.lock prevents second `bf watch` while read-only `status_summary` works freely!
         with pytest.raises(models.BusyError, match="another bf watch is already running"):
-            watch.serve(live_store, fmt="jsonl")
-        assert cli.run(["watch", "--format", "jsonl", "--brain", str(live_root)]) == 1
-        assert "another bf watch is already running" in capsys.readouterr().err
-        live_store.write("bf.yaml", f"version: {FORMAT}\nname: live-reload\n".encode())
-        stop_dl = time.monotonic() + 8.0
-        while time.monotonic() < stop_dl and loops.load_unit_state(live_store, "added")["status"] != "stopped":
+            watch.serve(w_store, fmt="jsonl")
+        assert status.status_summary(w_store)["brain"] == "svc-watch"
+
+        # Live note edit triggers incremental build automatically!
+        dl_b = time.monotonic() + 8.0
+        step = 0
+        while time.monotonic() < dl_b and "concepts/live-edit.md" not in w_store.read(NOTES_FILE).decode():
+            if step % 10 == 1:
+                w_store.write("concepts/live-edit.md", b"---\ntype: guide\nstatus: stable\n---\n# Live Edit\n")
+            step += 1
             time.sleep(0.05)
-        assert loops.load_unit_state(live_store, "added")["status"] == "stopped"
-
-        # Editing `.env` or a daemon script under `routines/` restarts the daemon live with new env/code.
-        live_store.write(
-            "routines/live_d.py",
-            b"import json, os, time\n"
-            b"print(json.dumps({'id': 'v1-' + os.environ.get('D_TAG', 'none'), 'kind': 'daemon.ver'}), flush=True)\n"
-            b"time.sleep(10)\n",
-        )
-        live_store.write(".env", b"D_TAG=init\n", mode=0o600)
-        live_store.write(
-            "bf.yaml",
-            f"version: {FORMAT}\nname: live-reload\nloops:\n  live-d:\n"
-            f"    when: daemon\n    run: [{sys.executable!r}, routines/live_d.py]\n    emit: loop.event\n".encode(),
-        )
-
-        def wait_event_id(target_id: str) -> bool:
-            dl = time.monotonic() + 8.0
-            while time.monotonic() < dl:
-                evs, _ = records.read_events(live_store)
-                if any(e.get("kind") == "daemon.ver" and e.get("data", {}).get("id") == target_id for e in evs):
-                    return True
-                time.sleep(0.05)
-            return False
-
-        assert wait_event_id("v1-init")
-        live_store.write(".env", b"D_TAG=rotated\n", mode=0o600)
-        assert wait_event_id("v1-rotated")
-        live_store.write(
-            "routines/live_d.py",
-            b"import json, os, time\n"
-            b"print(json.dumps({'id': 'v2-' + os.environ.get('D_TAG', 'none'), 'kind': 'daemon.ver'}), flush=True)\n"
-            b"time.sleep(10)\n",
-        )
-        assert wait_event_id("v2-rotated")
-        # Invalid `.env` (non-0600 permissions) emits `watch.error` without stopping the running daemon.
-        live_store.write(".env", b"D_TAG=bad\n", mode=0o644)
-        err_dl = time.monotonic() + 8.0
-        saw_env_err = False
-        while time.monotonic() < err_dl:
-            if "mode 600" in capsys.readouterr().out:
-                saw_env_err = True
-                break
-            time.sleep(0.05)
-        assert saw_env_err
-        assert loops.load_unit_state(live_store, "live-d")["status"] == "running"
-        live_store.write(".env", b"D_TAG=fixed\n", mode=0o600)
-        assert wait_event_id("v2-fixed")
-
-        # Symlinked interpreter-prefixed script is rejected fail-closed by `proc.prepare_unit`.
-        ext_script = tmp_path / "external.py"
-        ext_script.write_text("print('evil')\n")
-        (live_root / "routines" / "sym.py").symlink_to(ext_script)
-        with pytest.raises(Error, match="must be a regular file inside brain"):
-            proc.prepare_unit(live_store, "sym", (sys.executable, "routines/sym.py"), "r1", "2026-11-22T00:00:00Z")
-        (live_root / "routines" / "sym.py").unlink()
+        assert "concepts/live-edit.md" in w_store.read(NOTES_FILE).decode()
     finally:
-        stop_live.set()
-        live_t.join(timeout=6.0)
-        assert not live_t.is_alive()
+        stop_w.set()
+        wt.join(timeout=6.0)
+        assert not wt.is_alive()
 
-    # BrokenPipeError on `watch.serve(fmt="jsonl")` triggers clean shutdown without hanging.
-    class _BrokenBuf:
-        def write(self, _b: bytes) -> int:
-            raise BrokenPipeError
+    assert loops.load_unit_state(w_store, "tcp")["status"] == "stopped"
+    w_events = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert any(e.get("message") == "watch.started" for e in w_events)
+    assert any(e.get("message") == "watch.daemon" and e.get("ok") is True for e in w_events)
+    assert any(e.get("message") == "watch.stopped" for e in w_events)
 
-        def flush(self) -> None:
-            pass
-
-    class _BrokenOut:
-        buffer = _BrokenBuf()
-
-        def isatty(self) -> bool:
-            return False
-
-        def flush(self) -> None:
-            pass
-
-    monkeypatch.setattr(sys, "stdout", _BrokenOut())
-    bp_t = threading.Thread(target=lambda: watch.serve(live_store, fmt="jsonl"), daemon=True)
-    bp_t.start()
-    bp_t.join(timeout=6.0)
-    assert not bp_t.is_alive()
-    monkeypatch.undo()
-
-    ro_root = tmp_path / "ro-status"
-    engine.init_brain(ro_root, name="ro-status")
-    shutil.rmtree(ro_root / ".bf")
-    ro_sum = status.status_summary(Store(ro_root))
-    assert ro_sum["events_seq"] == 1
-    assert ro_sum["orphaned_states"] == []
-    assert not (ro_root / ".bf").exists()
-
-    records.append_event(store, "custom.het", "src", {"id": "h-null", "arr": None}, now=t0)
-    records.append_event(store, "custom.het", "src", {"id": "h-hit", "arr": [1]}, now=t0)
-    het_rules = (config.EventMatch(kind="custom.het", filter=".data.arr[] == 1 # comment"),)
-    het_matched, _ = loops.pending_events(store, 0, het_rules)
-    assert [ev["data"]["id"] for ev in het_matched] == ["h-hit"]
-
-    iso_root = tmp_path / "iso-filter"
-    engine.init_brain(iso_root, name="iso-filter")
-    iso_store = Store(iso_root)
-    iso_store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: iso-filter\nloops:\n"
-        "  bad-flt:\n    when:\n      - event:\n          kind: custom.x\n          filter: '[[['\n    run: [echo, no]\n"
-        f"  good-loop:\n    when: 1m\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n".encode(),
+    # `watch.serve(fmt="text")` prints overview + live stream and handles `_poll_changes` OSError cleanly!
+    stop_txt = threading.Event()
+    monkeypatch.setattr(watch, "_poll_changes", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("poll failed")))
+    monkeypatch.setattr(watch, "next_due_delay", lambda *_a, **_kw: 0.05)
+    capsys.readouterr()
+    txt_res: dict[str, Any] = {}
+    txt_t = threading.Thread(
+        target=lambda: txt_res.update(watch.serve(store, fmt="text", stop_event=stop_txt)), daemon=True
     )
-    records.append_event(iso_store, "custom.x", "src", {"id": "x1"}, now=t0)
-    iso_res = loops.run_loops(iso_store, due_only=True, now=t0)
-    assert {r["loop"]: r["status"] for r in iso_res["results"]} == {"bad-flt": "failed", "good-loop": "ok"}
-
-    monkeypatch.setattr(
-        subprocess, "run", lambda *_a, **_kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(["jq"], 5))
-    )
-    with pytest.raises(Error, match="event filter timed out after 5s"):
-        loops.pending_events(store, 0, het_rules)
-
-    reset_root = tmp_path / "cursor-reset"
-    engine.init_brain(reset_root, name="cursor-reset")
-    reset_store = Store(reset_root)
-    loops.save_unit_state(reset_store, {**loops.load_unit_state(reset_store, "l1"), "event_seq": 1})
-    loops.record_run(reset_store, "l1", "r1", "2026-11-16T08:00:00Z", ended=t0, dur_ms=1, code=0, cursor_seq=100)
-    assert loops.load_unit_state(reset_store, "l1")["event_seq"] == 1
-
-
-def test_status_attention_orphans_fallbacks_and_lazy_imports(tmp_path: Path) -> None:
-    proc_chk = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import sys, bf.markdown, bf.engine, bf.loops, bf.watch; "
-                "bad = {'structlog', 'yaml', 'croniter', 'jsonschema', 'markdown', 'rich', 'watchfiles', 'mcp'}; "
-                "assert not (bad & set(sys.modules)), bad & set(sys.modules)"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert proc_chk.returncode == 0, proc_chk.stderr
-
-    root = tmp_path / "v17-ops"
-    engine.init_brain(root, name="v17-ops")
-    store = Store(root)
-    t0 = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
-    store.write(
-        "bf.yaml",
-        (
-            f"version: {FORMAT}\nname: v17-ops\nloops:\n"
-            "  b:\n    run: [bf, build]\n"
-            "  c:\n    run: [bf, check]\n"
-            "  fail-empty:\n    run: [echo, nope]\n"
-        ).encode(),
-    )
-    assert loops.run_loops(store, ("b", "c"), now=t0)["ok"]
-
-    store.write(
-        "concepts/broken.md", b"---\ntype: guide\nstatus: stable\n---\n# Broken\n\n[Missing](concepts/nope.md)\n"
-    )
-    engine.build(store)
-    bv_fail = loops.run_loops(store, ("c",), now=t0)
-    assert not bv_fail["ok"]
-    assert "concepts/nope.md" in bv_fail["results"][0]["error"]
-
-    loops.record_run(store, "fail-empty", "r1", "2026-11-20T11:00:00Z", ended=t0, dur_ms=10, code=2, err_msg="  ")
-    st_doc = loops.load_unit_state(store, "fail-empty")
-    assert st_doc["error"] == "exit code 2"
-    loops.save_unit_state(store, {**st_doc, "status": "running", "error": ""})
-    st_running = status.status_summary(store)
-    assert {
-        "kind": "loop",
-        "mode": "cycle",
-        "name": "fail-empty",
-        "status": "running",
-        "failed": False,
-        "consecutive_failures": 1,
-    } in st_running["attention"]
-    assert "loops.fail-empty: 1 consecutive failure(s)" in st_running["problems"]
-
-    loops.save_unit_state(store, {**st_doc, "status": "failed", "error": ""})
-    st_fb = status.status_summary(store)
-    assert any(a["name"] == "fail-empty" and "exit code 2" in a["error"] for a in st_fb["attention"])
-
-    loops.save_unit_state(store, {**st_doc, "name": "no-log", "status": "failed", "error": ""})
-    store.write("bf.yaml", store.read("bf.yaml") + b"  no-log:\n    run: [echo, ok]\n")
-    assert any(
-        a["name"] == "no-log" and a["error"] == "last run failed" for a in status.status_summary(store)["attention"]
-    )
-
-    loops.save_unit_state(store, {**st_doc, "name": "ws-err", "status": "failed", "error": ""})
-    store.write("bf.yaml", store.read("bf.yaml") + b"  ws-err:\n    run: [echo, ok]\n")
-    store.append_log(
-        "ws-err", models.encode({"message": "loop.failed", "error": "   ", "stderr": "real stderr failure"})
-    )
-    assert any(
-        a["name"] == "ws-err" and a["error"] == "real stderr failure" for a in status.status_summary(store)["attention"]
-    )
-
-    ev_stop = threading.Event()
-    ev_stop.set()
-    assert proc.exec_argv(["echo", "hi"], cwd=root, env={}, timeout=5, stop_event=ev_stop)[0] == 130
-    assert loops.run_loops(store, ("b",), stop_event=ev_stop)["ran"] == 0
-    assert loops.pending_events(store, 0, ()) == ([], 0)
-    assert loops.pending_events(store, 999999, (config.EventMatch(kind="x"),)) == (
-        [],
-        loops.records.latest_event_seq(store),
-    )
-
-    loops.save_unit_state(store, {**st_doc, "name": "stale_unit"})
-    (root / ".bf" / "b").mkdir(mode=0o700, exist_ok=True)
-    (root / ".bf" / "b" / "nested-link").symlink_to(root / "bf.yaml")
-    assert "stale_unit" in status.status_summary(store)["orphaned_states"]
-    pruned_dry = loops.prune_state(store, dry_run=True)
-    assert pruned_dry["dry_run"] is True
-    assert "stale_unit" in pruned_dry["pruned"]
-    pruned = loops.prune_state(store)
-    assert "stale_unit" in pruned["pruned"]
-    assert status.status_summary(store)["orphaned_states"] == []
+    txt_t.start()
+    try:
+        dl_o = time.monotonic() + 5.0
+        txt_buf = ""
+        while time.monotonic() < dl_o:
+            txt_buf += capsys.readouterr().out
+            if "OSError" in txt_buf and "Watching ops-status" in txt_buf:
+                break
+            time.sleep(0.02)
+        assert "Watching ops-status" in txt_buf
+        assert "OSError" in txt_buf
+    finally:
+        stop_txt.set()
+        txt_t.join(timeout=5.0)
+        assert not txt_t.is_alive()
+    assert txt_res["exit_code"] == 0
 
 
-def test_builtin_bf_check_surfaces_errors_past_warnings(tmp_path: Path) -> None:
-    root = tmp_path / "chk-warn"
-    engine.init_brain(root, name="chk-warn")
-    store = Store(root)
-    t0 = datetime(2026, 11, 21, 6, 0, tzinfo=UTC)
-    store.write("bf.yaml", f"version: {FORMAT}\nname: chk-warn\nloops:\n  check-loop:\n    run: [bf, check]\n".encode())
-    store.write("memories/jira.forgotten", b"PROJ-999\n")
-    store.write(
-        "concepts/warn-note.md",
-        b"---\ntype: guide\nstatus: stable\n---\n\n# Warn Note\n\nSee [ticket](jira:PROJ-999).\n",
-    )
-    engine.build(store)
-
-    val = engine.validate(store)
-    assert val["ok"] is True
-    assert val["warnings_count"] == 1
-    assert val["problems"]
-
-    cfg = config.load(store)
-    res_ok = loops.execute_one_loop(store, cfg.loops["check-loop"], trigger="manual", now=t0)
-    assert res_ok["status"] == "ok"
-
-    store.write("concepts/bad-fm.md", b"---\nstatus: [\n---\n# Bad\n")
-    res_err = loops.execute_one_loop(store, cfg.loops["check-loop"], trigger="manual", now=t0)
-    assert res_err["status"] == "failed"
-    assert res_err["exit_code"] == 1
-    assert "concepts/bad-fm.md" in res_err["error"]
-    assert "PROJ-999" not in res_err["error"]
-
-
-def test_loops_argv0_confinement_cli_order_redaction_and_note_counts(tmp_path: Path) -> None:
-    root = tmp_path / "hardened-loops"
-    engine.init_brain(root, name="hardened-loops")
-    store = Store(root)
-    outside = tmp_path / "outside.sh"
-    outside.write_text("#!/bin/sh\necho PWNED\n")
-    outside.chmod(0o755)
-    (root / "sensors").mkdir(exist_ok=True)
-    (root / "sensors" / "escape.sh").symlink_to(outside)
-
-    # Relative `argv[0]` with `/` fails closed on `..` traversal, missing file, or symlink escape.
-    for bad_cmd in ("../outside.sh", "sensors/escape.sh", "sensors/missing.sh"):
-        with pytest.raises(Error):
-            proc.prepare_unit(store, "bad", (bad_cmd,), "r1", "2026-11-20T00:00:00Z")
-
-    # `parse_emitted_event` enforces `EVENT_KIND_RE`.
-    with pytest.raises(Error, match="invalid event kind"):
-        records.parse_emitted_event(b'{"kind":"BAD KIND"}', "loop.event", "loops.x")
-
-    # Explicit loop names execute in CLI argument order (not `bf.yaml` order), and returned JSON summaries are redacted.
-    store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: hardened-loops\nloops:\n"
-        f'  first:\n    run: [{sys.executable!r}, -c, \'import json; print(json.dumps({{"OPENAI_API_KEY": "sk-secret12345", "ok": True}}))\']\n'
-        f"  second:\n    run: [{sys.executable!r}, -c, 'print(\"{{}}\")']\n".encode(),
-    )
-    run_res = loops.run_loops(store, ("second", "first"))
-    assert [r["loop"] for r in run_res["results"]] == ["second", "first"]
-    assert run_res["results"][1]["summary"]["OPENAI_API_KEY"] == "[REDACTED]"
-
-    # `status_summary` counts only OKF notes (ignoring attachments in `actions/.../outputs/`).
-    store.write("actions/2026-11-20_demo/index.md", b"---\ntype: action\nstatus: draft\n---\n# Demo\n")
-    store.write("actions/2026-11-20_demo/outputs/report.md", b"# Attachment\n")
-    st = status.status_summary(store)
-    assert st["counts"]["notes"] == 2
-
-
-def test_daemon_health_timer_resets_consecutive_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_daemon_health_timer_overflow_and_backoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "daemon-heal"
     engine.init_brain(root, name="daemon-heal")
     store = Store(root)
@@ -1516,7 +902,8 @@ def test_daemon_health_timer_resets_consecutive_failures(tmp_path: Path, monkeyp
     )
     monkeypatch.setattr(watch, "_HEALTHY_SECS", 0.08)
     stop_ev, wake_ev = threading.Event(), threading.Event()
-    stream = watch.DaemonStream(store, unit, stop_ev, wake_ev)
+    events_seen: list[tuple[str, dict[str, Any]]] = []
+    stream = watch.DaemonStream(store, unit, stop_ev, wake_ev, on_event=lambda k, p: events_seen.append((k, p)))
     stream.start()
     try:
         deadline = time.monotonic() + 3.0
@@ -1526,651 +913,1477 @@ def test_daemon_health_timer_resets_consecutive_failures(tmp_path: Path, monkeyp
                 break
             time.sleep(0.03)
         final_doc = loops.load_unit_state(store, "bot")
-        assert final_doc["status"] == "running"
-        assert final_doc["consecutive_failures"] == 0
-        assert final_doc["error"] == ""
+        assert (final_doc["status"], final_doc["consecutive_failures"], final_doc["error"]) == ("running", 0, "")
         assert final_doc["last_success"]
     finally:
         stop_ev.set()
         stream.terminate()
     assert loops.load_unit_state(store, "bot")["status"] == "stopped"
+    assert any(p.get("state") == "healthy" and p.get("ok") is True for _, p in events_seen)
+
+    # Immediate exit-0 daemon does not reset backoff (restore default healthy threshold so startup latency never triggers it).
+    monkeypatch.setattr(watch, "_HEALTHY_SECS", 30.0)
+    waits: list[float] = []
+    spin_stop = threading.Event()
+    real_wait = spin_stop.wait
+
+    def spy_wait(timeout: float | None = None) -> bool:
+        if timeout is not None:
+            waits.append(timeout)
+        if len(waits) >= 10:
+            spin_stop.set()
+            return True
+        return real_wait(0.005)
+
+    monkeypatch.setattr(spin_stop, "wait", spy_wait)
+    spin_unit = config.LoopSpec(name="spin0", run=(sys.executable, "-c", "pass"), daemon=True)
+    spin_d = watch.DaemonStream(store, spin_unit, spin_stop, threading.Event())
+    spin_d.start()
+    spin_d.thread.join(timeout=10.0)
+    assert len(waits) == 10
+    assert 0.85 <= waits[0] <= 1.0
+    assert 1.7 <= waits[1] <= 2.0
+    # Repeated daemon failures climb past 30s and cap at 300s to limit offline retry storms.
+    assert 255.0 <= waits[-1] <= 300.0
+
+    # Oversized stdout line terminates daemon cleanly and records failure.
+    monkeypatch.setattr(models, "MAX_BATCH", 64)
+    huge_unit = config.LoopSpec(
+        name="huge",
+        run=(
+            sys.executable,
+            "-c",
+            "import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_a: sys.exit(0)); print('x' * 120, flush=True); time.sleep(5)",
+        ),
+        daemon=True,
+        emit="loop.event",
+    )
+    h_stop = threading.Event()
+    huge_d = watch.DaemonStream(store, huge_unit, h_stop, threading.Event())
+    huge_d.start()
+    h_dl = time.monotonic() + 5.0
+    while time.monotonic() < h_dl and loops.load_unit_state(store, "huge")["status"] != "failed":
+        time.sleep(0.02)
+    h_stop.set()
+    huge_d.terminate()
+    huge_st = loops.load_unit_state(store, "huge")
+    assert huge_st["status"] == "failed"
+    assert "exceeds 64 bytes" in huge_st["error"]
 
 
-def test_convention_sensors_routines_agents_ambiguity_symlinks_and_daemon(tmp_path: Path) -> None:
-    root = tmp_path / "conv-brain"
-    engine.init_brain(root, name="conv-brain")
+def test_incomplete_watermark_per_trigger_window_crashed_daemon_and_prune_lock(tmp_path: Path) -> None:
+    """Verify `incomplete=True` holds watermarks, per-trigger `BF_START`, partial multi-loop failures, crashed daemon detection, and active lock pruning safety."""
+    root = tmp_path / "adv-loops"
+    engine.init_brain(root, name="adv-loops")
     store = Store(root)
-    for d in ("sensors", "routines", "agents"):
-        (root / d).mkdir(exist_ok=True)
-    store.write("schemas/prio.json", OBJ_SCHEMA)
-
-    (root / "sensors" / "prio").write_text(
-        f"#!{sys.executable}\nimport json\nprint(json.dumps([{{'id':'p1','title':'From sensor'}}]))\n"
+    (root / "sensors").mkdir(exist_ok=True)
+    (root / "sensors" / "inc.py").write_text(
+        "import json, os\n"
+        "print(json.dumps({'records': [{'id': 'i1', 'title': os.environ['BF_START']}], 'incomplete': True}))\n"
     )
-    (root / "sensors" / "prio").chmod(0o755)
-    (root / "sensors" / "dup.py").write_text("print('[]')\n")
-    (root / "routines" / "dup.sh").write_text("echo hi\n")
-    (root / "sensors" / "exec-py.py").write_text(f"#!{sys.executable}\nprint('[]')\n")
-    (root / "sensors" / "exec-py.py").chmod(0o755)
-    (root / "routines" / "r-only.py").write_text("print('routine-ok')\n")
-    (root / "routines" / "sh-only.sh").write_text("echo sh-ok\n")
-    (root / "agents" / "agent-only.sh").write_text("echo agent-ok\n")
-    (root / "sensors" / "sym-loop.py").symlink_to(root / "routines" / "r-only.py")
-    (root / "routines" / "conv-daemon.py").write_text(
-        "import json, time\nprint(json.dumps({'id': 'cd-1', 'ok': True}), flush=True)\ntime.sleep(0.2)\n"
+    (root / "sensors" / "win.py").write_text(
+        "import json, os\nprint(json.dumps([{'id': 'w1', 'title': os.environ['BF_START']}]))\n"
     )
-
     store.write(
         "bf.yaml",
-        f"version: {FORMAT}\nname: conv-brain\n"
-        "loops:\n"
-        "  prio: {}\n"
-        "  dup:\n    enabled: false\n"
-        "  exec-py:\n    enabled: false\n"
-        "  r-only:\n    enabled: false\n"
-        "  sh-only:\n    enabled: false\n"
-        "  agent-only:\n    enabled: false\n"
-        "  sym-loop:\n    enabled: false\n"
-        "  interp-sensor:\n    run: [python3, sensors/exec-py.py]\n    enabled: false\n"
-        "  conv-daemon:\n    when: daemon\n    emit: loop.message\n".encode(),
+        (
+            f"version: {FORMAT}\nname: adv-loops\nloops:\n"
+            "  inc:\n"
+            "    when: 1h\n"
+            "    ingest: upsert\n"
+            "    window:\n      backfill: 1d\n"
+            "  win:\n"
+            "    ingest: upsert\n"
+            "    window:\n      backfill: 1d\n"
+            "    when:\n"
+            "      - 1d\n"
+            "      - cron: '0 8 * * 1'\n"
+            "        backfill: 1w\n"
+            "  broken-multi:\n"
+            "    run: [routines/does-not-exist.py]\n"
+            "  crashed-d:\n"
+            "    when: daemon\n"
+            f"    run: [{sys.executable!r}, -c, 'import time; time.sleep(10)']\n"
+        ).encode(),
     )
-    cfg = config.load(store)
-    assert loops.resolve_loop(store, cfg.loops["prio"]) == (("sensors/prio",), "prio", "memories", "upsert", 300)
-    assert loops.resolve_loop(store, cfg.loops["exec-py"]) == (
-        ("sensors/exec-py.py",),
-        "exec-py",
-        "memories",
-        "upsert",
-        300,
-    )
-    assert loops.resolve_loop(store, cfg.loops["r-only"]) == (
-        (sys.executable, "routines/r-only.py"),
-        "",
-        "memories",
-        "upsert",
-        300,
-    )
-    assert loops.resolve_loop(store, cfg.loops["sh-only"]) == (
-        ("bash", "routines/sh-only.sh"),
-        "",
-        "memories",
-        "upsert",
-        300,
-    )
-    assert loops.resolve_loop(store, cfg.loops["agent-only"]) == (
-        ("bash", "agents/agent-only.sh"),
-        "",
-        "memories",
-        "upsert",
-        900,
-    )
-    assert loops.resolve_loop(store, cfg.loops["interp-sensor"]) == (
-        ("python3", "sensors/exec-py.py"),
-        "interp-sensor",
-        "memories",
-        "upsert",
-        300,
-    )
-    uv_spec = config.LoopSpec(name="uv-s", run=("uv", "run", "--quiet", "sensors/exec-py.py"))
-    assert loops.resolve_loop(store, uv_spec)[1] == "uv-s"
-    with pytest.raises(Error, match="ambiguous convention scripts"):
-        loops.resolve_loop(store, cfg.loops["dup"])
-    with pytest.raises(Error, match="expected a regular file"):
-        loops.resolve_loop(store, cfg.loops["sym-loop"])
 
-    assert loops.run_loops(store, ("prio",))["ok"]
-    assert _load_jsonl(store, records.memory_file("prio"))[0]["title"] == "From sensor"
+    # 1. `incomplete=True` holds `last_success`, `last_scheduled`, and `schedule_last` so next run re-covers the window!
+    t_mon = datetime(2026, 11, 16, 9, 0, tzinfo=UTC)  # Monday 09:00 UTC -> both 1d and Monday 08:00 cron are due!
+    inc_res = loops.run_loops(store, ("inc",), now=t_mon)
+    assert inc_res["ok"] is True
+    inc_st = state.load_unit_state(store, "inc")
+    assert inc_st["last_success"] == ""
+    assert inc_st["last_scheduled"] == ""
+    assert inc_st["schedule_last"] == {}
+    assert inc_st["last_run"]["incomplete"] is True
 
-    # Daemon convention script in `routines/` runs cleanly in `DaemonStream`!
-    s_stop, s_wake = threading.Event(), threading.Event()
-    d = watch.DaemonStream(store, cfg.loops["conv-daemon"], s_stop, s_wake)
-    d.start()
-    assert s_wake.wait(timeout=5.0)
-    s_stop.set()
-    d.terminate()
-    evs, _ = records.read_events(store)
-    assert any(ev["data"].get("id") == "cd-1" for ev in evs)
+    # 2. Per-trigger window picks the widest/earliest start (`1w` backfill wins over `1d` when both schedules are due!).
+    due_win = loops.run_loops(store, due_only=True, now=t_mon)
+    assert due_win["ok"] is True
+    win_rec = _load_jsonl(store, records.memory_file("win"))[0]
+    assert win_rec["title"] == "2026-11-09T09:00:00Z"  # 7 days before 2026-11-16T09:00:00Z!
+
+    # 3. Multi-loop `bf run` captures pre-flight error in `broken-multi` while still executing sibling `win`!
+    multi_res = loops.run_loops(store, ("broken-multi", "win"), now=t_mon)
+    assert multi_res["ok"] is False
+    by_name = {r["loop"]: r["status"] for r in multi_res["results"]}
+    assert by_name == {"broken-multi": "failed", "win": "ok"}
+
+    # 4. Crashed daemon detection: state `"running"` + existing unlocked `.bf/locks/loop-crashed-d.lock` -> `crashed`!
+    state.mark_unit_state(store, "crashed-d", status="running")
+    locks_dir = private_dir(store, ".bf", "locks")
+    locks_dir.write("loop-crashed-d.lock", b"", mode=0o600)
+    st_crash = status.status_summary(store, include_loops=True, now=t_mon)
+    assert any(a["name"] == "crashed-d" and a["reason"] == "crashed" for a in st_crash["attention"])
+    assert st_crash["loops"]["crashed-d"]["crashed"] is True
+    assert st_crash["loops"]["crashed-d"]["status"] == "stopped"
+    # While the lock IS held, it is NOT reported as crashed:
+    with loop_lock(store, "crashed-d", wait=0.0):
+        st_live = status.status_summary(store, include_loops=True, now=t_mon)
+        assert not any(a["name"] == "crashed-d" for a in st_live["attention"])
+        assert st_live["loops"]["crashed-d"]["status"] == "running"
+
+    # 5. `prune_state` skips an actively locked orphan `loop-*.lock` instead of unlinking an active lock inode!
+    from bf.storage import is_loop_locked, try_unlink_loop_lock
+
+    assert is_loop_locked(store, "never-existed") is False
+    assert try_unlink_loop_lock(store, "loop-never-existed.lock") is False
+    with loop_lock(store, "active-orphan", wait=0.0):
+        pruned = loops.prune_state(store)
+        assert "loop-active-orphan.lock" not in pruned["pruned"]["locks"]
+        assert (root / ".bf" / "locks" / "loop-active-orphan.lock").exists()
+    pruned_after = loops.prune_state(store)
+    assert "loop-active-orphan.lock" in pruned_after["pruned"]["locks"]
+    assert not (root / ".bf" / "locks" / "loop-active-orphan.lock").exists()
+
+    # Multi-loop batch captures BusyError on locked loop while running sibling; single dry-run re-raises; `DaemonStream` handles held lock cleanly!
+    with loop_lock(store, "inc", wait=0.0):
+        busy_batch = loops.run_loops(store, ("inc", "win"), now=t_mon)
+        assert busy_batch["ok"] is False
+        assert {r["loop"]: r["status"] for r in busy_batch["results"]} == {"inc": "failed", "win": "ok"}
+    with pytest.raises(Error):
+        loops.run_loops(store, ("broken-multi",), dry_run=True, now=t_mon)
+
+    with loop_lock(store, "crashed-d", wait=0.0):
+        d_stop = threading.Event()
+        d_ev: list[tuple[str, dict[str, Any]]] = []
+        ds = watch.DaemonStream(
+            store,
+            config.load(store).loops["crashed-d"],
+            d_stop,
+            threading.Event(),
+            on_event=lambda k, p: d_ev.append((k, p)),
+        )
+        ds.start()
+        dl_d = time.monotonic() + 3.0
+        while time.monotonic() < dl_d and not any("already running" in str(p.get("error", "")) for _, p in d_ev):
+            time.sleep(0.03)
+        d_stop.set()
+        ds.terminate()
+        assert any("already running" in str(p.get("error", "")) for _, p in d_ev)
+
+    # 6. `status_summary` catches invalid `bf.yaml` cleanly instead of raising!
+    store.write("bf.yaml", b"version: 999\nname: broken\n")
+    st_bad = status.status_summary(store, now=t_mon)
+    assert st_bad["ok"] is False
+    assert st_bad["problems"]
 
 
-def test_v32_watch_text_rate_limit_self_trigger_and_structured_stderr(
+def test_dry_run_no_bf_dir_record_run_log_failure_and_dst_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 1. `bf run --dry-run` does not create `.bf/` on disk.
+    root = tmp_path / "dry"
+    engine.init_brain(root, name="dry")
+    store = Store(root)
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: dry\nloops:\n  echo:\n    run: [{sys.executable!r}, -c, 'print(1)']\n".encode(),
+    )
+    shutil.rmtree(root / ".bf", ignore_errors=True)
+    dry_res = loops.run_loops(store, ["echo"], dry_run=True)
+    assert dry_res["ok"] is True
+    assert not (root / ".bf").exists()
+
+    # 2. `record_run` preserves `"ok"` state and emits `loop.succeeded` even if `append_log` raises.
+    monkeypatch.setattr(Store, "append_log", lambda *_a, **_kw: (_ for _ in ()).throw(Error("logs busy")))
+    ran = loops.run_loops(store, ["echo"])
+    assert ran["ok"] is True
+    assert state.load_unit_state(store, "echo")["status"] == "ok"
+    evs, _ = state.read_events(store)
+    assert any(e["kind"] == "loop.succeeded" and e["source"] == "echo" for e in evs)
+
+    # 3. PEP 495 DST fall-back hour: America/New_York repeated 01:00 on 2026-11-01 still triggers.
+    dst_loop = config.LoopSpec(
+        name="dst",
+        run=("echo",),
+        schedules=(config.ScheduleSpec("cron:0 * * * *", cron="0 * * * *"),),
+    )
+    state_edt = {"schedule_last": {"cron:0 * * * *": "2026-11-01T05:30:00Z"}}
+    now_est = datetime(2026, 11, 1, 6, 15, tzinfo=UTC)
+    assert cron.due_schedules(dst_loop, state_edt, now_est, tz_name="America/New_York") != ()
+    assert cron.next_schedule_delay(dst_loop, state_edt, now_est, tz_name="America/New_York") == 0.5
+
+    # 4. DST spring-forward in Europe/Paris (2026-03-29 02:00 skipped -> fires at 01:00Z).
+    paris_cfg = config.LoopSpec(
+        name="paris", run=("echo",), schedules=(config.ScheduleSpec("cron:0 2 * * *", cron="0 2 * * *"),)
+    )
+    assert (
+        cron.due_schedules(
+            paris_cfg,
+            {"last_scheduled": "2026-03-28T01:00:00Z"},
+            datetime(2026, 3, 29, 0, 59, tzinfo=UTC),
+            tz_name="Europe/Paris",
+        )
+        == ()
+    )
+    assert (
+        cron.due_schedules(
+            paris_cfg,
+            {"last_scheduled": "2026-03-28T01:00:00Z"},
+            datetime(2026, 3, 29, 1, 5, tzinfo=UTC),
+            tz_name="Europe/Paris",
+        )
+        != ()
+    )
+
+
+def test_watch_live_reload_rate_limit_broken_pipe_and_proc_status_edges(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # 1. `format_watch_line` covers all event types in both plain and color modes (including ms and s durations).
+    # 1. `format_watch_line` across all event types in both plain and color modes!
     for col in (False, True):
-        assert "build" in watch.format_watch_line("watch.build", {"ok": True, "notes": 3, "written": 1}, color=col)
-        assert "build" in watch.format_watch_line("watch.build", {"ok": False, "notes": 3, "written": 0}, color=col)
-        out_rec = watch.format_watch_line(
+        assert "build" in render.format_watch_line("watch.build", {"ok": True, "notes": 3, "written": 1}, color=col)
+        assert "build" in render.format_watch_line(
+            "watch.build", {"ok": False, "notes": 3, "written": 0, "problems": ["p1", "p2"]}, color=col
+        )
+        assert "+2" in render.format_watch_line(
             "watch.loop",
             {"loop": "s", "status": "ok", "duration_ms": 1200, "summary": {"records": 5, "added": 2}},
             color=col,
         )
-        assert "+2" in out_rec
-        assert "1.2s" in out_rec
-        out_unch = watch.format_watch_line(
-            "watch.loop",
-            {"loop": "s", "status": "ok", "duration_ms": 50, "summary": {"records": 5}},
-            color=col,
+        assert "5 unchanged" in render.format_watch_line(
+            "watch.loop", {"loop": "s", "status": "ok", "duration_ms": 50, "summary": {"records": 5}}, color=col
         )
-        assert "5 unchanged" in out_unch
-        assert "50ms" in out_unch
-        assert "3 emitted" in watch.format_watch_line(
-            "watch.loop",
-            {"loop": "e", "status": "ok", "duration_ms": 50, "summary": {"emitted": 3}},
-            color=col,
+        assert "3 emitted" in render.format_watch_line(
+            "watch.loop", {"loop": "e", "status": "ok", "duration_ms": 50, "summary": {"emitted": 3}}, color=col
         )
-        assert "boom" in watch.format_watch_line(
+        assert "boom" in render.format_watch_line(
             "watch.loop", {"loop": "f", "status": "failed", "duration_ms": 50, "error": "boom"}, color=col
         )
-        assert "daemon" in watch.format_watch_line("watch.daemon", {"loop": "d", "state": "started"}, color=col)
-        assert "crash" in watch.format_watch_line(
+        assert "daemon" in render.format_watch_line("watch.daemon", {"loop": "d", "state": "started"}, color=col)
+        assert "crash" in render.format_watch_line(
             "watch.daemon", {"loop": "d", "state": "failed", "error": "crash"}, color=col
         )
-        assert "bad" in watch.format_watch_line("watch.error", {"error": "bad"}, color=col)
+        assert "start" in render.format_watch_line("watch.started", {"brain": "b"}, color=col)
+        assert "stop" in render.format_watch_line("watch.stopped", {"brain": "b"}, color=col)
+        assert "bad" in render.format_watch_line("watch.error", {"error": "bad"}, color=col)
 
-    # 2. Structured JSONL/structlog stderr -> `logs/<loop>.jsonl`, `_last_error_line`, non-exec script, self-trigger suppression, and usages target.
-    root = tmp_path / "v32-loops"
-    engine.init_brain(root, name="v32-loops")
+    # 2. `proc` edges: missing binary (127), stdout overflow (1), pre-set stop_event (130), host env_from fallback & bf PYTHON* strip!
+    root = tmp_path / "edge-ops"
+    engine.init_brain(root, name="edge-ops")
     store = Store(root)
-    (root / "sensors" / "noexec").write_text("#!/bin/sh\necho '[]'\n")
+    assert proc.exec_argv(["nonexistent-bf-bin-xyz"], cwd=root, env={}, timeout=5)[0] == 127
+    ev_stop = threading.Event()
+    ev_stop.set()
+    assert proc.exec_argv(["echo", "hi"], cwd=root, env={}, timeout=5, stop_event=ev_stop)[0] == 130
+    with monkeypatch.context() as mp_ov:
+        mp_ov.setattr(proc, "MAX_BATCH", 32)
+        ov_rc, _, ov_err = proc.exec_argv([sys.executable, "-c", "print('x' * 100)"], cwd=root, env={}, timeout=5)
+        assert ov_rc == 1
+        assert "exceeds 32 bytes" in ov_err
+    host_val = "super_secret_host_1234"
+    monkeypatch.setenv("HOST_ONLY_SECRET", host_val)
+    _, p_env, _, p_secs = proc.prepare_unit(
+        store, "u", ("echo", "ok"), "r1", "2026-11-20T00:00:00Z", unit_env_from=("HOST_ONLY_SECRET", "PATH")
+    )
+    assert p_env["HOST_ONLY_SECRET"] == host_val
+    assert host_val in p_secs
+    assert "PATH" in p_env
+
+    # 3. `loops` edges: structured stderr `_last_error_line`, `_bf_error_summary` past warnings, `status._log_error_fallback`, corrupt state isolation!
     (root / "routines" / "struct_err.py").write_text(
         "import json, sys\n"
-        "sys.stderr.write(json.dumps({'event': 'boot_step', 'level': 'info', 'k': 1}) + '\\n')\n"
         "sys.stderr.write(json.dumps({'severity': 'ERROR', 'message': 'structured boom'}) + '\\n')\n"
         "sys.exit(1)\n"
     )
-    (root / "sensors" / "toks.py").write_text(
-        "import json\nprint(json.dumps([{'id': 'u1', 'title': 'Turn 1', 'model': 'm1', 'input_tokens': 10}]))\n"
-    )
+    store.write("memories/jira.forgotten", b"PROJ-9\n")
+    store.write("concepts/warn.md", b"---\ntype: guide\nstatus: stable\n---\n# W\n\n[T](jira:PROJ-9)\n")
+    engine.build(store)
     store.write(
         "bf.yaml",
-        f"version: {FORMAT}\nname: v32-loops\n"
-        "loops:\n"
-        "  noexec:\n    enabled: false\n"
+        f"version: {FORMAT}\nname: edge-ops\nloops:\n"
         f"  struct-err:\n    run: [{sys.executable!r}, routines/struct_err.py]\n"
-        "  toks:\n    ingest:\n      target: usages\n"
-        f"  self-sub:\n    when:\n      - event: loop.succeeded\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n"
-        f"  corrupt-st:\n    when: 1m\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n".encode(),
+        "  chk:\n    run: [bf, check]\n"
+        "  corrupt-st:\n    when: 1m\n    run: [echo, ok]\n"
+        "  log-err:\n    run: [echo, ok]\n"
+        "  log-code:\n    run: [echo, ok]\n"
+        "  no-log:\n    run: [echo, ok]\n".encode(),
     )
-    cfg = config.load(store)
-    with pytest.raises(Error, match="not executable"):
-        loops.resolve_loop(store, cfg.loops["noexec"])
+    se_res = loops.run_loops(store, ("struct-err",))
+    assert not se_res["ok"]
+    assert se_res["results"][0]["error"] == "structured boom"
 
-    err_res = loops.run_loops(store, ("struct-err",))
-    assert not err_res["ok"]
-    assert err_res["results"][0]["error"] == "structured boom"
-    log_rows = [json.loads(ln) for ln in store.read("logs/struct-err.jsonl").decode().splitlines() if ln.strip()]
-    assert any(r.get("message") == "boot_step" and r.get("k") == 1 for r in log_rows)
-    assert any(r.get("message") == "structured boom" and r.get("severity") == "ERROR" for r in log_rows)
+    # `_bf_error_summary` skips warning lines and reports actual error lines!
+    store.write("concepts/bad.md", b"---\nstatus: [\n---\n# Bad\n")
+    chk_res = loops.run_loops(store, ("chk",))
+    assert not chk_res["ok"]
+    assert "concepts/bad.md" in chk_res["results"][0]["error"]
+    assert "PROJ-9" not in chk_res["results"][0]["error"]
+    store.delete("concepts/bad.md")
 
-    tok_res = loops.run_loops(store, ("toks",))
-    assert tok_res["ok"]
-    assert store.exists("usages/toks.jsonl")
-
-    # Self-sourced `loop.succeeded` is ignored by wildcard rule (`source=""`), while other-loop events match!
-    records.append_event(store, "loop.succeeded", "self-sub", {"run": "r1"})
-    records.append_event(store, "loop.succeeded", "other", {"run": "r2"})
-    matched, _ = loops.pending_events(store, 0, cfg.loops["self-sub"].events, self_name="self-sub")
-    assert [ev["source"] for ev in matched] == ["toks", "other"]
-
-    # Orphaned state renders in `format_status_text`, and `inside_brain` checks `enclosing.root == store.root`!
-    loops.save_unit_state(store, {**loops.load_unit_state(store, "ghost"), "status": "idle"})
-    st_text_col = status.format_status_text(status.status_summary(store, all_units=True), color=True)
-    assert "orphaned states: ghost" in st_text_col
-    assert "\033[" in st_text_col
-    # `status_summary` handles missing `memories/` and `usages/` dirs cleanly and reports future/missing timestamps!
-    bare_b = tmp_path / "bare-status"
-    engine.init_brain(bare_b, name="bare-status")
-    bare_st = Store(bare_b)
-    shutil.rmtree(bare_b / "memories")
-    shutil.rmtree(bare_b / "usages")
-    bare_st.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: bare-status\nloops:\n  fut:\n    when: 1h\n    run: [echo]\n".encode(),
-    )
-    loops.save_unit_state(
-        bare_st,
-        {
-            **loops.load_unit_state(bare_st, "fut"),
-            "status": "ok",
-            "last_end": "2099-01-01T00:00:00Z",
-        },
-    )
-    bare_txt = status.format_status_text(
-        status.status_summary(bare_st, all_units=True),
-        now=datetime(2026, 11, 20, 12, 0, tzinfo=UTC),
-    )
-    assert "bare-status" in bare_txt
-    assert "now" in bare_txt
-    # `reset_loops(..., dry_run=True)` handles missing `.bf/` cleanly.
-    shutil.rmtree(bare_b / ".bf", ignore_errors=True)
-    assert loops.reset_loops(bare_st, ("fut",), dry_run=True) == {
-        "ok": True,
-        "brain": "bare-status",
-        "reset": [],
-        "dry_run": True,
-    }
-    # Concurrency saturation (`concurrency: 1` with 2 due loops) leaves event quota untouched while slots == 0!
-    bare_st.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: bare-status\nconcurrency: 1\nloops:\n"
-        f"  s1:\n    when: 1m\n    run: [{sys.executable!r}, -c, 'import time; time.sleep(0.25)']\n"
-        f"  s2:\n    when: 1m\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n".encode(),
-    )
-    stop_sat = threading.Event()
-    t_sat = threading.Thread(target=lambda: watch.serve(bare_st, fmt="jsonl", stop_event=stop_sat), daemon=True)
-    t_sat.start()
-    try:
-        dl_sat = time.monotonic() + 5.0
-        while time.monotonic() < dl_sat and loops.load_unit_state(bare_st, "s2")["runs"] < 1:
-            time.sleep(0.05)
-        assert loops.load_unit_state(bare_st, "s1")["runs"] >= 1
-        assert loops.load_unit_state(bare_st, "s2")["runs"] >= 1
-    finally:
-        stop_sat.set()
-        t_sat.join(timeout=5.0)
-    # `prepare_unit` rewrites `bf` argv and `./` relative script paths cleanly.
-    bf_argv, _, _ = proc.prepare_unit(store, "b", ("bf", "build"), "r1", "2026-11-20T00:00:00Z")
-    assert bf_argv[:3] == [sys.executable, "-m", "bf"]
-    rel_argv, _, _ = proc.prepare_unit(store, "t", ("./sensors/toks.py",), "r1", "2026-11-20T00:00:00Z")
-    assert rel_argv[0].endswith("/sensors/toks.py")
-    other_b = tmp_path / "other-brain"
-    engine.init_brain(other_b, name="other-brain")
-    monkeypatch.chdir(other_b)
-    assert status.status_summary(store)["inside_brain"] is False
-    monkeypatch.chdir(root)
-    assert status.status_summary(store)["inside_brain"] is True
-
-    # Corrupt `.bf/<loop>.json` is isolated in `select_due_loops` without breaking healthy loops!
-    private_dir(store).write("corrupt-st.json", b"{corrupt", mode=0o600)
-    _, pre_fails = loops.select_due_loops(store, cfg, sched_now=datetime.now(UTC))
+    # Corrupt `.bf/state/<loop>.json` is isolated in `select_due_loops` & `status_summary`, and `_log_error_fallback` covers stderr/exit_code/default!
+    private_dir(store, ".bf", "state").write("corrupt-st.json", b"{corrupt", mode=0o600)
+    _, pre_fails = loops.select_due_loops(store, config.load(store), sched_now=datetime.now(UTC))
     assert any(f["loop"] == "corrupt-st" for f in pre_fails)
 
-    # 3. `watch.serve(fmt="text")` executes due loop, trips event rate circuit breaker, and handles config reload error!
-    rl_root = tmp_path / "rl-watch"
-    engine.init_brain(rl_root, name="rl-watch")
-    rl_store = Store(rl_root)
-    rl_store.write(
-        "bf.yaml",
-        f"version: {FORMAT}\nname: rl-watch\nloops:\n"
-        f"  ev-burst:\n    when:\n      - event: burst.ev\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n"
-        "  bad-pre:\n    when: 1m\n    run: [routines/missing.py]\n"
-        f"  corrupt-w:\n    when: 1m\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n"
-        f"  quiet-d:\n    when: daemon\n    run: [{sys.executable!r}, -c, 'import time; print(\"ignored\", flush=True); time.sleep(5)']\n".encode(),
+    private_dir(store, ".bf", "state").write("corrupt-st.json", b"{corrupt", mode=0o600)
+    loops.save_unit_state(store, {**state.default_unit_state("log-err"), "status": "failed", "error": ""})
+    store.append_log("log-err", models.encode({"message": "loop.failed", "error": "   ", "stderr": "real stderr boom"}))
+    loops.save_unit_state(store, {**state.default_unit_state("log-code"), "status": "failed", "error": ""})
+    store.append_log("log-code", models.encode({"message": "loop.failed", "exit_code": 7}))
+    loops.save_unit_state(store, {**state.default_unit_state("no-log"), "status": "failed", "error": ""})
+
+    st_fb = status.status_summary(store, include_loops=True)
+    att_map = {a["name"]: a for a in st_fb["attention"]}
+    assert att_map["log-err"]["error"] == "real stderr boom"
+    assert att_map["log-code"]["error"] == "exit code 7"
+    assert att_map["no-log"]["error"] == "last run failed"
+    assert att_map["corrupt-st"]["reason"] == "failed"
+
+    # `status.corpus_counts` scan fallback + scale_warnings when SQLite index is absent!
+    records.ingest(store, "big", b'[{"id":"1","title":"A"},{"id":"2","title":"B"}]')
+    store.delete(f".bf/cache/{index.INDEX_NAME}")
+    with monkeypatch.context() as mp_sc:
+        mp_sc.setattr(models, "SCALE_WARN_RECORDS", 1)
+        sw_list: list[str] = []
+        cnts, _, is_st = status.corpus_counts(store, config.load(store), scale_warnings=sw_list)
+        assert is_st is True
+        assert cnts["memories"] == 2
+        assert sw_list
+
+    # 4. Live `bf.yaml` + `.env` + daemon script reload + invalid `.env` error + `BrokenPipeError` + event rate limit in `watch.serve`!
+    live_root = tmp_path / "live-reload"
+    engine.init_brain(live_root, name="live-reload")
+    live_store = Store(live_root)
+    live_store.write(
+        "routines/live_d.py",
+        b"import json, os, time\n"
+        b"print('[1,2]', flush=True)\n"
+        b"print(json.dumps({'id': 'v1-' + os.environ.get('D_TAG', 'none'), 'kind': 'daemon.ver'}), flush=True)\n"
+        b"time.sleep(10)\n",
     )
-    private_dir(rl_store).write("corrupt-w.json", b"{bad", mode=0o600)
-    monkeypatch.setattr(watch, "_EVENT_RATE_MAX", 1)
-    monkeypatch.setattr(watch, "next_due_delay", lambda *_a, **_kw: 0.05)
-    stop_rl = threading.Event()
-    capsys.readouterr()
-    t_rl = threading.Thread(target=lambda: watch.serve(rl_store, fmt="text", stop_event=stop_rl), daemon=True)
-    t_rl.start()
-    try:
-        time.sleep(0.25)
-        for i in range(3):
-            records.append_event(rl_store, "burst.ev", "test", {"id": f"b-{i}"})
-            time.sleep(0.12)
-        dl = time.monotonic() + 5.0
-        while time.monotonic() < dl and loops.load_unit_state(rl_store, "ev-burst")["runs"] < 1:
+    live_store.write(".env", b"D_TAG=init\n", mode=0o600)
+    live_store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: live-reload\nloops:\n"
+        f"  live-d:\n    when: daemon\n    env_from: [D_TAG]\n    run: [{sys.executable!r}, routines/live_d.py]\n    emit: loop.event\n"
+        f"  ev-burst:\n    when:\n      - event: burst.ev\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n".encode(),
+    )
+    loops.reset_loops(live_store, ("ev-burst",))
+
+    def wait_event_id(target_id: str) -> bool:
+        dl = time.monotonic() + 8.0
+        while time.monotonic() < dl:
+            evs, _ = state.read_events(live_store)
+            if any(e.get("kind") == "daemon.ver" and e.get("data", {}).get("id") == target_id for e in evs):
+                return True
             time.sleep(0.05)
-        # Write broken bf.yaml briefly to exercise config reload error path, then restore valid renamed bf.yaml.
-        rl_store.write("bf.yaml", b"version: 999\nname: bad\n")
-        time.sleep(0.25)
-        rl_store.write("bf.yaml", f"version: {FORMAT}\nname: rl-renamed\n".encode())
-        time.sleep(0.25)
+        return False
+
+    stop_live = threading.Event()
+    capsys.readouterr()
+    with monkeypatch.context() as mp_live:
+        mp_live.setattr(watch, "_EVENT_RATE_MAX", 1)
+        mp_live.setattr(watch, "next_due_delay", lambda *_a, **_kw: 0.05)
+        live_t = threading.Thread(
+            target=lambda: watch.serve(live_store, fmt="jsonl", stop_event=stop_live), daemon=True
+        )
+        live_t.start()
+        try:
+            assert wait_event_id("v1-init")
+            assert "emitted event must be a JSON object" in live_store.read("logs/live-d.jsonl").decode()
+            # Trigger event burst past rate limit (`_EVENT_RATE_MAX = 1`) and assert throttling fires!
+            state.append_event(live_store, "burst.ev", "test", {"id": "b-0"})
+            dl_rl = time.monotonic() + 5.0
+            while time.monotonic() < dl_rl and loops.load_unit_state(live_store, "ev-burst")["runs"] < 1:
+                time.sleep(0.03)
+            assert loops.load_unit_state(live_store, "ev-burst")["runs"] >= 1
+            state.append_event(live_store, "burst.ev", "test", {"id": "b-1"})
+            dl_rl2 = time.monotonic() + 5.0
+            rl_out = ""
+            while time.monotonic() < dl_rl2:
+                rl_out += capsys.readouterr().out
+                if "event rate limit reached" in rl_out:
+                    break
+                time.sleep(0.03)
+            assert "event rate limit reached" in rl_out
+            # Rotate `.env` and edit daemon script -> live daemon restarts!
+            live_store.write(".env", b"D_TAG=rotated\n", mode=0o600)
+            assert wait_event_id("v1-rotated")
+            live_store.write(
+                "routines/live_d.py",
+                b"import json, os, time\n"
+                b"print(json.dumps({'id': 'v2-' + os.environ.get('D_TAG', 'none'), 'kind': 'daemon.ver'}), flush=True)\n"
+                b"time.sleep(10)\n",
+            )
+            assert wait_event_id("v2-rotated")
+            # Invalid `.env` permissions emits `watch.error` without stopping running daemon!
+            live_store.write(".env", b"D_TAG=bad\n", mode=0o644)
+            dl_err = time.monotonic() + 5.0
+            saw_err = False
+            while time.monotonic() < dl_err:
+                if "mode 600" in capsys.readouterr().out:
+                    saw_err = True
+                    break
+                time.sleep(0.05)
+            assert saw_err
+            assert loops.load_unit_state(live_store, "live-d")["status"] == "running"
+            live_store.write(".env", b"D_TAG=fixed\n", mode=0o600)
+            # Remove daemon from bf.yaml -> supervisor terminates it cleanly!
+            live_store.write("bf.yaml", f"version: {FORMAT}\nname: live-reload\n".encode())
+            dl_stop = time.monotonic() + 6.0
+            while time.monotonic() < dl_stop and loops.load_unit_state(live_store, "live-d")["status"] != "stopped":
+                time.sleep(0.05)
+            assert loops.load_unit_state(live_store, "live-d")["status"] == "stopped"
+        finally:
+            stop_live.set()
+            live_t.join(timeout=6.0)
+            assert not live_t.is_alive()
+
+    # BrokenPipeError on `watch.serve(fmt="jsonl")` shuts down cleanly without redirecting worker OS fd 1!
+    class _BrokenBuf:
+        def write(self, _b: bytes) -> int:
+            raise BrokenPipeError
+
+        def flush(self) -> None:
+            pass
+
+    class _BrokenOut:
+        buffer = _BrokenBuf()
+
+        def isatty(self) -> bool:
+            return False
+
+        def flush(self) -> None:
+            pass
+
+    bp_calls: list[int] = []
+    with monkeypatch.context() as mp_bp:
+        mp_bp.setattr(models, "silence_broken_pipe", lambda: bp_calls.append(1))
+        mp_bp.setattr(sys, "stdout", _BrokenOut())
+        bp_t = threading.Thread(target=lambda: watch.serve(live_store, fmt="jsonl"), daemon=True)
+        bp_t.start()
+        bp_t.join(timeout=6.0)
+        assert not bp_t.is_alive()
+    assert len(bp_calls) >= 1
+
+    # 5. Extra `proc.drain_tail` (incl. 64 KiB secret-boundary safety), `prepare_unit` security stripping, `loops`, and `watch` coverage!
+    pr_fd, pw_fd = os.pipe()
+    boundary_marker = "BOUNDARY_MARKER_VALUE_987654321"
+    with os.fdopen(pr_fd, "rb", buffering=0) as pr_s:
+        dt_t, dt_snap = proc.drain_tail(
+            pr_s,
+            256,
+            on_line=lambda raw: "" if b"SKIP" in raw else None,
+            secrets=(boundary_marker,),
+        )
+        with os.fdopen(pw_fd, "wb") as pw_s:
+            pw_s.write(b"\nSKIP_ME\n" + (b"a" * 65_520) + boundary_marker.encode() + b" tail-over\nNEXT_OK\n")
+        dt_t.join(timeout=3)
+        snap_val = dt_snap()
+        assert "NEXT_OK" in snap_val
+        assert "[truncated]" in snap_val
+        assert boundary_marker not in snap_val
+        assert "BOUNDARY_MARKER_" not in snap_val
+
+    # Self-`bf` `prepare_unit` strips injected `PYTHON*`/`LD_*`/`DYLD_*` + forwards `NO_COLOR` + keeps `.bf/` absent on `create_state=False`!
+    bare_root = tmp_path / "bare-no-bf"
+    bare_root.mkdir()
+    bare_st = Store(bare_root)
+    bare_st.write("bf.yaml", f"version: {FORMAT}\nname: bare\n".encode())
+    with monkeypatch.context() as mp_env:
+        mp_env.setenv("PYTHONSTARTUP", "/evil.py")
+        mp_env.setenv("LD_PRELOAD", "/evil.so")
+        mp_env.setenv("DYLD_INSERT_LIBRARIES", "/evil.dylib")
+        mp_env.setenv("NO_COLOR", "1")
+        _, bf_env, _, _ = proc.prepare_unit(
+            bare_st,
+            "chk",
+            ("bf", "check"),
+            "r1",
+            "2026-11-20T00:00:00Z",
+            unit_env_from=("PYTHONSTARTUP", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "PATH"),
+            create_state=False,
+        )
+    assert not any(k.startswith(("PYTHON", "LD_", "DYLD_")) for k in bf_env)
+    assert bf_env.get("NO_COLOR") == "1"
+    assert not (bare_root / ".bf").exists()
+
+    # P0 `event-loop-unpersisted-cursor`, F8 self-trigger suppression, and BF-07 emitted-event secret redaction!
+    ev_auto_root = tmp_path / "ev-auto"
+    engine.init_brain(ev_auto_root, name="ev-auto")
+    ev_st = Store(ev_auto_root)
+    ev_st.write(".env", b"OPAQUE_CRED=opaque_secret_value_123456\n", mode=0o600)
+    ev_st.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: ev-auto\nloops:\n"
+        f"  brand-new:\n    when:\n      - event: ping.now\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n"
+        f"  self-guard:\n    when:\n      - event: loop.succeeded\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n"
+        f'  emitter:\n    env_from: [OPAQUE_CRED]\n    run: [{sys.executable!r}, -c, \'import json, os; print(json.dumps({{"note": os.environ["OPAQUE_CRED"]}}))\']\n    emit: secret.ev\n'.encode(),
+    )
+    # Historical event emitted BEFORE first tick must NOT trigger brand-new loop,
+    # while first tick persists `.bf/state/brand-new.json` so a SUBSEQUENT event DOES trigger it (no manual `bf state reset`)!
+    state.append_event(ev_st, "ping.now", "test", {"id": "old"})
+    due0, _ = loops.select_due_loops(ev_st, config.load(ev_st), sched_now=datetime.now(UTC))
+    assert due0 == []
+    assert state.has_unit_state(ev_st, "brand-new") is True
+    state.append_event(ev_st, "ping.now", "test", {"id": "fresh"})
+    due1, _ = loops.select_due_loops(ev_st, config.load(ev_st), sched_now=datetime.now(UTC))
+    assert [it[0].name for it in due1] == ["brand-new"]
+
+    # F8: `self-guard` ignores its OWN `loop.succeeded` event but fires on sibling `emitter`'s `loop.succeeded`!
+    assert loops.run_loops(ev_st, ("self-guard",))["ok"] is True
+    due_self, _ = loops.select_due_loops(ev_st, config.load(ev_st), sched_now=datetime.now(UTC))
+    assert all(it[0].name != "self-guard" for it in due_self)
+    assert loops.run_loops(ev_st, ("emitter",))["ok"] is True
+    # BF-07: emitted event redacted `OPAQUE_CRED` before writing `.bf/state/events.jsonl`!
+    ev_log_raw = private_dir(ev_st, ".bf", "state").read("events.jsonl").decode()
+    assert "opaque_secret_value_123456" not in ev_log_raw
+    assert "[REDACTED]" in ev_log_raw
+    due_sib, _ = loops.select_due_loops(ev_st, config.load(ev_st), sched_now=datetime.now(UTC))
+    assert any(it[0].name == "self-guard" for it in due_sib)
+
+    # Render: failed + overdue loop shows `failed` (not `overdue`)!
+    _, f_rows, _ = render._build_loop_rows(  # noqa: SLF001
+        {"l1": {"enabled": True, "status": "failed", "overdue": True, "error": "boom"}},
+        datetime(2026, 11, 20, tzinfo=UTC),
+        color=False,
+    )
+    assert "failed" in f_rows[0]
+    assert "overdue" not in f_rows[0]
+
+    # F6: `_scan_watch_snapshot` excludes `.git/`, `memories/`, `logs/`, `.venv/`, and symlinks!
+    (ev_auto_root / ".git").mkdir(exist_ok=True)
+    (ev_auto_root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (ev_auto_root / ".venv").mkdir(exist_ok=True)
+    (ev_auto_root / ".venv" / "x.py").write_text("")
+    shutil.rmtree(ev_auto_root / "sensors")
+    (ev_auto_root / "sensors").symlink_to(tmp_path)
+    snap_keys = set(watch._scan_watch_snapshot(ev_st, config.load(ev_st).notes))  # noqa: SLF001
+    assert not any(k.startswith((".git/", ".venv/", "memories/", "logs/", "sensors/")) for k in snap_keys)
+    assert "concepts/welcome.md" in snap_keys
+
+    # Concurrent event append during `select_due_loops` never replays historical events into a brand-new loop
+    # and always persists the new loop's `.bf/state/<name>.json` cursor!
+    race_root = tmp_path / "ev-race"
+    engine.init_brain(race_root, name="ev-race")
+    race_st = Store(race_root)
+    race_st.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: ev-race\nloops:\n"
+        f"  alpha:\n    when:\n      - event: a.ev\n    run: [{sys.executable!r}, -c, 'print(\"a\")']\n"
+        f"  beta:\n    when:\n      - event: b.ev\n    run: [{sys.executable!r}, -c, 'print(\"b\")']\n".encode(),
+    )
+    state.append_event(race_st, "b.ev", "test", {"id": "hist-b"})
+    state.append_event(race_st, "a.ev", "test", {"id": "a1"})
+    loops.save_unit_state(race_st, state.default_unit_state("alpha", event_seq=1))
+    real_load_u = loops.load_unit_state
+    injected_ev = [False]
+
+    def _racy_load(st: Store, name: str, **kw: Any) -> dict[str, Any]:
+        if name == "beta" and not injected_ev[0]:
+            injected_ev[0] = True
+            state.append_event(race_st, "other.ev", "test", {"id": "concurrent"})
+        return real_load_u(st, name, **kw)
+
+    with monkeypatch.context() as mp_rc:
+        mp_rc.setattr(loops, "load_unit_state", _racy_load)
+        race_due, _ = loops.select_due_loops(race_st, config.load(race_st), sched_now=datetime.now(UTC))
+    assert [it[0].name for it in race_due] == ["alpha"]
+    assert state.has_unit_state(race_st, "beta") is True
+    state.append_event(race_st, "b.ev", "test", {"id": "fresh-b"})
+    race_due2, _ = loops.select_due_loops(race_st, config.load(race_st), sched_now=datetime.now(UTC))
+    assert any(it[0].name == "beta" for it in race_due2)
+
+    # `loops` edges: empty rules, source mismatch, corrupt state in `execute_one_loop` & `select_due_loops(dry_run=True)`, parallel `--due` + per-loop failure!
+    assert loops.pending_events(store, 0, ()) == ([], 0)
+    assert loops.pending_events(bare_st, 0, (config.EventMatch(kind="x.y"),)) == ([], 0)
+    assert not loops._rule_matches({"kind": "x.y", "source": "other"}, config.EventMatch(kind="x.y", source="want"))  # noqa: SLF001
+    assert loops._last_error_line("   \n") == ""  # noqa: SLF001
+    assert loops._bf_error_summary(("echo", "x"), b"{}") == ""  # noqa: SLF001
+
+    par_root = tmp_path / "par-due"
+    engine.init_brain(par_root, name="par-due")
+    par_st = Store(par_root)
+    par_st.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: par-due\nconcurrency: 2\nloops:\n"
+        f"  ok1:\n    when: 1m\n    run: [{sys.executable!r}, -c, 'print(\"ok1\")']\n"
+        f"  ok2:\n    when: 1m\n    run: [{sys.executable!r}, -c, 'print(\"ok2\")']\n"
+        "  bad-script:\n    when: 1m\n    run: [routines/missing.py]\n".encode(),
+    )
+    # Parallel `--due` runs >= 2 loops concurrently AND isolates pre-flight failure in `bad-script`!
+    par_res = loops.run_loops(par_st, due_only=True)
+    assert not par_res["ok"]
+    by_lp = {r["loop"]: r["status"] for r in par_res["results"]}
+    assert by_lp["ok1"] == "ok"
+    assert by_lp["ok2"] == "ok"
+    assert by_lp["bad-script"] == "failed"
+    # `select_due_loops(dry_run=True)` re-raises corrupt state instead of mutating; `execute_one_loop` tolerates corrupt state!
+    private_dir(par_st, ".bf", "state").write("ok1.json", b"{corrupt", mode=0o600)
+    with pytest.raises(Error, match="invalid JSON"):
+        loops.select_due_loops(par_st, config.load(par_st), sched_now=datetime.now(UTC), dry_run=True)
+    assert loops.execute_one_loop(par_st, config.load(par_st).loops["ok1"], trigger="manual")["status"] == "ok"
+    # `watch.next_due_delay` tolerates corrupt `.bf/state/<loop>.json`!
+    private_dir(par_st, ".bf", "state").write("ok1.json", b"{corrupt", mode=0o600)
+    assert watch.next_due_delay(par_st, config.load(par_st), datetime.now(UTC)) >= 0.5
+    # `run_loops` with pre-set `stop_event` stops cleanly without executing!
+    ev_pre = threading.Event()
+    ev_pre.set()
+    assert loops.run_loops(par_st, ("ok1",), stop_event=ev_pre)["ok"] is False
+
+    # `watch.serve` with fake `_poll_changes` exercises bundle-dir, `schemas/*.json`, `notes:` reload, and `_run_bg` failure!
+    wf_root = tmp_path / "wf-classify"
+    engine.init_brain(wf_root, name="wf-classify")
+    wf_st = Store(wf_root)
+    wf_st.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: wf-classify\nloops:\n  fail-l:\n    when: 1m\n    run: [routines/nope.py]\n".encode(),
+    )
+    stop_wf = threading.Event()
+
+    def _fake_poll(*_args: Any, **_kw: Any) -> Any:
+        # Change `notes:` in `bf.yaml` so `reconcile_config` sets `note_dirty`!
+        wf_st.write(
+            "bf.yaml",
+            f"version: {FORMAT}\nname: wf-classify\nnotes: [concepts, projects, actions, wiki]\nloops:\n  fail-l:\n    when: 1m\n    run: [routines/nope.py]\n".encode(),
+        )
+        yield {
+            "concepts/file.png",
+            "schemas/concepts.json",
+            "bf.yaml",
+            ".bf/state/events.jsonl",
+            "concepts/welcome.md",
+        }
+        dl_wf = time.monotonic() + 5.0
+        while time.monotonic() < dl_wf and loops.load_unit_state(wf_st, "fail-l")["failures"] < 1:
+            time.sleep(0.03)
+        stop_wf.set()
+
+    with monkeypatch.context() as mp_wf:
+        mp_wf.setattr(watch, "_poll_changes", _fake_poll)
+        mp_wf.setattr(watch, "next_due_delay", lambda *_a, **_kw: 0.05)
+        wf_res = watch.serve(wf_st, fmt="jsonl", stop_event=stop_wf)
+        assert wf_res["brain"] == "wf-classify"
+    assert loops.load_unit_state(wf_st, "fail-l")["failures"] >= 1
+
+    # 6. Hardening behavioral tests for `proc.exec_argv` and live `watch` root-dir reload + SIGTERM!
+    # `exec_argv`: stdin broken pipe, detached grandchild inheriting stdout (returns without hang!), timeout=124, mid-run stop=130, thread-start failure!
+    bp_rc, bp_out, _ = proc.exec_argv(
+        [sys.executable, "-c", "print('early')"], cwd=root, env={}, timeout=5, stdin_data=b"z" * 200_000
+    )
+    assert bp_rc == 0
+    assert bp_out.strip() == b"early"
+
+    t_gc = time.monotonic()
+    gc_rc, gc_out, _ = proc.exec_argv(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)']); print('parent-done', flush=True)",
+        ],
+        cwd=root,
+        env={},
+        timeout=5,
+    )
+    assert gc_rc == 0
+    assert b"parent-done" in gc_out
+    assert time.monotonic() - t_gc < 3.0
+
+    to_rc, _, to_err = proc.exec_argv([sys.executable, "-c", "import time; time.sleep(5)"], cwd=root, env={}, timeout=1)
+    assert to_rc == 124
+    assert "timed out" in to_err
+
+    mid_stop = threading.Event()
+    threading.Timer(0.15, mid_stop.set).start()
+    ms_rc, _, ms_err = proc.exec_argv(
+        [sys.executable, "-c", "import time; time.sleep(5)"], cwd=root, env={}, timeout=5, stop_event=mid_stop
+    )
+    assert ms_rc == 130
+    assert ms_err == "stopped"
+
+    # `drain_tail` oversized-line (>64 KiB) prefix safety margin (zero secret bisection!) + thread-start failure fd cleanup!
+    ws_r, ws_w = os.pipe()
+    cut_marker = "EXACT_CUT_MARKER_24CHARS"
+    emitted_chunks: list[str] = []
+
+    def _capture_chunk(raw_ln: bytes) -> str:
+        txt = raw_ln.decode("utf-8", "replace")
+        emitted_chunks.append(txt)
+        return txt
+
+    with os.fdopen(ws_r, "rb", buffering=0) as ws_rs:
+        ws_t, ws_snap = proc.drain_tail(ws_rs, 256, on_line=_capture_chunk, secrets=(cut_marker,))
+        with os.fdopen(ws_w, "wb") as ws_ws:
+            ws_ws.write((b"x" * 65_520) + cut_marker.encode() + ("é" * 2048).encode() + b"\nendmark\n")
+        ws_t.join(timeout=3)
+        joined_chunks = "\n".join(emitted_chunks)
+        assert cut_marker not in joined_chunks
+        assert "EXACT_CUT_" not in joined_chunks
+        assert "_24CHARS" not in joined_chunks
+        assert "[truncated]" in joined_chunks
+        assert "endmark" in ws_snap()
+
+    real_dup, real_close = os.dup, os.close
+    for th_stdin in (b"abc", None):
+        duped_th: list[int] = []
+        closed_th: list[int] = []
+
+        def _spy_dup(fd: int, _d: list[int] = duped_th) -> int:
+            nfd = real_dup(fd)
+            _d.append(nfd)
+            return nfd
+
+        def _spy_close(fd: int, _c: list[int] = closed_th) -> None:
+            _c.append(fd)
+            real_close(fd)
+
+        with monkeypatch.context() as mp_th:
+            mp_th.setattr(os, "dup", _spy_dup)
+            mp_th.setattr(os, "close", _spy_close)
+            mp_th.setattr(threading.Thread, "start", lambda _self: (_ for _ in ()).throw(RuntimeError("thread cap")))
+            with pytest.raises(RuntimeError, match="thread cap"):
+                proc.exec_argv([sys.executable, "-c", "print('x')"], cwd=root, env={}, timeout=5, stdin_data=th_stdin)
+        assert duped_th
+        assert set(duped_th) <= set(closed_th)
+
+    # Live `watch.serve` stdlib polling watcher: root-directory creation (`wiki/` added dynamically) + BusyError cooldown + SIGTERM (143)!
+    dyn_root = tmp_path / "dyn-watch"
+    engine.init_brain(dyn_root, name="dyn-watch")
+    dyn_st = Store(dyn_root)
+    dyn_st.write("bf.yaml", f"version: {FORMAT}\nname: dyn-watch\nnotes: [concepts, wiki]\n".encode())
+    dyn_stop = threading.Event()
+    capsys.readouterr()
+    dyn_t = threading.Thread(target=lambda: watch.serve(dyn_st, fmt="jsonl", stop_event=dyn_stop), daemon=True)
+    dyn_t.start()
+    try:
+        # Wait deterministically for startup + initial build before probing live FS watchers!
+        dl_start = time.monotonic() + 5.0
+        started_out = ""
+        while time.monotonic() < dl_start:
+            started_out += capsys.readouterr().out
+            if '"watch.started"' in started_out and dyn_st.exists(NOTES_FILE):
+                break
+            time.sleep(0.03)
+        assert '"watch.started"' in started_out
+        # Wait for live polling watcher on existing `concepts/` before creating `wiki/`, confirming watcher is active!
+        dl_c = time.monotonic() + 5.0
+        dyn_st.write("concepts/ready.md", b"---\ntype: guide\nstatus: stable\n---\n# Ready\n")
+        while time.monotonic() < dl_c and b"concepts/ready.md" not in dyn_st.read(NOTES_FILE):
+            time.sleep(0.05)
+        assert b"concepts/ready.md" in dyn_st.read(NOTES_FILE)
+        # Step 1: Create new `wiki/` top-level dir + `wiki/fresh.md` (detected cleanly by `_poll_changes`).
+        dyn_st.write("wiki/fresh.md", b"# Fresh Wiki\n")
+        dl_w = time.monotonic() + 5.0
+        while time.monotonic() < dl_w and b"wiki/fresh.md" not in dyn_st.read(NOTES_FILE):
+            time.sleep(0.05)
+        assert b"wiki/fresh.md" in dyn_st.read(NOTES_FILE)
+        # Step 2: Create a SECOND file inside the already-existing `wiki/` dir and delete it -> `_poll_changes` detects both!
+        dyn_st.write("wiki/second.md", b"# Second Wiki\n")
+        dl_w2 = time.monotonic() + 5.0
+        while time.monotonic() < dl_w2 and b"wiki/second.md" not in dyn_st.read(NOTES_FILE):
+            time.sleep(0.05)
+        assert b"wiki/second.md" in dyn_st.read(NOTES_FILE)
+        dyn_st.delete("wiki/second.md")
+        dl_w3 = time.monotonic() + 5.0
+        while time.monotonic() < dl_w3 and b"wiki/second.md" in dyn_st.read(NOTES_FILE):
+            time.sleep(0.05)
+        assert b"wiki/second.md" not in dyn_st.read(NOTES_FILE)
     finally:
-        stop_rl.set()
-        t_rl.join(timeout=6.0)
-    out_text = capsys.readouterr().out
-    assert "Watching rl-watch" in out_text
-    assert "ev-burst" in out_text
+        dyn_stop.set()
+        dyn_t.join(timeout=5.0)
+        assert not dyn_t.is_alive()
 
-
-def test_sensor_ingest_false_and_agent_timeout_with_defaults(tmp_path: Path) -> None:
-    root = tmp_path / "conv-opt"
-    engine.init_brain(root, name="conv-opt")
-    store = Store(root)
-    store.write("sensors/custom.py", b"print('custom-output')\n")
-    store.write("agents/worker.py", b"print('ok')\n")
-    store.write("agents/fast.py", b"print('ok')\n")
-    store.write(
+    # `watch.serve` applies `BusyError` cooldown without spinning when a loop's lock is held externally!
+    busy_root = tmp_path / "busy-watch"
+    engine.init_brain(busy_root, name="busy-watch")
+    busy_st = Store(busy_root)
+    busy_st.write(
         "bf.yaml",
-        (
-            f"version: {FORMAT}\nname: conv-opt\n"
-            "defaults:\n  timeout: 5m\n"
-            "loops:\n"
-            "  custom:\n    ingest: false\n"
-            "  worker: {}\n"
-            "  fast:\n    timeout: 2m\n"
-        ).encode(),
+        f"version: {FORMAT}\nname: busy-watch\nloops:\n  b1:\n    when: 1m\n    run: [{sys.executable!r}, -c, 'print(1)']\n".encode(),
     )
-    cfg = config.load(store)
-    _, ing_src, _, _, _ = loops.resolve_loop(store, cfg.loops["custom"], cfg.reserved_sources)
-    assert ing_src == ""
-    assert loops.effective_ingest(store, cfg.loops["custom"], cfg.reserved_sources)[0] == ""
-    assert loops.resolve_loop(store, cfg.loops["worker"], cfg.reserved_sources)[4] == 900
-    assert loops.resolve_loop(store, cfg.loops["fast"], cfg.reserved_sources)[4] == 120
-    assert engine.validate(store)["ok"] is True
-    ran = loops.run_loops(store, ["custom"])
-    assert ran["ok"] is True
-    assert not store.exists("memories/custom.jsonl")
+    busy_stop = threading.Event()
+    exec_attempts = [0]
+    real_exec_one = loops.execute_one_loop
 
-    # Explicit `{{...}}` placeholders in `run:` expand to exact runtime values in both dry-run and execution!
-    store.write(
+    def _spy_exec_one(*a: Any, **kw: Any) -> dict[str, Any]:
+        exec_attempts[0] += 1
+        return real_exec_one(*a, **kw)
+
+    with monkeypatch.context() as mp_b, loop_lock(busy_st, "b1", wait=0.0):
+        mp_b.setattr(watch, "_BUSY_COOLDOWN", 0.3)
+        mp_b.setattr(loops, "execute_one_loop", _spy_exec_one)
+        bt = threading.Thread(target=lambda: watch.serve(busy_st, fmt="jsonl", stop_event=busy_stop), daemon=True)
+        bt.start()
+        try:
+            dl_b1 = time.monotonic() + 4.0
+            while time.monotonic() < dl_b1 and exec_attempts[0] < 2:
+                time.sleep(0.03)
+            assert exec_attempts[0] >= 2
+        finally:
+            busy_stop.set()
+            bt.join(timeout=5.0)
+            assert not bt.is_alive()
+
+    # Deterministic post-handler SIGTERM via `engine.build` spy (never races handler registration!) -> `exit_code == 143`!
+    real_build = engine.build
+    sent_term = [False]
+
+    def _term_after_build(st: Store, **kw: Any) -> dict[str, Any]:
+        res_b = real_build(st, **kw)
+        if not sent_term[0]:
+            sent_term[0] = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return res_b
+
+    with monkeypatch.context() as mp_term:
+        mp_term.setattr(engine, "build", _term_after_build)
+        term_res = watch.serve(dyn_st, fmt="jsonl")
+    assert sent_term[0] is True
+    assert term_res["exit_code"] == 143
+
+
+def test_review_round1_regressions_incomplete_prune_pem_proxy_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lock P0/P1/P2 fixes from fresh-session review: incomplete backoff, active-lock prune, oversized PEM, proxies, render."""
+    import io
+
+    root = tmp_path / "r1-reg"
+    engine.init_brain(root, name="r1-reg")
+    st = Store(root)
+    st.write(
         "bf.yaml",
-        (
-            f"version: {FORMAT}\nname: conv-opt\nloops:\n"
-            "  ph:\n"
-            f"    run: [{sys.executable!r}, -c, 'import json, sys; print(json.dumps({{\"args\": sys.argv[1:]}}))', "
-            "'{{brain}}', '{{loop}}', '{{state}}', '{{start}}', '{{end}}', '{{trigger}}', '{{run}}']\n"
-        ).encode(),
+        f"version: {FORMAT}\nname: r1-reg\nloops:\n  inc:\n    when: 1h\n    ingest: upsert\n    run: [{sys.executable!r}, -c, 'print(\"{{}}\")']\n".encode(),
     )
-    now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
-    dry = loops.run_loops(store, ["ph"], dry_run=True, now=now)
-    dry_argv = dry["results"][0]["argv"]
-    assert dry_argv[3] == str(store.root)
-    assert dry_argv[4] == "ph"
-    assert dry_argv[5].endswith("/.bf/ph")
-    assert dry_argv[6] == "2026-11-21T12:00:00Z"
-    assert dry_argv[7] == "2026-11-22T12:00:00Z"
-    assert dry_argv[8] == "manual"
-    assert dry_argv[9].startswith("ph-")
-    exec_res = loops.run_loops(store, ["ph"], now=now)
-    assert exec_res["ok"] is True
-    got_args = exec_res["results"][0]["summary"]["args"]
-    assert got_args[:6] == [
-        str(store.root),
-        "ph",
-        str(store.root / ".bf" / "ph"),
-        "2026-11-21T12:00:00Z",
-        "2026-11-22T12:00:00Z",
-        "manual",
-    ]
-    assert got_args[6].startswith("ph-")
-
-    # Interpreter-prefixed `{{brain}}/sensors/...` retains `sensors/` auto-ingest convention detection.
-    store.write(
-        "bf.yaml",
-        (
-            f"version: {FORMAT}\nname: conv-opt\nloops:\n"
-            f"  bph:\n    run: [{sys.executable!r}, '{{{{brain}}}}/sensors/custom.py']\n"
-        ).encode(),
+    # 1. P0 `incomplete-watch-hotloop`: `incomplete=True` increments `incomplete_runs` and backs off without spinning!
+    t0 = datetime(2026, 11, 15, 10, 0, 0, tzinfo=UTC)
+    loops.record_run(
+        st,
+        "inc",
+        "r1",
+        "2026-11-15T10:00:00Z",
+        ended=t0,
+        dur_ms=10,
+        code=0,
+        summary={"records": 1, "incomplete": True},
+        trigger="schedule",
+        schedule_keys=("every:3600",),
     )
-    cfg_bph = config.load(store)
-    _, ing_src, ing_tgt, ing_mode, _ = loops.resolve_loop(store, cfg_bph.loops["bph"], cfg_bph.reserved_sources)
-    assert (ing_src, ing_tgt, ing_mode) == ("bph", "memories", "upsert")
+    doc_inc = loops.load_unit_state(st, "inc")
+    assert doc_inc["status"] == "ok"
+    assert doc_inc["consecutive_failures"] == 0
+    assert doc_inc["incomplete_runs"] == 1
+    cfg = config.load(st)
+    assert cron.due_schedules(cfg.loops["inc"], doc_inc, datetime(2026, 11, 15, 10, 0, 10, tzinfo=UTC)) == ()
+    # Clean run resets `incomplete_runs` to 0!
+    loops.record_run(
+        st,
+        "inc",
+        "r2",
+        "2026-11-15T10:05:00Z",
+        ended=datetime(2026, 11, 15, 10, 5, 1, tzinfo=UTC),
+        dur_ms=10,
+        code=0,
+        summary={"records": 1, "incomplete": False},
+        trigger="schedule",
+        schedule_keys=("every:3600",),
+    )
+    assert loops.load_unit_state(st, "inc")["incomplete_runs"] == 0
+
+    # 2. P1 `prune-state-active-orphan`: actively locked orphaned loop preserves state, dir, lock, and log in both dry-run and real prune!
+    (root / ".bf" / "state").mkdir(parents=True, mode=0o700, exist_ok=True)
+    (root / ".bf" / "state" / "active-orph.json").write_text('{"name":"active-orph","status":"running"}\n')
+    (root / ".bf" / "state" / "active-orph.json").chmod(0o600)
+    (root / ".bf" / "state" / "active-orph").mkdir(mode=0o700)
+    (root / ".bf" / "state" / "active-orph" / "work.txt").write_text("live")
+    (root / "logs").mkdir(mode=0o700, exist_ok=True)
+    (root / "logs" / "active-orph.jsonl").write_text("{}\n")
+    (root / "logs" / "active-orph.jsonl").chmod(0o600)
+    with loop_lock(st, "active-orph", wait=0.0):
+        dry_p = loops.prune_state(st, dry_run=True)
+        assert dry_p["pruned"] == {"states": [], "dirs": [], "locks": [], "logs": []}
+        real_p = loops.prune_state(st, dry_run=False)
+        assert real_p["pruned"] == {"states": [], "dirs": [], "locks": [], "logs": []}
+        assert (root / ".bf" / "state" / "active-orph.json").is_file()
+        assert (root / ".bf" / "state" / "active-orph" / "work.txt").is_file()
+        assert (root / "logs" / "active-orph.jsonl").is_file()
+    # Once released, prune removes all four artifacts cleanly!
+    post_p = loops.prune_state(st, dry_run=False)
+    assert post_p["pruned"] == {
+        "states": ["active-orph"],
+        "dirs": ["active-orph"],
+        "locks": ["loop-active-orph.lock"],
+        "logs": ["active-orph"],
+    }
+
+    # 3. P1 `proc-drain-pem-oversized`: PEM markers in oversized prefix OR past byte 65536 suppress subsequent PEM body lines!
+    pem_beg = b"-----" + b"BEGIN PRIVATE KEY" + b"-----"
+    pem_end = b"-----" + b"END PRIVATE KEY" + b"-----"
+    pem_body_marker = "MIIE_SENSITIVE_BASE64_KEY_MATERIAL_987654321"
+    for payload_bytes in (
+        b"x" * 100 + pem_beg + b"a" * 70000 + b"\n" + pem_body_marker.encode() + b"\n" + pem_end + b"\nafter_ok\n",
+        b"y" * 70000 + pem_beg + b"\n" + pem_body_marker.encode() + b"\n" + pem_end + b"\nafter_ok\n",
+        pem_beg + b"\n" + b"z" * 70000 + pem_end + b"\nafter_ok\n",
+        pem_beg + b"k" * 100 + pem_end + b"q" * 70000 + b"\nafter_ok\n",
+        pem_beg + b"k" + pem_end + pem_beg + b"\n" + pem_body_marker.encode() + b"\n" + pem_end + b"\nafter_ok\n",
+    ):
+        logger = state.make_stderr_logger(st, "pemtest", "r-pem")
+        t_dr, snap_dr = proc.drain_tail(io.BytesIO(payload_bytes), 4096, on_line=logger)
+        t_dr.join(timeout=5)
+        out_txt = snap_dr()
+        assert pem_body_marker not in out_txt
+        assert "after_ok" in out_txt
+    log_txt = (root / "logs" / "pemtest.jsonl").read_text()
+    assert pem_body_marker not in log_txt
+    # Original-coordinate truncation: short input (`cut<=0`), plain text, exact secrets, overlapping spans, & bisected tail!
+    assert models.redact_truncated_prefix("short", 100) == ""
+    assert models.redact_truncated_prefix("clean text " + ("z" * 40), 10) == "clean text " + ("z" * 30)
+    sec_lit = "custom_secret_literal_99"
+    assert "[REDACTED]" in models.redact_truncated_prefix(
+        f"a {sec_lit} token={sec_lit} " + ("z" * 40), 10, secrets=(sec_lit,)
+    )
+    many_sec = ("token=abcdefghij " * 1000) + ("x" * 50000) + "http://alice" + ":bisected_tail_secret_99"
+    red_pref = models.redact_truncated_prefix(many_sec, 8192)
+    assert "bisected_tail_secret_99" not in red_pref
+    assert "[REDACTED]" in red_pref
+    # Multi-chunk `dropping=True` stream (>80 KiB single line without newline spanning multiple 8 KiB reads + PEM marker):
+    chunked_pem = (
+        b"w" * 74000 + pem_beg + b"w" * 10000 + b"\n" + pem_body_marker.encode() + b"\n" + pem_end + b"\nok_end\n"
+    )
+    logger2 = state.make_stderr_logger(st, "pemtest2", "r-pem2")
+    t_dr2, snap_dr2 = proc.drain_tail(io.BytesIO(chunked_pem), 4096, on_line=logger2)
+    t_dr2.join(timeout=5)
+    assert pem_body_marker not in snap_dr2()
+    assert "ok_end" in snap_dr2()
+
+    # 4. P1 `proxy-cred-redaction-bypass` + `env-blocklist-openssl-bypass` (`is_self_bf`)!
+    p_tok = "p%40ssword99"
+    with monkeypatch.context() as mp_px:
+        mp_px.setenv("HTTP_PROXY", "alice:" + "schemeless_secret_99" + "@proxy.example.test:8080")
+        mp_px.setenv("HTTPS_PROXY", "http://bob:" + p_tok + "@proxy.example.test:8080")
+        mp_px.setenv("OPENSSL_CONF", str(tmp_path / "evil.cnf"))
+        mp_px.setenv("SSLKEYLOGFILE", str(tmp_path / "keys.log"))
+        _, _, _, px_secrets = proc.prepare_unit(st, "inc", ("echo",), "r1", "2026-11-15T10:00:00Z")
+        assert "schemeless_secret_99" in px_secrets
+        assert "p@ssword99" in px_secrets
+        _, self_env, _, _ = proc.prepare_unit(st, "inc", ("bf", "build"), "r1", "2026-11-15T10:00:00Z")
+        assert "OPENSSL_CONF" not in self_env
+        assert "SSLKEYLOGFILE" not in self_env
+    assert "[REDACTED]" in models.redact_secrets("https://" + ":emptypass123" + "@example.test/api")
+
+    # 5. P2 `render.py`: attention failure shown for `running`/`stopped` loops, `degraded` beats `overdue`, and `watch.loop` `stopped` is NOT red `fail`!
+    st_text = render.format_status_text(
+        {
+            "ok": False,
+            "brain": "r1-reg",
+            "counts": {"notes": 1, "memories": 0, "loops": 2},
+            "events_seq": 0,
+            "attention": [{"loop": "retrying", "reason": "failed"}, {"loop": "both", "reason": "degraded"}],
+            "loops": {
+                "retrying": {
+                    "enabled": True,
+                    "status": "running",
+                    "consecutive_failures": 3,
+                    "error": "upstream 503",
+                    "trigger": "daemon",
+                },
+                "both": {
+                    "enabled": True,
+                    "status": "ok",
+                    "degraded": True,
+                    "overdue": True,
+                    "trigger": "1h",
+                },
+            },
+        },
+        color=True,
+    )
+    assert "(3x) upstream 503" in st_text
+    assert "degraded" in st_text
+    stop_line = render.format_watch_line(
+        "watch.loop",
+        {"loop": "inc", "status": "stopped", "duration_ms": 42, "time": "2026-11-15T10:00:00Z"},
+        color=False,
+    )
+    assert "stop   " in stop_line
+    assert "fail" not in stop_line
+    warn_b_line = render.format_watch_line(
+        "watch.build",
+        {
+            "ok": True,
+            "notes": 2,
+            "written": 1,
+            "removed": 0,
+            "index_warning": "cache offline",
+            "time": "2026-11-15T10:00:00Z",
+        },
+        color=False,
+    )
+    assert "index warning: cache offline" in warn_b_line
 
 
-def test_watch_tui_renderer_keys_and_live_loop(
+def test_always_on_pools_debounce_backoff_split_timers_pause_and_lag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Verify zero-dep ANSI TUI clipping, key decoding, shortcuts, scrolling, filter/sort, and live `fmt='tui'`."""
-    # ANSI-aware single-line clipper sanitizes non-SGR escapes, prevents width overflow, and always closes open SGR.
-    assert status.clip_ansi("hello", 0) == ""
-    assert status.clip_ansi("hello", 10) == "hello"
-    assert status.clip_ansi("\033[31;1mabcdef\033[0m", 4) == "\033[31;1mabc…\033[0m"
-    assert status.clip_ansi("\033[31;1mabcdef", 1) == "\033[31;1ma\033[0m"
-    assert status.clip_ansi("\033[32mabc\033[0mdef", 3) == "\033[32mab…\033[0m"
-    assert status.clip_ansi("\033[32mhi", 10) == "\033[32mhi\033[0m"
-    assert status.clip_ansi("abcdef", 3) == "ab…"
-    sanitized_esc = status.clip_ansi("\033[2Jevil\r\n\033]52;c;xx\x07", 80)
-    assert "\x1b" not in sanitized_esc
-    assert "\r" not in sanitized_esc
-    assert "\n" not in sanitized_esc
-    assert "\x07" not in sanitized_esc
-    wl_san = watch.format_watch_line("watch.build", {"time": "2026-11-22T\x1b[2J", "notes": "1\x1b[31m", "written": 0})
-    assert "\x1b" not in wl_san
-
-    # Key decoder over an OS pipe handles plain keys, Ctrl+C, arrow/page/home/end, 6-byte CSI, SGR mouse wheel/click, and EOF.
-    r_fd, w_fd = os.pipe()
-    try:
-        os.write(
-            w_fd,
-            b"jk b gGfserq\x03\x1b[A\x1b[B\x1b[5~\x1b[6~\x1b[H\x1b[F\x1bOH\x1bOF\x1b[9~\x1b[1;5A\x1b[<64;12;5M\x1b[<65;12;5M\x1b[<0;12;5Mx",
-        )
-        got_keys = [status.read_tui_key(r_fd) for _ in range(26)]
-        assert got_keys == [
-            "down",
-            "up",
-            "pgdn",
-            "pgup",
-            "pgdn",
-            "home",
-            "end",
-            "filter",
-            "sort",
-            "errors",
-            "refresh",
-            "quit",
-            "quit",
-            "up",
-            "down",
-            "pgup",
-            "pgdn",
-            "home",
-            "end",
-            "home",
-            "end",
-            "",
-            "",
-            "up",
-            "down",
-            "",
-        ]
-        assert status.read_tui_key(r_fd) == ""  # 'x' is unbound
-        os.close(w_fd)
-        w_fd = -1
-        assert status.read_tui_key(r_fd) == "eof"
-    finally:
-        os.close(r_fd)
-        if w_fd != -1:
-            os.close(w_fd)
-
-    # Shortcut state transitions (scroll, page, home/end, filter, sort, errors, refresh, quit, noop).
-    assert status.apply_tui_key("down", 0, 5, False, True) == (1, False, True, False, "")
-    assert status.apply_tui_key("up", 0, 5, False, True) == (0, False, True, False, "")
-    assert status.apply_tui_key("pgdn", 1, 5, False, True) == (6, False, True, False, "")
-    assert status.apply_tui_key("pgup", 3, 5, False, True) == (0, False, True, False, "")
-    assert status.apply_tui_key("end", 0, 5, False, True) == (10**9, False, True, False, "")
-    assert status.apply_tui_key("home", 9, 5, False, True) == (0, False, True, False, "")
-    assert status.apply_tui_key("filter", 4, 5, False, True) == (0, True, True, False, "")
-    assert status.apply_tui_key("sort", 4, 5, True, True) == (0, True, False, False, "")
-    assert status.apply_tui_key("errors", 3, 5, False, True, False) == (3, False, True, True, "")
-    assert status.apply_tui_key("refresh", 2, 5, False, True) == (2, False, True, False, "refresh")
-    assert status.apply_tui_key("quit", 2, 5, False, True) == (2, False, True, False, "quit")
-    assert status.apply_tui_key("noop", 2, 5, False, True) == (2, False, True, False, "")
-
-    # Cached corpus_counts matches status_summary and format_watch_screen scrolls, filters, sorts, and clips cleanly.
-    root = tmp_path / "tui-brain"
-    engine.init_brain(root, name="tui-brain")
+    root = tmp_path / "always-on"
+    engine.init_brain(root, name="always-on")
     store = Store(root)
-    (root / "schemas" / "items.json").write_text('{"type":"object"}\n')
-    records.ingest(store, "items", b'[{"id":"1","title":"One"}]\n')
-    records.ingest(store, "u1", b'[{"id":"u1","title":"Usage 1"}]\n', target="usages")
-    loops_yaml = "\n".join(
-        [f"  lp-{i:02d}:\n    when: 1h\n    run: [{sys.executable!r}, -c, 'pass']" for i in range(10)]
-        + [f"  off:\n    enabled: false\n    run: [{sys.executable!r}, -c, 'pass']"]
+    (root / "routines").mkdir(exist_ok=True)
+
+    # 1. Named concurrency pools isolate slow `agents` pool from `interactive` pool in `run_loops --due`!
+    (root / "routines" / "pool_probe.py").write_text(
+        "import json, os, pathlib, sys, time\n"
+        "tag = sys.argv[1]\n"
+        "p = pathlib.Path('routines')\n"
+        "(p / f'start.{tag}').write_text(str(time.monotonic()))\n"
+        "if tag == 'slow-ag':\n"
+        "    dl = time.monotonic() + 4.0\n"
+        "    while time.monotonic() < dl and not (p / 'done.fast-dm').exists():\n"
+        "        time.sleep(0.02)\n"
+        "    assert (p / 'done.fast-dm').exists(), 'interactive pool was starved by agents pool'\n"
+        "elif tag == 'fast-dm':\n"
+        "    (p / 'done.fast-dm').write_text('1')\n"
+        "print(json.dumps({'tag': tag, 'missed': os.environ.get('BF_EVENTS_MISSED', '')}))\n"
     )
-    store.write("bf.yaml", f"version: {FORMAT}\nname: tui-brain\nloops:\n{loops_yaml}\n".encode())
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: always-on\n"
+        "concurrency:\n  default: 2\n  agents: 1\n  interactive: 1\n"
+        "loops:\n"
+        f"  slow-ag:\n    pool: agents\n    when: 1h\n    run: [{sys.executable!r}, routines/pool_probe.py, slow-ag]\n"
+        f"  slow-ag2:\n    pool: agents\n    when: 1h\n    run: [{sys.executable!r}, routines/pool_probe.py, slow-ag2]\n"
+        f"  fast-dm:\n    pool: interactive\n    when:\n      - event: loop.message\n    run: [{sys.executable!r}, routines/pool_probe.py, fast-dm]\n".encode(),
+    )
+    loops.reset_loops(store, ("fast-dm",))
+    t0 = datetime(2026, 11, 25, 10, 0, tzinfo=UTC)
+    state.append_event(store, "loop.message", "chat", {"id": "dm-1", "text": "urgent"}, now=t0)
+    pool_res = loops.run_loops(store, due_only=True, now=t0)
+    assert pool_res["ok"]
+    assert pool_res["results"][0]["loop"] == "fast-dm"  # event prioritized ahead of schedules!
+
+    # 2. Schedule failure backoff does NOT block incoming event triggers on the same loop!
+    (root / "routines" / "mix.py").write_text(
+        "import json, os, sys\n"
+        "trig = os.environ['BF_TRIGGER']\n"
+        "if trig == 'schedule':\n"
+        "    sys.stderr.write('transient schedule failure\\n')\n"
+        "    sys.exit(1)\n"
+        "evs = [json.loads(ln) for ln in sys.stdin.read().splitlines() if ln.strip()]\n"
+        "print(json.dumps({'trig': trig, 'count': len(evs), 'missed': os.environ.get('BF_EVENTS_MISSED', '')}))\n"
+    )
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: always-on\n"
+        "loops:\n"
+        "  mixed:\n"
+        "    when:\n"
+        "      - 1h\n"
+        "      - event:\n          kind: loop.message\n          source: chat\n"
+        "      - event:\n          kind: records.ingested\n        debounce: 20s\n"
+        f"    run: [{sys.executable!r}, routines/mix.py]\n".encode(),
+    )
+    loops.reset_loops(store, ("mixed",))
+    fail_sched = loops.run_loops(store, due_only=True, now=t0)
+    assert not fail_sched["ok"]
+    st_mix = loops.load_unit_state(store, "mixed")
+    assert st_mix["schedule_failures"] == 1
+    assert (
+        cron.backoff_remaining(st_mix, cron.backoff_cap(config.load(store).loops["mixed"]), t0 + timedelta(seconds=10))
+        > 0
+    )
+    assert cron.event_backoff_remaining(st_mix, t0 + timedelta(seconds=10)) == 0.0
+    # Urgent DM fires immediately 10s later despite active 60s schedule backoff, while preserving schedule_failures AND last_schedule_end!
+    state.append_event(store, "loop.message", "chat", {"id": "dm-2"}, now=t0 + timedelta(seconds=10))
+    dm_res = loops.run_loops(store, due_only=True, now=t0 + timedelta(seconds=10))
+    assert dm_res["ok"]
+    assert dm_res["results"][0]["summary"]["trig"] == "event"
+    st_after_dm = loops.load_unit_state(store, "mixed")
+    assert st_after_dm["schedule_failures"] == 1
+    assert st_after_dm["last_schedule_end"] == models.now_utc(t0)
+    # Schedule backoff is STILL measured from `last_schedule_end` (t0), NOT reset by the event at t0+10s!
+    assert (
+        cron.backoff_remaining(
+            st_after_dm, cron.backoff_cap(config.load(store).loops["mixed"]), t0 + timedelta(seconds=61)
+        )
+        == 0.0
+    )
+    # Per-rule debounce isolation: a slow debounced rule (30m) must NOT stretch a fast debounced rule (5s)!
+    fast_rule = config.EventMatch(kind="loop.fast", debounce=5)
+    slow_rule = config.EventMatch(kind="loop.slow", debounce=1800)
+    mixed_evs = [
+        {"seq": 1, "kind": "loop.fast", "source": "s", "time": models.now_utc(t0), "data": {}},
+        {"seq": 2, "kind": "loop.slow", "source": "s", "time": models.now_utc(t0 + timedelta(seconds=1)), "data": {}},
+    ]
+    assert loops.event_debounce_remaining(mixed_evs, (fast_rule, slow_rule), t0 + timedelta(seconds=6)) == 0.0
+    # `watch.error` text rendering includes `loop` name when present!
+    assert "noisy: rate limit" in render.format_watch_line("watch.error", {"loop": "noisy", "error": "rate limit"})
+    # Mark the hourly schedule satisfied at t0 so step 3 isolates event debouncing from hourly retries.
+    loops.save_unit_state(
+        store,
+        {
+            **st_after_dm,
+            "schedule_failures": 0,
+            "last_schedule_end": "",
+            "schedule_last": {"every:3600": models.now_utc(t0)},
+        },
+    )
+
+    # 3. Trailing-edge `debounce:` coalesces bursts, caps wait at 4x debounce, and lets non-debounced rules fire immediately!
+    t_deb = t0 + timedelta(minutes=5)
+    state.append_event(store, "records.ingested", "src-a", {"added": 1}, now=t_deb)
+    cfg_m = config.load(store)
+    due_early, _ = loops.select_due_loops(store, cfg_m, sched_now=t_deb + timedelta(seconds=5))
+    assert due_early == []
+    assert 10.0 <= watch.next_due_delay(store, cfg_m, t_deb + timedelta(seconds=5)) <= 16.0
+    # Second burst event extends trailing debounce!
+    state.append_event(store, "records.ingested", "src-b", {"added": 1}, now=t_deb + timedelta(seconds=15))
+    due_ext, _ = loops.select_due_loops(store, cfg_m, sched_now=t_deb + timedelta(seconds=25))
+    assert due_ext == []
+    # Ready once trailing window elapses: BOTH events delivered together in ONE run!
+    deb_run = loops.run_loops(store, due_only=True, now=t_deb + timedelta(seconds=36))
+    assert deb_run["ok"]
+    assert deb_run["results"][0]["summary"]["count"] == 2
+    # Max-wait cap (`4 * 20s = 80s`): continuous trickle still flushes!
+    t_cap = t_deb + timedelta(minutes=2)
+    evs_trickle = [
+        {
+            "seq": i + 1,
+            "kind": "records.ingested",
+            "source": "s",
+            "time": models.now_utc(t_cap + timedelta(seconds=i * 15)),
+            "data": {},
+        }
+        for i in range(6)
+    ]
+    assert (
+        loops.event_debounce_remaining(evs_trickle, cfg_m.loops["mixed"].events, t_cap + timedelta(seconds=81)) == 0.0
+    )
+    # Non-debounced `loop.message` alongside a debounced event bypasses debounce immediately!
+    state.append_event(store, "records.ingested", "src-c", {"added": 1}, now=t_cap)
+    state.append_event(store, "loop.message", "chat", {"id": "urgent-3"}, now=t_cap + timedelta(seconds=1))
+    urg_run = loops.run_loops(store, due_only=True, now=t_cap + timedelta(seconds=2))
+    assert urg_run["ok"]
+    assert urg_run["results"][0]["summary"]["count"] == 2
+
+    # 4. Delayed `schedule_event` promotes via `select_due_loops` and wakes `next_due_delay`!
+    t_wk = t_cap + timedelta(minutes=5)
+    state.schedule_event(
+        store, "loop.message", "chat", {"id": "wake-1"}, deliver_at=t_wk + timedelta(seconds=30), now=t_wk
+    )
+    assert 25.0 <= watch.next_due_delay(store, cfg_m, t_wk) <= 31.0
+    wk_run = loops.run_loops(store, due_only=True, now=t_wk + timedelta(seconds=31))
+    assert wk_run["ok"]
+    assert wk_run["ran"] == 1
+
+    # 5. `events_missed` surfaces in `status_summary`, `render.format_status_text`, and `BF_EVENTS_MISSED`!
+    st_dir = private_dir(store, ".bf", "state")
+    st_dir.write(
+        state.EVENTS_FILE,
+        (
+            json.dumps(
+                {
+                    "seq": 500,
+                    "id": "e500",
+                    "time": models.now_utc(t_wk),
+                    "kind": "loop.message",
+                    "source": "chat",
+                    "data": {"id": "gap-1"},
+                }
+            )
+            + "\n"
+        ).encode(),
+        mode=0o600,
+    )
+    loops.save_unit_state(store, {**loops.load_unit_state(store, "mixed"), "event_seq": 100})
+    st_lag = status.status_summary(store, include_loops=True, now=t_wk)
+    assert st_lag["ok"] is False
+    assert any(a["reason"] == "events_missed" and a["events_missed"] == 399 for a in st_lag["attention"])
+    assert "lagging" in render.format_status_text(st_lag, now=t_wk)
+    lag_run = loops.run_loops(store, due_only=True, now=t_wk + timedelta(minutes=1))
+    assert lag_run["ok"]
+    assert lag_run["results"][0]["summary"]["missed"] == "399"
+    # Unmatched post-compaction fast-forward preserves `pending_events_missed` & logs `loop.events_missed`, and failed/crashed loops still surface `events_missed`!
+    st_dir.write(
+        state.EVENTS_FILE,
+        (
+            json.dumps(
+                {
+                    "seq": 900,
+                    "id": "e900",
+                    "time": models.now_utc(t_wk),
+                    "kind": "other.unrelated",
+                    "source": "other",
+                    "data": {},
+                }
+            )
+            + "\n"
+        ).encode(),
+        mode=0o600,
+    )
+    loops.save_unit_state(
+        store, {**loops.load_unit_state(store, "mixed"), "event_seq": 600, "pending_events_missed": 0}
+    )
+    due_none, _ = loops.select_due_loops(store, cfg_m, sched_now=t_wk + timedelta(minutes=2))
+    assert due_none == []
+    st_ff = loops.load_unit_state(store, "mixed")
+    assert st_ff["event_seq"] == 900
+    assert st_ff["pending_events_missed"] == 299
+    # Failed loop with `pending_events_missed > 0` surfaces BOTH failure AND lag in `status_summary` + text!
+    loops.save_unit_state(store, {**st_ff, "status": "failed", "consecutive_failures": 1, "error": "boom"})
+    st_fl = status.status_summary(store, include_loops=True, now=t_wk + timedelta(minutes=2))
+    assert st_fl["attention"][0]["events_missed"] == 299
+    assert "missed 299 compacted" in render.format_status_text(st_fl, now=t_wk + timedelta(minutes=2))
+    # Crashed loop with `pending_events_missed > 0` surfaces BOTH crash AND lag!
+    loops.save_unit_state(store, {**st_ff, "status": "running", "consecutive_failures": 0})
+    st_cr = status.status_summary(store, include_loops=True, now=t_wk + timedelta(minutes=2))
+    assert st_cr["attention"][0]["reason"] == "crashed"
+    assert st_cr["attention"][0]["events_missed"] == 299
+
+    # 6. `bf pause` / `bf resume` for cycle loops & live daemon supervision under `bf watch`!
+    (root / "routines" / "d_flag.py").write_text(
+        "import pathlib, signal, time\n"
+        "p = pathlib.Path('routines/d_alive')\n"
+        "p.write_text('1')\n"
+        "stop = False\n"
+        "signal.signal(signal.SIGTERM, lambda *_: globals().update(stop=True))\n"
+        "while not stop:\n"
+        "    time.sleep(0.05)\n"
+        "p.unlink(missing_ok=True)\n"
+    )
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: always-on\n"
+        "concurrency:\n  default: 2\n  agents: 1\n"
+        "loops:\n"
+        f"  d-bot:\n    when: daemon\n    run: [{sys.executable!r}, routines/d_flag.py]\n"
+        f"  c-job:\n    pool: agents\n    when: 1h\n    run: [{sys.executable!r}, -c, 'print(\"ok\")']\n".encode(),
+    )
+    t_p = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
+    assert loops.pause_loops(store, ("c-job",), duration_s=120, now=t_p)["paused"] == ["c-job"]
+    assert loops.run_loops(store, due_only=True, now=t_p + timedelta(seconds=30))["ran"] == 0
+    # Manual run still works while paused and preserves active pause!
+    assert loops.run_loops(store, ("c-job",), now=t_p + timedelta(seconds=30))["ok"] is True
+    assert state.is_paused(loops.load_unit_state(store, "c-job"), t_p + timedelta(seconds=31)) is True
+    st_p = status.status_summary(store, include_loops=True, now=t_p + timedelta(seconds=31))
+    assert st_p["ok"] is True
+    assert st_p["paused"] == ["c-job"]
+    assert st_p["loops"]["c-job"]["status"] == "paused"
+    assert "paused (" in render.format_status_text(st_p, now=t_p + timedelta(seconds=31))
+    assert 85.0 <= watch.next_due_delay(store, config.load(store), t_p + timedelta(seconds=31), max_wait=120.0) <= 90.0
+    # Auto-resumes once `--for` duration passes!
+    assert loops.run_loops(store, due_only=True, now=t_p + timedelta(seconds=125))["ran"] == 1
+    assert loops.resume_loops(store, ("c-job",), now=t_p + timedelta(seconds=130))["resumed"] == ["c-job"]
+
+    # Live `bf watch` stops a daemon on `pause_loops` and restarts it on `resume_loops`!
+    monkeypatch.setattr(watch, "_POLL_INTERVAL", 0.05)
+    stop_w = threading.Event()
+    capsys.readouterr()
+    wt = threading.Thread(target=lambda: watch.serve(store, fmt="jsonl", stop_event=stop_w), daemon=True)
+    wt.start()
+    try:
+        dl = time.monotonic() + 6.0
+        while time.monotonic() < dl and not (root / "routines" / "d_alive").exists():
+            time.sleep(0.03)
+        assert (root / "routines" / "d_alive").exists()
+        loops.pause_loops(store, ("d-bot",))
+        dl2 = time.monotonic() + 6.0
+        while time.monotonic() < dl2 and (root / "routines" / "d_alive").exists():
+            time.sleep(0.03)
+        assert not (root / "routines" / "d_alive").exists()
+        loops.resume_loops(store, ("d-bot",))
+        dl3 = time.monotonic() + 6.0
+        while time.monotonic() < dl3 and not (root / "routines" / "d_alive").exists():
+            time.sleep(0.03)
+        assert (root / "routines" / "d_alive").exists()
+    finally:
+        stop_w.set()
+        wt.join(timeout=6.0)
+        assert not wt.is_alive()
+    watch_evs = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert any(e.get("message") == "watch.started" and e.get("pools") == {"default": 2, "agents": 1} for e in watch_evs)
+
+
+def test_review_regressions_event_race_status_toctou_and_clock_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regressions for BF-001 (select_due_loops cursor race), BF-004/005 (status TOCTOU/problems), BF-008 (clock), SIGTERM 143."""
+    root = tmp_path / "reg-brain"
+    engine.init_brain(root, name="reg")
+    store = Store(root)
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: reg\nloops:\n"
+        f"  a-loop:\n    when:\n      - event: loop.ping\n    run: [{sys.executable!r}, -c, 'print(\"a\")']\n"
+        f"  b-loop:\n    when:\n      - event: loop.other\n    run: [{sys.executable!r}, -c, 'print(\"b\")']\n".encode(),
+    )
     cfg = config.load(store)
-    cached = status.corpus_counts(store, cfg)
-    assert cached[0] == {"notes": 1, "records": 1, "usages": 1, "sources": 2, "loops": 11}
-    assert cached[1] == []
+    for i in range(1, 10):
+        state.append_event(store, f"loop.n{i}", "src", {"n": i})
+    base_seq = state.latest_event_seq(store)
+    loops.save_unit_state(store, state.default_unit_state("a-loop", event_seq=base_seq))
+    # Simulate concurrent arrival of ping (for a-loop), other1, other2 AFTER initial `event_bounds()` saw `base_seq`!
+    ev_ping = state.append_event(store, "loop.ping", "src", {"n": 11})[0]["seq"]
+    ev_other1 = state.append_event(store, "loop.other", "src", {"n": 12})[0]["seq"]
+    state.append_event(store, "loop.other", "src", {"n": 13})
+    loops.save_unit_state(store, state.default_unit_state("b-loop", event_seq=ev_other1))
+    bounds_calls = [0]
+    real_bounds = state.event_bounds
 
-    now = datetime(2026, 11, 22, 14, 0, tzinfo=UTC)
+    def racing_bounds(st: Store) -> tuple[int, int]:
+        bounds_calls[0] += 1
+        return (1, base_seq) if bounds_calls[0] == 1 else real_bounds(st)
+
+    monkeypatch.setattr(state, "event_bounds", racing_bounds)
+    due, _ = loops.select_due_loops(store, cfg, sched_now=datetime(2026, 11, 25, 12, 0, tzinfo=UTC), dry_run=True)
+    monkeypatch.undo()
+    by_name = {item[0].name: item for item in due}
+    assert "a-loop" in by_name
+    assert [ev["seq"] for ev in by_name["a-loop"][2]] == [ev_ping]
+
+    # BF-004: `status_summary` re-reads state after unlocked `_is_crashed_running` so a healthy finish never false-alerts!
     loops.save_unit_state(
         store,
         {
-            "kind": "loop",
-            "name": "lp-02",
-            "status": "failed",
-            "updated": "2026-11-22T13:59:00Z",
-            "last_start": "2026-11-22T13:59:00Z",
-            "last_end": "2026-11-22T13:59:00Z",
-            "consecutive_failures": 2,
-            "error": "boom timeout",
+            **state.default_unit_state("a-loop", event_seq=13),
+            "status": "running",
+            "last_start": "2026-11-25T10:00:00Z",
         },
     )
+
+    def finish_during_check(st: Store, name: str) -> bool:
+        loops.save_unit_state(
+            st,
+            {
+                **state.default_unit_state(name, event_seq=13),
+                "status": "ok",
+                "last_start": "2026-11-25T10:00:00Z",
+            },
+        )
+        return True
+
+    with monkeypatch.context() as mp:
+        mp.setattr(status, "_is_crashed_running", finish_during_check)
+        st_ok = status.status_summary(store, include_loops=True)
+    assert st_ok["ok"] is True
+    assert st_ok["loops"]["a-loop"]["status"] == "ok"
+
+    # Corrupt state on re-read inside crash check degrades to failed cleanly.
     loops.save_unit_state(
         store,
         {
-            "kind": "loop",
-            "name": "lp-05",
-            "status": "ok",
-            "updated": "2026-11-22T13:58:00Z",
-            "last_start": "2026-11-22T13:58:00Z",
-            "last_end": "2026-11-22T13:58:00Z",
-            "last_success": "2026-11-22T13:58:00Z",
-            "last_run": {"records": 10, "added": 3, "updated": 1, "removed": 0},
+            **state.default_unit_state("a-loop", event_seq=13),
+            "status": "running",
+            "last_start": "2026-11-25T10:00:00Z",
         },
     )
-    loops.save_unit_state(
-        store,
-        {
-            "kind": "loop",
-            "name": "lp-01",
-            "status": "ok",
-            "updated": "2026-11-22T13:50:00Z",
-            "last_start": "2026-11-22T13:50:00Z",
-            "last_end": "2026-11-22T13:50:00Z",
-            "last_success": "2026-11-22T13:50:00Z",
-            "last_run": {"records": 4, "added": 0, "updated": 0, "removed": 0},
-        },
-    )
-    private_dir(store).write("ghost.json", b'{"kind":"loop","name":"ghost","status":"idle"}\n')
-    sm = status.status_summary(store, all_units=True, counts_cache=cached)
-    assert sm["orphaned_states"] == ["ghost"]
-    assert sm["counts"] == {"notes": 1, "records": 1, "usages": 1, "sources": 2, "loops": 11}
 
-    # Scrollable viewport clamps offset and shows pagination + recent activity + alerts.
-    recent = [f"14:00:0{i}  ok     lp-0{i}  +1 · 2 records  12ms" for i in range(6)]
-    frame_top, off0, page0 = status.format_watch_screen(
-        sm, recent, cols=90, rows=20, offset=0, only_active=False, sort_recent=True, color=True, now=now
-    )
-    assert off0 == 0
-    assert page0 == 5
-    assert "Brain: tui-brain" in frame_top
-    assert "ATTENTION (1)" in frame_top
-    assert "sources=" not in frame_top
-    big_txt = status.format_status_text({**sm, "counts": {**sm["counts"], "records": 1250}, "events_seq": 1800})
-    assert "memories=1,250" in big_txt
-    assert "events=1,800" in big_txt
-    assert "sources=" not in big_txt
-    assert "orphans: ghost (bf run --prune)" in frame_top
-    assert "lp-02" in frame_top
-    assert "(2x) boom timeout" in frame_top
-    assert "showing 1-" in frame_top
-    assert "1 disabled" in frame_top
-    assert "Recent activity:" in frame_top
-    assert frame_top.index("lp-05") < frame_top.index("lp-01")  # recent-first order among ok loops
+    def corrupt_during_check(st: Store, name: str) -> bool:
+        private_dir(st, ".bf", "state").write(f"{name}.json", b"{corrupt")
+        return True
 
-    # End scroll clamps to last page; A-Z sort puts lp-01 before lp-05; active filter keeps only lp-02 & lp-05.
-    frame_end, off_end, _ = status.format_watch_screen(
-        sm, recent, cols=90, rows=16, offset=999, only_active=False, sort_recent=False, color=False, now=now
-    )
-    assert off_end > 0
-    assert "[A-Z]" in frame_end
-    assert "lp-09" in frame_end
-    frame_act, off_act, _ = status.format_watch_screen(
-        sm, recent, cols=90, rows=24, offset=0, only_active=True, sort_recent=True, color=False, now=now
-    )
-    assert off_act == 0
-    assert "[active]" in frame_act
-    act_table = frame_act.split("Recent activity:")[0]
-    assert "lp-02" in act_table
-    assert "lp-05" in act_table
-    assert "lp-01" not in act_table
-    assert "of 10 enabled" in act_table
+    with monkeypatch.context() as mp:
+        mp.setattr(status, "_is_crashed_running", corrupt_during_check)
+        st_cor = status.status_summary(store, include_loops=True)
+    assert st_cor["ok"] is False
+    assert st_cor["loops"]["a-loop"]["status"] == "failed"
+    loops.save_unit_state(store, state.default_unit_state("a-loop", event_seq=13))
 
-    # Empty active filter and empty brain messages + compact terminal height (`rows=10` and `rows=8`).
-    sm_idle = {**sm, "ok": True, "attention": [], "loops": {"lp-00": {"enabled": True, "status": "idle"}}}
-    f_no_act, _, _ = status.format_watch_screen(sm_idle, [], cols=80, rows=12, only_active=True, now=now)
-    assert "no active/failing loops (press f for all)" in f_no_act
-    f_empty, _, _ = status.format_watch_screen({**sm_idle, "loops": {}}, recent, cols=60, rows=8, now=now)
-    assert "no enabled loops in bf.yaml" in f_empty
-    assert "Recent activity:" not in f_empty
-    f_mid, _, _ = status.format_watch_screen(sm_idle, recent, cols=80, rows=11, now=now)
-    assert "Recent activity:" in f_mid
-    assert len(f_mid.splitlines()) <= 11
+    # BF-005: `status_summary` records note/memory symlinks, bundle collisions, unreadable memory files, and deleted CWD in `problems` (no crash).
+    (root / "concepts" / "sym.md").symlink_to(root / "bf.yaml")
+    store.write("concepts/dup.md", b"---\ntype: guide\nstatus: stable\n---\n# D\n")
+    store.write("concepts/dup/index.md", b"---\ntype: guide\nstatus: stable\n---\n# D2\n")
+    (root / "memories" / "badmem.jsonl").symlink_to(root / "bf.yaml")
+    records.ingest(store, "unreadable", b'[{"id":"1","title":"U"}]')
+    store.delete(f".bf/cache/{index.INDEX_NAME}")
+    unr_p = root / "memories" / "unreadable.jsonl"
+    unr_p.chmod(0o000)
+    try:
+        with monkeypatch.context() as mp:
+            mp.setattr(config, "inside_brain", lambda: (_ for _ in ()).throw(FileNotFoundError("cwd gone")))
+            st_prob = status.status_summary(store)
+        assert st_prob["ok"] is False
+        assert st_prob["inside_brain"] is False
+        assert any("sym.md" in p for p in st_prob["problems"])
+        assert any("collides" in p for p in st_prob["problems"])
+        assert any("badmem.jsonl" in p for p in st_prob["problems"])
+        assert any("unreadable.jsonl" in p for p in st_prob["problems"])
+        with pytest.raises((Error, OSError)):
+            status.corpus_counts(store, config.load(store))
+    finally:
+        unr_p.chmod(0o644)
+        (root / "concepts" / "sym.md").unlink()
+        (root / "memories" / "badmem.jsonl").unlink()
 
-    # Error-inspect toggle (`show_errors=True`) renders full wrapped error detail or healthy empty state.
-    long_err = "HTTP 403 rate limit exceeded " + ("x" * 95) + " TAIL_END"
-    sm_errs = {
-        **sm,
-        "attention": [
-            {"name": "lp-02", "consecutive_failures": 3, "error": long_err},
-            {"name": "lp-03", "consecutive_failures": 1, "error": "other"},
-        ],
+    # BF-R2-002: Symlinked `memories/` and unreadable `_notes.jsonl` surface cleanly in `status_summary` `problems`!
+    sym_mem_root = tmp_path / "sym-mem-brain"
+    engine.init_brain(sym_mem_root, name="symmem")
+    notes_p = sym_mem_root / "memories" / "_notes.jsonl"
+    notes_p.chmod(0o000)
+    try:
+        st_unr = status.status_summary(Store(sym_mem_root), check_inside=False)
+        assert st_unr["ok"] is True or st_unr["inside_brain"] is False
+    finally:
+        notes_p.chmod(0o644)
+    shutil.rmtree(sym_mem_root / "memories")
+    (sym_mem_root / "memories").symlink_to(tmp_path)
+    st_sym_mem = status.status_summary(Store(sym_mem_root))
+    assert st_sym_mem["ok"] is False
+    assert any("memories" in p and "symlinks" in p for p in st_sym_mem["problems"])
+    with pytest.raises(Error, match="symlinks"):
+        status.corpus_counts(Store(sym_mem_root), config.load(Store(sym_mem_root)))
+
+    # BF-008: Backward wall-clock step never extends backoff or debounce beyond cap!
+    t_last = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
+    t_past = t_last - timedelta(hours=2)
+    doc_b = {
+        "name": "a-loop",
+        "consecutive_failures": 1,
+        "event_failures": 1,
+        "last_end": "2026-11-25T12:00:00Z",
     }
-    f_err, _, _ = status.format_watch_screen(sm_errs, recent, cols=70, rows=20, show_errors=True, now=now)
-    assert "[errors]" in f_err
-    assert "Error (lp-02 · 3x · +1 more):" in f_err
-    assert "TAIL_END" in f_err
-    f_no_err, _, _ = status.format_watch_screen(sm_idle, recent, cols=80, rows=16, show_errors=True, now=now)
-    assert "Errors: (no failing loops)" in f_no_err
+    assert cron.backoff_remaining(doc_b, 3600, t_past) <= 60.0
+    assert cron.event_backoff_remaining(doc_b, t_past) <= 10.0
+    ev_rule = config.EventMatch(kind="loop.ping", debounce=15)
+    assert loops.event_debounce_remaining([], (ev_rule,), t_past) == 0.0
+    assert (
+        loops.event_debounce_remaining([{"kind": "loop.other", "time": "2026-11-25T12:00:00Z"}], (ev_rule,), t_past)
+        == 0.0
+    )
+    assert (
+        loops.event_debounce_remaining([{"kind": "loop.ping", "time": "2026-11-25T12:00:00Z"}], (ev_rule,), t_past)
+        <= 15.0
+    )
 
-    # Live `watch.serve(fmt="tui")` enters/exits alt-screen + SGR mouse mode, restores termios on quit AND EOF!
-    live_root = tmp_path / "tui-live"
-    engine.init_brain(live_root, name="tui-live")
-    live_store = Store(live_root)
-    (live_root / "concepts" / "extra.md").write_text("---\ntype: concept\nstatus: draft\n---\n\n# Extra\n")
-    restored: list[tuple[int, Any]] = []
-    kr_fd, kw_fd = os.pipe()
-    fake_in = os.fdopen(kr_fd, "r", encoding="latin1", closefd=True)
-    key_timer = threading.Timer(0.15, lambda: os.write(kw_fd, b"ferq"))
-    try:
-        monkeypatch.setattr(fake_in, "isatty", lambda: True)
-        monkeypatch.setattr(sys, "stdin", fake_in)
-        monkeypatch.setattr(watch.termios, "tcgetattr", lambda _fd: ["saved-term"])
-        monkeypatch.setattr(watch.termios, "tcsetattr", lambda fd, _when, attrs: restored.append((fd, attrs)))
-        monkeypatch.setattr(watch.tty, "setcbreak", lambda _fd: None)
-        monkeypatch.setattr(watch, "next_due_delay", lambda *_a, **_kw: 0.2)
-        key_timer.start()
-        capsys.readouterr()
-        res_tui = watch.serve(live_store, fmt="tui")
-        assert res_tui["ok"] is True
-        assert restored == [(kr_fd, ["saved-term"])]
-        tui_out = capsys.readouterr().out
-        assert "\033[?1049h\033[?25l\033[?1000h\033[?1006h" in tui_out
-        assert "\033[?1006l\033[?1000l\033[?25h\033[?1049l" in tui_out
-        assert "Brain: tui-live" in tui_out
-    finally:
-        key_timer.cancel()
-        fake_in.close()
-        os.close(kw_fd)
+    # `watch-loop-sigterm-exit-code`: SIGTERM during cycle loop records exit_code 143 (not 130).
+    slow_loop = config.LoopSpec(
+        "slow-term",
+        run=(sys.executable, "-c", "import time; time.sleep(30)"),
+    )
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: reg\nloops:\n  slow-term:\n    run: [{sys.executable!r}, -c, 'import time; time.sleep(30)']\n".encode(),
+    )
+    stop_e, term_e = threading.Event(), threading.Event()
 
-    # EOF on interactive stdin still restores termios via `term_fd` and does not busy-spin until `stop_event` fires.
-    restored.clear()
-    er_fd, ew_fd = os.pipe()
-    os.close(ew_fd)
-    eof_in = os.fdopen(er_fd, "r", encoding="latin1", closefd=True)
-    stop_eof = threading.Event()
-    eof_timer = threading.Timer(0.25, stop_eof.set)
-    try:
-        monkeypatch.setattr(eof_in, "isatty", lambda: True)
-        monkeypatch.setattr(sys, "stdin", eof_in)
-        eof_timer.start()
-        res_eof = watch.serve(live_store, fmt="tui", stop_event=stop_eof)
-        assert res_eof["ok"] is True
-        assert restored == [(er_fd, ["saved-term"])]
-    finally:
-        eof_timer.cancel()
-        eof_in.close()
+    def trigger_term() -> None:
+        time.sleep(0.25)
+        term_e.set()
+        stop_e.set()
 
-    # Failing `corpus_counts` caches fallback without double-scanning per tick.
-    count_calls = 0
-
-    def fail_counts(*_a: Any, **_kw: Any) -> Any:
-        nonlocal count_calls
-        count_calls += 1
-        raise Error("boom")
-
-    monkeypatch.setattr(status, "corpus_counts", fail_counts)
-    stop_err = threading.Event()
-    err_timer = threading.Timer(0.25, stop_err.set)
-    try:
-        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-        err_timer.start()
-        assert watch.serve(live_store, fmt="tui", stop_event=stop_err)["ok"] is True
-        assert count_calls == 1
-    finally:
-        err_timer.cancel()
+    tt = threading.Thread(target=trigger_term, daemon=True)
+    tt.start()
+    res_t = loops.execute_one_loop(store, slow_loop, trigger="manual", stop_event=stop_e, term_event=term_e)
+    tt.join(timeout=2.0)
+    assert res_t["exit_code"] == 143

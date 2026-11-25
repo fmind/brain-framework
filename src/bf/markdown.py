@@ -1,74 +1,92 @@
-"""Python-Markdown compiler turning Markdown notes into uniform JSON records (`kind: 'note'`)."""
+"""CommonMark compiler (`markdown-it-py`) turning Markdown notes into uniform JSON records (`kind: 'note'`)."""
 
 from __future__ import annotations
 
 import html
-import posixpath
 import re
 import stat
-import threading
-from collections.abc import Iterable, Mapping
+import unicodedata
+from collections.abc import Iterable
+from dataclasses import dataclass
+from functools import cache
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qsl, unquote, urlsplit
-
-from bf import models, storage
-from bf.config import yaml_object
-from bf.models import DEFAULT_NOTES, RESERVED_SOURCES, Error, clean, clean_env, clean_text, digest, encode, invisible
-from bf.storage import LINKED, Store
 
 if TYPE_CHECKING:
-    import xml.etree.ElementTree as ET
+    from markdown_it import MarkdownIt
 
-_RESERVED_FM = frozenset(("id", "ref", "source", "kind", "text", "headings", "tasks", "sha256"))
-_OMIT_OPT = frozenset(("tags", "aliases", "entity", "stale_after", "description", "links", "headings", "tasks"))
+from bf import models, refs
+from bf.models import (
+    DEFAULT_NOTES,
+    Error,
+    clean,
+    clean_text,
+    digest,
+    encode,
+    invisible,
+    normalize_iso_date_or_time,
+    sanitize_record_strings,
+    strip_unsafe_text,
+)
+from bf.storage import LINKED, Store
+from bf.yaml_io import yaml_object
+
+_RESERVED_FM = frozenset(("id", "ref", "source", "kind", "text", "headings", "tasks", "sha256", "ingested_at"))
+_OMIT_OPT = frozenset(
+    (
+        "tags",
+        "aliases",
+        "entity",
+        "stale_after",
+        "description",
+        "links",
+        "headings",
+        "tasks",
+        "created",
+        "updated",
+        "url",
+    )
+)
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
-_CONFLICT = re.compile(r"^(?:<{7,}|>{7,}|\|{7,}|={7,})(?: |$)")
+_CONFLICT_OPEN = re.compile(r"^<{7,}(?: |$)")
+_CONFLICT_OTHER = re.compile(r"^(?:>{7,}|\|{7,})(?: |$)")
 _BAD_ATTR = re.compile(r"\{#[A-Za-z0-9_.-]+\?[^}\r\n]+\}")
 _TASK = re.compile(r"^\[([ xX])\]\s+(\S[\s\S]*)$")
-_META_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
-_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):(.*)\Z")
-_URL_SCHEMES = frozenset({"https", "http", "mailto", "urn"})
-_FORBIDDEN = frozenset({"javascript", "data", "file", "vbscript", "tel"})
-_HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
-_STASH_BLOCK = re.compile(r"\x02wzxhzdk:(\d+)\x03")
-_STASH_ANY = re.compile(r"\x02[^\x03]*\x03")
-_HTML_TAG = re.compile(r"<[^>]+>")
-_ATX_RE = re.compile(r"^ {0,3}(#{1,6})(?!#)")
-_DEFAULT_RESERVED = RESERVED_SOURCES | frozenset(DEFAULT_NOTES)
-_LOCAL = threading.local()
+_TASK_PREFIX = re.compile(r"^\[([ xX])\]\s+")
+_ATTR_TAIL = re.compile(r"(?:^|\s)\{:?([^{}\r\n]++)\}\s*$")
+_ATTR_HEAD = re.compile(r"^\{:?([^{}\r\n]++)\}")
+_ATTR_TOK = re.compile(
+    r"""(?P<id>#[A-Za-z0-9_.-]+)|(?P<cls>\.[A-Za-z0-9_.-]+)|(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)=(?:"(?P<dq>(?:[^"\\]|\\.)*)"|'(?P<sq>(?:[^'\\]|\\.)*)'|(?P<uq>[^\s"']+))|(?P<bad>\S+)"""
+)
+_HTML_TAG = re.compile(r"<[^<>]+>")
+_FOOTNOTE_REF = re.compile(r"\[\^([^\s\]]+)\]")
+_FOOTNOTE_DEF = re.compile(r"^ {0,3}\[\^([^\s\]]+)\]:[ \t]*(.*)$")
+_SLUG_DROP = re.compile(r"[^\w\s-]", re.UNICODE)
+_SLUG_DASH = re.compile(r"[-\s]+")
 
 
-def _engine() -> tuple[Any, Any]:
-    if (pair := getattr(_LOCAL, "engine", None)) is None:
-        import markdown
-        from markdown.extensions import Extension
-        from markdown.treeprocessors import Treeprocessor
+@dataclass(frozen=True)
+class _ParsedHeading:
+    id: str
+    title: str
+    level: int
+    meta: dict[str, str]
+    start_line: int
 
-        class _Capture(Treeprocessor):
-            root: Any = None
 
-            def run(self, root: Any) -> Any:
-                self.root = root
-                return root
+@cache
+def _md_parser() -> MarkdownIt:
+    from markdown_it import MarkdownIt
 
-        cap = _Capture()
-
-        class _Ext(Extension):
-            def extendMarkdown(self, md: markdown.Markdown) -> None:  # noqa: N802
-                md.treeprocessors.register(cap, "bf_capture", 1)
-
-        md = markdown.Markdown(extensions=["extra", "toc", "sane_lists", _Ext()])
-        pair = _LOCAL.engine = (md, cap)
-    return pair
+    return MarkdownIt("commonmark").enable("table").enable("strikethrough")
 
 
 def note_role(path: str, note_dirs: Iterable[str] = DEFAULT_NOTES) -> tuple[str, bool] | None:
-    """Return `(source_dir, is_bundle)` if `path` matches a Markdown note path under `note_dirs`."""
-    if path.rsplit("/", 1)[-1].startswith(".#") or not path.endswith(".md"):
-        return None
+    """Return `(source_dir, is_bundle)` if `path` matches an authored Markdown note under `note_dirs` (no dotfiles)."""
     parts = path.split("/")
-    if len(parts) < 2 or parts[0] not in set(note_dirs):
+    if not path.endswith(".md") or len(parts) < 2 or any(p.startswith(".") for p in parts):
+        return None
+    if parts[0] not in set(note_dirs):
         return None
     return parts[0], len(parts) >= 3 and parts[-1] == "index.md"
 
@@ -101,6 +119,8 @@ def authored_notes(
         flat_set = {rel for rel in top_files if note_role(rel, dirs) is not None}
         paths.extend(flat_set)
         for sub in sub_dirs:
+            if sub.startswith("."):
+                continue
             sub_path = f"{directory}/{sub}"
             idx_rel = f"{sub_path}/index.md"
             try:
@@ -137,23 +157,6 @@ def authored_notes(
     return sorted(paths)
 
 
-def parse_record_ref(ref: str, reserved: frozenset[str] = _DEFAULT_RESERVED) -> tuple[str, str] | None:
-    """Return `(source, id)` when `ref` is a valid `<source>:<id>` record reference, else `None`."""
-    src, sep, rec_id = ref.partition(":")
-    is_http = rec_id.lower().startswith(("https://", "http://"))
-    if not sep or not rec_id or rec_id.startswith("//") or "#" in rec_id or ("?" in rec_id and not is_http):
-        return None
-    if not models.NAME_RE.fullmatch(src) or src in reserved:
-        return None
-    if any(ch.isspace() for ch in rec_id) or invisible(rec_id) or re.search(r"[\x00-\x1f\x7f-\x9f]", rec_id):
-        return None
-    return src, rec_id
-
-
-def is_record_ref(ref: str, reserved: frozenset[str] = _DEFAULT_RESERVED) -> bool:
-    return parse_record_ref(ref, reserved) is not None
-
-
 def _step_fence(fence: str, line: str) -> tuple[str, bool]:
     if match := FENCE.fullmatch(line):
         if fence and match[1][0] == fence[0] and len(match[1]) >= len(fence) and not match[2].strip():
@@ -184,433 +187,367 @@ def _split_frontmatter(path: str, data: bytes, *, parse_yaml: bool) -> tuple[dic
     for num, line in enumerate(lines[offset:], offset + 1):
         fence, in_fence = _step_fence(fence, stripped := line.rstrip("\r\n"))
         if not in_fence:
-            if _CONFLICT.match(stripped):
+            if _CONFLICT_OPEN.match(stripped) or _CONFLICT_OTHER.match(stripped):
                 raise Error(f"{path}: line {num}: unresolved merge conflict marker")
             if _BAD_ATTR.search(stripped):
                 raise Error(f"{path}: line {num}: invalid attr_list syntax; separate #id and attributes with spaces")
     return frontmatter, "".join(lines[offset:])
 
 
-def _clean_vis(val: str, label: str) -> str:
-    if invisible(out := clean(val, label)):
-        raise Error(f"{label} contains invisible format characters")
-    return out
+def _slugify(title: str) -> str:
+    folded = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii").lower()
+    cleaned = _SLUG_DROP.sub("", folded).strip()
+    return _SLUG_DASH.sub("-", cleaned).strip("-") or "section"
 
 
-def _unstash(text: str, stash: list[str]) -> str:
-    def repl(match: re.Match[str]) -> str:
-        return _HTML_TAG.sub("", stash[idx]) if 0 <= (idx := int(match[1])) < len(stash) else ""
-
-    return html.unescape(_STASH_ANY.sub("", _STASH_BLOCK.sub(repl, text)))
-
-
-def _classes(attrib: Mapping[str, Any]) -> list[str]:
-    raw = attrib.get("class", "")
-    return [str(x) for x in raw if str(x)] if isinstance(raw, (list, tuple)) else (str(raw).split() if raw else [])
-
-
-def _extract_meta(attrib: Mapping[str, Any], path: str, *, drop: frozenset[str] = frozenset()) -> dict[str, str]:
+def _parse_attr_block(raw_inner: str, path: str, *, strict: bool = True) -> tuple[str, dict[str, str]] | None:
+    """Parse `attr_list` inner text (`#id .cls key=val key="v"`), returning `(explicit_id, meta)` or `None` if not attrs."""
+    explicit_id = ""
+    classes: list[str] = []
     meta: dict[str, str] = {}
-    for key, raw_val in attrib.items():
-        if key in drop:
-            continue
-        if not _META_KEY.fullmatch(key):
-            raise Error(f"{path}: invalid attribute name {key!r}")
-        val = " ".join(str(x) for x in raw_val if str(x)) if isinstance(raw_val, (list, tuple)) else str(raw_val)
-        if val.strip():
-            meta[key] = clean(val.strip(), f"{path}: attribute {key}")
-    return meta
+    found_any = False
+    for m in _ATTR_TOK.finditer(raw_inner):
+        if m.group("bad") is not None:
+            if strict and m.group("bad").startswith("#"):
+                raise Error(f"{path}: invalid attr_list syntax; separate #id and attributes with spaces")
+            return None
+        found_any = True
+        if raw_id := m.group("id"):
+            explicit_id = raw_id[1:]
+        elif raw_cls := m.group("cls"):
+            classes.append(raw_cls[1:])
+        elif key := m.group("key"):
+            val = (
+                m.group("dq")
+                if m.group("dq") is not None
+                else (m.group("sq") if m.group("sq") is not None else m.group("uq"))
+            )
+            val = re.sub(r'\\(["\'\\])', r"\1", val or "").strip()
+            if val:
+                meta[key] = clean(strip_unsafe_text(val), f"{path}: attribute {key}")
+    if not found_any:
+        return None
+    if classes:
+        meta["class"] = " ".join(classes)
+    return explicit_id, meta
 
 
-def _own_inline_text(elem: ET.Element, stash: list[str]) -> str:
-    parts = [*([elem.text] if elem.text else [])]
-    for child in elem:
-        if child.tag not in {"ul", "ol", "dl", "table", "blockquote", "div"}:
-            parts.append("".join(child.itertext()))
-        if child.tail:
-            parts.append(child.tail)
-    return re.sub(r"\s+", " ", _unstash("".join(parts), stash)).strip()
+def _strip_html(raw: str) -> str:
+    # Linear single-pass comment stripper avoiding quadratic regex backtracking on repeated unclosed `<!--`.
+    if "<!--" in raw:
+        chunks: list[str] = []
+        pos = 0
+        while (start := raw.find("<!--", pos)) != -1:
+            chunks.append(raw[pos:start])
+            end = raw.find("-->", start + 4)
+            if end == -1:
+                chunks.append(raw[start:])
+                pos = len(raw)
+                break
+            pos = end + 3
+        if pos < len(raw):
+            chunks.append(raw[pos:])
+        raw = "".join(chunks)
+    return html.unescape(_HTML_TAG.sub("", raw))
 
 
-def is_private_path(path: str) -> bool:
-    parts = [p.lower() for p in path.split("/") if p]
-    forbidden = {".bf", ".git", ".venv", ".env"}
-    return (
-        not parts
-        or parts[0] == "logs"
-        or any(p in forbidden or (p[:5] == ".env." and p != ".env.example") for p in parts)
-    )
+def _render_inline(
+    children: list[Any],
+    path: str,
+    active_sec: str,
+    raw_links: list[tuple[str, dict[str, str], str]],
+) -> tuple[str, str, dict[str, str]]:
+    """Render CommonMark inline tokens to plain text, extract links + `{...}` link attrs, and strip trailing `{...}`."""
+    parts: list[str] = []
+    n = len(children)
+    idx = 0
+    link_stack: list[str] = []
+
+    while idx < n:
+        tok = children[idx]
+        ttype = tok.type
+        if ttype in {"text", "code_inline"}:
+            parts.append(tok.content)
+        elif ttype in {"softbreak", "hardbreak"}:
+            parts.append(" ")
+        elif ttype == "html_inline":
+            parts.append(_strip_html(tok.content))
+        elif ttype == "image":
+            if tok.content:
+                parts.append(tok.content)
+        elif ttype == "link_open":
+            href = str(tok.attrGet("href") or "")
+            link_stack.append(href)
+        elif ttype == "link_close":
+            href = link_stack.pop() if link_stack else ""
+            link_meta: dict[str, str] = {}
+            if idx + 1 < n and children[idx + 1].type == "text":
+                nxt_text = children[idx + 1].content
+                if (m := _ATTR_HEAD.match(nxt_text)) and (
+                    parsed_a := _parse_attr_block(m.group(1).strip(), path, strict=False)
+                ) is not None:
+                    _, link_meta = parsed_a
+                    remainder = nxt_text[m.end() :]
+                    if remainder:
+                        parts.append(remainder)
+                    idx += 1
+            if href:
+                raw_links.append((href, link_meta, active_sec))
+        idx += 1
+
+    text = re.sub(r"\s+", " ", strip_unsafe_text("".join(parts))).strip()
+    explicit_id, tail_meta = "", {}
+    # Avoid stripping attr syntax that came from code_inline by verifying last child was text.
+    if (
+        (m := _ATTR_TAIL.search(text))
+        and children
+        and children[-1].type == "text"
+        and (parsed_t := _parse_attr_block(m.group(1).strip(), path, strict=True)) is not None
+    ):
+        explicit_id, tail_meta = parsed_t
+        text = text[: m.start()].strip()
+    return text, explicit_id, tail_meta
 
 
-def _bad_rel(path: str) -> bool:
-    try:
-        storage.relative(path)
-    except Error:
-        return True
-    return False
-
-
-def _normalize_note_path(src: str, raw_path: str, note_dirs: frozenset[str], *, relative_base: bool) -> str:
-    if not raw_path:
-        if not relative_base:
-            raise Error(f"{src}: fragment-only link requires a target note path")
-        return src
-    if raw_path.startswith("/") or "\\" in raw_path or "" in raw_path.split("/"):
-        raise Error(f"{src}: invalid relative or brain-root link path")
-    root_prefixes = tuple(f"{folder}/" for folder in note_dirs)
-    if not relative_base or raw_path.startswith(root_prefixes):
-        if any(part in {".", ".."} for part in raw_path.split("/")):
-            raise Error(f"{src}: brain-root path must not contain . or .. segments")
-        out = raw_path
-    else:
-        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(src), raw_path))
-        if resolved == ".." or resolved.startswith("../"):
-            raise Error(f"{src}: link leaves the brain")
-        out = resolved
-    if is_private_path(out):
-        raise Error(f"{src}: private or runtime paths are not allowed in links")
-    return out
-
-
-def _unquote(val: str, src: str) -> str:
-    try:
-        dec = unquote(val, errors="strict")
-    except UnicodeError as error:
-        raise Error(f"{src}: link contains invalid UTF-8 percent-encoding") from error
-    if dec:
-        clean_env(dec, f"{src}: link")
-        if invisible(dec):
-            raise Error(f"{src}: link contains invisible format characters")
-    return dec
-
-
-def _split_target_parts(src: str, raw: str, msg: str) -> tuple[str, str]:
-    head, has_hash, raw_frag = raw.partition("#")
-    if re.search(r"\s", head) or (has_hash and not raw_frag):
-        raise Error(f"{src}: {msg}")
-    frag = clean(_unquote(raw_frag, src), "anchor") if raw_frag else ""
-    return head, frag
-
-
-def _parse_query(raw_query: str, src: str) -> dict[str, str]:
-    if not raw_query:
-        raise Error(f"{src}: invalid link query; use ?key=value or {{key=value}}")
-    try:
-        pairs = parse_qsl(raw_query, keep_blank_values=True, strict_parsing=True, max_num_fields=32, errors="strict")
-    except ValueError:
-        raise Error(f"{src}: invalid link query; use ?key=value or {{key=value}}") from None
-    meta: dict[str, str] = {}
-    for key, val in pairs:
-        if not _META_KEY.fullmatch(key) or key in meta:
-            raise Error(f"{src}: link query keys must be unique identifiers")
-        meta[key] = _clean_vis(val, f"{src}: link parameter {key}")
-    return meta
-
-
-def record_link_problem(
-    lnk: Mapping[str, Any], *, note_dirs: Iterable[str] = DEFAULT_NOTES, reserved: frozenset[str] | None = None
-) -> str:
-    dirs = frozenset(note_dirs)
-    res = (RESERVED_SOURCES | dirs) if reserved is None else reserved
-    kind, target, anchor = str(lnk.get("kind", "")), str(lnk.get("to", "")), str(lnk.get("anchor", ""))
-    sib_host, _, sib_path = target.removeprefix("bf://").partition("/")
-    bad_ch = bool(re.search(r"[\x00-\x1f\x7f-\x9f\s]", target))
-    if kind == "url" and (bad_ch or not ((m := _SCHEME.match(target)) and m[1].lower() in _URL_SCHEMES)):
-        return f"url link {target!r} must use https://, http://, mailto:, or urn:"
-    if kind == "record" and not is_record_ref(target, res):
-        return f"record link {target!r} must use <source>:<id>"
-    note_prefixes = tuple(f"{folder}/" for folder in dirs)
-    bad_note = bad_ch or ":" in target or "?" in target or _bad_rel(target) or not target.startswith(note_prefixes)
-    if kind == "note" and (bad_note or is_private_path(target)):
-        return f"note link {target!r} must target a configured note directory"
-    if kind == "brain":
-        bad_brain = bad_ch or not target.startswith("bf://") or not sib_host or "\\" in sib_host or not sib_path
-        sib_rec = is_record_ref(sib_path, RESERVED_SOURCES)
-        sib_note = (
-            ":" not in sib_path and "?" not in sib_path and not _bad_rel(sib_path) and not is_private_path(sib_path)
-        )
-        if bad_brain or not (sib_rec or sib_note):
-            return f"cross-brain link {target!r} must use bf://<brain>/<ref>"
-        if anchor and sib_rec:
-            return "record links do not support #anchor fragments"
-    if anchor and kind == "record":
-        return "record links do not support #anchor fragments"
-    return ""
-
-
-def parse_link(
-    source_path: str,
-    raw_target: str,
-    brain_name: str,
-    *,
-    note_dirs: Iterable[str] = DEFAULT_NOTES,
-    section: str = "",
-    attr_meta: Mapping[str, str] | None = None,
-    relative_base: bool = True,
-    require_uri: bool = False,
-) -> dict[str, Any]:
-    """Normalize a Markdown, frontmatter, or record link into canonical `{to, kind, anchor, meta, section}`."""
-    dirs = frozenset(note_dirs)
-    reserved = RESERVED_SOURCES | dirs
-    clean_sec = _clean_vis(section, f"{source_path}: link section") if section else ""
-    if len(target := _clean_vis(raw_target, f"{source_path}: link target").strip()) > 8192:
-        raise Error(f"{source_path}: link exceeds 8192 characters")
-
-    def make_link(to: str, kind: str, anchor: str = "", q_meta: Mapping[str, str] | None = None) -> dict[str, Any]:
-        meta: dict[str, str] = dict(q_meta or {})
-        for key, val in (attr_meta or {}).items():
-            if not _META_KEY.fullmatch(key):
-                raise Error(f"{source_path}: invalid link attribute {key!r}")
-            cleaned = clean(val, f"{source_path}: link attribute {key}")
-            if key in meta and meta[key] != cleaned:
-                raise Error(f"{source_path}: conflicting link attribute {key!r}")
-            meta[key] = cleaned
-        return {"to": to, "kind": kind, "anchor": anchor, "meta": meta, "section": clean_sec}
-
-    def canonical_rec(src_s: str, rid_s: str, err_lbl: str, res_set: frozenset[str]) -> str:
-        ref = f"{src_s}:{rid_s}"
-        if parse_record_ref(ref, res_set) is None:
-            raise Error(f"{source_path}: invalid record reference {err_lbl!r}")
-        return ref
-
-    scheme_m = _SCHEME.match(target)
-    scheme = scheme_m[1].lower() if scheme_m else ""
-    if scheme in _URL_SCHEMES:
-        return make_link(target, "url")
-    if scheme in _FORBIDDEN:
-        raise Error(f"{source_path}: unsupported link scheme {scheme}:")
-    if scheme == "bf":
-        if not target.lower().startswith("bf://") or re.search(r"%(?![0-9a-fA-F]{2})", target):
-            raise Error(f"{source_path}: invalid bf:// URI")
-        head, anchor = _split_target_parts(source_path, target, "invalid bf:// URI or empty # fragment")
-        has_q, uri = "?" in head, urlsplit(head)
-        _unquote(uri.netloc, source_path)
-        raw_rest, netloc = uri.path.lstrip("/"), uri.netloc
-        is_local = netloc in {"", brain_name}
-        if netloc in reserved:
-            raise Error(f"{source_path}: use bf:///{netloc}/... instead of bf://{netloc}/...")
-        src_part, sep, raw_id = raw_rest.partition(":")
-        q_meta: dict[str, str] = {}
-        if is_rec := bool(sep and "/" not in src_part):
-            is_http = raw_id.lower().startswith(("https://", "http://"))
-            if is_http and has_q:
-                rec_id = f"{raw_id}?{uri.query}" if uri.query else f"{raw_id}?"
-            else:
-                rec_id = raw_id
-                if has_q:
-                    q_meta = _parse_query(uri.query, source_path)
-            canon = canonical_rec(src_part, rec_id, raw_rest, reserved if is_local else RESERVED_SOURCES)
-            rest = canon
+def _extract_footnotes(body: str) -> tuple[str, list[tuple[str, str]]]:
+    """Extract Markdown footnote definitions (`[^id]: ...`) outside fences while preserving exact line numbers."""
+    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    main_lines: list[str] = []
+    footnotes: list[tuple[str, str]] = []
+    fence = ""
+    i, n = 0, len(lines)
+    while i < n:
+        ln = lines[i]
+        fence, in_fence = _step_fence(fence, ln)
+        if not in_fence and (m := _FOOTNOTE_DEF.match(ln)):
+            label = m.group(1)
+            fn_lines = [m.group(2)]
+            main_lines.append("")
+            i += 1
+            while i < n:
+                nxt = lines[i]
+                if nxt.startswith("    "):
+                    fn_lines.append(nxt[4:])
+                    main_lines.append("")
+                    i += 1
+                elif nxt.startswith("\t"):
+                    fn_lines.append(nxt[1:])
+                    main_lines.append("")
+                    i += 1
+                elif not nxt.strip():
+                    # Look ahead once in O(N) total: blank lines belong to footnote only if followed by indented text.
+                    j = i + 1
+                    while j < n and not lines[j].strip():
+                        j += 1
+                    if j < n and lines[j].startswith(("    ", "\t")):
+                        blanks = j - i
+                        fn_lines.extend([""] * blanks)
+                        main_lines.extend([""] * blanks)
+                        i = j
+                    else:
+                        break
+                else:
+                    break
+            footnotes.append((label, "\n".join(fn_lines)))
         else:
-            if has_q:
-                q_meta = _parse_query(uri.query, source_path)
-            rest = _unquote(raw_rest, source_path)
-            if not rest or re.search(r"\s", rest):
-                raise Error(f"{source_path}: expected bf:///path or bf://brain/path")
-            if _bad_rel(rest):
-                raise Error(f"{source_path}: invalid path in bf:// URI")
-            if is_private_path(rest):
-                raise Error(f"{source_path}: private or runtime paths are not allowed in links")
-            canon = ""
-        if is_local:
-            if is_rec:
-                return make_link(canon, "record", anchor, q_meta)
-            to = _normalize_note_path(source_path, rest, dirs, relative_base=False)
-            return make_link(to, "note", anchor, q_meta)
-        return make_link(f"bf://{netloc}/{canon if is_rec else rest}", "brain", anchor, q_meta)
-    if scheme and scheme_m is not None:
-        raw_src, rhs = scheme_m[1], scheme_m[2]
-        if rhs.startswith("//"):
-            raise Error(f"{source_path}: unsupported link scheme {scheme}:")
-        if not models.NAME_RE.fullmatch(raw_src) or not rhs:
-            raise Error(f"{source_path}: invalid record reference {target!r}")
-        bad_r = f"invalid record reference {target!r}"
-        rec_id, anchor = _split_target_parts(source_path, rhs, bad_r)
-        q_meta = {}
-        if not rec_id.lower().startswith(("https://", "http://")) and "?" in rec_id:
-            rec_id, _, raw_q = rec_id.partition("?")
-            q_meta = _parse_query(raw_q, source_path)
-        if not rec_id:
-            raise Error(f"{source_path}: record id must be nonempty")
-        return make_link(canonical_rec(raw_src, rec_id, target, reserved), "record", anchor, q_meta)
-    if require_uri:
-        raise Error(f"{source_path}: links must use <source>:<id>, bf://, or https:// URLs")
-    raw_lhs, anchor = _split_target_parts(source_path, target, "invalid Markdown link target or trailing #")
-    raw_p, has_q, raw_q = raw_lhs.partition("?")
-    q_meta = _parse_query(raw_q, source_path) if has_q else {}
-    dec_p = _unquote(raw_p, source_path)
-    if re.search(r"\s", dec_p):
-        raise Error(f"{source_path}: invalid Markdown link target or trailing #")
-    if not dec_p and not anchor:
-        raise Error(f"{source_path}: empty link target")
-    to = _normalize_note_path(source_path, dec_p, dirs, relative_base=relative_base)
-    return make_link(to, "note", anchor, q_meta)
+            main_lines.append(ln)
+            i += 1
+    return "\n".join(main_lines), footnotes
 
 
-def add_link(seen: set[tuple[Any, ...]], out: list[dict[str, Any]], parsed: dict[str, Any]) -> None:
-    """Append `parsed` link object to `out` when its normalized tuple key is unseen."""
-    meta = parsed.get("meta") or {}
-    key = (
-        parsed["to"],
-        parsed["kind"],
-        parsed.get("anchor", ""),
-        tuple(sorted(meta.items())),
-        parsed.get("section", ""),
-    )
-    if key not in seen:
-        seen.add(key)
-        out.append(parsed)
-
-
-def _extract_ast(
+def _parse_body(
     path: str, body: str
-) -> tuple[str, list[dict[str, Any]], list[tuple[str, dict[str, str], str]], list[dict[str, Any]], set[str]]:
-    md, capture = _engine()
-    md.reset()
-    md.convert(body)
-    if (root := capture.root) is None:
+) -> tuple[str, list[_ParsedHeading], list[tuple[str, dict[str, str], str]], list[dict[str, Any]], set[str]]:
+    """Single stateless CommonMark AST walk extracting plain text, exact-line headings, links, and tasks."""
+    if not body.strip():
         return "", [], [], [], set()
-    stash = [b if isinstance(b, str) else "".join(b.itertext()) for b in md.htmlStash.rawHtmlBlocks]
-    headings: list[dict[str, Any]] = []
+    main_body, fn_defs = _extract_footnotes(body)
+    tokens = _md_parser().parse(main_body)
+    headings: list[_ParsedHeading] = []
     raw_links: list[tuple[str, dict[str, str], str]] = []
     tasks: list[dict[str, Any]] = []
-    cited_fn: dict[str, str] = {}
     heading_ids: set[str] = set()
+    plain_lines: list[str] = []
     cur_sec = ""
+    footnote_secs: dict[str, str] = {}
+    blockquote_depth = 0
+    # Per active list_item: [first_inline_seen, task_dict_or_None] so loose-item `{: attr=val}` attaches to its task.
+    list_item_stack: list[list[Any]] = []
+    idx = 0
+    total = len(tokens)
 
-    def walk(elem: ET.Element, *, in_quote: bool = False, fn_sec: str | None = None) -> None:
-        nonlocal cur_sec
-        tag, cls, active = elem.tag, _classes(elem.attrib), cur_sec if fn_sec is None else fn_sec
-        if tag == "div" and "footnote" in cls:
-            for ch in elem.iter("li"):
-                sec = cited_fn.get(ch.attrib.get("id", "").removeprefix("fn:"), cur_sec)
-                for sub in ch:
-                    walk(sub, in_quote=in_quote, fn_sec=sec)
-            return
-        if tag in _HEADINGS and not in_quote and fn_sec is None:
-            if not (hid := elem.attrib.get("id", "").strip()) or hid.endswith(".md"):
-                raise Error(f"{path}: invalid heading anchor #{hid}")
-            if hid in heading_ids:
-                raise Error(f"{path}: duplicate heading anchor #{hid}")
-            heading_ids.add(hid)
-            title = re.sub(r"\s+", " ", _unstash("".join(elem.itertext()), stash)).strip()
-            meta = _extract_meta(elem.attrib, path, drop=frozenset({"id"}))
-            headings.append({"id": hid, "title": title, "level": int(tag[1]), "meta": meta})
-            cur_sec = active = hid
-        elif tag == "a":
-            if "footnote-backref" in cls:
-                return
-            href = elem.attrib.get("href", "")
-            if "footnote-ref" in cls:
-                if href.startswith("#fn:"):
-                    cited_fn.setdefault(href.removeprefix("#fn:"), active)
-                return
-            link_meta = _extract_meta(elem.attrib, path, drop=frozenset({"href", "id"}))
-            raw_links.append((href, link_meta, active))
-        elif (
-            tag == "li"
-            and not in_quote
-            and fn_sec is None
-            and (tm := _TASK.match(_own_inline_text(elem, stash)))
-            and (t_body := tm[2].strip()[:512])
-        ):
-            sa = elem.attrib or (elem[0].attrib if len(elem) and elem[0].tag == "p" else {})
-            t_meta = _extract_meta(sa, path, drop=frozenset({"id"}))
-            tasks.append({"text": t_body, "done": tm[1] != " ", "section": active, "meta": t_meta})
-        for child in elem:
-            walk(child, in_quote=in_quote or tag == "blockquote", fn_sec=fn_sec)
+    while idx < total:
+        tok = tokens[idx]
+        ttype = tok.type
+        if ttype == "blockquote_open":
+            blockquote_depth += 1
+        elif ttype == "blockquote_close":
+            blockquote_depth = max(0, blockquote_depth - 1)
+        elif ttype == "list_item_open":
+            list_item_stack.append([False, None])
+        elif ttype == "list_item_close":
+            if list_item_stack:
+                list_item_stack.pop()
+        elif ttype == "heading_open":
+            level = int(tok.tag[1])
+            start_line = tok.map[0] if tok.map else 0
+            inline_tok = tokens[idx + 1] if idx + 1 < total and tokens[idx + 1].type == "inline" else None
+            children = list(inline_tok.children or ()) if inline_tok is not None else []
+            heading_links: list[tuple[str, dict[str, str], str]] = []
+            title, explicit_id, h_meta = _render_inline(children, path, "", heading_links)
+            if blockquote_depth == 0:
+                if explicit_id:
+                    if explicit_id.endswith(".md") or invisible(explicit_id):
+                        raise Error(f"{path}: invalid heading anchor #{explicit_id}")
+                    if explicit_id in heading_ids:
+                        raise Error(f"{path}: duplicate heading anchor #{explicit_id}")
+                    hid = explicit_id
+                else:
+                    base_slug = _slugify(title)
+                    hid = base_slug
+                    suffix = 1
+                    while hid in heading_ids:
+                        hid = f"{base_slug}_{suffix}"
+                        suffix += 1
+                heading_ids.add(hid)
+                headings.append(_ParsedHeading(hid, title, level, h_meta, start_line))
+                cur_sec = hid
+            for href, lmeta, _ in heading_links:
+                raw_links.append((href, lmeta, cur_sec))
+            if title:
+                plain_lines.append(title)
+            idx += 2  # Skip inline; loop advances past heading_close on next iteration or idx+1
+        elif ttype == "inline":
+            children = list(tok.children or ())
+            raw_content = tok.content or ""
+            for fn_ref in _FOOTNOTE_REF.finditer(raw_content):
+                footnote_secs.setdefault(fn_ref.group(1), cur_sec)
+            text, _, tail_meta = _render_inline(children, path, cur_sec, raw_links)
+            has_plain_box = (
+                bool(children) and children[0].type == "text" and bool(_TASK_PREFIX.match(children[0].content))
+            )
+            if (
+                blockquote_depth == 0
+                and list_item_stack
+                and not list_item_stack[-1][0]
+                and has_plain_box
+                and (tm := _TASK.match(text))
+                and (t_body := tm[2].strip()[:512])
+            ):
+                task_obj: dict[str, Any] = {"text": t_body, "done": tm[1] != " ", "section": cur_sec, "meta": tail_meta}
+                list_item_stack[-1][0] = True
+                list_item_stack[-1][1] = task_obj
+                tasks.append(task_obj)
+            elif list_item_stack and not list_item_stack[-1][0]:
+                list_item_stack[-1][0] = True
+            elif list_item_stack and list_item_stack[-1][1] is not None and not text and tail_meta:
+                list_item_stack[-1][1]["meta"].update(tail_meta)
+            if text:
+                plain_lines.append(text)
+        elif ttype in {"fence", "code_block"}:
+            if stripped := strip_unsafe_text(tok.content).strip():
+                plain_lines.extend(ln.strip() for ln in stripped.splitlines() if ln.strip())
+        elif ttype == "html_block" and (stripped := strip_unsafe_text(_strip_html(tok.content)).strip()):
+            plain_lines.extend(ln.strip() for ln in stripped.splitlines() if ln.strip())
+        idx += 1
 
-    walk(root)
-    plain = "\n".join(ln.strip() for ln in _unstash("".join(root.itertext()), stash).splitlines() if ln.strip())
+    # Walk extracted footnote definitions attributing links to their referring heading section.
+    for fn_label, fn_body in fn_defs:
+        if not fn_body.strip():
+            continue
+        fn_sec = footnote_secs.get(fn_label, cur_sec)
+        for ft in _md_parser().parse(fn_body):
+            if ft.type == "inline":
+                ft_txt, _, _ = _render_inline(list(ft.children or ()), path, fn_sec, raw_links)
+                if ft_txt:
+                    plain_lines.append(ft_txt)
+            elif (ft.type in {"fence", "code_block"} and (st := strip_unsafe_text(ft.content).strip())) or (
+                ft.type == "html_block" and (st := strip_unsafe_text(_strip_html(ft.content)).strip())
+            ):
+                plain_lines.extend(ln.strip() for ln in st.splitlines() if ln.strip())
+
+    plain = "\n".join(ln for ln in plain_lines if ln)
     return plain, headings, raw_links, tasks, heading_ids
 
 
 def anchor_ids(path: str, data: bytes) -> set[str]:
     """Extract all heading `#id` anchors from any UTF-8 Markdown file."""
-    return set(_extract_ast(path, _split_frontmatter(path, data, parse_yaml=False)[1])[4])
+    _, body = _split_frontmatter(path, data, parse_yaml=False)
+    return _parse_body(path, body)[4]
 
 
-def compiled_anchors(item: Mapping[str, Any]) -> set[str]:
+def compiled_anchors(item: dict[str, Any]) -> set[str]:
     """Return every heading `#id` anchor recorded on a compiled note."""
     return {
         str(h["id"])
         for h in (item.get("headings") or ())
-        if isinstance(h, Mapping) and isinstance(h.get("id"), str) and h["id"]
+        if isinstance(h, dict) and isinstance(h.get("id"), str) and h["id"]
     }
 
 
 def extract_section(text: str, anchor: str, compiled: dict[str, Any]) -> dict[str, Any]:
-    """Extract the raw Markdown section for heading `#anchor` in a single line scan."""
-    headings = [h for h in (compiled.get("headings") or ()) if isinstance(h, dict)]
-    target_idx = next((idx for idx, h in enumerate(headings) if h.get("id") == anchor), None)
+    """Extract the exact raw Markdown section for heading `#anchor` using the single CommonMark AST line map."""
+    ref = str(compiled.get("ref") or "<note>")
+    _, body = _split_frontmatter(ref, text.encode("utf-8"), parse_yaml=False)
+    _, parsed_headings, _, _, _ = _parse_body(ref, body)
+    target_idx = next((i for i, h in enumerate(parsed_headings) if h.id == anchor), None)
     if target_idx is None:
-        raise Error(f"{compiled['ref']}: missing anchor #{anchor}")
-    lines = text.splitlines()
-    body_start = next((i + 1 for i in range(1, len(lines)) if lines[i] == "---"), 0) if lines[:1] == ["---"] else 0
-    heading_lines: list[tuple[int, int]] = []
-    idx, fence, prev_heading = body_start, "", False
-    while idx < len(lines):
-        ln, was_h, prev_heading = lines[idx], prev_heading, False
-        fence, in_fence = _step_fence(fence, ln)
-        if not in_fence:
-            if m_atx := _ATX_RE.match(ln):
-                heading_lines.append((idx, len(m_atx[1])))
-                idx, prev_heading = idx + 1, True
-                continue
-            at_blk = (idx == body_start or was_h or not lines[idx - 1].strip()) and bool(ln.strip())
-            can_set = at_blk and idx + 1 < len(lines) and not ln.startswith(("    ", "\t"))
-            if (
-                can_set
-                and not ln.lstrip().startswith((">", "-", "*", "+", "|", ":"))
-                and re.fullmatch(r"(?:=+|-+)[ ]*", lines[idx + 1])
-            ):
-                lvl = 1 if lines[idx + 1].startswith("=") else 2
-                heading_lines.append((idx, lvl))
-                idx, prev_heading = idx + 2, True
-                continue
-        idx += 1
-    heading = headings[target_idx]
-    if target_idx >= len(heading_lines):
-        return {"anchor": anchor, "heading": heading, "text": ""}
-    start_line, start_lvl = heading_lines[target_idx]
-    end_line = next((ln for ln, lvl in heading_lines[target_idx + 1 :] if lvl <= start_lvl), len(lines))
-    return {"anchor": anchor, "heading": heading, "text": "\n".join(lines[start_line:end_line]).strip()}
-
-
-def normalize_tags(raw_tags: object, label: str) -> list[str]:
-    """Validate and deduplicate a list of string/numeric tags without spaces or slashes."""
-    if not isinstance(raw_tags, list):
-        raise Error(f"{label}: tags must be a list of strings")
-    out, seen = [], set()
-    for item in raw_tags:
-        val = str(item) if type(item) in {int, float} else item
-        if not isinstance(val, str) or not val.strip() or re.search(r"[/\\\s]", val):
-            raise Error(f"{label}: tags must be nonempty tokens without spaces or slashes")
-        clean(val, f"{label}: tag")
-        if val not in seen:
-            seen.add(val)
-            out.append(val)
-    return out
+        raise Error(f"{ref}: missing anchor #{anchor}")
+    target = parsed_headings[target_idx]
+    body_lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    end_line = next(
+        (h.start_line for h in parsed_headings[target_idx + 1 :] if h.level <= target.level),
+        len(body_lines),
+    )
+    heading_obj: dict[str, Any] = {"id": target.id, "title": target.title, "level": target.level}
+    if target.meta:
+        heading_obj["meta"] = target.meta
+    return {
+        "anchor": anchor,
+        "heading": heading_obj,
+        "text": "\n".join(body_lines[target.start_line : end_line]).strip(),
+    }
 
 
 def compile_note(
     path: str, data: bytes, *, brain_name: str, note_dirs: Iterable[str] = DEFAULT_NOTES
 ) -> dict[str, Any]:
-    """Compile a Markdown note into a compact unified JSON record (`kind: 'note'`)."""
+    """Compile a Markdown note into a sanitized, schema-ready JSON record (`kind: 'note'`)."""
     if (role := note_role(path, note_dirs)) is None:
         raise Error(f"{path}: not an authored note path")
     source_dir, is_bundle = role
     frontmatter, body = _split_frontmatter(path, data, parse_yaml=True)
+    frontmatter = sanitize_record_strings(frontmatter)
     if forbidden := sorted(_RESERVED_FM & frontmatter.keys()):
         raise Error(f"{path}: frontmatter cannot override computed field {', '.join(forbidden)}")
-    plain_text, headings, raw_links, tasks, _ = _extract_ast(path, body)
+    plain_text, parsed_headings, raw_links, tasks, _ = _parse_body(path, body)
     fm = dict(frontmatter)
     if (fm_title := fm.pop("title", None)) is not None and not isinstance(fm_title, str):
         raise Error(f"{path}: title must be a string")
     stem = (PurePosixPath(path).parent.name if is_bundle else PurePosixPath(path).stem).replace("-", " ")
-    h1_title = next((str(h["title"]) for h in headings if h["level"] == 1 and str(h["title"]).strip()), stem)
-    title = clean((fm_title.strip() if isinstance(fm_title, str) else "") or h1_title, f"{path}: title")
-    tags = normalize_tags(fm.pop("tags"), path) if "tags" in fm and fm["tags"] is not None else []
+    h1_title = next((h.title for h in parsed_headings if h.level == 1 and h.title.strip()), stem)
+    title = clean(
+        strip_unsafe_text(fm_title.strip() if isinstance(fm_title, str) else "") or h1_title, f"{path}: title"
+    )
+    tags = refs.normalize_tags(fm.pop("tags"), path) if "tags" in fm and fm["tags"] is not None else []
+    for dt_key in ("created", "updated"):
+        if dt_key in fm and (dt_val := fm[dt_key]) is not None:
+            if not isinstance(dt_val, str) or not dt_val:
+                raise Error(f"{path}: {dt_key} must be an ISO date (YYYY-MM-DD) or timestamp with timezone")
+            fm[dt_key] = normalize_iso_date_or_time(dt_val, f"{path}: {dt_key}")
+    if "url" in fm and fm["url"] is not None:
+        if not isinstance(fm["url"], str):
+            raise Error(f"{path}: url must be a string")
+        fm["url"] = refs.validate_url(fm["url"], f"{path}: url")
+    if "stale_after" in fm and fm["stale_after"] is not None:
+        sa = fm["stale_after"]
+        if not isinstance(sa, str) or not sa:
+            raise Error(f"{path}: stale_after must be an explicit duration (e.g. 90d) or ISO date")
+        if models.DURATION_RE.fullmatch(sa) and "\n" not in sa:
+            models.parse_duration(sa, f"{path}: stale_after")
+        else:
+            fm["stale_after"] = normalize_iso_date_or_time(sa, f"{path}: stale_after")
+
     fm_specs: list[tuple[str, dict[str, str], str]] = []
     bad_fm = f"{path}: frontmatter links must be a list of link targets or {{to, meta}} objects"
     if (fm_links := fm.pop("links", None)) is not None:
@@ -631,10 +568,15 @@ def compile_note(
     links: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     for target, link_meta, sec in [*fm_specs, *raw_links]:
-        parsed = parse_link(path, target, brain_name, note_dirs=note_dirs, section=sec, attr_meta=link_meta)
-        add_link(seen, links, parsed)
+        parsed = refs.parse_link(path, target, brain_name, note_dirs=note_dirs, section=sec, attr_meta=link_meta)
+        refs.add_link(seen, links, parsed)
+
+    headings_dicts = [
+        {"id": h.id, "title": h.title, "level": h.level, **({"meta": h.meta} if h.meta else {})}
+        for h in parsed_headings
+    ]
     specs = (
-        ("headings", headings, {"id", "title", "level"}),
+        ("headings", headings_dicts, {"id", "title", "level"}),
         ("links", links, {"to", "kind"}),
         ("tasks", tasks, {"text", "done"}),
     )
@@ -644,6 +586,7 @@ def compile_note(
     }
     base = {"ref": path, "source": source_dir, "kind": "note", "title": title, "text": plain_text}
     merged = {**fm, **base, "tags": tags, **comp, "sha256": digest(data)}
-    compiled = {k: v for k, v in merged.items() if not (k in _OMIT_OPT and v in ("", {}, [], None))}
+    sanitized = sanitize_record_strings(merged)
+    compiled = {k: v for k, v in sanitized.items() if not (k in _OMIT_OPT and v in ("", {}, [], None))}
     encode(compiled)
     return compiled

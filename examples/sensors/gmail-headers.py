@@ -283,7 +283,7 @@ def record(message_id: str, start: datetime, end: datetime) -> dict[str, object]
         subject or "(no subject)",
         item_type="EmailMessage",
         when=when,
-        text="\n".join(lines),
+        text="\n".join(line(ln) for ln in lines),
         url=f"https://mail.google.com/mail/#all/{thread}",
         attributes={
             "thread": thread,
@@ -318,4 +318,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     main()

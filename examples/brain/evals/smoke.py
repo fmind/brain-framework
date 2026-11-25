@@ -28,18 +28,22 @@ def test_example_project_decision_section() -> None:
     assert "demo:retention" in str(res.get("text", ""))
 
 
-def test_cites_links_via_jq() -> None:
-    res = _bf(
-        "query",
-        "--kind",
-        "note",
-        "--jq",
-        'select(any(.links[]?; .to == "demo:retention" and .meta.rel == "cites")) | .ref',
+def test_cites_links_on_compiled_note() -> None:
+    res = _bf("read", "projects/example.md")
+    rec = res["record"]
+    assert isinstance(rec, dict)
+    links = rec.get("links")
+    assert isinstance(links, list)
+    assert any(
+        isinstance(lk, dict)
+        and lk.get("to") == "demo:retention"
+        and isinstance(lk.get("meta"), dict)
+        and lk["meta"].get("rel") == "cites"
+        for lk in links
     )
-    assert res["items"] == ["projects/example.md"]
 
 
 if __name__ == "__main__":
     test_retention_record_is_searchable()
     test_example_project_decision_section()
-    test_cites_links_via_jq()
+    test_cites_links_on_compiled_note()

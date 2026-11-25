@@ -1,4 +1,4 @@
-"""Time JSONL record ingestion, note compilation, validation, and review over synthetic notes and records.
+"""Time JSONL record ingestion, incremental note compilation, validation, review, and FTS5 query over synthetic data.
 
 The synthetic brain lives in a temporary folder under --dir, on disk by default: record writes fsync, and a RAM-backed
 /tmp would hide that cost while holding the whole corpus in memory.
@@ -15,12 +15,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
-from bf import engine, query, records, status
-from bf.models import FORMAT, MAX_BATCH, MAX_FILES
+from bf import engine, query, records, render, status
+from bf.models import FORMAT, MAX_BATCH, MAX_FILES, NOTES_FILE
 from bf.storage import Store
-
-_OBJ_SCHEMA = json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}).encode() + b"\n"
 
 
 def _seed_batches(store: Store, source: str, items: list[dict[str, object]]) -> None:
@@ -65,13 +64,13 @@ def main() -> None:
         engine.init_brain(root, name="benchmark")
         store = Store(root)
         store.write("bf.yaml", f"version: {FORMAT}\nname: benchmark\n".encode())
-        store.write("schemas/benchmark.json", _OBJ_SCHEMA)
         background = ("Routine project background. " * args.body_chars)[: args.body_chars]
         items: list[dict[str, object]] = [
             {
                 "id": str(n),
                 "title": f"Decision {n}",
-                "text": background + "\nRetain evidence.",
+                "text": background
+                + ("\nRetain evidence.\nRare tail marker." if n == args.records - 1 else "\nRetain evidence."),
                 "created": f"2026-{n % 12 + 1:02d}-01T00:00:00Z",
                 "updated": "2026-09-01T00:00:00Z",
             }
@@ -101,7 +100,6 @@ def main() -> None:
             nonlocal active_source
             churn[kind] += 1
             active_source = f"churn-{kind}-{churn[kind]}"
-            store.write(f"schemas/{active_source}.json", _OBJ_SCHEMA)
             if kind != "add":
                 records.ingest(store, active_source, base_payload)
 
@@ -112,18 +110,40 @@ def main() -> None:
                 return records.ingest(store, active_source, edited_payload)
             return records.ingest(store, active_source, b"[]", mode="snapshot", allow_removal=True)
 
-        operations = [
-            ("build", None, lambda: engine.build(store)),
+        corpus_reset = {"toggle": 0}
+        corpus_payload = b""
+
+        def prep_corpus_upsert() -> None:
+            nonlocal corpus_payload
+            corpus_reset["toggle"] += 1
+            corpus_payload = json.dumps(
+                [{**rec, "text": background + f"\nRevised pass {corpus_reset['toggle']}."} for rec in base_batch]
+            ).encode()
+
+        def prep_full_build() -> None:
+            if store.exists(NOTES_FILE):
+                store.delete(NOTES_FILE)
+
+        def run_status_text() -> dict[str, Any]:
+            render.format_status_text(status.status_summary(store, include_loops=True))
+            return {"ok": True}
+
+        operations: list[tuple[str, Any, Any]] = [
+            ("build_full", prep_full_build, lambda: engine.build(store)),
+            ("build_incremental", None, lambda: engine.build(store)),
             ("validate", None, lambda: engine.validate(store)),
             ("review", None, lambda: engine.review(store)),
-            ("query_rg", None, lambda: query.query(store, "Retain evidence", scope="benchmark", limit=20)),
-            ("query_jq", None, lambda: query.query(store, None, jq_expr=".id", scope="benchmark", limit=20)),
-            (
-                "status_text",
-                None,
-                lambda: (status.format_status_text(status.status_summary(store, all_units=True)), {"ok": True})[1],
-            ),
+            ("query_fts_scoped", None, lambda: query.query(store, "Retain evidence", scope="benchmark", limit=20)),
+            ("query_fts_unscoped", None, lambda: query.query(store, "Rare tail marker", limit=20)),
+            ("query_structured", None, lambda: query.query(store, None, kind="memory", scope="benchmark", limit=20)),
+            ("read_indexed", None, lambda: query.read_target(store, f"benchmark:{args.records - 1}")),
+            ("status_text", None, run_status_text),
             ("unchanged_record", None, lambda: records.ingest(store, "benchmark", json.dumps([items[0]]).encode())),
+            (
+                "upsert_update_corpus",
+                prep_corpus_upsert,
+                lambda: records.ingest(store, "benchmark", corpus_payload, mode="upsert"),
+            ),
             ("upsert_add", lambda: prep_write("add"), lambda: run_write("add")),
             ("upsert_update", lambda: prep_write("update"), lambda: run_write("update")),
             ("snapshot_remove", lambda: prep_write("remove"), lambda: run_write("remove")),
@@ -138,9 +158,16 @@ def main() -> None:
                 if prep is not None:
                     prep()
                 start = time.perf_counter()
-                result = op()
+                result: dict[str, Any] = op()
                 timings.append(time.perf_counter() - start)
-                if result.get("problems") or not result.get("ok", True):
+                summary_obj = result.get("summary")
+                err_count = summary_obj.get("errors", 0) if isinstance(summary_obj, dict) else 0
+                has_err = (
+                    not result.get("ok", True)
+                    or bool(err_count)
+                    or (summary_obj is None and bool(result.get("problems")))
+                )
+                if has_err:
                     raise RuntimeError(f"{name}: failed benchmark validation: {result}")
             measurements[name] = {
                 "min": round(min(timings), 4),
@@ -148,8 +175,9 @@ def main() -> None:
                 "max": round(max(timings), 4),
             }
 
-        notes_bytes = (store.root / "memories/concepts.jsonl").stat().st_size
+        notes_bytes = (store.root / NOTES_FILE).stat().st_size
         memories_bytes = (store.root / "memories/benchmark.jsonl").stat().st_size
+        index_bytes = (store.root / ".bf/cache/index.sqlite3").stat().st_size
         max_rss_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         max_rss_kb = max_rss_raw // 1024 if sys.platform == "darwin" else max_rss_raw
         corpus = {key: value for key, value in vars(args).items() if key != "dir"}
@@ -161,6 +189,7 @@ def main() -> None:
                     "peak_rss_kib": max_rss_kb,
                     "notes_jsonl_bytes": notes_bytes,
                     "memories_jsonl_bytes": memories_bytes,
+                    "index_sqlite_bytes": index_bytes,
                 }
             )
             + "\n"

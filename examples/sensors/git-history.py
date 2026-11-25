@@ -35,16 +35,8 @@ MAX_COMMITS = 10000
 MAX_BYTES = 16 << 20
 AUTOMATED = re.compile(r"(\[bot\]@users\.noreply\.github\.com|@([a-z0-9-]+\.)*(invalid|test|example|localhost))$")
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
-_GIT_ENV = frozenset(
-    {
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_COMMON_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    }
-)
+_SAFE_ENV = ("PATH", "HOME", "USER", "LC_ALL", "LANG")
+TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
 
 
 class InvalidError(ValueError):
@@ -60,9 +52,17 @@ class ProviderError(Exception):
 
 
 def run(argv: Sequence[str], *, timeout: float, max_bytes: int) -> bytes:
-    """Execute Git from / without inherited hook GIT_* overrides, with bounded output and process-group reaping."""
-    env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV}
-    env.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_TERMINAL_PROMPT": "0"})
+    """Execute Git from / with minimal env and disabled hooks/config, bounded output, and process-group reaping."""
+    env = {k: os.environ[k] for k in _SAFE_ENV if k in os.environ}
+    env.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_ALLOW_PROTOCOL": "",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
     try:
         proc = subprocess.Popen(
             list(argv),
@@ -277,25 +277,40 @@ def _audit_objects_dir(obj_dir: Path, real_root: Path, seen: set[Path], depth: i
 
 def _audit_git_dir(git_dir: Path, real_root: Path) -> None:
     """Reject symlinked administrative entries, grafts, or external alternates inside `git_dir`."""
+    visited = 0
 
-    def scan_dir(path: Path, *, recurse: bool = False, depth: int = 0) -> None:
+    def scan_fd(dir_fd: int, *, recurse: bool = False, depth: int = 0) -> None:
+        nonlocal visited
         if depth > 16:
             raise InvalidError("git refs exceed depth limit")
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        try:
-            with os.scandir(fd) as entries:
-                for entry in entries:
-                    if entry.is_symlink():
-                        raise InvalidError(f"symlinked git entry {entry.name!r} is refused")
-                    if recurse and entry.is_dir(follow_symlinks=False):
-                        scan_dir(path / entry.name, recurse=True, depth=depth + 1)
-        finally:
-            os.close(fd)
+        with os.scandir(dir_fd) as entries:
+            for entry in entries:
+                visited += 1
+                if visited > 100_000:
+                    raise InvalidError("git refs exceed entry limit")
+                if entry.is_symlink():
+                    raise InvalidError(f"symlinked git entry {entry.name!r} is refused")
+                if recurse and entry.is_dir(follow_symlinks=False):
+                    sub_fd = os.open(
+                        entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd
+                    )
+                    try:
+                        scan_fd(sub_fd, recurse=True, depth=depth + 1)
+                    finally:
+                        os.close(sub_fd)
 
-    scan_dir(git_dir)
-    for sub, recurse in ((git_dir / "info", False), (git_dir / "refs", True)):
-        with contextlib.suppress(FileNotFoundError):
-            scan_dir(sub, recurse=recurse)
+    root_fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        scan_fd(root_fd)
+        for sub_name, recurse in (("info", False), ("refs", True), ("reftable", False)):
+            with contextlib.suppress(FileNotFoundError):
+                sub_fd = os.open(sub_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+                try:
+                    scan_fd(sub_fd, recurse=recurse)
+                finally:
+                    os.close(sub_fd)
+    finally:
+        os.close(root_fd)
     if (git_dir / "info" / "grafts").exists():
         raise InvalidError("git grafts and http-alternates are refused")
     obj_path = git_dir / "objects"
@@ -354,19 +369,25 @@ def repositories(root: Path, skip: frozenset[str]) -> tuple[list[tuple[str, Path
     """
     skipped: set[Path] = set()
 
-    # os.scandir and lstat raise on an unreadable folder; from Python 3.14, pathlib's checks return False instead.
+    # os.scandir with O_NOFOLLOW descriptors refuses symlinked roots and directory races.
     def directories(parent: Path) -> list[Path]:
-        with os.scandir(root / parent) as entries:
-            return [
-                parent / entry.name
-                for entry in entries
-                if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False)
-            ]
+        fd = os.open(root / parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            with os.scandir(fd) as entries:
+                return [
+                    parent / entry.name
+                    for entry in entries
+                    if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False)
+                ]
+        finally:
+            os.close(fd)
 
     try:
         parents = directories(Path())
-    except (FileNotFoundError, NotADirectoryError):
-        raise InvalidError("ROOT is not a directory") from None
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR, errno.ENOENT}:
+            raise InvalidError("ROOT must be a real directory (not a symlink)") from None
+        raise
     real = Path(os.path.realpath(root))
     candidates = list(parents)
     for parent in parents:
@@ -434,10 +455,17 @@ def history(repository: Path, start: str, end: str) -> list[str]:
             "-c",
             "core.fsmonitor=false",
             "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.sshCommand=false",
+            "-c",
+            "diff.external=",
+            "-c",
             "protocol.allow=never",
             "-C",
             str(repository),
             "log",
+            "--no-patch",
             f"--max-count={MAX_COMMITS + 1}",
             # Visit older commits too: committer dates need not follow ancestry order.
             f"--since-as-filter={start}",
@@ -504,7 +532,7 @@ def collect(
             author = author.strip().lower()
             if AUTOMATED.search(author):
                 continue
-            message = message.strip()
+            message = TEXT_CONTROL.sub(" ", message).strip()
             subject = message.partition("\n")[0]
             key = f"{encoded_repo}@{commit}"
             records.append(
@@ -546,4 +574,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     cli(main, "Git history collection failed", "check repository access and the requested window")

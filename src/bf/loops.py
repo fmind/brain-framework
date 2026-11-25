@@ -1,115 +1,79 @@
-"""Orchestration of unified `loops:` (`sensors/`, `routines/`, `agents/`), `.bf/<loop>.json`, and `logs/<loop>.jsonl`."""
+"""Orchestration of unified `loops:` with pure-Python event matching, per-loop locks, dead-letter caps, and state maintenance."""
 
 from __future__ import annotations
 
 import fnmatch
 import os
-import stat
-import subprocess
-import sys
 import threading
 import time
+from collections import Counter
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-from bf import config, engine, models, proc, records
-from bf.config import Config, EventMatch, LoopSpec, ScheduleSpec, due_schedule
-from bf.models import Error, InputError, decode, encode, now_utc
-from bf.proc import prepare_unit
-from bf.records import emit_output_events, find_orphans, load_unit_state, mark_unit_state, save_unit_state
-from bf.storage import Store, private_dir, writer
+from bf import config, cron, models, proc, records, state
+from bf.config import Config, EventMatch, LoopSpec, resolve_loop
+from bf.cron import ScheduleSpec, due_schedules
+from bf.models import BusyError, Error, InputError, decode, now_utc
+from bf.proc import StopFlag, prepare_unit
+from bf.state import (
+    emit_output_events,
+    find_orphans,
+    latest_event_seq,
+    load_unit_state,
+    mark_unit_state,
+    save_unit_state,
+)
+from bf.storage import Store, is_loop_locked, loop_lock, private_dir, try_unlink_loop_lock, writer
 
 _GLOB_CHARS = frozenset("*?[")
-_LOOP_DIRS = ("sensors", "routines", "agents")
-_INTERPRETERS = frozenset({"sh", "bash", "zsh", "dash", "fish", "python", "python3", "uv"})
-_AGENT_DEFAULT_TIMEOUT = 900
+MAX_EVENT_RETRIES = 3
 
-type _Events = tuple[list[dict[str, Any]], int]
-type _DueItem = tuple[LoopSpec, str, list[dict[str, Any]], int | None, ScheduleSpec | None]
+type _Events = tuple[list[dict[str, Any]], int, int]
+type _DueItem = tuple[LoopSpec, str, list[dict[str, Any]], int | None, tuple[ScheduleSpec, ...], int]
 
 
-def _script_folder(argv: Sequence[str]) -> str:
-    """Detect convention folder (`sensors`, `routines`, `agents`) from direct or interpreter-prefixed argv."""
-    if not argv:
-        return ""
-    first = argv[0].removeprefix("./")
-    if hit := next((f for f in _LOOP_DIRS if first.startswith(f"{f}/")), ""):
-        return hit
-    exe = Path(first).name
-    if exe in _INTERPRETERS or exe.startswith("python3."):
-        for tok in argv[1:]:
-            if tok.startswith("-") or (exe == "uv" and tok == "run"):
-                continue
-            cleaned = tok.removeprefix("{{brain}}/").removeprefix("./")
-            return next((f for f in _LOOP_DIRS if cleaned.startswith(f"{f}/")), "")
-    return ""
-
-
-def resolve_loop(
-    store: Store, loop: LoopSpec, reserved: frozenset[str] = models.RESERVED_SOURCES
-) -> tuple[tuple[str, ...], str, records.Target, Literal["upsert", "snapshot"], int]:
-    """Resolve `(argv, ingest_source, ingest_target, ingest_mode, timeout)` via explicit `run:` or folder conventions."""
-    if loop.run:
-        argv, folder = loop.run, _script_folder(loop.run)
-    else:
-        found: list[tuple[str, str, os.stat_result]] = []
-        for fld in _LOOP_DIRS:
-            for ext in ("", ".sh", ".py"):
-                cand = f"{fld}/{loop.name}{ext}"
-                try:
-                    info = store.stat(cand)
-                except FileNotFoundError:
-                    continue
-                if not stat.S_ISREG(info.st_mode):
-                    raise Error(f"loops.{loop.name}: {cand}: expected a regular file")
-                found.append((fld, cand, info))
-        if not found:
-            raise Error(f"loops.{loop.name}: no run command and no script found in sensors/, routines/, or agents/")
-        if len(found) > 1:
-            names = ", ".join(c for _, c, _ in found)
-            raise Error(f"loops.{loop.name}: ambiguous convention scripts ({names}); keep one or set run:")
-        folder, cand, info = found[0]
-        if info.st_mode & stat.S_IXUSR:
-            argv = (cand,)
-        elif cand.endswith(".sh"):
-            argv = ("bash", cand)
-        elif cand.endswith(".py"):
-            argv = (sys.executable, cand)
+def _resolve_dot_path(obj: Mapping[str, Any], path: str) -> tuple[bool, Any]:
+    cur: Any = obj
+    for part in path.split("."):
+        if isinstance(cur, Mapping) and part in cur:
+            cur = cur[part]
         else:
-            raise Error(f"loops.{loop.name}: {cand} is not executable; run chmod +x {cand}")
-
-    timeout = (
-        max(_AGENT_DEFAULT_TIMEOUT, loop.timeout)
-        if (folder == "agents" and not loop.explicit_timeout)
-        else loop.timeout
-    )
-    if loop.explicit_ingest:
-        return argv, loop.ingest, loop.target, loop.mode, timeout
-    if folder == "sensors" and not loop.daemon and not loop.emit:
-        if loop.name in reserved:
-            raise Error(f"loops.{loop.name}: sensor name {loop.name!r} is reserved")
-        return argv, loop.name, "memories", "upsert", timeout
-    return argv, "", "memories", "upsert", timeout
+            return False, None
+    return True, cur
 
 
-def effective_ingest(
-    store: Store, loop: LoopSpec, reserved: frozenset[str] = models.RESERVED_SOURCES
-) -> tuple[str, records.Target, str]:
-    """Return `(ingest_source, ingest_target, ingest_mode)` for status display without raising on missing scripts."""
-    if loop.explicit_ingest:
-        return loop.ingest, loop.target, loop.mode
-    if not loop.daemon and not loop.emit:
-        with suppress(Error):
-            _, src, tgt, mode, _ = resolve_loop(store, loop, reserved)
-            return src, tgt, mode
-    return "", "memories", "upsert"
+def _scalar_eq(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return type(actual) is type(expected) and actual == expected
+    return actual == expected
 
 
-def _rule_head_matches(ev: Mapping[str, Any], rule: EventMatch, *, self_name: str = "") -> bool:
+def match_event_where(ev: Mapping[str, Any], where: Mapping[str, Any]) -> bool:
+    """Evaluate declarative dot-path predicates (`exact`, `{in}`, `{exists}`, `{prefix}`) against one event."""
+    for path_key, pred in where.items():
+        found, val = _resolve_dot_path(ev, path_key)
+        if isinstance(pred, Mapping):
+            if "exists" in pred:
+                if bool(pred["exists"]) != found:
+                    return False
+            elif "in" in pred:
+                if not found or not any(_scalar_eq(val, cand) for cand in pred["in"]):
+                    return False
+            elif "prefix" in pred and (
+                not found or not isinstance(val, str) or not val.startswith(str(pred["prefix"]))
+            ):
+                return False
+        else:
+            if not found or not _scalar_eq(val, pred):
+                return False
+    return True
+
+
+def _rule_matches(ev: Mapping[str, Any], rule: EventMatch, *, self_name: str = "") -> bool:
     if (
         self_name
         and not rule.source
@@ -117,63 +81,67 @@ def _rule_head_matches(ev: Mapping[str, Any], rule: EventMatch, *, self_name: st
         and ev.get("kind") in {"loop.succeeded", "loop.failed"}
     ):
         return False
-    return (not rule.kind or ev.get("kind") == rule.kind) and (not rule.source or ev.get("source") == rule.source)
+    if rule.kind and ev.get("kind") != rule.kind:
+        return False
+    if rule.source and ev.get("source") != rule.source:
+        return False
+    return not rule.where or match_event_where(ev, rule.where)
+
+
+def event_debounce_remaining(
+    matched_evs: Sequence[Mapping[str, Any]],
+    rules: Sequence[EventMatch],
+    now: datetime,
+    *,
+    self_name: str = "",
+) -> float:
+    """Return earliest remaining trailing-edge debounce seconds across per-debounce groups (`0.0` when any group is ready)."""
+    if not matched_evs or not rules:
+        return 0.0
+    by_debounce: dict[int, list[datetime]] = {}
+    for ev in matched_evs:
+        matching_rules = [r for r in rules if _rule_matches(ev, r, self_name=self_name)]
+        if not matching_rules:
+            continue
+        deb = min(r.debounce for r in matching_rules)
+        if deb <= 0:
+            return 0.0
+        if (dt := cron.parse_dt(str(ev.get("time") or ""))) is not None:
+            by_debounce.setdefault(deb, []).append(dt.astimezone(UTC))
+    if not by_debounce:
+        return 0.0
+    utc_now = now.astimezone(UTC)
+    waits: list[float] = []
+    for deb, times in by_debounce.items():
+        first_dt, last_dt = min(times), max(times)
+        trailing = last_dt + timedelta(seconds=deb)
+        max_wait = first_dt + timedelta(seconds=min(deb * 4, 3600))
+        ready_at = min(trailing, max_wait)
+        waits.append(min(float(deb), max(0.0, (ready_at - utc_now).total_seconds())))
+    return min(waits)
 
 
 def pending_events(
     store: Store,
     last_seq: int,
-    rules: tuple[EventMatch, ...],
+    rules: Sequence[EventMatch],
     *,
     self_name: str = "",
     events_data: _Events | None = None,
-) -> _Events:
-    """Return `(matching_events, latest_seq)` since `last_seq` from `logs/events.jsonl`."""
+) -> tuple[list[dict[str, Any]], int]:
+    """Return `(matching_events, latest_seq)` since `last_seq` from `.bf/state/events.jsonl` in pure Python."""
     if not rules:
         return [], 0
     if events_data is not None:
-        all_evs, latest = events_data
+        all_evs, latest, _ = events_data
         floor = 0 if (latest and last_seq > latest) else last_seq
         cands = [ev for ev in all_evs if int(ev["seq"]) > floor]
     else:
-        cands, latest = records.read_events(store, after_seq=last_seq)
+        cands, latest = state.read_events(store, after_seq=last_seq)
     if not cands:
         return [], latest
-    plain_rules = [r for r in rules if not r.filter]
-    matched_idx = {
-        i for i, ev in enumerate(cands) if any(_rule_head_matches(ev, r, self_name=self_name) for r in plain_rules)
-    }
-    groups: dict[str, list[EventMatch]] = {}
-    for rule in rules:
-        if rule.filter:
-            groups.setdefault(rule.filter, []).append(rule)
-    jq_bin: str | None = None
-    for flt, flt_rules in groups.items():
-        unmatched = (i for i in range(len(cands)) if i not in matched_idx)
-        if not (
-            sub_idx := [
-                i for i in unmatched if any(_rule_head_matches(cands[i], r, self_name=self_name) for r in flt_rules)
-            ]
-        ):
-            continue
-        jq_bin = jq_bin or proc.resolve_tool("jq")
-        wrapped = (
-            f"{proc.JQ_PRELUDE}\ntry ([\n{flt}\n] | "
-            "if length == 0 then false else (.[-1] // false | . != false) end) "
-            'catch (if . == "disabled" then error else false end)'
-        )
-        jq_kw: dict[str, Any] = {"capture_output": True, "cwd": "/", "env": proc.safe_env(jq_bin), "timeout": 5}
-        try:
-            cmd = [jq_bin, "-L", "/dev/null", "-c", "--", wrapped]
-            cp = subprocess.run(cmd, input=b"".join(encode(cands[i]) for i in sub_idx), **jq_kw, check=False)  # noqa: S603
-        except subprocess.TimeoutExpired as error:
-            raise Error("event filter timed out after 5s") from error
-        if cp.returncode != 0:
-            err = cp.stderr.decode("utf-8", "replace").strip()
-            raise Error(f"event filter failed: {err.splitlines()[-1] if err else 'jq exited nonzero'}")
-        outs = cp.stdout.splitlines()[: len(sub_idx)]
-        matched_idx.update(sub_idx[pos] for pos, ln in enumerate(outs) if ln == b"true")
-    return [ev for i, ev in enumerate(cands) if i in matched_idx], latest
+    matched = [ev for ev in cands if any(_rule_matches(ev, rule, self_name=self_name) for rule in rules)]
+    return matched, latest
 
 
 def _merge_cursor(stored: int, target: int, disk: int) -> int:
@@ -191,42 +159,96 @@ def record_run(
     code: int,
     err_msg: str = "",
     stderr: str = "",
-    summary: dict[str, Any] | None = None,
+    summary: Mapping[str, Any] | None = None,
     cursor_seq: int | None = None,
+    events_missed: int = 0,
     emit_loop_event: bool = False,
     trigger: str = "",
-    schedule_key: str = "",
+    schedule_keys: Sequence[str] = (),
+    secrets: Sequence[str] = (),
 ) -> None:
-    """Update `.bf/<name>.json`, append a summary line to `logs/<name>.jsonl`, and optionally emit `loop.*`."""
+    """Update `.bf/state/<name>.json`, hold watermarks on `incomplete`, append `logs/<name>.jsonl`, and emit `loop.*`."""
     cfg_name, ended_iso, ok = config.load(store).name, now_utc(ended), code == 0
+    is_incomplete = isinstance(summary, Mapping) and summary.get("incomplete") is True
+    advance_watermark = ok and not is_incomplete
+    dead_letter = False
     with writer(store):
         latest: dict[str, Any]
         try:
             latest = load_unit_state(store, name)
         except Error:
-            latest = {"kind": "loop", "name": name, "schedule_last": {}, "last_run": {}}
-        last_ok = started_iso if ok else str(latest.get("last_success") or "")
-        last_sched = started_iso if ok and trigger == "schedule" else str(latest.get("last_scheduled") or "")
+            latest = {"name": name, "schedule_last": {}, "last_run": {}, "event_seq": latest_event_seq(store)}
+        last_ok = started_iso if advance_watermark else str(latest.get("last_success") or "")
+        last_sched = (
+            started_iso if advance_watermark and trigger == "schedule" else str(latest.get("last_scheduled") or "")
+        )
         sched_last = dict(latest.get("schedule_last") or {}) if isinstance(latest.get("schedule_last"), dict) else {}
-        if ok and schedule_key:
-            sched_last[schedule_key] = started_iso
-        consec = 0 if ok else int(latest.get("consecutive_failures") or 0) + 1
-        runs, fails = int(latest.get("runs") or 0) + 1, int(latest.get("failures") or 0) + int(not ok)
-        stored_seq = int(latest.get("event_seq") or 0)
-        disk_seq = records.latest_event_seq(store) if ok and cursor_seq is not None else 0
-        seq = _merge_cursor(stored_seq, cursor_seq, disk_seq) if ok and cursor_seq is not None else stored_seq
+        if advance_watermark and schedule_keys:
+            for sk in schedule_keys:
+                sched_last[sk] = started_iso
+        consec = 0 if ok else state.int_field(latest, "consecutive_failures") + 1
+        prev_sf = (
+            state.int_field(latest, "schedule_failures")
+            if type(latest.get("schedule_failures")) is int
+            else state.int_field(latest, "consecutive_failures")
+        )
+        prev_ef = state.int_field(latest, "event_failures")
+        prev_incomp = state.int_field(latest, "incomplete_runs")
+        if ok:
+            sched_fails = prev_sf if trigger == "event" else 0
+            ev_fails = prev_ef if trigger == "schedule" else 0
+            incomp_runs = prev_incomp if trigger == "event" else ((prev_incomp + 1) if is_incomplete else 0)
+        else:
+            sched_fails = prev_sf if trigger == "event" else prev_sf + 1
+            ev_fails = prev_ef + 1 if trigger == "event" else prev_ef
+            incomp_runs = prev_incomp if trigger == "event" else 0
+        runs = state.int_field(latest, "runs") + 1
+        fails = state.int_field(latest, "failures") + int(not ok)
+        stored_seq = state.int_field(latest, "event_seq")
+        dead_lettered = state.int_field(latest, "dead_lettered")
+        last_dl_seq = state.int_field(latest, "last_dead_letter_seq")
+        advance_cursor = ok and cursor_seq is not None
+        if not ok and trigger == "event" and cursor_seq is not None and ev_fails >= MAX_EVENT_RETRIES:
+            advance_cursor = True
+            dead_letter = True
+            ev_fails = 0
+            dead_lettered += 1
+            last_dl_seq = cursor_seq
+        prev_sched_end = str(latest.get("last_schedule_end") or "")
+        prev_ev_end = str(latest.get("last_event_end") or "")
+        if trigger == "event":
+            last_sched_end = prev_sched_end
+            last_ev_end = "" if (ok or dead_letter) else ended_iso
+        elif trigger == "schedule":
+            last_sched_end = "" if (ok and not is_incomplete) else ended_iso
+            last_ev_end = prev_ev_end
+        else:
+            last_sched_end = "" if (ok and not is_incomplete) else ended_iso
+            last_ev_end = "" if ok else prev_ev_end
+        disk_seq = latest_event_seq(store) if advance_cursor else 0
+        seq = (
+            _merge_cursor(stored_seq, cursor_seq, disk_seq) if advance_cursor and cursor_seq is not None else stored_seq
+        )
+        pending_missed = (
+            0 if (advance_cursor or (ok and events_missed > 0)) else state.int_field(latest, "pending_events_missed")
+        )
+        paused_active = state.is_paused(latest, ended)
+        paused_until = str(latest.get("paused_until") or "") if paused_active else ""
         raw_err = err_msg if ok else (err_msg.strip() or stderr.strip() or f"exit code {code}")
-        err_clean = models.redact_secrets(raw_err)[-4096:]
+        err_clean = models.redact_secrets(raw_err, secrets=secrets)[-4096:]
         err_clean = err_clean if (ok or err_clean.strip()) else f"exit code {code}"
-        stderr_clean = models.redact_secrets(stderr)[-8192:]
-        safe_sum = models.redact_value(dict(summary)) if isinstance(summary, dict) and summary else {}
+        stderr_clean = models.redact_secrets(stderr, secrets=secrets)[-8192:]
+        safe_sum = (
+            models.redact_value(dict(summary), secrets=secrets) if isinstance(summary, Mapping) and summary else {}
+        )
         doc = {
-            "kind": "loop",
             "name": name,
             "status": "ok" if ok else "failed",
             "updated": ended_iso,
             "last_start": started_iso,
             "last_end": ended_iso,
+            "last_schedule_end": last_sched_end,
+            "last_event_end": last_ev_end,
             "last_success": last_ok,
             "last_scheduled": last_sched,
             "schedule_last": sched_last,
@@ -234,28 +256,42 @@ def record_run(
             "runs": runs,
             "failures": fails,
             "consecutive_failures": consec,
+            "schedule_failures": sched_fails,
+            "incomplete_runs": incomp_runs,
+            "event_failures": ev_fails,
+            "dead_lettered": dead_lettered,
+            "last_dead_letter_seq": last_dl_seq,
+            "pending_events_missed": pending_missed,
+            "paused": paused_active,
+            "paused_until": paused_until,
             "duration_ms": dur_ms,
             "last_run": safe_sum,
             "error": err_clean,
         }
         save_unit_state(store, doc, locked=True)
-        extras = {k: v for k, v in (("summary", safe_sum), ("error", err_clean), ("stderr", stderr_clean)) if v}
-        msg, sev = f"loop.{'succeeded' if ok else 'failed'}", "INFO" if ok else "ERROR"
-        log_meta = {
-            "brain": cfg_name,
-            "loop": name,
-            "run": run_id,
-            "trigger": trigger or "loop",
-            "started": started_iso,
-            "ended": ended_iso,
-            "duration_ms": dur_ms,
-            "exit_code": code,
-            **extras,
-        }
+    extras = {k: v for k, v in (("summary", safe_sum), ("error", err_clean), ("stderr", stderr_clean)) if v}
+    if dead_letter:
+        extras["dead_letter_seq"] = cursor_seq
+    if events_missed > 0:
+        extras["events_missed"] = events_missed
+    msg, sev = f"loop.{'succeeded' if ok else 'failed'}", "INFO" if ok else "ERROR"
+    if emit_loop_event:
+        ev_data = {"run": run_id, "exit_code": code, "duration_ms": dur_ms}
+        with suppress(Error, OSError):
+            state.append_event(store, msg, name, ev_data, now=ended)
+    log_meta = {
+        "brain": cfg_name,
+        "loop": name,
+        "run": run_id,
+        "trigger": trigger or "loop",
+        "started": started_iso,
+        "ended": ended_iso,
+        "duration_ms": dur_ms,
+        "exit_code": code,
+        **extras,
+    }
+    with suppress(Error, OSError):
         store.append_log(name, models.log_line(msg, severity=sev, time_iso=ended_iso, **log_meta))
-        if emit_loop_event:
-            ev_data = {"run": run_id, "exit_code": code, "duration_ms": dur_ms}
-            records.append_event(store, msg, name, ev_data, locked=True, now=ended)
 
 
 def _bf_error_summary(run_argv: Sequence[str], out_bytes: bytes) -> str:
@@ -294,15 +330,17 @@ def execute_one_loop(
     *,
     trigger: str,
     events: Sequence[dict[str, Any]] = (),
+    events_missed: int = 0,
     cursor_target_seq: int | None = None,
-    schedule: ScheduleSpec | None = None,
+    schedules: Sequence[ScheduleSpec] = (),
     extra_args: Sequence[str] = (),
     dry_run: bool = False,
     now: datetime | None = None,
-    stop_event: threading.Event | None = None,
+    stop_event: StopFlag | None = None,
+    term_event: StopFlag | None = None,
     base_env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Execute one triggered `LoopSpec` with `BF_*` env + stdin JSON, structured stderr logs, and `ingest`/`emit`."""
+    """Execute one `LoopSpec` under `.bf/locks/loop-<name>.lock`."""
     cfg = config.load(store)
     instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
     started_iso, run_id = now_utc(instant), f"{loop.name}-{int(instant.timestamp())}-{os.urandom(3).hex()}"
@@ -310,21 +348,11 @@ def execute_one_loop(
         state_doc = load_unit_state(store, loop.name)
     except Error:
         state_doc = {"schedule_last": {}, "last_run": {}}
-    last_ok = (
-        config.sched_anchor(state_doc, schedule) if trigger == "schedule" else str(state_doc.get("last_success") or "")
-    )
-    last_dt = config.parse_dt(last_ok)
-    backfill = schedule.backfill if (schedule and schedule.backfill is not None) else loop.backfill
-    overlap = schedule.overlap if (schedule and schedule.overlap is not None) else loop.overlap
-    win_start = min(
-        (last_dt or instant) - timedelta(seconds=overlap if last_dt else backfill), instant - timedelta(seconds=1)
-    )
-    resolved_run, ingest_src, ingest_target, ingest_mode, timeout = resolve_loop(store, loop, cfg.reserved_sources)
-    if ingest_src:
-        records.require_ingest_validators(store, ingest_src, ingest_target)
+    win_start = cron.schedule_window_start(loop, state_doc, instant, trigger=trigger, schedules=schedules)
+    resolved_run, ingest_src, ingest_mode, ingest_schema, timeout = resolve_loop(store, loop, cfg.reserved_sources)
 
     b_env = cfg.env if base_env is None else base_env
-    argv, env, ctx_bytes = prepare_unit(
+    argv, env, stdin_bytes, secret_vals = prepare_unit(
         store,
         loop.name,
         resolved_run,
@@ -333,94 +361,131 @@ def execute_one_loop(
         end_iso=started_iso,
         trigger=trigger,
         events=events,
+        events_missed=events_missed,
         base_env=b_env,
         unit_env=loop.env,
+        unit_env_from=loop.env_from,
+        extra_args=extra_args,
+        create_state=not dry_run,
     )
     if dry_run:
-        ing = {"ingest": {"source": ingest_src, "target": ingest_target, "mode": ingest_mode}} if ingest_src else {}
+        ing = {"ingest": {"source": ingest_src, "mode": ingest_mode, "schema": ingest_schema}} if ingest_src else {}
         return {
             "loop": loop.name,
             "run": run_id,
             "status": "dry_run",
             "trigger": trigger,
-            "argv": [*argv, *extra_args],
+            "argv": argv,
             **ing,
         }
 
-    t0, summary, err_msg, err_txt = time.monotonic(), {}, "", ""
-    argv, recorded = [*argv, *extra_args], False
-    mark_unit_state(store, loop.name, status="running", updated=started_iso, last_start=started_iso)
-    try:
-        err_cb = records.make_stderr_logger(store, loop.name, run_id)
-        code, out_bytes, err_txt = proc.exec_argv(
-            argv,
-            cwd=store.root,
-            env=env,
-            timeout=timeout,
-            stdin_data=ctx_bytes,
-            stop_event=stop_event,
-            on_stderr_line=err_cb,
-        )
-        if stop_event is not None and stop_event.is_set() and code == 130:
-            dur_ms = max(0, int((time.monotonic() - t0) * 1000))
-            return {"loop": loop.name, "run": run_id, "status": "stopped", "exit_code": 130, "duration_ms": dur_ms}
-        if code != 0:
-            safe_err = models.redact_secrets(err_txt)
-            raw_fail = _last_error_line(safe_err) or _bf_error_summary(resolved_run, out_bytes) or f"exit code {code}"
-            err_msg = (models.redact_secrets(raw_fail).strip() or f"exit code {code}")[-1024:]
-        else:
-            try:
-                if ingest_src:
-                    summary = records.ingest(
-                        store, ingest_src, out_bytes, target=ingest_target, mode=ingest_mode, now=now
+    with loop_lock(store, loop.name, wait=0.0):
+        t0, summary, err_msg, err_txt = time.monotonic(), {}, "", ""
+        recorded = False
+        mark_unit_state(store, loop.name, status="running", updated=started_iso, last_start=started_iso)
+        try:
+            err_cb = state.make_stderr_logger(store, loop.name, run_id, secrets=secret_vals)
+            code, out_bytes, err_txt = proc.exec_argv(
+                argv,
+                cwd=store.root,
+                env=env,
+                timeout=timeout,
+                stdin_data=stdin_bytes,
+                stop_event=stop_event,
+                on_stderr_line=err_cb,
+                secrets=secret_vals,
+            )
+            if stop_event is not None and stop_event.is_set() and code == 130:
+                stop_code = 143 if (term_event is not None and term_event.is_set()) else 130
+                dur_ms = max(0, int((time.monotonic() - t0) * 1000))
+                return {
+                    "loop": loop.name,
+                    "run": run_id,
+                    "status": "stopped",
+                    "exit_code": stop_code,
+                    "duration_ms": dur_ms,
+                }
+            if code != 0:
+                safe_err = models.redact_secrets(err_txt, secrets=secret_vals)
+                raw_fail = (
+                    _last_error_line(safe_err) or _bf_error_summary(resolved_run, out_bytes) or f"exit code {code}"
+                )
+                err_msg = (models.redact_secrets(raw_fail, secrets=secret_vals).strip() or f"exit code {code}")[-1024:]
+            else:
+                try:
+                    if ingest_src:
+                        summary = records.ingest(
+                            store,
+                            ingest_src,
+                            out_bytes,
+                            mode=ingest_mode,
+                            schema_name=loop.schema_name,
+                            now=now,
+                        )
+                    elif loop.emit and out_bytes.strip():
+                        summary = {
+                            "emitted": emit_output_events(
+                                store, loop.name, loop.emit, out_bytes, now=now, secrets=secret_vals
+                            )
+                        }
+                    elif len(out_bytes) <= 65536 and out_bytes.decode("utf-8", "replace").strip().startswith("{"):
+                        with suppress(Error):
+                            if isinstance(dec := decode(out_bytes, f"loops.{loop.name}"), dict):
+                                summary = (
+                                    rv
+                                    if isinstance(rv := models.redact_value(dict(dec), secrets=secret_vals), dict)
+                                    else {}
+                                )
+                except models.FAILURES as error:
+                    code = 1
+                    err_msg = (
+                        models.redact_secrets(models.failure(error) or "failed", secrets=secret_vals)[-1024:]
+                        or "failed"
                     )
-                elif loop.emit and out_bytes.strip():
-                    summary = {"emitted": emit_output_events(store, loop.name, loop.emit, out_bytes, now=now)}
-                elif len(out_bytes) <= 65536 and out_bytes.decode("utf-8", "replace").strip().startswith("{"):
-                    with suppress(Error):
-                        if isinstance(dec := decode(out_bytes, f"loops.{loop.name}"), dict):
-                            summary = rv if isinstance(rv := models.redact_value(dict(dec)), dict) else {}
-            except models.FAILURES as error:
-                code, err_msg = 1, (models.redact_secrets(models.failure(error) or "failed")[-1024:] or "failed")
 
-        ended, dur_ms = (datetime.now(UTC) if now is None else instant), max(0, int((time.monotonic() - t0) * 1000))
-        s_key = schedule.raw if schedule else ""
-        record_run(
-            store,
-            loop.name,
-            run_id,
-            started_iso,
-            ended=ended,
-            dur_ms=dur_ms,
-            code=code,
-            err_msg=err_msg,
-            stderr=err_txt,
-            summary=summary,
-            cursor_seq=cursor_target_seq,
-            emit_loop_event=True,
-            trigger=trigger,
-            schedule_key=s_key,
-        )
-        recorded = True
-    finally:
-        if not recorded:
-            with suppress(Error, OSError):
-                t_end = now_utc(None if now is None else instant)
-                mark_unit_state(store, loop.name, status="stopped", updated=t_end, last_end=t_end)
-    res = {
+            ended = datetime.now(UTC) if now is None else instant
+            dur_ms = max(0, int((time.monotonic() - t0) * 1000))
+            s_keys = tuple(s.raw for s in schedules)
+            record_run(
+                store,
+                loop.name,
+                run_id,
+                started_iso,
+                ended=ended,
+                dur_ms=dur_ms,
+                code=code,
+                err_msg=err_msg,
+                stderr=err_txt,
+                summary=summary,
+                cursor_seq=cursor_target_seq,
+                events_missed=events_missed,
+                emit_loop_event=True,
+                trigger=trigger,
+                schedule_keys=s_keys,
+                secrets=secret_vals,
+            )
+            recorded = True
+        finally:
+            if not recorded:
+                with suppress(Error, OSError):
+                    t_end = now_utc(None if now is None else instant)
+                    mark_unit_state(store, loop.name, status="stopped", updated=t_end, last_end=t_end)
+    res: dict[str, Any] = {
         "loop": loop.name,
         "run": run_id,
         "status": "ok" if code == 0 else "failed",
         "exit_code": code,
         "duration_ms": dur_ms,
     }
+    if events_missed > 0:
+        res["events_missed"] = events_missed
     return {**res, **({"error": err_msg} if err_msg else {}), **({"summary": summary} if summary else {})}
 
 
 def record_failure(
     store: Store, name: str, trigger: str, err: BaseException, *, now: datetime | None = None
 ) -> dict[str, Any]:
-    """Record a pre-flight or event-filter failure for loop `name` and return its result row."""
+    """Record a pre-flight failure for loop `name` and return its result row."""
     msg = (models.redact_secrets(models.failure(err)) or "failed")[-1024:]
     end_dt = datetime.now(UTC) if now is None else now.astimezone(UTC)
     pre_id = f"{name}-{int(end_dt.timestamp())}-{os.urandom(3).hex()}"
@@ -449,74 +514,153 @@ def select_due_loops(
     dry_run: bool = False,
     now: datetime | None = None,
 ) -> tuple[list[_DueItem], list[dict[str, Any]]]:
-    """Select enabled due/event cycle loops not in `exclude`, advancing idle event cursors atomically."""
+    """Promote due timers and select enabled unpaused due/event cycle loops, prioritizing events ahead of schedules."""
+    if not dry_run:
+        with suppress(Error, OSError):
+            state.promote_due_timers(store, now=sched_now)
     latest_disk_seq: int | None = None
+    first_disk_seq: int = 0
     cached_events: _Events | None = None
-    selected: list[_DueItem] = []
-    advance_cursors: list[tuple[str, int]] = []
+    selected_events: list[_DueItem] = []
+    selected_scheds: list[_DueItem] = []
+    advance_cursors: list[tuple[str, int, int]] = []
+    init_cursors: list[tuple[str, int]] = []
     failures: list[dict[str, Any]] = []
 
+    loaded_loops: list[tuple[str, LoopSpec, bool, dict[str, Any]]] = []
     for name, loop in cfg.loops.items():
         if not loop.enabled or loop.daemon or name in exclude or not (loop.schedules or loop.events):
             continue
+        if loop.events and latest_disk_seq is None:
+            first_disk_seq, latest_disk_seq = state.event_bounds(store)
+        has_state = state.has_unit_state(store, name)
         try:
-            state_doc = load_unit_state(store, name)
+            state_doc = load_unit_state(store, name, default_event_seq=latest_disk_seq if loop.events else 0)
         except Error as err:
             if dry_run:
                 raise
             failures.append(record_failure(store, name, "state", err, now=now))
             continue
-        if config.backoff_remaining(state_doc, config.backoff_cap(loop), sched_now) > 0:
+        if state.is_paused(state_doc, sched_now):
             continue
-        cur_seq, matched_evs, target_seq = int(state_doc.get("event_seq") or 0), [], None
+        loaded_loops.append((name, loop, has_state, state_doc))
+
+    cached_floor = 0
+    if latest_disk_seq is not None:
+        max_cur = max((state.int_field(sd, "event_seq") for _, lp, _, sd in loaded_loops if lp.events), default=0)
+        if max_cur > latest_disk_seq:
+            fresh_first, fresh_seq = state.event_bounds(store)
+            if fresh_seq > latest_disk_seq:
+                first_disk_seq, latest_disk_seq = fresh_first, fresh_seq
+        if latest_disk_seq > 0:
+            lag_floors = [
+                0 if (cur := state.int_field(sd, "event_seq")) > latest_disk_seq else cur
+                for _, lp, _, sd in loaded_loops
+                if lp.events and state.int_field(sd, "event_seq") != latest_disk_seq
+            ]
+            if lag_floors:
+                cached_floor = min(lag_floors)
+                cached_events = state.read_events_meta(store, after_seq=cached_floor)
+
+    for name, loop, has_state, state_doc in loaded_loops:
+        cur_seq = state.int_field(state_doc, "event_seq")
+        pending_missed = state.int_field(state_doc, "pending_events_missed")
+        matched_evs, target_seq, debounced, ev_blocked, live_missed = [], None, False, False, 0
         if loop.events:
-            latest_disk_seq = records.latest_event_seq(store) if latest_disk_seq is None else latest_disk_seq
+            assert latest_disk_seq is not None  # noqa: S101
             target_seq = latest_disk_seq
             if cur_seq != latest_disk_seq and latest_disk_seq > 0:
-                cached_events = records.read_events(store) if cached_events is None else cached_events
-                try:
-                    matched_evs, target_seq = pending_events(
-                        store, cur_seq, loop.events, self_name=name, events_data=cached_events
-                    )
-                except models.FAILURES as err:
-                    if dry_run:
-                        raise
-                    failures.append(record_failure(store, name, "event", err, now=now))
-                    continue
-        if matched_evs:
-            selected.append((loop, "event", matched_evs, target_seq, None))
-        elif (matched_sched := due_schedule(loop, state_doc, sched_now, tz_name=cfg.timezone)) is not None:
-            selected.append((loop, "schedule", [], target_seq, matched_sched))
-        elif target_seq is not None and target_seq != cur_seq:
-            advance_cursors.append((name, target_seq))
+                need_floor = 0 if cur_seq > latest_disk_seq else cur_seq
+                if cached_events is None or need_floor < cached_floor:
+                    cached_floor = need_floor
+                    cached_events = state.read_events_meta(store, after_seq=cached_floor)
+                matched_evs, target_seq = pending_events(
+                    store, cur_seq, loop.events, self_name=name, events_data=cached_events
+                )
+            eff_first = cached_events[2] if cached_events is not None else first_disk_seq
+            if has_state and eff_first > 1 and cur_seq < eff_first - 1:
+                live_missed = (eff_first - 1) - cur_seq
+            if matched_evs:
+                if cron.event_backoff_remaining(state_doc, sched_now) > 0:
+                    ev_blocked = True
+                elif event_debounce_remaining(matched_evs, loop.events, sched_now, self_name=name) > 0:
+                    debounced = True
+        total_missed = pending_missed + live_missed
+        if matched_evs and not ev_blocked and not debounced:
+            selected_events.append((loop, "event", matched_evs, target_seq, (), total_missed))
+        elif matched_scheds := due_schedules(loop, state_doc, sched_now, tz_name=cfg.timezone):
+            sched_cursor = None if (debounced or ev_blocked) else target_seq
+            sched_missed = total_missed if sched_cursor is not None else 0
+            selected_scheds.append((loop, "schedule", [], sched_cursor, matched_scheds, sched_missed))
+        elif loop.events and not has_state and target_seq is not None:
+            init_cursors.append((name, target_seq))
+        elif target_seq is not None and target_seq != cur_seq and not debounced and not ev_blocked:
+            advance_cursors.append((name, target_seq, live_missed))
 
-    if advance_cursors and not dry_run:
+    if (advance_cursors or init_cursors) and not dry_run:
+        missed_logs: list[tuple[str, int]] = []
         with writer(store):
-            disk_seq = records.latest_event_seq(store)
-            for cursor_name, cursor_seq in advance_cursors:
+            disk_seq = latest_event_seq(store)
+            wrote_any = False
+            for init_name, init_seq in init_cursors:
+                if not state.has_unit_state(store, init_name):
+                    anchor = min(init_seq, disk_seq)
+                    save_unit_state(
+                        store, state.default_unit_state(init_name, event_seq=anchor), locked=True, durable=False
+                    )
+                    wrote_any = True
+            for cursor_name, cursor_seq, gap_missed in advance_cursors:
                 with suppress(Error):
                     latest = load_unit_state(store, cursor_name)
-                    stored = int(latest.get("event_seq") or 0)
+                    stored = state.int_field(latest, "event_seq")
                     if (nxt := _merge_cursor(stored, cursor_seq, disk_seq)) != stored:
-                        save_unit_state(store, {**latest, "event_seq": nxt}, locked=True)
-    return selected, failures
+                        next_pending = state.int_field(latest, "pending_events_missed") + gap_missed
+                        save_unit_state(
+                            store,
+                            {**latest, "event_seq": nxt, "pending_events_missed": next_pending},
+                            locked=True,
+                            durable=False,
+                        )
+                        wrote_any = True
+                        if gap_missed > 0:
+                            missed_logs.append((cursor_name, gap_missed))
+            if wrote_any:
+                store.sync_dirs([".bf/state"])
+        for log_name, gap_n in missed_logs:
+            with suppress(Error, OSError):
+                store.append_log(
+                    log_name,
+                    models.log_line(
+                        "loop.events_missed",
+                        severity="WARN",
+                        loop=log_name,
+                        events_missed=gap_n,
+                    ),
+                )
+    return [*selected_events, *selected_scheds], failures
 
 
-def _expand_loop_selectors(cfg: Config, selectors: Sequence[str]) -> list[str]:
+def _expand_loop_selectors(
+    cfg: Config, selectors: Sequence[str], *, allow_daemons: bool = False, allow_disabled: bool = False
+) -> list[str]:
     resolved: list[str] = []
     for token in selectors:
         if any(ch in _GLOB_CHARS for ch in token):
             matches = [
-                n for n, lp in cfg.loops.items() if lp.enabled and not lp.daemon and fnmatch.fnmatchcase(n, token)
+                n
+                for n, lp in cfg.loops.items()
+                if (allow_disabled or lp.enabled) and (allow_daemons or not lp.daemon) and fnmatch.fnmatchcase(n, token)
             ]
             if not matches:
-                raise InputError(f"pattern {token!r} matched no enabled cycle loops in bf.yaml")
+                raise InputError(f"pattern {token!r} matched no matching loops in bf.yaml")
             resolved.extend(matches)
         else:
             if token not in cfg.loops:
                 raise InputError(f"unknown loop {token!r} in bf.yaml")
-            if cfg.loops[token].daemon:
+            if not allow_daemons and cfg.loops[token].daemon:
                 raise InputError(f"loop {token!r} is a daemon; run it with bf watch")
+            if not allow_disabled and not cfg.loops[token].enabled:
+                raise InputError(f"loop {token!r} is disabled in bf.yaml")
             resolved.append(token)
     return list(dict.fromkeys(resolved))
 
@@ -528,58 +672,97 @@ def run_loops(
     due_only: bool = False,
     all_loops: bool = False,
     extra_args: Sequence[str] = (),
+    has_passthrough: bool = False,
     dry_run: bool = False,
     now: datetime | None = None,
-    stop_event: threading.Event | None = None,
+    stop_event: StopFlag | None = None,
+    term_event: StopFlag | None = None,
 ) -> dict[str, Any]:
-    """Run selected, glob-matched, `--all`, or `--due` loops (concurrently up to `cfg.concurrency` for `--due`)."""
-    cfg, sched_now = config.load(store), datetime.now(UTC) if now is None else now.astimezone(UTC)
+    """Run selected, glob-matched, `--all`, or `--due` cycle loops (never mutates notes implicitly)."""
     if bool(names) + bool(due_only) + bool(all_loops) != 1:
         raise InputError("specify loop names/patterns, --due, or --all (mutually exclusive)")
-    if extra_args and (due_only or all_loops):
+    if (extra_args or has_passthrough) and (due_only or all_loops):
         raise InputError("passthrough -- arguments require a single loop")
+    cfg, sched_now = config.load(store), datetime.now(UTC) if now is None else now.astimezone(UTC)
 
-    built = engine.build(store, now=now) if due_only and not dry_run else None
     results: list[dict[str, Any]] = []
     if due_only:
         selected, pre_fails = select_due_loops(store, cfg, sched_now=sched_now, dry_run=dry_run, now=now)
         results.extend(pre_fails)
     elif all_loops:
-        selected = [(lp, "manual", [], None, None) for lp in cfg.loops.values() if lp.enabled and not lp.daemon]
+        selected = [(lp, "manual", [], None, (), 0) for lp in cfg.loops.values() if lp.enabled and not lp.daemon]
     else:
         matched_names = _expand_loop_selectors(cfg, names)
-        if extra_args and len(matched_names) > 1:
+        if (extra_args or has_passthrough) and len(matched_names) > 1:
             raise InputError("passthrough -- arguments require a single loop")
-        selected = [(cfg.loops[n], "manual", [], None, None) for n in matched_names]
+        selected = [(cfg.loops[n], "manual", [], None, (), 0) for n in matched_names]
 
-    def run_item(item: _DueItem, *, stop: threading.Event | None = stop_event) -> dict[str, Any]:
-        loop, trig, evs, seq_target, sched = item
+    multi_batch = due_only or all_loops or len(selected) > 1
+
+    def run_item(item: _DueItem, *, stop: StopFlag | None = stop_event) -> dict[str, Any]:
+        loop, trig, evs, seq_target, scheds, missed = item
         if stop is not None and stop.is_set():
-            return {"loop": loop.name, "status": "stopped", "exit_code": 130, "duration_ms": 0}
+            stop_code = 143 if (term_event is not None and term_event.is_set()) else 130
+            return {"loop": loop.name, "status": "stopped", "exit_code": stop_code, "duration_ms": 0}
         try:
             return execute_one_loop(
                 store,
                 loop,
                 trigger=trig,
                 events=evs,
+                events_missed=missed,
                 cursor_target_seq=seq_target,
-                schedule=sched,
+                schedules=scheds,
                 extra_args=extra_args,
                 dry_run=dry_run,
                 now=now,
                 stop_event=stop,
+                term_event=term_event,
                 base_env=cfg.env,
             )
+        except BusyError as err:
+            if due_only:
+                return {"loop": loop.name, "status": "busy", "exit_code": 0, "duration_ms": 0, "error": str(err)}
+            if multi_batch and not dry_run:
+                return {"loop": loop.name, "status": "failed", "exit_code": 1, "duration_ms": 0, "error": str(err)}
+            raise
         except models.FAILURES as err:
-            if not due_only or dry_run:
+            if not multi_batch or dry_run:
                 raise
             return record_failure(store, loop.name, trig, err, now=now)
 
-    if due_only and not dry_run and len(selected) > 1 and cfg.concurrency > 1:
-        local_stop = stop_event or threading.Event()
-        pool = ThreadPoolExecutor(max_workers=min(cfg.concurrency, len(selected)))
+    pools_map = cfg.effective_pools()
+    total_cap = cfg.total_concurrency()
+    if due_only and not dry_run and len(selected) > 1 and total_cap > 1:
+        local_stop: StopFlag = stop_event or threading.Event()
+        pool = ThreadPoolExecutor(max_workers=min(total_cap, len(selected)))
+        pending_items: list[tuple[int, _DueItem]] = list(enumerate(selected))
+        active_futs: dict[Future[dict[str, Any]], tuple[int, str]] = {}
+        pool_counts: Counter[str] = Counter()
+        ordered_out: dict[int, dict[str, Any]] = {}
         try:
-            results.extend(f.result() for f in [pool.submit(run_item, it, stop=local_stop) for it in selected])
+            while pending_items or active_futs:
+                next_pending: list[tuple[int, _DueItem]] = []
+                for idx_i, item in pending_items:
+                    if local_stop.is_set():
+                        ordered_out[idx_i] = run_item(item, stop=local_stop)
+                        continue
+                    p_name = item[0].pool
+                    p_cap = pools_map.get(p_name, cfg.concurrency)
+                    if pool_counts[p_name] < p_cap and len(active_futs) < total_cap:
+                        pool_counts[p_name] += 1
+                        active_futs[pool.submit(run_item, item, stop=local_stop)] = (idx_i, p_name)
+                    else:
+                        next_pending.append((idx_i, item))
+                pending_items = next_pending
+                if not active_futs:
+                    break
+                done, _ = wait_futures(active_futs, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    idx_i, p_name = active_futs.pop(fut)
+                    pool_counts[p_name] -= 1
+                    ordered_out[idx_i] = fut.result()
+            results.extend(ordered_out[i] for i in sorted(ordered_out))
         except BaseException:
             local_stop.set()
             pool.shutdown(wait=True, cancel_futures=True)
@@ -591,43 +774,185 @@ def run_loops(
                 break
             results.append(run_item(item))
 
-    ok_all = (built is None or bool(built["ok"])) and all(r["status"] in {"ok", "dry_run", "stopped"} for r in results)
-    out: dict[str, Any] = {"brain": cfg.name, "ok": ok_all, "ran": len(results), "results": results}
-    return {**out, "problems": list(built["problems"])} if built and built["problems"] else out
+    interrupted = bool(stop_event is not None and stop_event.is_set())
+    ok_all = (not interrupted) and all(r["status"] in {"ok", "dry_run", "busy"} for r in results)
+    return {
+        "brain": cfg.name,
+        "ok": ok_all,
+        "dry_run": dry_run,
+        "ran": len(results),
+        "results": results,
+    }
 
 
-def _delete_states(store: Store, names: Sequence[str], *, dry_run: bool) -> list[str]:
-    unique = list(dict.fromkeys(names))
-    if dry_run or not unique:
-        with suppress(FileNotFoundError):
-            bf_dir = private_dir(store, create=False)
-            return [name for name in unique if bf_dir.exists(f"{name}.json")]
-        return []
-    removed: list[str] = []
-    with writer(store), suppress(FileNotFoundError):
-        bf_dir = private_dir(store, create=False)
-        for name in unique:
-            if bf_dir.exists(f"{name}.json"):
-                bf_dir.delete(f"{name}.json", durable=False)
-                removed.append(name)
-        if removed:
-            store.sync_dirs([".bf"])
-    return removed
-
-
-def reset_loops(store: Store, names: Sequence[str], *, dry_run: bool = False) -> dict[str, Any]:
-    """Reset `.bf/<loop>.json` state for named loops back to idle."""
+def pause_loops(
+    store: Store,
+    selectors: Sequence[str],
+    *,
+    all_loops: bool = False,
+    duration_s: int | None = None,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Pause named/glob loops or `--all` indefinitely (or for `duration_s` seconds) without editing `bf.yaml`."""
+    if bool(selectors) == bool(all_loops):
+        raise InputError("specify loop names/patterns or --all (mutually exclusive)")
     cfg = config.load(store)
-    if not names:
-        raise InputError("--reset requires one or more loop names")
-    if bad := next((w for w in names if w not in cfg.loops), ""):
-        raise InputError(f"unknown loop {bad!r} in bf.yaml")
-    return {"ok": True, "brain": cfg.name, "reset": _delete_states(store, names, dry_run=dry_run), "dry_run": dry_run}
+    targets = (
+        sorted(cfg.loops)
+        if all_loops
+        else _expand_loop_selectors(cfg, selectors, allow_daemons=True, allow_disabled=True)
+    )
+    instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
+    now_iso = now_utc(instant)
+    until_iso = now_utc(instant + timedelta(seconds=duration_s)) if duration_s is not None else ""
+    if dry_run:
+        return {
+            "ok": True,
+            "brain": cfg.name,
+            "paused": targets,
+            **({"paused_until": until_iso} if until_iso else {}),
+            "dry_run": True,
+        }
+    with writer(store):
+        for name in targets:
+            try:
+                cur = load_unit_state(store, name)
+            except Error:
+                cur = state.default_unit_state(name, event_seq=latest_event_seq(store))
+            save_unit_state(
+                store,
+                {**cur, "name": name, "paused": True, "paused_until": until_iso, "updated": now_iso},
+                locked=True,
+            )
+    return {
+        "ok": True,
+        "brain": cfg.name,
+        "paused": targets,
+        **({"paused_until": until_iso} if until_iso else {}),
+        "dry_run": False,
+    }
+
+
+def resume_loops(
+    store: Store,
+    selectors: Sequence[str],
+    *,
+    all_loops: bool = False,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Resume paused named/glob loops or `--all`."""
+    if bool(selectors) == bool(all_loops):
+        raise InputError("specify loop names/patterns or --all (mutually exclusive)")
+    cfg = config.load(store)
+    targets = (
+        sorted(cfg.loops)
+        if all_loops
+        else _expand_loop_selectors(cfg, selectors, allow_daemons=True, allow_disabled=True)
+    )
+    now_iso = now_utc(now)
+    if dry_run:
+        return {"ok": True, "brain": cfg.name, "resumed": targets, "dry_run": True}
+    with writer(store):
+        for name in targets:
+            try:
+                cur = load_unit_state(store, name)
+            except Error:
+                cur = state.default_unit_state(name, event_seq=latest_event_seq(store))
+            save_unit_state(
+                store,
+                {**cur, "name": name, "paused": False, "paused_until": "", "updated": now_iso},
+                locked=True,
+            )
+    return {"ok": True, "brain": cfg.name, "resumed": targets, "dry_run": False}
+
+
+def reset_loops(
+    store: Store, selectors: Sequence[str], *, all_loops: bool = False, dry_run: bool = False
+) -> dict[str, Any]:
+    """Reset `.bf/state/<loop>.json` state to idle anchored at `latest_event_seq()` (preventing historical event replay)."""
+    if bool(selectors) == bool(all_loops):
+        raise InputError("specify loop names/patterns or --all (mutually exclusive)")
+    cfg = config.load(store)
+    targets = (
+        sorted(cfg.loops)
+        if all_loops
+        else _expand_loop_selectors(cfg, selectors, allow_daemons=True, allow_disabled=True)
+    )
+    if dry_run:
+        return {"ok": True, "brain": cfg.name, "reset": targets, "event_seq": latest_event_seq(store), "dry_run": True}
+    with writer(store):
+        cur_seq = latest_event_seq(store)
+        for name in targets:
+            doc = state.default_unit_state(name, event_seq=cur_seq)
+            save_unit_state(store, doc, locked=True)
+    return {"ok": True, "brain": cfg.name, "reset": targets, "event_seq": cur_seq, "dry_run": False}
+
+
+def _filter_unlocked_orphans(store: Store, orphans: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Exclude orphaned loop artifacts belonging to any still-running loop holding `.bf/locks/loop-<name>.lock`."""
+    all_names = {
+        *orphans["states"],
+        *orphans["dirs"],
+        *orphans["logs"],
+        *(lk.removeprefix("loop-").removesuffix(".lock") for lk in orphans["locks"]),
+    }
+    active = {n for n in all_names if is_loop_locked(store, n)}
+    if not active:
+        return orphans
+    return {
+        "states": [n for n in orphans["states"] if n not in active],
+        "dirs": [n for n in orphans["dirs"] if n not in active],
+        "locks": [lk for lk in orphans["locks"] if lk.removeprefix("loop-").removesuffix(".lock") not in active],
+        "logs": [n for n in orphans["logs"] if n not in active],
+    }
 
 
 def prune_state(store: Store, *, dry_run: bool = False) -> dict[str, Any]:
-    """Delete orphaned `.bf/<loop>.json` state files."""
+    """Remove orphaned `.bf/state/<loop>.json`, `.bf/state/<loop>/`, unlocked `.bf/locks/loop-*.lock`, and `logs/<loop>.jsonl`."""
     cfg = config.load(store)
-    orphans = find_orphans(store, set(cfg.loops))
-    pruned = orphans if (dry_run or not orphans) else sorted(_delete_states(store, orphans, dry_run=False))
-    return {"ok": True, "brain": cfg.name, "pruned": pruned, "dry_run": dry_run}
+    if dry_run:
+        pruned_preview = _filter_unlocked_orphans(store, find_orphans(store, set(cfg.loops)))
+        return {"ok": True, "brain": cfg.name, "pruned": pruned_preview, "dry_run": True}
+    with writer(store):
+        cfg = config.load(store)
+        orphans = find_orphans(store, set(cfg.loops))
+        if not any(orphans.values()):
+            return {"ok": True, "brain": cfg.name, "pruned": orphans, "dry_run": False}
+        active_locked: set[str] = set()
+        pruned_locks: list[str] = []
+        for lock_name in orphans["locks"]:
+            lp_name = lock_name.removeprefix("loop-").removesuffix(".lock")
+            if try_unlink_loop_lock(store, lock_name):
+                pruned_locks.append(lock_name)
+            elif is_loop_locked(store, lp_name):
+                active_locked.add(lp_name)
+        if pruned_locks:
+            with suppress(Error, OSError):
+                store.sync_dirs([".bf/locks"])
+        for cand in (*orphans["states"], *orphans["dirs"], *orphans["logs"]):
+            if cand not in active_locked and is_loop_locked(store, cand):
+                active_locked.add(cand)
+        pruned_states = [n for n in orphans["states"] if n not in active_locked]
+        pruned_dirs = [d for d in orphans["dirs"] if d not in active_locked]
+        pruned_logs = [lg for lg in orphans["logs"] if lg not in active_locked]
+        with suppress(FileNotFoundError):
+            st_dir = private_dir(store, ".bf", "state", create=False)
+            for name in pruned_states:
+                with suppress(FileNotFoundError):
+                    st_dir.delete(f"{name}.json", durable=False)
+            for sub in pruned_dirs:
+                with suppress(FileNotFoundError):
+                    st_dir.delete_tree(sub, durable=False)
+            if pruned_states or pruned_dirs:
+                store.sync_dirs([".bf/state"])
+        if pruned_logs:
+            with writer(store, name="logs.lock"), suppress(FileNotFoundError):
+                logs_dir = private_dir(store, "logs", create=False)
+                for log_name in pruned_logs:
+                    with suppress(FileNotFoundError):
+                        logs_dir.delete(f"{log_name}.jsonl", durable=False)
+                store.sync_dirs(["logs"])
+    pruned = {"states": pruned_states, "dirs": pruned_dirs, "locks": pruned_locks, "logs": pruned_logs}
+    return {"ok": True, "brain": cfg.name, "pruned": pruned, "dry_run": False}

@@ -1,13 +1,13 @@
-"""Draft 2020-12 JSON Schemas for bf.yaml and unified JSONL records, plus required per-source schemas."""
+"""Draft 2020-12 JSON Schemas for bf.yaml and unified JSONL records, plus fast native core validation."""
 
 from __future__ import annotations
 
 import copy
+import re
 import threading
-from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
-from bf import models
+from bf import models, refs
 from bf.models import Error, InputError, decode, digest
 from bf.storage import Store
 
@@ -23,9 +23,14 @@ _CAL_DATE = (
     r"|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))"
 )
 _TS_HMS = r"[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})"
-_ISO_DT = rf"^(?:{_CAL_DATE}(?:T{_TS_HMS})?)?$"
+_ISO_DT = rf"^{_CAL_DATE}(?:T{_TS_HMS})?$"
+_ISO_DT_RE = re.compile(rf"^{_CAL_DATE}(?:T{_TS_HMS})?\Z")
 _BOOL = {"type": "boolean"}
 _NAME_REF = {"type": "string", "pattern": models.NAME}
+_ENV_KEY_PAT = r"^[A-Z_][A-Z0-9_]*$"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
+_TAG_BAD_RE = re.compile(r"[/\\\s]")
+_URL_PAT = r"^(?:https?://[^\s/?#]+\S*|(?:mailto|urn):\S+)$"
 
 
 def _str(max_len: int = 4096, min_len: int = 0, pat: str = "") -> dict[str, Any]:
@@ -69,50 +74,54 @@ def _doc(slug: str, title: str, desc: str, body: dict[str, Any]) -> dict[str, An
 
 
 _DUR_STR = _str(32, pat=models.DURATION_PAT)
-_DURATION = {"anyOf": [_int(1, 315576000), _DUR_STR]}
-_TIMEOUT = {"anyOf": [_int(1, 86400), _DUR_STR]}
-_OVERLAP = {"anyOf": [_int(0, 315576000), _str(32, pat=models.DURATION_ZERO_PAT)]}
-_ENV_MAP = _obj(extra=_str(4096), names=r"^[A-Z_][A-Z0-9_]*$", opt=True)
+_OVERLAP = {"anyOf": [{"const": 0}, _str(32, pat=models.DURATION_ZERO_PAT)]}
+_ENV_MAP = _obj(extra=_str(4096), names=_ENV_KEY_PAT, opt=True)
+_ENV_FROM = _arr(_str(128, min_len=1, pat=_ENV_KEY_PAT), max_items=128, unique=True)
 _TAG_ITEMS = _arr(_str(128, min_len=1, pat=r"^[^/\\\s]+$"), max_items=200, unique=True)
 _META_REF = {"$ref": "#/$defs/Meta"}
-_LOOP_KEY = {"pattern": models.NAME, "not": {"enum": ["events"]}}
 _SRC_REF = {**_NAME_REF, "not": {"enum": sorted(models.RESERVED_SOURCES)}}
 _EVENT_KIND_STR = _str(128, min_len=1, pat=models.EVENT_KIND_PAT)
-_EVENT_VAL = {"anyOf": [_EVENT_KIND_STR, {"$ref": "#/$defs/EventMatch"}]}
 _CRON_STR = _str(128, min_len=1, pat=r"^(?:@[A-Za-z]+|[^\s]+(?:[ \t]+[^\s]+){4})$")
-_TRIG_SCALAR = {"anyOf": [_int(1, 315576000), _DUR_STR, _CRON_STR]}
-_TRIG_ITEM = {
+_WHERE_SCALAR: dict[str, Any] = {"type": ["string", "number", "integer", "boolean", "null"]}
+_WHERE_PRED: dict[str, Any] = {
     "anyOf": [
-        _TRIG_SCALAR,
-        {"$ref": "#/$defs/EveryTrigger"},
-        {"$ref": "#/$defs/CronTrigger"},
-        {"$ref": "#/$defs/EventTrigger"},
+        _WHERE_SCALAR,
+        _obj({"in": _arr(_WHERE_SCALAR, min_items=1, max_items=64)}, req=("in",)),
+        _obj({"exists": _BOOL}, req=("exists",)),
+        _obj({"prefix": _str(512, min_len=1)}, req=("prefix",)),
     ]
 }
+_WHERE_MAP = _obj(extra=_WHERE_PRED, names=r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$", min_props=1)
+_EVENT_VAL = {"anyOf": [_EVENT_KIND_STR, {"$ref": "#/$defs/EventMatch"}]}
+_TRIG_ITEM = {"anyOf": [_DUR_STR, _CRON_STR, {"$ref": "#/$defs/ScheduleTrigger"}, {"$ref": "#/$defs/EventTrigger"}]}
 _WHEN_VAL = {"anyOf": [{"const": "daemon"}, _TRIG_ITEM, _arr(_TRIG_ITEM, min_items=1, max_items=32)]}
-_INGEST_VAL = {"anyOf": [{"const": False}, _enum("upsert", "snapshot"), {"$ref": "#/$defs/Ingest"}]}
+_POOL_INT = _int(1, 32)
+_POOL_MAP = {**_obj(extra=_POOL_INT, names=models.NAME, min_props=1), "maxProperties": 32}
+_CONCURRENCY_VAL = {"anyOf": [_POOL_INT, _POOL_MAP]}
+_INGEST_VAL = {"anyOf": [_enum("upsert", "snapshot"), {"$ref": "#/$defs/Ingest"}]}
 
 _LOOP_PROPS: dict[str, Any] = {
     "description": _desc(_str(512), "Short description of what this loop does for humans and AI agents."),
-    "when": _desc(_WHEN_VAL, "When the loop runs: 'daemon', a trigger, a list of triggers, or omit for manual."),
+    "when": _desc(
+        _WHEN_VAL,
+        "When the loop runs: 'daemon', duration ('1h'), cron ('0 8 * * 0'), {every|cron, backfill?, overlap?}, {event, debounce?}, list, or omit for manual.",
+    ),
     "window": {"$ref": "#/$defs/Window"},
     "run": {"$ref": "#/$defs/Argv"},
     "ingest": _desc(
         _INGEST_VAL,
-        "Ingest stdout JSONL into memories/ or usages/ ('upsert'|'snapshot'|{source?, target?, mode?}), or false to disable sensors/ auto-ingest.",
+        "Explicitly ingest stdout JSONL into memories/<source>.jsonl ('upsert'|'snapshot'|{source?, mode?, schema?}).",
     ),
-    "emit": _desc(_EVENT_KIND_STR, "Default event kind emitted from stdout JSONL to logs/events.jsonl."),
-    "timeout": _desc(_TIMEOUT, "Max cycle runtime before terminating the process group.", default="5m"),
-    "env": _desc(_ENV_MAP, "Loop environment variable overrides."),
+    "emit": _desc(_EVENT_KIND_STR, "Default event kind emitted from stdout JSONL to .bf/state/events.jsonl."),
+    "pool": _desc(_NAME_REF, "Named concurrency pool declared under bf.yaml concurrency: (default: 'default')."),
+    "timeout": _desc(_DUR_STR, "Max cycle runtime as explicit duration (1s..24h, e.g. 5m, 15m).", default="5m"),
+    "env": _desc(_ENV_MAP, "Explicit loop environment variable values (blocks linker/interpreter hijack keys)."),
+    "env_from": _desc(_ENV_FROM, "Host or .env variable names explicitly allowed into this loop."),
     "enabled": _desc(_BOOL, "Enable automatic triggers and daemon supervision.", default=True),
-}
-_DEFAULTS_PROPS: dict[str, Any] = {
-    "window": {"$ref": "#/$defs/Window"},
-    "timeout": _desc(_TIMEOUT, "Default cycle timeout for loops.", default="5m"),
 }
 _EMIT_SET = {"type": "object", "required": ["emit"]}
 _IS_DAEMON = {"type": "object", "required": ["when"], "properties": {"when": {"const": "daemon"}}}
-_NO_CYCLE = {"not": {"anyOf": [{"required": [k]} for k in ("window", "ingest", "timeout")]}}
+_NO_CYCLE = {"not": {"anyOf": [{"required": [k]} for k in ("window", "ingest", "timeout", "pool")]}}
 _LOOP_RULES = [{"if": _EMIT_SET, "then": {"not": {"required": ["ingest"]}}}, {"if": _IS_DAEMON, "then": _NO_CYCLE}]
 
 _BRAIN_PROPS: dict[str, Any] = {
@@ -122,20 +131,36 @@ _BRAIN_PROPS: dict[str, Any] = {
     "timezone": _desc(_str(128, min_len=1), "IANA timezone for cron schedules.", default="UTC"),
     "notes": _desc(
         _arr(_SRC_REF, min_items=1, max_items=32, unique=True),
-        "Top-level Markdown note folders compiled into memories/<dir>.jsonl.",
+        "Top-level Markdown note folders compiled into memories/_notes.jsonl.",
         default=list(models.DEFAULT_NOTES),
     ),
     "brains": _desc(_obj(extra=_str(4096, min_len=1), names=models.NAME, opt=True), "Sibling brain aliases for bf://."),
-    "concurrency": _desc(_int(1, 32), "Max concurrent cycle loops in bf watch and bf run --due (1..32).", default=4),
-    "env": _desc(_ENV_MAP, "Shared environment variables for loops."),
-    "defaults": {"$ref": "#/$defs/Defaults"},
-    "loops": _desc(_obj(extra={"$ref": "#/$defs/Loop"}, names=_LOOP_KEY, opt=True), "Unified loop definitions."),
+    "search": _obj(
+        {
+            "exclude": _desc(
+                _arr(_SRC_REF, max_items=128, unique=True),
+                "Memory sources excluded from unscoped bf query by default (override via --scope or --all-sources).",
+            )
+        },
+        min_props=1,
+        opt=True,
+        desc="Default retrieval settings.",
+    ),
+    "concurrency": _desc(
+        _CONCURRENCY_VAL,
+        "Max concurrent cycle loops (1..32) or named concurrency pools ({default: 4, agents: 2}).",
+        default=4,
+    ),
+    "env": _desc(_ENV_MAP, "Shared explicit environment variables for loops."),
+    "loops": _desc(
+        _obj(extra={"anyOf": [{"$ref": "#/$defs/Loop"}, {"type": "null"}]}, names=models.NAME, opt=True),
+        "Unified loop definitions.",
+    ),
 }
 _WIN_PROPS = {
-    "backfill": _desc(_DURATION, "Initial BF_START window on first run (now - backfill).", default="1d"),
-    "overlap": _desc(_OVERLAP, "Rewind on later runs (last_anchor - overlap).", default=0),
+    "backfill": _desc(_DUR_STR, "Initial BF_START window on first run (now - backfill).", default="1d"),
+    "overlap": _desc(_OVERLAP, "Rewind on later runs (last_anchor - overlap).", default="0s"),
 }
-
 
 _BRAIN_DEFS = {
     "Argv": _desc(
@@ -143,47 +168,53 @@ _BRAIN_DEFS = {
         "Literal argv without a shell (supports {{brain}}, {{loop}}, {{state}}, {{start}}, {{end}}, {{trigger}}, {{run}}).",
         title="Argv",
     ),
-    "CronTrigger": _obj(
-        {"cron": _desc(_CRON_STR, "5-field cron expression or @macro."), **_WIN_PROPS},
-        req=("cron",),
-        title="CronTrigger",
-        desc="Cron schedule trigger with optional per-trigger window.",
-    ),
-    "Defaults": _obj(_DEFAULTS_PROPS, opt=True, title="Defaults", desc="Shared loop defaults (timeout, window)."),
     "EventMatch": _obj(
         {
-            "kind": _desc(_str(128, min_len=1), "Exact event kind to match (e.g. records.ingested)."),
-            "source": _desc(_str(128, min_len=1), "Exact event source to match (loop name or 'bf')."),
-            "filter": _desc(_str(2048, min_len=1), "Isolated jq boolean expression evaluated per event."),
+            "kind": _desc(
+                _EVENT_KIND_STR,
+                "Exact event kind to match (lowercase letters, digits, '.', '_', '-'; e.g. records.ingested).",
+            ),
+            "source": _desc(_NAME_REF, "Exact event source to match (lowercase loop name or 'bf')."),
+            "where": _desc(_WHERE_MAP, "Declarative dot-path predicates evaluated against the event object."),
         },
         min_props=1,
         title="EventMatch",
-        desc="Event matcher against logs/events.jsonl.",
+        desc="Event matcher against .bf/state/events.jsonl.",
     ),
     "EventTrigger": _obj(
-        {"event": _desc(_EVENT_VAL, "Event kind string or matcher object.")},
+        {
+            "event": _desc(_EVENT_VAL, "Event kind string or matcher object."),
+            "debounce": _desc(_DUR_STR, "Trailing-edge coalesce window before firing (1s..1h, e.g. 10s)."),
+        },
         req=("event",),
         title="EventTrigger",
-        desc="Event subscription trigger.",
-    ),
-    "EveryTrigger": _obj(
-        {"every": _desc(_DURATION, "Repeat interval duration (e.g. 15m, 1h, 1d)."), **_WIN_PROPS},
-        req=("every",),
-        title="EveryTrigger",
-        desc="Interval schedule trigger with optional per-trigger window.",
+        desc="Event subscription trigger with optional trailing-edge debounce.",
     ),
     "Ingest": _obj(
         {
-            "source": _desc(_SRC_REF, "Target <target>/<source>.jsonl stem (defaults to loop name)."),
-            "target": _desc(_enum("memories", "usages"), "Record bucket: memories or usages.", default="memories"),
+            "source": _desc(_SRC_REF, "Target memories/<source>.jsonl stem (defaults to loop name)."),
             "mode": _desc(_enum("upsert", "snapshot"), "Write mode: upsert or snapshot.", default="upsert"),
+            "schema": _desc(_SRC_REF, "Optional schemas/<schema>.json name (for year-partitioned sources)."),
         },
         min_props=1,
         title="Ingest",
         desc="Explicit record ingestion target.",
     ),
     "Loop": {**_obj(_LOOP_PROPS, title="Loop", desc="One loop entry."), "allOf": _LOOP_RULES},
-    "Window": _obj(_WIN_PROPS, min_props=1, title="Window", desc="Default time window for BF_START/BF_END."),
+    "ScheduleTrigger": {
+        **_obj(
+            {
+                "every": _desc(_DUR_STR, "Interval schedule duration (e.g. 1h, 1d)."),
+                "cron": _desc(_CRON_STR, "5-field POSIX cron expression or @macro."),
+                "backfill": _desc(_DUR_STR, "Per-trigger initial BF_START window override."),
+                "overlap": _desc(_OVERLAP, "Per-trigger BF_START rewind override."),
+            },
+            title="ScheduleTrigger",
+            desc="Interval or cron trigger with optional per-trigger BF_START window override.",
+        ),
+        "oneOf": [{"required": ["every"]}, {"required": ["cron"]}],
+    },
+    "Window": _obj(_WIN_PROPS, min_props=1, title="Window", desc="Time window for BF_START/BF_END."),
 }
 BF_SCHEMA = _doc(
     "bf",
@@ -192,25 +223,26 @@ BF_SCHEMA = _doc(
     {**_obj(_BRAIN_PROPS, req=("version", "name")), "$defs": _BRAIN_DEFS},
 )
 
-_STALE_ANY = [_int(1, 36500), _DUR_STR, {"type": "string", "minLength": 10, "pattern": _ISO_DT}]
+_STALE_ANY = [_DUR_STR, {"type": "string", "minLength": 10, "pattern": _ISO_DT}]
 _RECORD_PROPS: dict[str, Any] = {
-    "id": _desc(_str(4096, min_len=1), "Stable source-local record identifier (required for memory/usage)."),
+    "id": _desc(_str(4096, min_len=1), "Stable source-local record identifier (required for memory)."),
     "title": _desc(_str(4096, min_len=1), "Human-readable title."),
     "entity": _desc(_str(4096, min_len=1), "Canonical entity URI or source:id alias."),
-    "type": _desc(_str(128, min_len=1), "Domain subtype (e.g. guide, project, issue, session)."),
+    "type": _desc(_str(128, min_len=1), "Domain subtype (e.g. guide, project, issue, usage)."),
     "status": _desc(_str(128, min_len=1), "Lifecycle status (e.g. draft, stable, active, open, done)."),
     "description": _desc(_str(16384), "Short description of the note or record."),
     "ref": _desc(_str(4200, min_len=1), "Universal brain-local reference (note path or source:id)."),
-    "source": _desc(_NAME_REF, "Owning source name (<bucket>/<source>.jsonl)."),
-    "kind": _desc(_enum("note", "memory", "usage"), "Top-level record kind (note, memory, or usage)."),
+    "source": _desc(_NAME_REF, "Owning source name (note dir or memories/<source>.jsonl)."),
+    "kind": _desc(_enum("note", "memory"), "Top-level record kind (note or memory)."),
     "text": _desc(_str(4 << 20), "Plain or Markdown body text."),
-    "url": _desc(_str(8192), "Canonical external URL."),
-    "created": _desc({"type": "string", "pattern": _ISO_DT}, "Creation or event ISO date (YYYY-MM-DD) or timestamp."),
-    "updated": _desc({"type": "string", "pattern": _ISO_DT}, "Last-updated ISO date (YYYY-MM-DD) or timestamp."),
-    "stale_after": _desc({"anyOf": _STALE_ANY}, "Review freshness threshold (days, duration, or ISO date)."),
+    "url": _desc(_str(8192, min_len=1, pat=_URL_PAT), "Canonical external URL (https, http, mailto, or urn)."),
+    "created": _desc({"type": "string", "minLength": 10, "pattern": _ISO_DT}, "Creation or event ISO date/timestamp."),
+    "updated": _desc({"type": "string", "minLength": 10, "pattern": _ISO_DT}, "Last-updated ISO date/timestamp."),
+    "ingested_at": _desc({"type": "string", "minLength": 10, "pattern": _ISO_DT}, "UTC ingestion timestamp."),
+    "stale_after": _desc({"anyOf": _STALE_ANY}, "Review freshness threshold (explicit duration like 90d or ISO date)."),
     "tags": _desc(_TAG_ITEMS, "Unique tags without whitespace or slashes."),
     "aliases": _desc(_arr(_str(1024, min_len=1), max_items=200), "Alternate identifiers resolved by bf read/review."),
-    "attributes": _desc({"type": "object"}, "Freeform sensor-specific domain attributes."),
+    "attributes": _desc({"type": "object"}, "Optional sensor-specific domain attributes."),
     "headings": _desc(_arr({"$ref": "#/$defs/Heading"}), "Compiled Markdown headings with optional attr_list meta."),
     "links": _desc(_arr({"$ref": "#/$defs/Link"}, max_items=2000), "Normalized outgoing links."),
     "tasks": _desc(_arr({"$ref": "#/$defs/Task"}), "Compiled Markdown checklist tasks."),
@@ -241,18 +273,17 @@ _RECORD_DEFS = {
     ),
 }
 _RECORD_IF = {
-    "if": {"required": ["kind"], "properties": {"kind": {"enum": ["memory", "usage"]}}},
+    "if": {"required": ["kind"], "properties": {"kind": {"const": "memory"}}},
     "then": {"required": ["id"]},
 }
 RECORD_SCHEMA = _doc(
     "record",
     "Record",
-    "Unified JSON record schema enforced on compiled notes and ingested records in memories/*.jsonl and usages/*.jsonl.",
+    "Unified JSON record schema enforced natively on compiled notes and ingested records in memories/*.jsonl.",
     {**_obj(_RECORD_PROPS, req=("ref", "source", "kind", "title"), extra=True), **_RECORD_IF, "$defs": _RECORD_DEFS},
 )
 
 _SCHEMAS: dict[Kind, dict[str, Any]] = {"bf": BF_SCHEMA, "record": RECORD_SCHEMA}
-
 
 _STARTER_STATUSES: dict[str, tuple[str, ...]] = {
     "concepts": ("draft", "stable", "deprecated"),
@@ -262,15 +293,12 @@ _STARTER_STATUSES: dict[str, tuple[str, ...]] = {
 
 
 def starter_note_schema(folder: str) -> dict[str, Any]:
-    """Return an idiomatic Draft 2020-12 OKF note schema for `schemas/<folder>.json`."""
+    """Return an optional idiomatic Draft 2020-12 note schema for `schemas/<folder>.json`."""
     label, statuses = folder.replace("-", " ").title(), _STARTER_STATUSES.get(folder, ("draft", "stable", "deprecated"))
-    dt = {"type": "string", "minLength": 10, "pattern": _ISO_DT}
     props = {
         "type": _str(128, min_len=1),
         "status": _enum(*statuses),
         "description": _str(16384),
-        "created": dt,
-        "updated": dt,
     }
     req = ("type", "status", "created") if folder == "actions" else ("type", "status")
     return {
@@ -280,22 +308,9 @@ def starter_note_schema(folder: str) -> dict[str, Any]:
             req=req,
             extra=True,
             title=f"{label}Note",
-            desc=f"Domain schema for authored Markdown notes in {folder}/.",
+            desc=f"Optional domain schema for authored Markdown notes in {folder}/.",
         ),
     }
-
-
-def starter_usages_schema() -> dict[str, Any]:
-    """Return a Draft 2020-12 FinOps/prompt telemetry schema for `schemas/usages.json`."""
-    props: dict[str, Any] = {
-        "harness": _str(128, min_len=1),
-        "model": _str(256, min_len=1),
-        "session_id": _str(256, min_len=1),
-        **dict.fromkeys(("input_tokens", "output_tokens", "cached_tokens", "duration_ms", "prompts"), _int()),
-        "cost_usd": {"type": "number", "minimum": 0},
-    }
-    desc = "Shared domain schema for token, FinOps, and prompt usage records in usages/*.jsonl."
-    return {"$schema": _DRAFT, **_obj(props, extra=True, title="UsageRecord", desc=desc)}
 
 
 def document(kind: Kind) -> dict[str, Any]:
@@ -316,6 +331,212 @@ def export_schemas() -> dict[str, dict[str, Any]]:
     return {k: document(k) for k in ("bf", "record")}
 
 
+def _check_meta(val: object, path: str, out: list[str]) -> None:
+    if not isinstance(val, dict):
+        out.append(f"{path}: expected type object")
+        return
+    for k, v in val.items():
+        if not isinstance(k, str) or not refs.META_KEY_RE.fullmatch(k) or "\n" in k:
+            out.append(f"{path}: invalid or reserved property name")
+            return
+        if not isinstance(v, str) or len(v) > 4096:
+            out.append(f"{path}.{k}: expected string up to 4096 chars")
+            return
+
+
+def validate_core_record(obj: object, label: str) -> list[str]:
+    """Fast native Python enforcement of `RECORD_SCHEMA` (~50x faster than `jsonschema`, strict dates & URLs)."""
+    if not isinstance(obj, dict):
+        return [f"{label}: expected type object"]
+    out: list[str] = [
+        f"{label}: missing required {req_k!r}" for req_k in ("ref", "source", "kind", "title") if req_k not in obj
+    ]
+    if "kind" in obj:
+        kind = obj["kind"]
+        if not isinstance(kind, str) or kind not in {"note", "memory"}:
+            out.append(f"{label}: kind: must be one of ['note', 'memory']")
+        elif kind == "memory" and "id" not in obj:
+            out.append(f"{label}: missing required 'id'")
+
+    str_limits = (
+        ("id", 1, 4096),
+        ("title", 1, 4096),
+        ("entity", 1, 4096),
+        ("type", 1, 128),
+        ("status", 1, 128),
+        ("description", 0, 16384),
+        ("ref", 1, 4200),
+        ("text", 0, 4 << 20),
+    )
+    for key, lo, hi in str_limits:
+        if key in obj:
+            val = obj[key]
+            if not isinstance(val, str):
+                out.append(f"{label}: {key}: expected type string")
+            elif len(val) < lo:
+                out.append(f"{label}: {key}: violates minLength {lo}")
+            elif len(val) > hi:
+                out.append(f"{label}: {key}: violates maxLength {hi}")
+
+    if "source" in obj:
+        sv = obj["source"]
+        if not isinstance(sv, str) or "\n" in sv or not models.NAME_RE.fullmatch(sv):
+            out.append(f"{label}: source: does not match pattern {models.NAME}")
+
+    if "url" in obj:
+        uv = obj["url"]
+        if not isinstance(uv, str) or len(uv) > 8192:
+            out.append(f"{label}: url: expected string up to 8192 chars")
+        else:
+            try:
+                refs.validate_url(uv, f"{label}: url")
+            except Error as err:
+                out.append(str(err))
+
+    for dt_key in ("created", "updated", "ingested_at"):
+        if dt_key in obj:
+            dv = obj[dt_key]
+            if not isinstance(dv, str) or not _ISO_DT_RE.fullmatch(dv):
+                out.append(f"{label}: {dt_key}: must be ISO date (YYYY-MM-DD) or timestamp with timezone")
+            else:
+                try:
+                    models.normalize_iso_date_or_time(dv, f"{label}: {dt_key}")
+                except Error as err:
+                    out.append(str(err))
+
+    if "stale_after" in obj:
+        sa = obj["stale_after"]
+        if not isinstance(sa, str) or not sa:
+            out.append(f"{label}: stale_after: expected explicit duration (e.g. 90d) or ISO date")
+        elif len(sa) <= 32 and models.DURATION_RE.fullmatch(sa):
+            try:
+                models.parse_duration(sa, f"{label}: stale_after")
+            except Error as err:
+                out.append(str(err))
+        elif _ISO_DT_RE.fullmatch(sa):
+            try:
+                models.normalize_iso_date_or_time(sa, f"{label}: stale_after")
+            except Error as err:
+                out.append(str(err))
+        else:
+            out.append(f"{label}: stale_after: expected explicit duration (<=32 chars) or ISO date/timestamp")
+
+    if "tags" in obj:
+        tv = obj["tags"]
+        if not isinstance(tv, list):
+            out.append(f"{label}: tags: expected type array")
+        elif len(tv) > 200:
+            out.append(f"{label}: tags: violates maxItems 200")
+        else:
+            seen_tags: set[str] = set()
+            for item in tv:
+                if not isinstance(item, str) or not item or len(item) > 128 or _TAG_BAD_RE.search(item):
+                    out.append(f"{label}: tags: items must be nonempty tokens without spaces or slashes")
+                    break
+                if item in seen_tags:
+                    out.append(f"{label}: tags: items must be unique")
+                    break
+                seen_tags.add(item)
+
+    if "aliases" in obj:
+        av = obj["aliases"]
+        if not isinstance(av, list):
+            out.append(f"{label}: aliases: expected type array")
+        elif len(av) > 200:
+            out.append(f"{label}: aliases: violates maxItems 200")
+        elif any(not isinstance(x, str) or not x or len(x) > 1024 for x in av):
+            out.append(f"{label}: aliases: items must be nonempty strings up to 1024 chars")
+
+    if "attributes" in obj and not isinstance(obj["attributes"], dict):
+        out.append(f"{label}: attributes: expected type object")
+
+    if "sha256" in obj:
+        sh = obj["sha256"]
+        if not isinstance(sh, str) or not _SHA256_RE.fullmatch(sh):
+            out.append(f"{label}: sha256: must be 64 lowercase hex characters")
+
+    if "headings" in obj:
+        hv = obj["headings"]
+        if not isinstance(hv, list):
+            out.append(f"{label}: headings: expected type array")
+        else:
+            for idx, h in enumerate(hv):
+                if not isinstance(h, dict):
+                    out.append(f"{label}: headings.{idx}: expected type object")
+                    break
+                if extra := set(h) - {"id", "title", "level", "meta"}:
+                    out.append(f"{label}: headings.{idx}: unknown property {', '.join(repr(k) for k in sorted(extra))}")
+                    break
+                hid, htitle, hlvl = h.get("id"), h.get("title"), h.get("level")
+                if not isinstance(hid, str) or not (1 <= len(hid) <= 256):
+                    out.append(f"{label}: headings.{idx}.id: invalid string")
+                    break
+                if not isinstance(htitle, str) or len(htitle) > 4096:
+                    out.append(f"{label}: headings.{idx}.title: invalid string")
+                    break
+                if type(hlvl) is not int or not (1 <= hlvl <= 6):
+                    out.append(f"{label}: headings.{idx}.level: expected integer 1..6")
+                    break
+                if "meta" in h:
+                    _check_meta(h["meta"], f"{label}: headings.{idx}.meta", out)
+
+    if "links" in obj:
+        lv = obj["links"]
+        if not isinstance(lv, list):
+            out.append(f"{label}: links: expected type array")
+        elif len(lv) > 2000:
+            out.append(f"{label}: links: violates maxItems 2000")
+        else:
+            for idx, lk in enumerate(lv):
+                if not isinstance(lk, dict):
+                    out.append(f"{label}: links.{idx}: expected type object")
+                    break
+                if extra := set(lk) - {"to", "kind", "anchor", "meta", "section"}:
+                    out.append(f"{label}: links.{idx}: unknown property {', '.join(repr(k) for k in sorted(extra))}")
+                    break
+                lto, lkind = lk.get("to"), lk.get("kind")
+                if not isinstance(lto, str) or not (1 <= len(lto) <= 8192):
+                    out.append(f"{label}: links.{idx}.to: invalid string")
+                    break
+                if not isinstance(lkind, str) or lkind not in {"note", "record", "brain", "url"}:
+                    out.append(f"{label}: links.{idx}.kind: must be one of ['note', 'record', 'brain', 'url']")
+                    break
+                if "anchor" in lk and (not isinstance(lk["anchor"], str) or len(lk["anchor"]) > 2048):
+                    out.append(f"{label}: links.{idx}.anchor: invalid string")
+                    break
+                if "section" in lk and (not isinstance(lk["section"], str) or len(lk["section"]) > 256):
+                    out.append(f"{label}: links.{idx}.section: invalid string")
+                    break
+                if "meta" in lk:
+                    _check_meta(lk["meta"], f"{label}: links.{idx}.meta", out)
+
+    if "tasks" in obj:
+        tkv = obj["tasks"]
+        if not isinstance(tkv, list):
+            out.append(f"{label}: tasks: expected type array")
+        else:
+            for idx, tk in enumerate(tkv):
+                if not isinstance(tk, dict):
+                    out.append(f"{label}: tasks.{idx}: expected type object")
+                    break
+                if extra := set(tk) - {"text", "done", "section", "meta"}:
+                    out.append(f"{label}: tasks.{idx}: unknown property {', '.join(repr(k) for k in sorted(extra))}")
+                    break
+                if not isinstance(tk.get("text"), str) or not (1 <= len(tk["text"]) <= 4096):
+                    out.append(f"{label}: tasks.{idx}.text: invalid string")
+                    break
+                if type(tk.get("done")) is not bool:
+                    out.append(f"{label}: tasks.{idx}.done: expected type boolean")
+                    break
+                if "section" in tk and (not isinstance(tk["section"], str) or len(tk["section"]) > 256):
+                    out.append(f"{label}: tasks.{idx}.section: invalid string")
+                    break
+                if "meta" in tk:
+                    _check_meta(tk["meta"], f"{label}: tasks.{idx}.meta", out)
+
+    return [*out[:5], f"{label}: and {len(out) - 5} more schema errors"] if len(out) > 5 else out
+
+
 def compile_schema(raw: object, label: str) -> Validator:
     """Validate that `raw` is a legal Draft 2020-12 JSON Schema object and return its validator."""
     from jsonschema import Draft202012Validator
@@ -332,18 +553,12 @@ def compile_schema(raw: object, label: str) -> Validator:
     return Draft202012Validator(raw)
 
 
-@cache
-def base_record_validator() -> Validator:
-    """Return the unconditionally enforced bundled `RECORD_SCHEMA` validator."""
-    return compile_schema(RECORD_SCHEMA, "record.schema.json")
-
-
 _VALIDATORS: dict[str, Validator] = {}
 _VALIDATORS_LOCK = threading.Lock()
 
 
 def load_validator(store: Store, path: str) -> Validator | None:
-    """Load and compile `path` from `store`, returning `None` when the file is absent."""
+    """Load and compile optional `path` from `store`, returning `None` when absent."""
     try:
         raw = store.read(path, models.MAX_SCHEMA)
     except FileNotFoundError:
@@ -360,14 +575,6 @@ def load_validator(store: Store, path: str) -> Validator | None:
     return cached
 
 
-def require_validator(store: Store, source: str) -> Validator:
-    """Require and compile `schemas/<source>.json`, failing closed when absent."""
-    path = f"schemas/{source}.json"
-    if (validator := load_validator(store, path)) is None:
-        raise Error(f"{path}: missing required schema for source {source!r}")
-    return validator
-
-
 def _err_key(error: ValidationError) -> tuple[Any, ...]:
     return (
         -len(error.absolute_path),
@@ -382,6 +589,12 @@ def _describe_error(error: ValidationError) -> str:
         skip = {"type", "enum", "const"}
         if sub := [e for e in error.context if e.absolute_path != error.absolute_path or e.validator not in skip]:
             return _describe_error(min(sub, key=_err_key))
+    if (
+        error.validator == "anyOf"
+        and type(error.instance) is int
+        and (sub := [e for e in error.context if e.validator in {"minimum", "maximum"}])
+    ):
+        return _describe_error(min(sub, key=_err_key))
     loc = ".".join(str(part) for part in error.absolute_path)
     prefix, rule, val = (f"{loc}: " if loc else ""), str(error.validator), error.validator_value
     if error.schema is False:
@@ -408,7 +621,20 @@ def _describe_error(error: ValidationError) -> str:
 
 
 def validate_instance(validator: Validator, instance: object, label: str) -> list[str]:
-    """Validate `instance` and return up to 5 sanitized diagnostic strings without echoing values."""
-    errs = sorted(validator.iter_errors(instance), key=lambda e: ([str(p) for p in e.absolute_path], str(e.validator)))
+    """Validate `instance` and return up to 5 sanitized diagnostic strings, failing closed on external `$ref`/regex errors."""
+    try:
+        errs = sorted(
+            validator.iter_errors(instance),
+            key=lambda e: ([str(p) for p in e.absolute_path], str(e.validator)),
+        )
+    except re.error:
+        return [f"{label}: schema contains an invalid regular expression"]
+    except MemoryError:
+        raise
+    except Exception as err:
+        name = type(err).__name__
+        if "Unresolvable" in name or "Referencing" in name:
+            return [f"{label}: schema contains an unresolvable external $ref"]
+        raise Error(f"{label}: schema validation failed ({name})") from err
     msgs = list(dict.fromkeys(f"{label}: {_describe_error(err)}" for err in errs))
     return [*msgs[:5], f"{label}: and {len(msgs) - 5} more schema errors"] if len(msgs) > 5 else msgs

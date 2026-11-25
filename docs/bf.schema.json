@@ -8,77 +8,58 @@
       "title": "Argv",
       "type": "array"
     },
-    "CronTrigger": {
-      "additionalProperties": false,
-      "description": "Cron schedule trigger with optional per-trigger window.",
-      "properties": {
-        "backfill": {
-          "anyOf": [
-            { "maximum": 315576000, "minimum": 1, "type": "integer" },
-            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
-          ],
-          "default": "1d",
-          "description": "Initial BF_START window on first run (now - backfill)."
-        },
-        "cron": {
-          "description": "5-field cron expression or @macro.",
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^(?:@[A-Za-z]+|[^\\s]+(?:[ \\t]+[^\\s]+){4})$",
-          "type": "string"
-        },
-        "overlap": {
-          "anyOf": [
-            { "maximum": 315576000, "minimum": 0, "type": "integer" },
-            { "maxLength": 32, "pattern": "^(?:0|(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+)$", "type": "string" }
-          ],
-          "default": 0,
-          "description": "Rewind on later runs (last_anchor - overlap)."
-        }
-      },
-      "required": ["cron"],
-      "title": "CronTrigger",
-      "type": "object"
-    },
-    "Defaults": {
-      "additionalProperties": false,
-      "description": "Shared loop defaults (timeout, window).",
-      "properties": {
-        "timeout": {
-          "anyOf": [
-            { "maximum": 86400, "minimum": 1, "type": "integer" },
-            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
-          ],
-          "default": "5m",
-          "description": "Default cycle timeout for loops."
-        },
-        "window": { "$ref": "#/$defs/Window" }
-      },
-      "title": "Defaults",
-      "type": ["object", "null"]
-    },
     "EventMatch": {
       "additionalProperties": false,
-      "description": "Event matcher against logs/events.jsonl.",
+      "description": "Event matcher against .bf/state/events.jsonl.",
       "minProperties": 1,
       "properties": {
-        "filter": {
-          "description": "Isolated jq boolean expression evaluated per event.",
-          "maxLength": 2048,
-          "minLength": 1,
-          "type": "string"
-        },
         "kind": {
-          "description": "Exact event kind to match (e.g. records.ingested).",
+          "description": "Exact event kind to match (lowercase letters, digits, '.', '_', '-'; e.g. records.ingested).",
           "maxLength": 128,
           "minLength": 1,
+          "pattern": "^[a-z][a-z0-9._-]{0,127}$",
           "type": "string"
         },
         "source": {
-          "description": "Exact event source to match (loop name or 'bf').",
-          "maxLength": 128,
-          "minLength": 1,
+          "description": "Exact event source to match (lowercase loop name or 'bf').",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
           "type": "string"
+        },
+        "where": {
+          "additionalProperties": {
+            "anyOf": [
+              { "type": ["string", "number", "integer", "boolean", "null"] },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "in": {
+                    "items": { "type": ["string", "number", "integer", "boolean", "null"] },
+                    "maxItems": 64,
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "required": ["in"],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": { "exists": { "type": "boolean" } },
+                "required": ["exists"],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": { "prefix": { "maxLength": 512, "minLength": 1, "type": "string" } },
+                "required": ["prefix"],
+                "type": "object"
+              }
+            ]
+          },
+          "description": "Declarative dot-path predicates evaluated against the event object.",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,127}$" },
+          "type": "object"
         }
       },
       "title": "EventMatch",
@@ -86,8 +67,14 @@
     },
     "EventTrigger": {
       "additionalProperties": false,
-      "description": "Event subscription trigger.",
+      "description": "Event subscription trigger with optional trailing-edge debounce.",
       "properties": {
+        "debounce": {
+          "description": "Trailing-edge coalesce window before firing (1s..1h, e.g. 10s).",
+          "maxLength": 32,
+          "pattern": "^(?:[0-9]+(?:s|m|h|d|w|y))+$",
+          "type": "string"
+        },
         "event": {
           "anyOf": [
             { "maxLength": 128, "minLength": 1, "pattern": "^[a-z][a-z0-9._-]{0,127}$", "type": "string" },
@@ -98,38 +85,6 @@
       },
       "required": ["event"],
       "title": "EventTrigger",
-      "type": "object"
-    },
-    "EveryTrigger": {
-      "additionalProperties": false,
-      "description": "Interval schedule trigger with optional per-trigger window.",
-      "properties": {
-        "backfill": {
-          "anyOf": [
-            { "maximum": 315576000, "minimum": 1, "type": "integer" },
-            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
-          ],
-          "default": "1d",
-          "description": "Initial BF_START window on first run (now - backfill)."
-        },
-        "every": {
-          "anyOf": [
-            { "maximum": 315576000, "minimum": 1, "type": "integer" },
-            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
-          ],
-          "description": "Repeat interval duration (e.g. 15m, 1h, 1d)."
-        },
-        "overlap": {
-          "anyOf": [
-            { "maximum": 315576000, "minimum": 0, "type": "integer" },
-            { "maxLength": 32, "pattern": "^(?:0|(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+)$", "type": "string" }
-          ],
-          "default": 0,
-          "description": "Rewind on later runs (last_anchor - overlap)."
-        }
-      },
-      "required": ["every"],
-      "title": "EveryTrigger",
       "type": "object"
     },
     "Ingest": {
@@ -143,16 +98,18 @@
           "enum": ["upsert", "snapshot"],
           "type": "string"
         },
-        "source": {
-          "description": "Target <target>/<source>.jsonl stem (defaults to loop name).",
+        "schema": {
+          "description": "Optional schemas/<schema>.json name (for year-partitioned sources).",
           "not": {
             "enum": [
               "agents",
               "bf",
               "clients",
               "evals",
+              "http",
+              "https",
               "logs",
-              "loops",
+              "mailto",
               "memories",
               "notes",
               "prompts",
@@ -160,17 +117,35 @@
               "routines",
               "schemas",
               "sensors",
-              "skills",
-              "usages"
+              "urn"
             ]
           },
           "pattern": "^[a-z][a-z0-9-]{0,63}$",
           "type": "string"
         },
-        "target": {
-          "default": "memories",
-          "description": "Record bucket: memories or usages.",
-          "enum": ["memories", "usages"],
+        "source": {
+          "description": "Target memories/<source>.jsonl stem (defaults to loop name).",
+          "not": {
+            "enum": [
+              "agents",
+              "bf",
+              "clients",
+              "evals",
+              "http",
+              "https",
+              "logs",
+              "mailto",
+              "memories",
+              "notes",
+              "prompts",
+              "record",
+              "routines",
+              "schemas",
+              "sensors",
+              "urn"
+            ]
+          },
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
           "type": "string"
         }
       },
@@ -184,7 +159,14 @@
         {
           "if": { "properties": { "when": { "const": "daemon" } }, "required": ["when"], "type": "object" },
           "then": {
-            "not": { "anyOf": [{ "required": ["window"] }, { "required": ["ingest"] }, { "required": ["timeout"] }] }
+            "not": {
+              "anyOf": [
+                { "required": ["window"] },
+                { "required": ["ingest"] },
+                { "required": ["timeout"] },
+                { "required": ["pool"] }
+              ]
+            }
           }
         }
       ],
@@ -196,7 +178,7 @@
           "type": "string"
         },
         "emit": {
-          "description": "Default event kind emitted from stdout JSONL to logs/events.jsonl.",
+          "description": "Default event kind emitted from stdout JSONL to .bf/state/events.jsonl.",
           "maxLength": 128,
           "minLength": 1,
           "pattern": "^[a-z][a-z0-9._-]{0,127}$",
@@ -209,66 +191,61 @@
         },
         "env": {
           "additionalProperties": { "maxLength": 4096, "type": "string" },
-          "description": "Loop environment variable overrides.",
+          "description": "Explicit loop environment variable values (blocks linker/interpreter hijack keys).",
           "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]*$" },
           "type": ["object", "null"]
         },
+        "env_from": {
+          "description": "Host or .env variable names explicitly allowed into this loop.",
+          "items": { "maxLength": 128, "minLength": 1, "pattern": "^[A-Z_][A-Z0-9_]*$", "type": "string" },
+          "maxItems": 128,
+          "type": "array",
+          "uniqueItems": true
+        },
         "ingest": {
-          "anyOf": [
-            { "const": false },
-            { "enum": ["upsert", "snapshot"], "type": "string" },
-            { "$ref": "#/$defs/Ingest" }
-          ],
-          "description": "Ingest stdout JSONL into memories/ or usages/ ('upsert'|'snapshot'|{source?, target?, mode?}), or false to disable sensors/ auto-ingest."
+          "anyOf": [{ "enum": ["upsert", "snapshot"], "type": "string" }, { "$ref": "#/$defs/Ingest" }],
+          "description": "Explicitly ingest stdout JSONL into memories/<source>.jsonl ('upsert'|'snapshot'|{source?, mode?, schema?})."
+        },
+        "pool": {
+          "description": "Named concurrency pool declared under bf.yaml concurrency: (default: 'default').",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "type": "string"
         },
         "run": { "$ref": "#/$defs/Argv" },
         "timeout": {
-          "anyOf": [
-            { "maximum": 86400, "minimum": 1, "type": "integer" },
-            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
-          ],
           "default": "5m",
-          "description": "Max cycle runtime before terminating the process group."
+          "description": "Max cycle runtime as explicit duration (1s..24h, e.g. 5m, 15m).",
+          "maxLength": 32,
+          "pattern": "^(?:[0-9]+(?:s|m|h|d|w|y))+$",
+          "type": "string"
         },
         "when": {
           "anyOf": [
             { "const": "daemon" },
             {
               "anyOf": [
+                { "maxLength": 32, "pattern": "^(?:[0-9]+(?:s|m|h|d|w|y))+$", "type": "string" },
                 {
-                  "anyOf": [
-                    { "maximum": 315576000, "minimum": 1, "type": "integer" },
-                    { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" },
-                    {
-                      "maxLength": 128,
-                      "minLength": 1,
-                      "pattern": "^(?:@[A-Za-z]+|[^\\s]+(?:[ \\t]+[^\\s]+){4})$",
-                      "type": "string"
-                    }
-                  ]
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^(?:@[A-Za-z]+|[^\\s]+(?:[ \\t]+[^\\s]+){4})$",
+                  "type": "string"
                 },
-                { "$ref": "#/$defs/EveryTrigger" },
-                { "$ref": "#/$defs/CronTrigger" },
+                { "$ref": "#/$defs/ScheduleTrigger" },
                 { "$ref": "#/$defs/EventTrigger" }
               ]
             },
             {
               "items": {
                 "anyOf": [
+                  { "maxLength": 32, "pattern": "^(?:[0-9]+(?:s|m|h|d|w|y))+$", "type": "string" },
                   {
-                    "anyOf": [
-                      { "maximum": 315576000, "minimum": 1, "type": "integer" },
-                      { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" },
-                      {
-                        "maxLength": 128,
-                        "minLength": 1,
-                        "pattern": "^(?:@[A-Za-z]+|[^\\s]+(?:[ \\t]+[^\\s]+){4})$",
-                        "type": "string"
-                      }
-                    ]
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "pattern": "^(?:@[A-Za-z]+|[^\\s]+(?:[ \\t]+[^\\s]+){4})$",
+                    "type": "string"
                   },
-                  { "$ref": "#/$defs/EveryTrigger" },
-                  { "$ref": "#/$defs/CronTrigger" },
+                  { "$ref": "#/$defs/ScheduleTrigger" },
                   { "$ref": "#/$defs/EventTrigger" }
                 ]
               },
@@ -277,32 +254,66 @@
               "type": "array"
             }
           ],
-          "description": "When the loop runs: 'daemon', a trigger, a list of triggers, or omit for manual."
+          "description": "When the loop runs: 'daemon', duration ('1h'), cron ('0 8 * * 0'), {every|cron, backfill?, overlap?}, {event, debounce?}, list, or omit for manual."
         },
         "window": { "$ref": "#/$defs/Window" }
       },
       "title": "Loop",
       "type": "object"
     },
-    "Window": {
+    "ScheduleTrigger": {
       "additionalProperties": false,
-      "description": "Default time window for BF_START/BF_END.",
-      "minProperties": 1,
+      "description": "Interval or cron trigger with optional per-trigger BF_START window override.",
+      "oneOf": [{ "required": ["every"] }, { "required": ["cron"] }],
       "properties": {
         "backfill": {
-          "anyOf": [
-            { "maximum": 315576000, "minimum": 1, "type": "integer" },
-            { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" }
-          ],
-          "default": "1d",
-          "description": "Initial BF_START window on first run (now - backfill)."
+          "description": "Per-trigger initial BF_START window override.",
+          "maxLength": 32,
+          "pattern": "^(?:[0-9]+(?:s|m|h|d|w|y))+$",
+          "type": "string"
+        },
+        "cron": {
+          "description": "5-field POSIX cron expression or @macro.",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?:@[A-Za-z]+|[^\\s]+(?:[ \\t]+[^\\s]+){4})$",
+          "type": "string"
+        },
+        "every": {
+          "description": "Interval schedule duration (e.g. 1h, 1d).",
+          "maxLength": 32,
+          "pattern": "^(?:[0-9]+(?:s|m|h|d|w|y))+$",
+          "type": "string"
         },
         "overlap": {
           "anyOf": [
-            { "maximum": 315576000, "minimum": 0, "type": "integer" },
-            { "maxLength": 32, "pattern": "^(?:0|(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+)$", "type": "string" }
+            { "const": 0 },
+            { "maxLength": 32, "pattern": "^(?:0|(?:[0-9]+(?:s|m|h|d|w|y))+)$", "type": "string" }
           ],
-          "default": 0,
+          "description": "Per-trigger BF_START rewind override."
+        }
+      },
+      "title": "ScheduleTrigger",
+      "type": "object"
+    },
+    "Window": {
+      "additionalProperties": false,
+      "description": "Time window for BF_START/BF_END.",
+      "minProperties": 1,
+      "properties": {
+        "backfill": {
+          "default": "1d",
+          "description": "Initial BF_START window on first run (now - backfill).",
+          "maxLength": 32,
+          "pattern": "^(?:[0-9]+(?:s|m|h|d|w|y))+$",
+          "type": "string"
+        },
+        "overlap": {
+          "anyOf": [
+            { "const": 0 },
+            { "maxLength": 32, "pattern": "^(?:0|(?:[0-9]+(?:s|m|h|d|w|y))+)$", "type": "string" }
+          ],
+          "default": "0s",
           "description": "Rewind on later runs (last_anchor - overlap)."
         }
       },
@@ -322,13 +333,19 @@
       "type": ["object", "null"]
     },
     "concurrency": {
+      "anyOf": [
+        { "maximum": 32, "minimum": 1, "type": "integer" },
+        {
+          "additionalProperties": { "maximum": 32, "minimum": 1, "type": "integer" },
+          "maxProperties": 32,
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+          "type": "object"
+        }
+      ],
       "default": 4,
-      "description": "Max concurrent cycle loops in bf watch and bf run --due (1..32).",
-      "maximum": 32,
-      "minimum": 1,
-      "type": "integer"
+      "description": "Max concurrent cycle loops (1..32) or named concurrency pools ({default: 4, agents: 2})."
     },
-    "defaults": { "$ref": "#/$defs/Defaults" },
     "description": {
       "description": "Short description of this brain's scope for humans and AI agents.",
       "maxLength": 1024,
@@ -336,14 +353,14 @@
     },
     "env": {
       "additionalProperties": { "maxLength": 4096, "type": "string" },
-      "description": "Shared environment variables for loops.",
+      "description": "Shared explicit environment variables for loops.",
       "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]*$" },
       "type": ["object", "null"]
     },
     "loops": {
-      "additionalProperties": { "$ref": "#/$defs/Loop" },
+      "additionalProperties": { "anyOf": [{ "$ref": "#/$defs/Loop" }, { "type": "null" }] },
       "description": "Unified loop definitions.",
-      "propertyNames": { "not": { "enum": ["events"] }, "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+      "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,63}$" },
       "type": ["object", "null"]
     },
     "name": {
@@ -353,7 +370,7 @@
     },
     "notes": {
       "default": ["concepts", "projects", "actions"],
-      "description": "Top-level Markdown note folders compiled into memories/<dir>.jsonl.",
+      "description": "Top-level Markdown note folders compiled into memories/_notes.jsonl.",
       "items": {
         "not": {
           "enum": [
@@ -361,8 +378,10 @@
             "bf",
             "clients",
             "evals",
+            "http",
+            "https",
             "logs",
-            "loops",
+            "mailto",
             "memories",
             "notes",
             "prompts",
@@ -370,8 +389,7 @@
             "routines",
             "schemas",
             "sensors",
-            "skills",
-            "usages"
+            "urn"
           ]
         },
         "pattern": "^[a-z][a-z0-9-]{0,63}$",
@@ -382,6 +400,44 @@
       "type": "array",
       "uniqueItems": true
     },
+    "search": {
+      "additionalProperties": false,
+      "description": "Default retrieval settings.",
+      "minProperties": 1,
+      "properties": {
+        "exclude": {
+          "description": "Memory sources excluded from unscoped bf query by default (override via --scope or --all-sources).",
+          "items": {
+            "not": {
+              "enum": [
+                "agents",
+                "bf",
+                "clients",
+                "evals",
+                "http",
+                "https",
+                "logs",
+                "mailto",
+                "memories",
+                "notes",
+                "prompts",
+                "record",
+                "routines",
+                "schemas",
+                "sensors",
+                "urn"
+              ]
+            },
+            "pattern": "^[a-z][a-z0-9-]{0,63}$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "type": ["object", "null"]
+    },
     "timezone": {
       "default": "UTC",
       "description": "IANA timezone for cron schedules.",
@@ -389,7 +445,7 @@
       "minLength": 1,
       "type": "string"
     },
-    "version": { "const": 18, "description": "Brain configuration format version.", "type": "integer" }
+    "version": { "const": 19, "description": "Brain configuration format version.", "type": "integer" }
   },
   "required": ["version", "name"],
   "title": "Config",

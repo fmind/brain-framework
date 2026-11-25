@@ -126,7 +126,6 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(home / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     monkeypatch.delenv("BF_BRAIN", raising=False)
-    monkeypatch.delenv("BRAIN_LOCATION", raising=False)
     monkeypatch.chdir(tmp_path)
     for key in tuple(os.environ):
         if key.startswith("GIT_"):

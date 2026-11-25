@@ -25,7 +25,9 @@ def test_welcome_concept_is_searchable() -> None:
 def test_welcome_section_is_readable() -> None:
     res = _bf("read", "concepts/welcome.md#conventions")
     assert res["kind"] == "section"
-    assert "attr_list" in str(res.get("text", ""))
+    text = str(res.get("text", ""))
+    assert "{rel=" in text
+    assert "?rel=" in text
 
 
 if __name__ == "__main__":

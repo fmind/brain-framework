@@ -1,10 +1,10 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "33.2.1"
-description = "Brain Framework is a local-first brain for you and your AI agents. It compiles OKF Markdown notes into JSONL records, enforces required per-source JSON Schemas, orchestrates convention loops, and queries offline with rg, jq, and DuckDB."
+version = "34.0.0"
+description = "Brain Framework is a local-first brain for you and your AI agents. It compiles YAML-frontmatter Markdown notes into JSONL records, validates with optional JSON Schemas, orchestrates least-privilege loops, and searches offline via a disposable SQLite FTS5 index."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Médéric Hurier" }]
@@ -31,17 +31,17 @@ classifiers = [
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Topic :: Text Processing :: Indexing",
   "Typing :: Typed",
 ]
 dependencies = [
-  "croniter>=6.0.0,<8",
   "jsonschema>=4.26.0,<5",
-  "markdown>=3.11,<4",
+  "markdown-it-py>=3.0.0,<5",
   "pyyaml>=6.0.3,<7",
-  "watchfiles>=1.1.0,<2",
 ]
 
 [project.urls]
@@ -64,6 +64,8 @@ module-name = "bf"
 [dependency-groups]
 dev = [
   "deptry>=0.25.1",
+  # Used by tests/test_readme.py to mirror Zensical's Python-Markdown rendering.
+  "markdown>=3.11,<4",
   # Imported directly by scripts/notices.py to parse requirements and normalize names.
   "packaging>=26.3",
   "pytest-cov>=7.1.0",
@@ -84,7 +86,7 @@ line-length = 120
 src = ["src", "tests"]
 extend-exclude = ["*.md"] # dprint owns Markdown, including its Python code blocks.
 # Copied examples run with the host's python3, not the package interpreter.
-per-file-target-version = { "examples/**/*.py" = "py311" }
+per-file-target-version = { "examples/**/*.py" = "py312" }
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -181,8 +183,6 @@ timeout = "60"
 [tool.coverage.run]
 branch = true
 source = ["bf"]
-# Skill helpers run as separate processes with the agent's python3; their tests exercise them there.
-omit = ["*/bf/skills/*"]
 # Also measure Python subprocesses, such as `python -m bf`, which pytest-cov 7 no longer does; one started with a fresh
 # environment stays unmeasured. Each writes a .coverage.* file that the run combines.
 patch = ["subprocess"]

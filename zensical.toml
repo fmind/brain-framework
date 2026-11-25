@@ -133,19 +133,19 @@ redirect_maps = { "docs/index.md" = "index.md", "docs/getting-started.md" = "get
 # Publish llms.txt and llms-full.txt so agents can read the guides as Markdown.
 [project.plugins.llmstxt]
 full_output = "llms-full.txt"
-markdown_description = "Brain Framework (`bf`) keeps a local-first brain built on YAML for config, JSONL for records (`memories/<source>.jsonl`), and Markdown for humans: required per-source JSON Schemas, Python-Markdown attr_list metadata, universal refs & `bf://` URLs, and offline retrieval with rg, jq, and DuckDB. Release notes and upgrade steps are in the [changelog](https://raw.githubusercontent.com/fmind/brain-framework/main/CHANGELOG.md)."
+markdown_description = "Brain Framework (`bf`) keeps a local-first brain built on YAML for config, JSONL for records (`memories/_notes.jsonl` and `memories/<source>.jsonl`), Markdown for humans, and a strictly disposable offset-indexed stdlib SQLite FTS5 cache (`.bf/cache/index.sqlite3`) for ranked offline retrieval alongside rg, jq, and DuckDB. Release notes and upgrade steps are in the [changelog](https://raw.githubusercontent.com/fmind/brain-framework/main/CHANGELOG.md)."
 
 [project.plugins.llmstxt.sections]
 # Descriptions repeat each page's front matter so agents can choose a page; tests/test_docs.py keeps them in sync.
 Overview = [
-  { "index.md" = "YAML for config, JSONL for records, and Markdown for humans. Enforce required JSON Schemas, resolve universal refs, and query with rg, jq, and DuckDB." },
+  { "index.md" = "YAML for config, JSONL for records, Markdown for humans, and a disposable offset-indexed SQLite FTS5 cache for ranked offline retrieval alongside rg, jq, and DuckDB." },
 ]
 Guides = [
-  { "getting-started.md" = "Create a brain, add a source schema, ingest a record, write a Markdown decision with attr_list metadata and universal refs, and query JSONL records with rg and jq." },
-  { "authoring.md" = "Write OKF Markdown with Python-Markdown attr_list metadata, connect notes and brains with universal refs and bf:// URLs, and enforce required JSON Schemas in schemas/." },
-  { "retrieval.md" = "Orient with bf status and bf review, resolve universal refs with bf read, and query flat JSONL records in memories/ and usages/ with rg, jq, DuckDB, and bf check." },
-  { "operations.md" = "Compose loops with sensors/, routines/, and agents/ conventions, stdout/stderr JSONL streams, when triggers, and bf watch in bf.yaml, ingest atomically, and enforce security boundaries." },
+  { "getting-started.md" = "Create a brain, ingest a record, write a Markdown decision with heading anchors and typed links, and search with BM25 bf query, bf read, and bf review." },
+  { "authoring.md" = "Write YAML-frontmatter Markdown with CommonMark attr_list metadata, connect notes and brains with universal refs and bf:// URLs, and add optional JSON Schemas in schemas/." },
+  { "retrieval.md" = "Orient with bf status and bf review, resolve universal refs with bf read, and search ranked BM25 results and backlinks across memories/ with bf query, rg, jq, DuckDB, and bf check." },
+  { "operations.md" = "Compose explicit, least-privilege loops with per-loop env_from allowlists, per-trigger windows, stdout/stderr JSONL streams, when triggers, and headless bf watch." },
 ]
 Reference = [
-  { "reference.md" = "Complete contract lookup for bf CLI commands, exit codes, 3x3 brain layout, bf.yaml v18, and published JSON Schemas." },
+  { "reference.md" = "Complete contract lookup for bf CLI commands, exit codes, 3x3 brain layout, bf.yaml v19, and published JSON Schemas." },
 ]

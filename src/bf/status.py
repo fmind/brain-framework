@@ -1,27 +1,16 @@
-"""Strictly read-only brain status summary and bird's-eye text table formatter (zero external UI deps)."""
+"""Strictly read-only brain status summary with O(sources) indexed counts and failed/degraded/overdue/crashed attention."""
 
 from __future__ import annotations
 
-import os
-import re
-import select
-import textwrap
-from collections.abc import Iterable, Mapping, Sequence
-from contextlib import suppress
+import sqlite3
+from contextlib import closing, suppress
 from datetime import UTC, datetime
 from typing import Any
 
-from bf import config, loops, markdown, models, records
+from bf import config, cron, engine, index, markdown, models, records, state
 from bf.config import LoopSpec
-from bf.models import Error, decode, printable
-from bf.storage import Store, private_dir
-
-_ANSI_RE = re.compile(r"(\033\[[0-9;]*m)")
-_STATE_ORDER = {"failed": 0, "running": 1, "ok": 2, "stopped": 3, "idle": 4}
-_E1 = {"[A": "up", "[B": "down", "[5~": "pgup", "[6~": "pgdn"}
-_ESC_KEYS = _E1 | dict.fromkeys(("[H", "OH", "[1~"), "home") | dict.fromkeys(("[F", "OF", "[4~"), "end")
-_C1 = {"k": "up", "j": "down", "b": "pgup", " ": "pgdn", "g": "home", "G": "end"}
-_CHAR_KEYS = _C1 | {"f": "filter", "s": "sort", "e": "errors", "r": "refresh", "q": "quit"}
+from bf.models import Error, decode
+from bf.storage import Store, is_loop_locked, private_dir
 
 
 def _log_error_fallback(store: Store, name: str) -> str:
@@ -52,374 +41,291 @@ def _loop_trigger_label(loop: LoopSpec) -> str:
     return " · ".join(parts) or "manual"
 
 
-def unbuilt_note_dirs(store: Store, folders: Iterable[str], authored: Iterable[str] | None = None) -> list[str]:
-    """Return sorted note folders whose `memories/<dir>.jsonl` is missing or out of sync with Markdown files."""
-    dirs = tuple(dict.fromkeys(folders))
-    by_dir: dict[str, list[str]] = {d: [] for d in dirs}
-    for path in authored or ():
-        if (d := path.split("/", 1)[0]) in by_dir:
-            by_dir[d].append(path)
-    out: list[str] = []
-    for folder in dirs:
-        try:
-            notes = markdown.authored_notes(store, (folder,), skipped=[]) if authored is None else by_dir[folder]
-            mem = records.memory_file(folder)
-            if not notes or not store.exists(mem):
-                if bool(notes) != store.exists(mem):
-                    out.append(folder)
-                continue
-            built: dict[str, str] = {}
-            for _, obj in records.iter_jsonl(store, mem):
-                if not isinstance(ref := obj.get("ref"), str) or ref in built:
-                    raise Error("bad")
-                built[ref] = str(obj.get("sha256") or "")
-            if set(built) != set(notes) or any(
-                models.digest(store.read(p, models.MAX_NOTE)) != built[p] for p in notes
-            ):
-                out.append(folder)
-        except Error, OSError:
-            out.append(folder)
-    return sorted(out)
+def _is_crashed_running(store: Store, name: str) -> bool:
+    """Return True if `.bf/locks/loop-<name>.lock` exists (a process created it) yet is no longer locked."""
+    try:
+        locks_dir = private_dir(store, ".bf", "locks", create=False)
+        if not locks_dir.exists(f"loop-{name}.lock"):
+            return False
+    except (FileNotFoundError, Error, OSError):
+        return False
+    return not is_loop_locked(store, name)
 
 
-def corpus_counts(store: Store, cfg: config.Config) -> tuple[dict[str, int], list[str]]:
-    """Compute corpus counts and out-of-sync note folders without mutating disk."""
-    notes_set, authored_list = frozenset(cfg.notes), markdown.authored_notes(store, cfg.notes)
-    rec_total, usage_total, rec_sources = 0, 0, set()
-    for bucket in models.RECORD_DIRS:
-        for src in records.valid_record_sources(store, bucket, cfg.notes):
-            if bucket == "memories" and src in notes_set:
+def corpus_counts(
+    store: Store,
+    cfg: config.Config,
+    *,
+    scale_warnings: list[str] | None = None,
+    problems: list[str] | None = None,
+) -> tuple[dict[str, int], list[str], bool]:
+    """Compute corpus counts, out-of-sync note folders, and index staleness without mutating disk."""
+    authored_list = markdown.authored_notes(store, cfg.notes, skipped=problems)
+    mem_sources = records.valid_memory_sources(store, reserved=cfg.reserved_sources, skipped=problems)
+    try:
+        stale_idx = index.is_stale(store, mem_sources)
+    except (Error, OSError) as err:
+        if problems is None:
+            raise
+        msg = str(err) if isinstance(err, Error) else f"{models.NOTES_FILE}: unreadable file"
+        if msg not in problems:
+            problems.append(msg)
+        stale_idx = True
+    mem_total = 0
+    active_sources = 0
+
+    if not stale_idx:
+        con = index.open_readonly(store)
+        if con is not None:
+            try:
+                _, mem_total, active_sources = index.indexed_counts(con)
+                if scale_warnings is not None:
+                    for src in mem_sources:
+                        rec_path = records.memory_file(src)
+                        with suppress(Error, OSError):
+                            size_b = store.stat(rec_path).st_size
+                            row = con.execute("SELECT record_count FROM sources WHERE source = ?", (src,)).fetchone()
+                            cnt = int(row[0]) if row else 0
+                            if cnt > models.SCALE_WARN_RECORDS or size_b > models.SCALE_WARN_BYTES:
+                                mb = size_b / (1 << 20)
+                                scale_warnings.append(
+                                    f"{rec_path} ({cnt:,} records, {mb:.1f} MiB; consider partitioning)"
+                                )
+            except sqlite3.Error:
+                stale_idx = True
+            finally:
+                con.close()
+        else:
+            stale_idx = bool(mem_sources or store.exists(models.NOTES_FILE))
+
+    if stale_idx:
+        mem_total = 0
+        active_sources = 0
+        for src in mem_sources:
+            rec_path = records.memory_file(src)
+            try:
+                with closing(store.iter_lines(rec_path, models.MAX_FILE)) as lines:
+                    cnt = sum(1 for ln in lines if ln.strip())
+                size_b = store.stat(rec_path).st_size if (cnt and scale_warnings is not None) else 0
+            except (Error, OSError) as err:
+                if problems is None:
+                    raise
+                problems.append(str(err) if isinstance(err, Error) else f"{rec_path}: unreadable file")
                 continue
-            if cnt := sum(
-                1 for ln in store.iter_lines(records.record_file(src, bucket), models.MAX_FILE) if ln.strip()
-            ):
-                if bucket == "usages":
-                    usage_total += cnt
-                else:
-                    rec_total += cnt
-                if rec_total + usage_total > models.MAX_TOTAL_FILES:
-                    raise Error(f"records exceed the {models.MAX_TOTAL_FILES:,}-record total scan limit")
-                rec_sources.add(f"{bucket}/{src}")
-    n, s, lp = len(authored_list), len(rec_sources), len(cfg.loops)
-    counts = {"notes": n, "records": rec_total, "usages": usage_total, "sources": s, "loops": lp}
-    return counts, unbuilt_note_dirs(store, cfg.notes, authored_list)
+            if cnt:
+                mem_total += cnt
+                if mem_total > models.MAX_TOTAL_FILES:
+                    raise Error(f"memories exceeds the {models.MAX_TOTAL_FILES:,}-record total scan limit")
+                active_sources += 1
+                if scale_warnings is not None and (cnt > models.SCALE_WARN_RECORDS or size_b > models.SCALE_WARN_BYTES):
+                    mb = size_b / (1 << 20)
+                    scale_warnings.append(f"{rec_path} ({cnt:,} records, {mb:.1f} MiB; consider partitioning)")
+
+    counts = {
+        "notes": len(authored_list),
+        "memories": mem_total,
+        "sources": active_sources,
+        "loops": len(cfg.loops),
+    }
+    return counts, engine.unbuilt_note_dirs(store, cfg.notes, authored_list, fast=True), stale_idx
+
+
+def _is_inside(store: Store, check_inside: bool) -> bool:
+    if not check_inside:
+        return False
+    with suppress(Error, OSError):
+        return (enclosing := config.inside_brain()) is not None and enclosing.root == store.root
+    return False
 
 
 def status_summary(
-    store: Store, *, all_units: bool = False, counts_cache: tuple[dict[str, int], list[str]] | None = None
+    store: Store,
+    *,
+    include_loops: bool = False,
+    cfg: config.Config | None = None,
+    check_inside: bool = True,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Strictly read-only brain counts, failing attention loops, orphaned `.bf/` states, and optional `loops`."""
-    cfg, problems, attention, loops_out = config.load(store), [], [], {}
-    for name, loop in cfg.loops.items():
+    """Strictly read-only brain counts, failing/degraded/overdue/crashed attention loops, orphans, and optional `loops`."""
+    try:
+        active_cfg = config.load(store) if cfg is None else cfg
+    except Error as err:
+        fallback_probs = [str(err)]
         try:
-            doc = loops.load_unit_state(store, name)
+            ev_seq = state.latest_event_seq(store)
+        except Error as seq_err:
+            ev_seq = 0
+            fallback_probs.append(str(seq_err))
+        return {
+            "brain": store.root.name,
+            "ok": False,
+            "inside_brain": _is_inside(store, check_inside),
+            "events_seq": ev_seq,
+            "counts": {"notes": 0, "memories": 0, "sources": 0, "loops": 0},
+            "attention": [],
+            "orphans": {"states": [], "dirs": [], "logs": []},
+            "unbuilt_notes": [],
+            "problems": fallback_probs,
+        }
+
+    instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
+    first_seq, latest_seq = state.event_bounds(store)
+    pending_timers = len(state.read_timers(store))
+    problems: list[str] = []
+    attention: list[dict[str, Any]] = []
+    paused_names: list[str] = []
+    loops_out: dict[str, Any] = {}
+
+    for name, loop in active_cfg.loops.items():
+        has_state = state.has_unit_state(store, name)
+        try:
+            doc = state.load_unit_state(store, name, default_event_seq=0)
         except Error as err:
             doc = {"status": "failed", "consecutive_failures": 1, "error": str(err)}
-        st, consec = str(doc.get("status") or "idle"), int(doc.get("consecutive_failures") or 0)
+        st = str(doc.get("status") or "idle")
+        paused_now = state.is_paused(doc, instant)
+        paused_until = str(doc.get("paused_until") or "") if paused_now else ""
+        crashed = not paused_now and st == "running" and _is_crashed_running(store, name)
+        if crashed:
+            try:
+                re_doc = state.load_unit_state(store, name, default_event_seq=0)
+            except Error as err:
+                doc = {"status": "failed", "consecutive_failures": 1, "error": str(err)}
+                st, crashed = "failed", False
+            else:
+                re_st = str(re_doc.get("status") or "idle")
+                if re_st != "running" or re_doc.get("last_start") != doc.get("last_start"):
+                    doc, st = re_doc, re_st
+                    paused_now = state.is_paused(doc, instant)
+                    paused_until = str(doc.get("paused_until") or "") if paused_now else ""
+                    crashed = False
+        consec = state.int_field(doc, "consecutive_failures")
+        ev_seq = state.int_field(doc, "event_seq")
+        dl_cnt = state.int_field(doc, "dead_lettered")
+        pending_missed = state.int_field(doc, "pending_events_missed")
+        live_missed = (
+            (first_seq - 1) - ev_seq if (loop.events and has_state and first_seq > 1 and ev_seq < first_seq - 1) else 0
+        )
+        ev_missed = pending_missed + live_missed
         err_s = str(doc.get("error") or "").strip() or (_log_error_fallback(store, name) if st == "failed" else "")
+        err_preview = " ".join(err_s.split())[:256] if err_s else ""
         mode = "daemon" if loop.daemon else "cycle"
-        if loop.enabled and (st == "failed" or consec > 0):
-            why = "last run failed" if st == "failed" else f"{consec} consecutive failure(s)"
-            problems.append(f"loops.{name}: {why}")
-            att = {"kind": "loop", "mode": mode, "name": name, "status": st, "failed": st == "failed"}
-            attention.append({**att, "consecutive_failures": consec, **({"error": err_s} if err_s else {})})
         lr = doc.get("last_run") if isinstance(doc.get("last_run"), dict) and doc.get("last_run") else None
-        ing_s, ing_tgt, ing_m = loops.effective_ingest(store, loop, cfg.reserved_sources)
-        ing_d = {"ingest_target": ing_tgt, "ingest_mode": ing_m} if ing_s else {}
-        doc_d = {"last_start": doc.get("last_start", ""), "last_end": doc.get("last_end", "")}
-        opt_d = {"description": loop.description, "trigger": _loop_trigger_label(loop), **ing_d, **doc_d}
-        opt_d |= {"duration_ms": doc.get("duration_ms", 0) or None, "last_run": lr, "error": err_s}
-        base_l = {"enabled": loop.enabled, "mode": mode, "status": st, "last_success": doc.get("last_success", "")}
-        loops_out[name] = {**base_l, "consecutive_failures": consec, **{k: v for k, v in opt_d.items() if v}}
-    if counts_cache is None:
-        counts, unbuilt_notes = corpus_counts(store, cfg)
-    else:
-        counts, unbuilt_notes = {**counts_cache[0], "loops": len(cfg.loops)}, list(counts_cache[1])
-    inside = False
-    with suppress(Error):
-        inside = (enclosing := config.inside_brain()) is not None and enclosing.root == store.root
-    desc_d = {"description": cfg.description} if cfg.description else {}
-    head_d = {"brain": cfg.name, **desc_d, "ok": not problems, "inside_brain": inside}
-    mid_d = {"events_seq": records.latest_event_seq(store), "counts": counts, "attention": attention}
-    tail_d = {"orphaned_states": loops.find_orphans(store, set(cfg.loops)), "unbuilt_notes": unbuilt_notes}
-    return {**head_d, **mid_d, **tail_d, "problems": problems, **({"loops": loops_out} if all_units else {})}
+        degraded = bool(isinstance(lr, dict) and lr.get("incomplete") is True)
+        overdue = not paused_now and cron.is_schedule_overdue(loop, doc, instant, tz_name=active_cfg.timezone)
 
+        if loop.enabled:
+            if paused_now:
+                paused_names.append(name)
+            elif st == "failed" or consec > 0:
+                why = "last run failed" if st == "failed" else f"{consec} consecutive failure(s)"
+                problems.append(f"loops.{name}: {why}")
+                if ev_missed > 0:
+                    problems.append(f"loops.{name}: missed {ev_missed} compacted event(s)")
+                att: dict[str, Any] = {
+                    "name": name,
+                    "mode": mode,
+                    "reason": "failed",
+                    "status": st,
+                    "consecutive_failures": consec,
+                }
+                if ev_missed > 0:
+                    att["events_missed"] = ev_missed
+                if err_preview:
+                    att["error"] = err_preview
+                attention.append(att)
+            elif crashed:
+                problems.append(f"loops.{name}: process exited unexpectedly (lock not held)")
+                if ev_missed > 0:
+                    problems.append(f"loops.{name}: missed {ev_missed} compacted event(s)")
+                attention.append(
+                    {
+                        "name": name,
+                        "mode": mode,
+                        "reason": "crashed",
+                        "status": "stopped",
+                        "error": "process exited unexpectedly (lock not held)",
+                        **({"events_missed": ev_missed} if ev_missed > 0 else {}),
+                    }
+                )
+            elif ev_missed > 0:
+                problems.append(f"loops.{name}: missed {ev_missed} compacted event(s)")
+                attention.append(
+                    {
+                        "name": name,
+                        "mode": mode,
+                        "reason": "events_missed",
+                        "status": st,
+                        "events_missed": ev_missed,
+                    }
+                )
+            elif degraded:
+                problems.append(f"loops.{name}: degraded (incomplete collection)")
+                attention.append({"name": name, "mode": mode, "reason": "degraded", "status": st})
+            elif overdue:
+                problems.append(f"loops.{name}: overdue schedule")
+                attention.append({"name": name, "mode": mode, "reason": "overdue", "status": st})
 
-def _fmt_age(raw_iso: str, now: datetime, *, live: bool = False) -> str:
-    with suppress(ValueError, TypeError):
-        if raw_iso:
-            sec = max(0, int((now - datetime.fromisoformat(raw_iso)).total_seconds()))
-            if sec < 5 and not live:
-                return "now"
-            for size, unit in ((86400, "d"), (3600, "h"), (60, "m"), (1, "s")):
-                if sec >= size or size == 1:
-                    return f"up {sec // size}{unit}" if live else f"{sec // size}{unit} ago"
-    return "-"
+        if include_loops:
+            optional: dict[str, Any] = {
+                "description": loop.description,
+                "trigger": _loop_trigger_label(loop),
+                "pool": loop.pool if (not loop.daemon and loop.pool != "default") else None,
+                "paused": paused_now or None,
+                "paused_until": paused_until,
+                "last_start": doc.get("last_start", ""),
+                "last_end": doc.get("last_end", ""),
+                "duration_ms": state.int_field(doc, "duration_ms") or None,
+                "last_run": lr,
+                "error": err_s,
+                "dead_lettered": dl_cnt or None,
+                "events_missed": ev_missed or None,
+                "crashed": crashed or None,
+                "degraded": degraded or None,
+                "overdue": overdue or None,
+            }
+            if loop.ingest:
+                optional["ingest_mode"] = loop.mode
+            eff_st = "paused" if paused_now else ("stopped" if crashed else st)
+            loops_out[name] = {
+                "enabled": loop.enabled,
+                "mode": mode,
+                "status": eff_st,
+                "last_success": doc.get("last_success", ""),
+                "event_seq": ev_seq,
+                "runs": state.int_field(doc, "runs"),
+                "failures": state.int_field(doc, "failures"),
+                "consecutive_failures": consec,
+                **{key: val for key, val in optional.items() if val},
+            }
 
-
-def format_run_detail(lr: Mapping[str, Any], *, compact: bool = False) -> str:
-    """Render sanitized `+added ~updated -removed` / `emitted` / `notes` detail from a loop run summary."""
-    if "records" in lr:
-        diffs = " ".join(
-            f"{s}{printable(str(v))[:16]}"
-            for s, k in (("+", "added"), ("~", "updated"), ("-", "removed"))
-            if (v := lr.get(k))
-        )
-        tot = printable(str(lr.get("records") or 0))[:16]
-        if diffs:
-            return f"{diffs} · {tot} records" if compact else f"{diffs} ({tot} total)"
-        return f"{tot} unchanged"
-    if "emitted" in lr:
-        return f"{printable(str(lr['emitted']))[:16]} emitted"
-    if "notes" in lr:
-        return f"{printable(str(lr['notes']))[:16]} notes ({printable(str(lr.get('written', 0)))[:16]} built)"
-    return ""
-
-
-def _fmt_detail(entry: dict[str, Any]) -> str:
-    st = str(entry.get("status") or "idle")
-    if st == "failed":
-        consec = int(entry.get("consecutive_failures") or 0)
-        err = printable(" ".join(str(entry.get("error") or "failed").split()))
-        return f"({consec}x) {err[:72]}" if consec > 1 else err[:72]
-    if st == "ok" and isinstance(lr := entry.get("last_run"), dict) and (detail := format_run_detail(lr)):
-        return detail
-    return printable(" ".join(str(entry.get("description") or "").split()))[:64]
-
-
-def ansi_codes(color: bool) -> tuple[str, str, str, str, str]:
-    """Return `(ok, err, running, dim, reset)` ANSI SGR codes when `color` is enabled."""
-    return ("\033[32m", "\033[31;1m", "\033[36;1m", "\033[2m", "\033[0m") if color else ("", "", "", "", "")
-
-
-def clip_ansi(line: str, width: int) -> str:
-    """Sanitize non-SGR escapes via `printable()` and clip to `width` visible columns without color bleed."""
-    if width < 1:
-        return ""
-    parts = [p if i % 2 else printable(p) for i, p in enumerate(_ANSI_RE.split(line))]
-    if sum(len(p) for i, p in enumerate(parts) if i % 2 == 0) <= width:
-        last_sgr = next((parts[i] for i in range(len(parts) - 1, -1, -1) if i % 2), "")
-        return "".join(parts) + ("\033[0m" if last_sgr and last_sgr != "\033[0m" else "")
-    keep, out, vis, has_esc = (width - 1 if width > 1 else 1), [], 0, False
-    for i, part in enumerate(parts):
-        if i % 2:
-            out.append(part)
-            has_esc = True
-        elif part:
-            take = min(len(part), keep - vis)
-            out.append(part[:take])
-            vis += take
-            if vis >= keep:
-                break
-    return "".join(out) + ("…" if width > 1 else "") + ("\033[0m" if has_esc else "")
-
-
-def read_tui_key(fd: int) -> str:
-    """Decode one keypress, ANSI arrow/page/SGR-wheel sequence, or `'eof'` from a TTY descriptor."""
-    if not (ch := os.read(fd, 1)):
-        return "eof"
-    if ch == b"\x03":
-        return "quit"
-    if ch != b"\x1b":
-        return _CHAR_KEYS.get(ch.decode("latin1"), "")
-    poller = select.poll()
-    poller.register(fd, select.POLLIN)
-    seq = b""
-    while len(seq) < 20 and (evs := poller.poll(20)) and (evs[0][1] & select.POLLIN) and (part := os.read(fd, 1)):
-        seq += part
-        if hit := _ESC_KEYS.get(seq.decode("latin1")):
-            return hit
-        if part == b"M" and (wheel := {b"[<64;": "up", b"[<65;": "down"}.get(seq[:5])):
-            return wheel
-        if len(seq) >= 2 and 0x40 <= part[0] <= 0x7E:
-            break
-    return ""
-
-
-def apply_tui_key(
-    key: str, offset: int, page: int, only_active: bool, sort_recent: bool, show_errors: bool = False
-) -> tuple[int, bool, bool, bool, str]:
-    """Apply one interactive shortcut and return `(offset, only_active, sort_recent, show_errors, action)`."""
-    step = max(1, page)
-    if (delta := {"up": -1, "down": 1, "pgup": -step, "pgdn": step}.get(key)) is not None:
-        return max(0, offset + delta), only_active, sort_recent, show_errors, ""
-    if key in {"home", "end"}:
-        return (0 if key == "home" else 10**9), only_active, sort_recent, show_errors, ""
-    if key in {"filter", "sort"}:
-        return 0, only_active ^ (key == "filter"), sort_recent ^ (key == "sort"), show_errors, ""
-    if key == "errors":
-        return offset, only_active, sort_recent, not show_errors, ""
-    return offset, only_active, sort_recent, show_errors, key if key in {"refresh", "quit"} else ""
-
-
-def _neg_epoch(entry: Mapping[str, Any]) -> float:
-    with suppress(ValueError, TypeError):
-        if raw := str(entry.get("last_end") or entry.get("last_start") or entry.get("last_success") or ""):
-            return -datetime.fromisoformat(raw).timestamp()
-    return 0.0
-
-
-def _summary_head(summary: Mapping[str, Any], *, color: bool, suffix: str = "") -> list[str]:
-    c_ok, c_err, _, _, c_rst = ansi_codes(color)
-    cnt, ok = summary.get("counts") or {}, bool(summary.get("ok", True))
-    badge = f"{c_ok}HEALTHY{c_rst}" if ok else f"{c_err}ATTENTION ({len(summary.get('attention') or [])}){c_rst}"
-    c_ln = f"  notes={int(cnt.get('notes', 0)):,}  memories={int(cnt.get('records', 0)):,}  usages={int(cnt.get('usages', 0)):,}  loops={int(cnt.get('loops', 0)):,}  events={int(summary.get('events_seq') or 0):,}"
-    return [f"Brain: {printable(str(summary.get('brain', '')))}  [{badge}]{suffix}", c_ln]
-
-
-def _is_active_loop(d: Mapping[str, Any]) -> bool:
-    lr = d.get("last_run")
-    changed = isinstance(lr, Mapping) and any(lr.get(k) for k in ("added", "updated", "removed", "emitted", "written"))
-    return str(d.get("status") or "") in {"failed", "running"} or int(d.get("consecutive_failures") or 0) > 0 or changed
-
-
-def _build_loop_rows(
-    loops_map: Mapping[str, Any],
-    instant: datetime,
-    *,
-    color: bool,
-    only_active: bool = False,
-    sort_recent: bool = False,
-) -> tuple[str, list[str], int, int]:
-    c_ok, c_err, c_run, c_dim, c_rst = ansi_codes(color)
-    enabled = [(n, d) for n, d in loops_map.items() if isinstance(d, dict) and d.get("enabled", True)]
-    picked = [(n, d) for n, d in enabled if not only_active or _is_active_loop(d)]
-    picked.sort(
-        key=lambda p: (
-            _STATE_ORDER.get(str(p[1].get("status", "idle")), 4),
-            _neg_epoch(p[1]) if sort_recent else 0.0,
-            p[0],
-        )
+    scale_warnings: list[str] = []
+    counts, unbuilt_notes, index_stale = corpus_counts(
+        store, active_cfg, scale_warnings=scale_warnings, problems=problems
     )
-    if not picked:
-        return "", [], len(enabled), len(loops_map) - len(enabled)
-    w_n = max(len(printable(n)) for n, _ in picked)
-    w_t = max(len(printable(str(d.get("trigger") or d.get("mode") or ""))) for _, d in picked)
-    hdr = f"  {c_dim}{'LOOP':<{w_n}}  {'TRIGGER':<{w_t}}  {'STATE':<8}  {'WHEN':<8}  DETAIL{c_rst}"
-    rows = []
-    for name, d in picked:
-        st = str(d.get("status") or "idle")
-        st_c = c_err if st == "failed" else (c_run if st == "running" else (c_ok if st == "ok" else c_dim))
-        ts = str(d.get("last_start" if st == "running" else "last_end") or d.get("last_success") or "")
-        trig, age = printable(str(d.get("trigger") or d.get("mode") or "")), _fmt_age(ts, instant, live=st == "running")
-        rows.append(
-            f"  {printable(name):<{w_n}}  {trig:<{w_t}}  {st_c}{printable(st)[:16]:<8}{c_rst}  {age:<8}  {_fmt_detail(d)}"
-        )
-    return hdr, rows, len(enabled), len(loops_map) - len(enabled)
 
+    inside = _is_inside(store, check_inside)
 
-def _alert_lines(summary: Mapping[str, Any], *, short: bool = False) -> list[str]:
-    pfx = "" if short else "run: "
-    u_l, o_l = ("unbuilt", "orphans") if short else ("unbuilt notes", "orphaned states")
-    rows = ((u_l, summary.get("unbuilt_notes"), "bf build"), (o_l, summary.get("orphaned_states"), "bf run --prune"))
-    return [f"  {lbl}: {', '.join(printable(str(v)) for v in vals)} ({pfx}{cmd})" for lbl, vals, cmd in rows if vals]
+    raw_orphans = state.find_orphans(store, set(active_cfg.loops))
+    orphans_out = {k: raw_orphans[k] for k in ("states", "dirs", "logs")}
 
-
-def format_status_text(summary: dict[str, Any], *, color: bool = False, now: datetime | None = None) -> str:
-    """Format a compact, calm bird's-eye overview table for humans (zero external dependencies)."""
-    instant, (_, _, _, c_dim, c_rst) = datetime.now(UTC) if now is None else now.astimezone(UTC), ansi_codes(color)
-    lines = _summary_head(summary, color=color)
-    if isinstance(loops_map := summary.get("loops"), dict) and loops_map:
-        hdr, rows, _, disabled = _build_loop_rows(loops_map, instant, color=color)
-        if rows:
-            lines.extend(["", hdr, *rows])
-        if disabled:
-            lines.append(f"  {c_dim}({disabled} disabled loop(s)){c_rst}")
-    lines.extend(_alert_lines(summary))
-    return "\n".join(lines) + "\n"
-
-
-def format_watch_screen(
-    summary: dict[str, Any],
-    recent: Sequence[str],
-    *,
-    cols: int = 100,
-    rows: int = 30,
-    offset: int = 0,
-    only_active: bool = False,
-    sort_recent: bool = True,
-    show_errors: bool = False,
-    concurrency: int = 4,
-    color: bool = False,
-    now: datetime | None = None,
-) -> tuple[str, int, int]:
-    """Render one flicker-free scrollable ANSI frame for `bf watch`, returning `(frame, clamped_offset, page)`."""
-    instant, (_, c_err, _, c_dim, c_rst) = datetime.now(UTC) if now is None else now.astimezone(UTC), ansi_codes(color)
-    t_spec = (("active", only_active), ("A-Z", not sort_recent), ("errors", show_errors))
-    tags = "".join(f"  {c_dim}[{t}]{c_rst}" for t, on in t_spec if on)
-    sfx = f"{tags}  {c_dim}{concurrency}w · {instant.strftime('%H:%M:%S')} UTC{c_rst}"
-    head = [*_summary_head(summary, color=color, suffix=sfx), *_alert_lines(summary, short=True)]
-    loops_map: Mapping[str, Any] = raw if isinstance(raw := summary.get("loops"), dict) else {}
-    hdr, r_lines, en_n, dis_n = _build_loop_rows(
-        loops_map, instant, color=color, only_active=only_active, sort_recent=sort_recent
-    )
-    w, rec_n, rec_blk = max(20, cols), (5 if rows >= 14 else (2 if rows >= 10 else 0)), []
-    if rec_n and show_errors:
-        att = [a for a in (summary.get("attention") or ()) if isinstance(a, Mapping)]
-        if att:
-            top, span = att[0], max(20, w - 4)
-            more = f" · +{len(att) - 1} more" if len(att) > 1 else ""
-            err_s = printable(" ".join(str(top.get("error") or "failed").split()))
-            wrapped = textwrap.wrap(err_s, span)[:rec_n] or ["failed"]
-            t_lbl = f"{printable(str(top.get('name') or ''))} · {int(top.get('consecutive_failures') or 0)}x{more}"
-            rec_blk = ["", f"  {c_err}Error ({t_lbl}):{c_rst}", *(f"  {ln}" for ln in wrapped)]
-        else:
-            rec_blk = ["", f"  {c_dim}Errors: (no failing loops){c_rst}"]
-    elif rec_n and recent:
-        rec_blk = ["", f"  {c_dim}Recent activity:{c_rst}", *(f"  {r}" for r in list(recent)[-rec_n:])]
-    f_l, s_l = ("active" if only_active else "all"), ("recent" if sort_recent else "name")
-    keys_bar = f"  {c_dim}↑/↓ scroll · PgUp/PgDn page · g/G top/end · f filter({f_l}) · s sort({s_l}) · e errors · r refresh · q quit{c_rst}"
-    avail = max(1, rows - len(head) - len(rec_blk) - 5)
-    clamped = max(0, min(offset, max(0, len(r_lines) - avail)))
-    body = [""]
-    if r_lines:
-        shown = r_lines[clamped : clamped + avail]
-        body.extend([hdr, *shown])
-        if len(r_lines) > avail or only_active or dis_n:
-            extra = (f" of {en_n} enabled" if only_active else "") + (f" · {dis_n} disabled" if dis_n else "")
-            body.append(f"  {c_dim}showing {clamped + 1}-{clamped + len(shown)}/{len(r_lines)}{extra}{c_rst}")
-    else:
-        empty = "no active/failing loops (press f for all)" if only_active and en_n else "no enabled loops in bf.yaml"
-        body.append(f"  {c_dim}({empty}){c_rst}")
-    out = [*head, *body, *rec_blk, "", keys_bar][: max(1, rows)]
-    return "\n".join(clip_ansi(ln, w) + "\033[K" for ln in out), clamped, avail
-
-
-def format_check_text(res: dict[str, Any], *, color: bool = False, notes_only: bool = False) -> str:
-    """Format a compact, calm human summary for `bf check --format text`."""
-    c_ok, c_err, _, c_dim, c_rst = ansi_codes(color)
-    errs, warns = int(res.get("errors_count") or 0), int(res.get("warnings_count") or 0)
-    badge = f"{c_ok}OK{c_rst}" if res.get("ok") else f"{c_err}FAILED ({errs} errors, {warns} warnings){c_rst}"
-    mem_v, use_v = ("skipped", "skipped") if notes_only else (res.get("records", 0), res.get("usages", 0))
-    c_head = f"Check: {printable(str(res.get('brain', '')))}  [{badge}]"
-    c_cnt = f"  notes={res.get('notes', 0)}  memories={mem_v}  usages={use_v}  errors={errs}  warnings={warns}"
-    lines = [c_head, c_cnt]
-    if probs := res.get("problems"):
-        lines.extend(["", *(f"  - {printable(str(p))}" for p in probs)])
-    if (res.get("summary") or {}).get("truncated"):
-        lines.append(f"  {c_dim}(truncated; pass --all for full list){c_rst}")
-    return "\n".join(lines) + "\n"
-
-
-def format_review_text(res: dict[str, Any], *, color: bool = False) -> str:
-    """Format a compact, calm human summary for `bf review --format text`."""
-    c_ok, c_err, _, c_dim, c_rst = ansi_codes(color)
-    probs, stale = res.get("problems") or [], res.get("stale") or []
-    total_stale, open_tasks = int(res.get("total_stale") or 0), int(res.get("total_tasks_open") or 0)
-    ok_b = f"{c_ok}FRESH{c_rst}" if total_stale == 0 else f"{c_err}STALE ({total_stale}){c_rst}"
-    badge = ok_b if res.get("ok", True) else f"{c_err}FAILED{f' ({len(probs)} problems)' if probs else ''}{c_rst}"
-    b_head = f"Review: {printable(str(res.get('brain', '')))}  [{badge}]"
-    lines = [b_head, f"  stale={total_stale}  open_tasks={open_tasks}"]
-    if stale:
-        w_r = max((len(printable(str(it.get("ref", "")))) for it in stale), default=3)
-        lines.extend(["", f"  {c_dim}{'REF':<{w_r}}  {'REASONS':<22}  DETAIL{c_rst}"])
-        for it in stale:
-            newer = [printable(str(n)) for n in (it.get("newer") or ())]
-            detail = f"newer: {', '.join(newer)}" if newer else printable(str(it.get("title") or ""))
-            rsn = ",".join(str(r) for r in (it.get("reasons") or ()))
-            lines.append(f"  {printable(str(it.get('ref', ''))):<{w_r}}  {rsn:<22}  {detail}")
-    if res.get("truncated"):
-        lines.append(f"  {c_dim}(truncated; pass --all for full list){c_rst}")
-    if probs:
-        lines.extend(["", *(f"  ! {printable(str(p))}" for p in probs)])
-    return "\n".join(lines) + "\n"
+    out: dict[str, Any] = {
+        "brain": active_cfg.name,
+        **({"description": active_cfg.description} if active_cfg.description else {}),
+        "ok": not problems,
+        "inside_brain": inside,
+        "events_seq": latest_seq,
+        **({"pending_timers": pending_timers} if pending_timers else {}),
+        **({"paused": paused_names} if paused_names else {}),
+        "counts": counts,
+        "attention": attention,
+        "orphans": orphans_out,
+        "unbuilt_notes": unbuilt_notes,
+        **({"index_stale": True} if index_stale else {}),
+        "problems": problems,
+    }
+    if scale_warnings:
+        out["scale_warnings"] = scale_warnings
+    if include_loops:
+        out["loops"] = loops_out
+    return out

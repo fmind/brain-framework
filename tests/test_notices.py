@@ -16,6 +16,7 @@ _PLATFORM_MARKERS = {
     "linux": {
         "implementation_name != 'PyPy'": True,
         "platform_python_implementation != 'PyPy'": True,
+        "python_full_version < '3.13'": False,
         "python_full_version < '3.15'": True,
         "sys_platform != 'emscripten'": True,
         "sys_platform == 'emscripten'": False,
@@ -24,6 +25,7 @@ _PLATFORM_MARKERS = {
     "macos": {
         "implementation_name != 'PyPy'": True,
         "platform_python_implementation != 'PyPy'": True,
+        "python_full_version < '3.13'": False,
         "python_full_version < '3.15'": True,
         "sys_platform != 'emscripten'": True,
         "sys_platform == 'emscripten'": False,

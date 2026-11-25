@@ -1,29 +1,29 @@
 # yaml-language-server: $schema=https://fmind.github.io/brain-framework/bf.schema.json
 # https://fmind.github.io/brain-framework/reference/
-version: 18
+version: 19
 name: example
 description: Runnable example brain with offline sensors, routines, and loops.
 timezone: UTC
-concurrency: 4
+concurrency:
+  default: 4
+  agents: 2
+  interactive: 2
 env:
   EXAMPLE_MODE: "local"
-defaults:
-  timeout: 5m
 loops:
   demo:
     description: Snapshot fictional evidence records from the local demo sensor.
     when: 1h
     ingest: snapshot
   usage-demo:
-    description: Snapshot fictional FinOps telemetry records into usages/usage-demo.jsonl.
+    description: Snapshot fictional FinOps telemetry records into memories/usage-demo.jsonl with schemas/usages.json.
     when: 1d
     ingest:
-      target: usages
       mode: snapshot
+      schema: usages
   weekly-review:
     description: Save a weekly summary of notes, records, and open tasks into memories/weekly-review.jsonl.
-    when:
-      cron: "0 8 * * 0"
+    when: "0 8 * * 0"
     ingest: snapshot
   local:
     description: Stream local inbox messages as loop.message events.
@@ -32,10 +32,13 @@ loops:
     emit: loop.message
     enabled: false
   assistant:
-    description: Run a scheduled or chat-triggered digest assistant (agents/assistant.py, 15m default timeout).
+    description: Run a scheduled or chat-triggered digest assistant (agents/assistant.py).
+    pool: agents
+    timeout: 15m
+    window:
+      backfill: 1d
     when:
-      - every: 1d
-        backfill: 1d
+      - 1d
       - cron: "0 8 * * 1"
         backfill: 1w
       - event:

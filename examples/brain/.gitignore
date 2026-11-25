@@ -3,5 +3,3 @@
 /logs/
 /memories/*
 !/memories/*.forgotten
-/usages/*
-!/usages/*.forgotten

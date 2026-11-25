@@ -1,8 +1,6 @@
-# Disposable locks/cursors, local secrets, compiled/ingested JSONL records, and runtime logs stay out of Git.
+# Disposable index/locks/cursors/events, local secrets, compiled/ingested JSONL records, and runtime logs stay out of Git.
 /.bf/
 /.env
 /logs/
 /memories/*
 !/memories/*.forgotten
-/usages/*
-!/usages/*.forgotten

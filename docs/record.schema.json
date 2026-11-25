@@ -52,8 +52,8 @@
   "$id": "https://fmind.github.io/brain-framework/record.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": true,
-  "description": "Unified JSON record schema enforced on compiled notes and ingested records in memories/*.jsonl and usages/*.jsonl.",
-  "if": { "properties": { "kind": { "enum": ["memory", "usage"] } }, "required": ["kind"] },
+  "description": "Unified JSON record schema enforced natively on compiled notes and ingested records in memories/*.jsonl.",
+  "if": { "properties": { "kind": { "const": "memory" } }, "required": ["kind"] },
   "properties": {
     "aliases": {
       "description": "Alternate identifiers resolved by bf read/review.",
@@ -61,10 +61,11 @@
       "maxItems": 200,
       "type": "array"
     },
-    "attributes": { "description": "Freeform sensor-specific domain attributes.", "type": "object" },
+    "attributes": { "description": "Optional sensor-specific domain attributes.", "type": "object" },
     "created": {
-      "description": "Creation or event ISO date (YYYY-MM-DD) or timestamp.",
-      "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$",
+      "description": "Creation or event ISO date/timestamp.",
+      "minLength": 10,
+      "pattern": "^[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
       "type": "string"
     },
     "description": { "description": "Short description of the note or record.", "maxLength": 16384, "type": "string" },
@@ -80,16 +81,18 @@
       "type": "array"
     },
     "id": {
-      "description": "Stable source-local record identifier (required for memory/usage).",
+      "description": "Stable source-local record identifier (required for memory).",
       "maxLength": 4096,
       "minLength": 1,
       "type": "string"
     },
-    "kind": {
-      "description": "Top-level record kind (note, memory, or usage).",
-      "enum": ["note", "memory", "usage"],
+    "ingested_at": {
+      "description": "UTC ingestion timestamp.",
+      "minLength": 10,
+      "pattern": "^[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
       "type": "string"
     },
+    "kind": { "description": "Top-level record kind (note or memory).", "enum": ["note", "memory"], "type": "string" },
     "links": {
       "description": "Normalized outgoing links.",
       "items": { "$ref": "#/$defs/Link" },
@@ -108,21 +111,20 @@
       "type": "string"
     },
     "source": {
-      "description": "Owning source name (<bucket>/<source>.jsonl).",
+      "description": "Owning source name (note dir or memories/<source>.jsonl).",
       "pattern": "^[a-z][a-z0-9-]{0,63}$",
       "type": "string"
     },
     "stale_after": {
       "anyOf": [
-        { "maximum": 36500, "minimum": 1, "type": "integer" },
-        { "maxLength": 32, "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d|w|y))+$", "type": "string" },
+        { "maxLength": 32, "pattern": "^(?:[0-9]+(?:s|m|h|d|w|y))+$", "type": "string" },
         {
           "minLength": 10,
-          "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$",
+          "pattern": "^[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
           "type": "string"
         }
       ],
-      "description": "Review freshness threshold (days, duration, or ISO date)."
+      "description": "Review freshness threshold (explicit duration like 90d or ISO date)."
     },
     "status": {
       "description": "Lifecycle status (e.g. draft, stable, active, open, done).",
@@ -145,17 +147,24 @@
     "text": { "description": "Plain or Markdown body text.", "maxLength": 4194304, "type": "string" },
     "title": { "description": "Human-readable title.", "maxLength": 4096, "minLength": 1, "type": "string" },
     "type": {
-      "description": "Domain subtype (e.g. guide, project, issue, session).",
+      "description": "Domain subtype (e.g. guide, project, issue, usage).",
       "maxLength": 128,
       "minLength": 1,
       "type": "string"
     },
     "updated": {
-      "description": "Last-updated ISO date (YYYY-MM-DD) or timestamp.",
-      "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?)?$",
+      "description": "Last-updated ISO date/timestamp.",
+      "minLength": 10,
+      "pattern": "^[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|[12][0-9]))(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
       "type": "string"
     },
-    "url": { "description": "Canonical external URL.", "maxLength": 8192, "type": "string" }
+    "url": {
+      "description": "Canonical external URL (https, http, mailto, or urn).",
+      "maxLength": 8192,
+      "minLength": 1,
+      "pattern": "^(?:https?://[^\\s/?#]+\\S*|(?:mailto|urn):\\S+)$",
+      "type": "string"
+    }
   },
   "required": ["ref", "source", "kind", "title"],
   "then": { "required": ["id"] },

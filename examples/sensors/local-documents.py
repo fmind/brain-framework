@@ -40,13 +40,13 @@ MAX_ENTRIES = 10000
 MAX_DEPTH = 20
 MAX_ID = 4096
 MAX_ENCODED_ID = 7988
-MAX_REF = 8192
 # Per Office XML part: parsing stops at these bounds and the record keeps the text read so far, marked partial.
 MAX_ELEMENTS, MAX_NESTING = 100_000, 64
 PDF_TIMEOUT = 60
 EXTENSIONS = {".txt", ".md", ".rst", ".org", ".csv", ".tsv", ".html", ".htm", ".docx", ".pptx", ".xlsx", ".pdf"}
 SKIP = {"node_modules", "__pycache__", "venv"}
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
+TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
 
 
 class InvalidError(ValueError):
@@ -62,11 +62,13 @@ class ProviderError(Exception):
 
 
 def run(argv: Sequence[str], *, timeout: float, max_bytes: int) -> bytes:
-    """Execute one converter CLI from / with bounded output and process-group reaping."""
+    """Execute one converter CLI from / with minimal env, bounded output, and process-group reaping."""
+    minimal_env = {"PATH": os.environ.get("PATH", ""), "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"}
     try:
         proc = subprocess.Popen(
             list(argv),
             cwd="/",
+            env=minimal_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -247,12 +249,30 @@ def office(data: bytes, suffix: str) -> tuple[str, bool]:
         def text(element: ET.Element) -> str:
             return "".join(child.text or "" for child in element.iter() if tag(child) == "t")
 
+        char_cap = TEXT_BYTES * 4
+
+        def bounded_join(chunks: Iterator[str], sep: str = "\n") -> str:
+            nonlocal partial
+            parts: list[str] = []
+            used = 0
+            for item in chunks:
+                step = len(item) + (len(sep) if parts else 0)
+                if used + step > char_cap:
+                    rem = max(0, char_cap - used - (len(sep) if parts else 0))
+                    if rem:
+                        parts.append(item[:rem])
+                    partial = True
+                    break
+                parts.append(item)
+                used += step
+            return sep.join(parts)
+
         if suffix == ".docx":
             names = ["word/document.xml"]
             names.extend(
                 sorted(name for name in archive.namelist() if re.fullmatch(r"word/(header|footer)\d+\.xml", name))
             )
-            content = "\n".join(
+            content = bounded_join(
                 text(paragraph) for name in names for paragraph in xml(name).iter() if tag(paragraph) == "p"
             )
             return content, partial
@@ -263,11 +283,15 @@ def office(data: bytes, suffix: str) -> tuple[str, bool]:
                 if re.fullmatch(r"ppt/(slides/slide|notesSlides/notesSlide)\d+\.xml", name)
             ]
             names.sort(key=lambda name: ("notesSlides" in name, int(re.findall(r"\d+", name)[-1])))
-            content = "\n\n".join(
-                name + "\n" + "\n".join(text(paragraph) for paragraph in xml(name).iter() if tag(paragraph) == "p")
-                for name in names
-            )
-            return content, partial
+
+            def slide_chunks() -> Iterator[str]:
+                for name in names:
+                    yield name
+                    for paragraph in xml(name).iter():
+                        if tag(paragraph) == "p":
+                            yield text(paragraph)
+
+            return bounded_join(slide_chunks()), partial
         strings = (
             [text(item) for item in xml("xl/sharedStrings.xml")] if "xl/sharedStrings.xml" in archive.namelist() else []
         )
@@ -275,23 +299,25 @@ def office(data: bytes, suffix: str) -> tuple[str, bool]:
         cut = partial
         names = [name for name in archive.namelist() if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)]
         names.sort(key=lambda name: int(re.findall(r"\d+", name)[-1]))
-        parts = []
-        for name in names:
-            parts.append(name)
-            for cell in xml(name).iter():
-                if tag(cell) != "c":
-                    continue
-                value = next((child.text or "" for child in cell if tag(child) == "v"), "")
-                if cell.get("t") == "s":
-                    position = int(value)
-                    if position < 0 or (position >= len(strings) and not cut):
-                        raise InvalidError("worksheet shared string index is invalid")
-                    value = strings[position] if position < len(strings) else ""
-                elif cell.get("t") == "inlineStr":
-                    value = text(cell)
-                formula = next((child.text or "" for child in cell if tag(child) == "f"), "")
-                parts.append(f"{cell.get('r', '?')}: {value}" + (f" [formula: {formula}]" if formula else ""))
-        return "\n".join(parts), partial
+
+        def sheet_chunks() -> Iterator[str]:
+            for name in names:
+                yield name
+                for cell in xml(name).iter():
+                    if tag(cell) != "c":
+                        continue
+                    value = next((child.text or "" for child in cell if tag(child) == "v"), "")
+                    if cell.get("t") == "s":
+                        position = int(value)
+                        if position < 0 or (position >= len(strings) and not cut):
+                            raise InvalidError("worksheet shared string index is invalid")
+                        value = strings[position] if position < len(strings) else ""
+                    elif cell.get("t") == "inlineStr":
+                        value = text(cell)
+                    formula = next((child.text or "" for child in cell if tag(child) == "f"), "")
+                    yield f"{cell.get('r', '?')}: {value}" + (f" [formula: {formula}]" if formula else "")
+
+        return bounded_join(sheet_chunks()), partial
 
 
 def pdf(path: Path) -> bytes:
@@ -440,9 +466,9 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
                     NotImplementedError,
                 ) as error:
                     raise InvalidError(f"{relative}: damaged or unsupported document; repair or exclude it") from error
-                content = text.encode()
+                clean_body = TEXT_CONTROL.sub(" ", text)
+                content = clean_body.encode()
                 when = datetime.fromtimestamp(info.st_mtime, UTC).isoformat()
-                url = (root / relative).as_uri()
                 record: dict[str, object] = {
                     "id": identifier,
                     "type": "document",
@@ -450,7 +476,6 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
                     "text": content[:TEXT_BYTES].decode(errors="ignore"),
                     "created": when,
                     "updated": when,
-                    **({"url": url} if len(url) <= MAX_REF else {}),
                     "attributes": {
                         "scope": label,
                         "path": relative,

@@ -64,7 +64,7 @@ def primary(tmp_path: Path) -> Path:
     git(checkout, "checkout", "-q", "-B", "main")
     write(checkout / "pyproject.toml", '[project]\nname = "demo"\nversion = "1.2.3"\n')
     write(checkout / "src/bf/__init__.py", '__version__ = "1.2.3"\n')
-    write(checkout / "src/bf/skills/demo/SKILL.md", "---\ncompatibility: Requires Brain Framework 1 (bf).\n---\n")
+    write(checkout / "skills/demo/SKILL.md", "---\ncompatibility: Requires Brain Framework 1 (bf).\n---\n")
     write(checkout / "docs/demo.schema.json", "{}\n")
     write(checkout / "tests/contract/demo.schema.json", "{}\n")
     write(checkout / "README.md", "Needs Brain Framework 1.\n")
@@ -130,7 +130,7 @@ def test_prepare_ships_only_the_named_paths(primary: Path) -> None:
         f"## Unreleased\n\n## [v1.3.0](https://github.com/fmind/brain-framework/releases/tag/v1.3.0) - {today}\n\n### Added"
         in changelog
     )
-    assert "Requires Brain Framework 1 " in (clone / "src/bf/skills/demo/SKILL.md").read_text()
+    assert "Requires Brain Framework 1 " in (clone / "skills/demo/SKILL.md").read_text()
     # Everything is staged for review, and the primary checkout is untouched.
     assert git(clone, "status", "--porcelain", "--untracked-files=all").splitlines() == [
         "M  CHANGELOG.md",
@@ -146,13 +146,20 @@ def test_prepare_ships_only_the_named_paths(primary: Path) -> None:
 def test_prepare_a_major_updates_compatibility_and_the_contract(primary: Path) -> None:
     write(primary / "docs/demo.schema.json", '{"major": true}\n')
     write(primary / "tests/contract/retired.schema.json", "{}\n")
+    write(primary / "skills/new/SKILL.md", "---\ncompatibility: Requires Brain Framework 1 (bf).\n---\nSee bf 1.\n")
+    write(primary / "src/bf/starter/AGENTS.md", "Runs Brain Framework 1.\n")
     clone, data = prepare(primary, "2.0.0", "--all")
     assert data["major"] is True
-    assert "Requires Brain Framework 2 " in (clone / "src/bf/skills/demo/SKILL.md").read_text()
+    assert "Requires Brain Framework 2 " in (clone / "skills/demo/SKILL.md").read_text()
+    assert "Requires Brain Framework 2 " in (clone / "skills/new/SKILL.md").read_text()
     assert (clone / "tests/contract/demo.schema.json").read_text() == '{"major": true}\n'
     assert not (clone / "tests/contract/retired.schema.json").exists()
     assert (primary.parent / "mise.calls").read_text() == "run generate:schema\n"
-    assert data["review"] == ["README.md:1:Needs Brain Framework 1."]
+    assert data["review"] == [
+        "README.md:1:Needs Brain Framework 1.",
+        "skills/new/SKILL.md:4:See bf 1.",
+        "src/bf/starter/AGENTS.md:1:Runs Brain Framework 1.",
+    ]
 
 
 @pytest.mark.parametrize(

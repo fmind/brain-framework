@@ -3,7 +3,10 @@ blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
     url: https://github.com/fmind/brain-framework/security/advisories/new
-    about: Report vulnerabilities and sensitive findings privately.
+    about: Report vulnerabilities and sensitive findings privately (see SECURITY.md).
   - name: Documentation
     url: https://fmind.github.io/brain-framework/
     about: The brain layout, the configuration reference, and the command surface.
+  - name: Contributing guide
+    url: https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md
+    about: Setup, checks, scope contracts, and pull request guidelines.

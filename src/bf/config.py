@@ -1,61 +1,92 @@
-"""Strict YAML 1.2 loader, bf.yaml validation, defaults merging, and brain discovery."""
+"""bf.yaml v19 validation, `.env` loading, loop resolution, script confinement, and brain discovery."""
 
 from __future__ import annotations
 
 import os
+import posixpath
 import re
+import shutil
 import stat
+import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from typing import TYPE_CHECKING, Any, Literal
+from zoneinfo import ZoneInfoNotFoundError
 
-from bf import models
+from bf import cron, models
+from bf.cron import ScheduleSpec
 from bf.models import DEFAULT_NOTES, RESERVED_SOURCES, Error, InputError
 from bf.schemas import BF_SCHEMA, compile_schema, validate_instance
-from bf.storage import Store, expand
+from bf.storage import Store, expand, relative
+from bf.yaml_io import yaml_object
 
 if TYPE_CHECKING:
-    import yaml
-    from yaml import MappingNode, ScalarNode
-    from yaml.constructor import SafeConstructor
+    from jsonschema.protocols import Validator
 
-LIBYAML = (
-    "reading YAML needs PyYAML built with libyaml; reinstall bf with a wheel that bundles it: "
-    "uv tool install --reinstall --python 3.14 brain-framework"
+LOOP_DIRS = ("sensors", "routines", "agents")
+_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*\Z")
+_BLOCKED_ENV_EXACT = frozenset(
+    {
+        "LC_ALL",
+        "LANG",
+        "BASH_ENV",
+        "BASHOPTS",
+        "ENV",
+        "FPATH",
+        "IFS",
+        "SHELL",
+        "SHELLOPTS",
+        "PS4",
+        "PROMPT_COMMAND",
+        "ZDOTDIR",
+        "PATH",
+        "HOME",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "SSLKEYLOGFILE",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "CURL_HOME",
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "PERL5OPT",
+        "PERL5LIB",
+        "PERLLIB",
+        "RUBYOPT",
+        "RUBYLIB",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "CLASSPATH",
+        "SSH_ASKPASS",
+        "SUDO_ASKPASS",
+        "GCONV_PATH",
+        "GLIBC_TUNABLES",
+    }
 )
-_FLOAT_RE = r"^(?:[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$"
-_CORE = (
-    ("null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]),
-    ("bool", r"^(?:true|True|TRUE|false|False|FALSE)$", list("tTfF")),
-    ("int", r"^(?:[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+)$", list("-+0123456789")),
-    ("float", _FLOAT_RE, list("-+.0123456789")),
-)
-_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
-_PROTECTED_ENV = frozenset(
-    {"BF_BRAIN", "BF_LOOP", "BF_STATE", "BF_START", "BF_END", "BF_TRIGGER", "BF_RUN", "LC_ALL", "LANG"}
-)
+_BLOCKED_ENV_PREFIXES = ("BF_", "LD_", "DYLD_", "PYTHON", "GIT_", "XDG_", "NPM_CONFIG_", "OPENSSL_")
 
 
 @dataclass(frozen=True)
 class EventMatch:
     kind: str = ""
     source: str = ""
-    filter: str = ""
-
-
-@dataclass(frozen=True)
-class ScheduleSpec:
-    raw: str
-    every: int | None = None
-    cron: str = ""
-    backfill: int | None = None
-    overlap: int | None = None
+    where: dict[str, Any] = field(default_factory=dict)
+    debounce: int = 0
 
 
 @dataclass(frozen=True)
@@ -65,18 +96,18 @@ class LoopSpec:
     description: str = ""
     daemon: bool = False
     ingest: str = ""
-    target: Literal["memories", "usages"] = "memories"
     mode: Literal["upsert", "snapshot"] = "upsert"
-    explicit_ingest: bool = False
+    schema_name: str = ""
     emit: str = ""
     schedules: tuple[ScheduleSpec, ...] = ()
     events: tuple[EventMatch, ...] = ()
     backfill: int = 86400
     overlap: int = 0
     timeout: int = 300
-    explicit_timeout: bool = False
     enabled: bool = True
     env: dict[str, str] = field(default_factory=dict)
+    env_from: tuple[str, ...] = ()
+    pool: str = "default"
 
 
 @dataclass(frozen=True)
@@ -85,114 +116,57 @@ class Config:
     description: str = ""
     notes: tuple[str, ...] = DEFAULT_NOTES
     brains: dict[str, str] = field(default_factory=dict)
+    search_exclude: tuple[str, ...] = ()
     timezone: str = "UTC"
     concurrency: int = 4
     env: dict[str, str] = field(default_factory=dict)
     loops: dict[str, LoopSpec] = field(default_factory=dict)
+    pools: dict[str, int] = field(default_factory=dict)
 
     @property
     def reserved_sources(self) -> frozenset[str]:
         return RESERVED_SOURCES | frozenset(self.notes)
+
+    def effective_pools(self) -> dict[str, int]:
+        """Return named concurrency pool limits (defaulting to `{'default': concurrency}`)."""
+        if not self.pools:
+            return {"default": self.concurrency}
+        return {"default": self.concurrency, **self.pools}
+
+    def total_concurrency(self) -> int:
+        """Return bounded total worker count across all declared pools (`1..64`)."""
+        return min(64, max(1, sum(self.effective_pools().values())))
 
 
 _LOADED: dict[str, Config] = {}
 _LOADED_LOCK = threading.Lock()
 
 
-def _integer(loader: SafeConstructor, node: ScalarNode) -> int:
-    val = str(loader.construct_scalar(node))
-    base = {"0o": 8, "0x": 16}.get(val[:2])
-    try:
-        number = int(val[2:], base) if base else int(val, 10)
-        str(number)
-    except ValueError:
-        import yaml.constructor
-
-        raise yaml.constructor.ConstructorError(None, None, "invalid integer", node.start_mark) from None
-    return number
-
-
-class _KeyError(ValueError):
-    def __init__(self, mark: object = None) -> None:
-        super().__init__("YAML mapping keys must be unique strings")
-        self.problem_mark = mark
-
-
-def _mapping(loader: SafeConstructor, node: MappingNode) -> dict[str, object]:
-    out: dict[str, object] = {}
-    for key_node, val_node in node.value:
-        if not isinstance(key := loader.construct_object(key_node), str) or key in out:
-            raise _KeyError(key_node.start_mark)
-        out[key] = loader.construct_object(val_node)
-    return out
-
-
 @cache
-def _strict(base: type[yaml.CSafeLoader]) -> type[yaml.CSafeLoader]:
-    import yaml.resolver
-
-    loader = cast("type[yaml.CSafeLoader]", type("StrictLoader", (base,), {}))
-    loader.yaml_implicit_resolvers = {}
-    for tag, pat, first in _CORE:
-        loader.add_implicit_resolver(f"tag:yaml.org,2002:{tag}", re.compile(pat), first)
-    loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
-    loader.add_constructor("tag:yaml.org,2002:int", _integer)
-    loader.add_constructor("tag:yaml.org,2002:timestamp", lambda c, n: c.construct_scalar(n))
-    return loader
-
-
-def yaml_object(data: bytes, name: str = "", *, line: int = 1) -> dict[str, object]:
-    """Parse one UTF-8 YAML 1.2 mapping without anchors, aliases, duplicate keys, or deep nesting."""
-    import yaml
-
-    prefix = f"{name}: " if name else ""
-    try:
-        if (base := getattr(yaml, "CSafeLoader", None)) is None:
-            raise Error(LIBYAML)
-        if len(data) > 1 << 20:
-            raise Error("YAML exceeds 1 MiB")
-        data.decode("utf-8")
-        depth = 0
-        for count, ev in enumerate(yaml.parse(data, Loader=base), 1):
-            if isinstance(ev, yaml.AliasEvent) or getattr(ev, "anchor", None):
-                raise Error("YAML anchors and aliases are not supported")
-            depth += isinstance(ev, (yaml.MappingStartEvent, yaml.SequenceStartEvent))
-            depth -= isinstance(ev, (yaml.MappingEndEvent, yaml.SequenceEndEvent))
-            if depth > 32 or count > 20_000:
-                raise Error("YAML structure exceeds its limit")
-        val = yaml.load(data, Loader=_strict(base))  # noqa: S506 - restricted CSafeLoader subclass
-        if val is not None and not isinstance(val, dict):
-            raise Error("YAML must contain one mapping")
-        return {} if val is None else cast("dict[str, object]", val)
-    except UnicodeDecodeError as err:
-        raise Error(f"{prefix}YAML is not UTF-8") from err
-    except (yaml.YAMLError, ValueError, OverflowError, LookupError, TypeError) as err:
-        mark = getattr(err, "problem_mark", None)
-        why = "YAML mapping keys must be unique strings" if isinstance(err, _KeyError) else "invalid YAML"
-        loc = f" at line {mark.line + line}, column {mark.column + 1}" if mark else ""
-        raise Error(f"{prefix}{why}{loc}") from err
-    except Error as error:
-        raise (Error(f"{prefix}{error}") if name else error) from error
-
-
-@cache
-def _bf_validator():
+def _bf_validator() -> Validator:
     return compile_schema(BF_SCHEMA, "bf.schema.json")
 
 
 def _check_tz(tz: str, label: str) -> str:
+    if "\n" in tz or "\r" in tz:
+        raise Error(f"{label}: unknown IANA timezone {tz!r}")
     try:
-        ZoneInfo(tz)
+        cron.resolve_tz(tz)
     except (ZoneInfoNotFoundError, ValueError) as error:
         raise Error(f"{label}: unknown IANA timezone {tz!r}") from error
     return tz
 
 
+def is_blocked_env_key(key: str) -> bool:
+    """Return True if `key` is reserved or can hijack dynamic linkers, TLS/proxies, interpreters, or shells."""
+    return key in _BLOCKED_ENV_EXACT or key.startswith(_BLOCKED_ENV_PREFIXES)
+
+
 def _check_env(key: str, val: str, label: str, key_err: str) -> str:
-    if not _ENV_KEY_RE.fullmatch(key):
+    if "\n" in key or not _ENV_KEY_RE.fullmatch(key):
         raise Error(key_err)
-    if key in _PROTECTED_ENV:
-        raise Error(f"{label}: cannot override reserved environment variable")
+    if is_blocked_env_key(key):
+        raise Error(f"{label}: cannot override reserved or protected environment variable {key!r}")
     return models.clean_env(val, label)
 
 
@@ -205,8 +179,22 @@ def _parse_env_map(raw: object, label: str) -> dict[str, str]:
     }
 
 
+def _parse_env_from(raw: object, label: str) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    out: list[str] = []
+    for item in raw:
+        key = str(item)
+        if "\n" in key or not _ENV_KEY_RE.fullmatch(key):
+            raise Error(f"{label}: invalid environment variable name {key!r}")
+        if is_blocked_env_key(key):
+            raise Error(f"{label}: cannot allowlist reserved or protected variable {key!r}")
+        out.append(key)
+    return tuple(dict.fromkeys(out))
+
+
 def load_dotenv(store: Store) -> dict[str, str]:
-    """Load optional gitignored `.env` from brain root without shell or variable interpolation."""
+    """Load optional gitignored `0600` `.env` from brain root without shell or variable interpolation."""
     try:
         raw = store.read(".env", 65536, private=True).decode("utf-8")
     except FileNotFoundError:
@@ -231,110 +219,202 @@ def load_dotenv(store: Store) -> dict[str, str]:
     return out
 
 
-def prev_cron(expr: str, when: datetime) -> datetime:
-    """Return the previous scheduled fire time for 5-field or `@macro` cron `expr` at or before `when`."""
-    from croniter import croniter
+def normalize_brain_script(tok: str, brain_root: Path | None = None) -> str:
+    """Return confined brain-relative script path without `.`/`..` segments when `tok` targets a file inside the brain, else `''`."""
+    raw = tok
+    if raw.startswith("{{brain}}/"):
+        raw = raw.removeprefix("{{brain}}/")
+    elif raw.startswith("/"):
+        if brain_root is None:
+            return ""
+        root_str = brain_root.as_posix().rstrip("/")
+        if not raw.startswith(f"{root_str}/"):
+            return ""
+        raw = raw[len(root_str) + 1 :]
+    elif raw.startswith("./"):
+        raw = raw[2:]
+    elif "/" not in raw or raw.startswith("-"):
+        return ""
+    if not raw or any(seg in {"", ".", ".."} for seg in raw.split("/")):
+        return ""
+    return raw
 
-    return cast("datetime", croniter(expr, when).get_prev(datetime))
 
-
-def next_cron(expr: str, when: datetime) -> datetime:
-    """Return the next scheduled fire time for 5-field or `@macro` cron `expr` after `when`."""
-    from croniter import croniter
-
-    return cast("datetime", croniter(expr, when).get_next(datetime))
-
-
-def parse_dt(raw: str) -> datetime | None:
-    with suppress(ValueError):
-        return dt if raw and (dt := datetime.fromisoformat(raw)).tzinfo is not None else None
+def _extract_loop_script_target(tok: str, brain_root: Path, *, loop_name: str = "") -> str | None:
+    """Return raw brain-relative path string if `tok` targets a path inside the brain (single-pass, non-recursive)."""
+    if tok in {"{{brain}}", "{{state}}"}:
+        return None
+    if tok.startswith("{{brain}}/"):
+        return tok.removeprefix("{{brain}}/")
+    if tok.startswith("{{state}}/"):
+        relative(tok.removeprefix("{{state}}/"))
+        return None
+    root_str = brain_root.as_posix().rstrip("/")
+    state_dir = f"{root_str}/.bf/state/{loop_name}" if loop_name else ""
+    cur = tok
+    if "{{" in cur and "}}" in cur:
+        preview = {"brain": root_str, "loop": loop_name, "state": state_dir or f"{root_str}/.bf/state/loop"}
+        cur = models.PLACEHOLDER_RE.sub(lambda m: preview.get(m[1], m[0]), cur)
+        if cur in {root_str, preview["state"]}:
+            return None
+    if state_dir and (cur == state_dir or cur.startswith(f"{state_dir}/")):
+        if cur != state_dir:
+            relative(cur[len(state_dir) + 1 :])
+        return None
+    if cur.startswith("./"):
+        return cur[2:]
+    if cur.startswith("/"):
+        if cur.startswith(f"{root_str}/"):
+            return cur[len(root_str) + 1 :]
+        collapsed = "/" + cur.lstrip("/")
+        norm = posixpath.normpath(collapsed)
+        if collapsed.startswith(f"{root_str}/") or norm.startswith(f"{root_str}/"):
+            return cur
+        return None
+    if "/" in cur:
+        head = cur.split("/", 1)[0]
+        norm_head = posixpath.normpath(cur).split("/", 1)[0]
+        brain_dirs = (*LOOP_DIRS, "evals", "clients", "prompts")
+        if head in brain_dirs or norm_head in brain_dirs:
+            return cur
+        segs = cur.split("/")
+        if "." in segs or ".." in segs:
+            joined = posixpath.normpath(posixpath.join(root_str, cur))
+            if joined == root_str or joined.startswith(f"{root_str}/"):
+                return cur
     return None
 
 
-def backoff_cap(loop: LoopSpec) -> int:
-    return min((s.every for s in loop.schedules if s.every is not None), default=3600)
+def _check_brain_relative_arg(store: Store, raw: str, name: str) -> None:
+    """Reject any brain-relative path argument containing symlinks inside `store.root` without false-positiving non-paths."""
+    if (
+        raw in {"", ".", ".."}
+        or raw.startswith(("/", "-", "http://", "https://", "bf://", "~"))
+        or "\x00" in raw
+        or "\\" in raw
+    ):
+        return
+    cur = store.root
+    for part in (p for p in raw.split("/") if p and p != "."):
+        if part == "..":
+            return
+        cur = cur / part
+        try:
+            info = cur.lstat()
+        except OSError:
+            return
+        if stat.S_ISLNK(info.st_mode):
+            raise Error(f"loops.{name}: symlink {raw} is not allowed inside brain")
 
 
-def backoff_remaining(doc: Mapping[str, object], cap: int, now: datetime) -> float:
-    fails = int(val) if isinstance(val := doc.get("consecutive_failures"), int) else 0
-    last_dt = parse_dt(str(doc.get("last_end") or "")) if fails > 0 else None
-    if last_dt is None:
-        return 0.0
-    wait = min(60 * (1 << min(fails - 1, 10)), cap)
-    return max(0.0, wait - (now - last_dt).total_seconds())
-
-
-def sched_anchor(doc: Mapping[str, object], sched: ScheduleSpec | None = None) -> str:
-    if sched is not None and isinstance(sl := doc.get("schedule_last"), Mapping):
-        return str(sl.get(sched.raw) or "")
-    return str(doc.get("last_scheduled") or "")
-
-
-def due_schedule(
-    loop: LoopSpec, state_doc: Mapping[str, object], now: datetime, *, tz_name: str = "UTC"
-) -> ScheduleSpec | None:
-    """Return the due `ScheduleSpec` (preferring widest backfill if multiple are due), or `None`."""
-    if not loop.schedules or backoff_remaining(state_doc, backoff_cap(loop), now) > 0:
-        return None
-    tz, local_now, due = None, None, []
-    for sched in loop.schedules:
-        last_dt = parse_dt(sched_anchor(state_doc, sched))
-        if sched.every is not None:
-            if last_dt is None or (now - last_dt).total_seconds() >= sched.every:
-                due.append(sched)
+def validate_loop_scripts(store: Store, argv: Sequence[str], name: str) -> None:
+    """Verify every brain-relative or `{{brain}}/...` script path in `argv` has no `.`/`..` segments and exists via `O_NOFOLLOW`."""
+    if not argv:
+        return
+    if argv[0] != "bf" and "/" in argv[0]:
+        if (raw0 := _extract_loop_script_target(argv[0], store.root, loop_name=name)) is not None:
+            relative(raw0)
+            if not store.exists(raw0):
+                raise Error(f"loops.{name}: script {raw0} must be a regular file inside brain")
+        elif not Path(argv[0]).is_absolute():
+            cleaned = argv[0].removeprefix("./")
+            relative(cleaned)
+            if not store.exists(cleaned):
+                raise Error(f"loops.{name}: command {argv[0]} must be a regular file inside brain")
+    for tok in argv[1:]:
+        if tok.startswith("-"):
+            if "=" in tok:
+                rhs = tok.split("=", 1)[1]
+                if not rhs.startswith(("http://", "https://", "bf://", "~")):
+                    if (raw_rhs := _extract_loop_script_target(rhs, store.root, loop_name=name)) is not None:
+                        relative(raw_rhs)
+                        if not (store.exists(raw_rhs) or store.is_dir(raw_rhs)):
+                            raise Error(f"loops.{name}: path {raw_rhs} must exist inside brain")
+                    else:
+                        _check_brain_relative_arg(store, rhs, name)
             continue
-        if tz is None or local_now is None:
-            tz = ZoneInfo(tz_name)
-            local_now = (now.astimezone(UTC).replace(microsecond=0) + timedelta(seconds=1)).astimezone(tz)
-        with suppress(ValueError, KeyError, TypeError):
-            if last_dt is None or last_dt.astimezone(tz) < prev_cron(sched.cron, local_now):
-                due.append(sched)
-    return max(due, key=lambda s: s.backfill if s.backfill is not None else loop.backfill) if due else None
-
-
-def next_schedule_delay(
-    loop: LoopSpec, state_doc: Mapping[str, object], now: datetime, *, tz_name: str = "UTC"
-) -> float | None:
-    """Return seconds until `loop`'s earliest next schedule or backoff expiry, or `None` if unscheduled."""
-    if (backoff_rem := backoff_remaining(state_doc, backoff_cap(loop), now)) > 0:
-        return backoff_rem
-    if not loop.schedules:
-        return None
-    utc_now, tz = now.astimezone(UTC), ZoneInfo(tz_name)
-    local_now = utc_now.astimezone(tz)
-    cron_now = (utc_now.replace(microsecond=0) + timedelta(seconds=1)).astimezone(tz)
-    soonest: float | None = None
-    for sched in loop.schedules:
-        if (last_dt := parse_dt(sched_anchor(state_doc, sched))) is None:
-            return 0.5
-        if sched.every is not None:
-            rem = max(0.5, sched.every - (now - last_dt).total_seconds())
-            soonest = rem if soonest is None else min(soonest, rem)
+        if tok.startswith(("http://", "https://", "bf://", "~")):
+            continue
+        if (raw_rel := _extract_loop_script_target(tok, store.root, loop_name=name)) is not None:
+            relative(raw_rel)
+            if not (store.exists(raw_rel) or store.is_dir(raw_rel)):
+                raise Error(f"loops.{name}: script {raw_rel} must be a regular file inside brain")
         else:
-            with suppress(ValueError, KeyError, TypeError):
-                if last_dt.astimezone(tz) < prev_cron(sched.cron, cron_now):
-                    return 0.5
-                rem = max(0.5, (next_cron(sched.cron, local_now).astimezone(UTC) - utc_now).total_seconds())
-                soonest = rem if soonest is None else min(soonest, rem)
-    return soonest
+            _check_brain_relative_arg(store, tok, name)
+
+
+def resolve_loop(
+    store: Store, loop: LoopSpec, reserved: frozenset[str] = models.RESERVED_SOURCES
+) -> tuple[tuple[str, ...], str, Literal["upsert", "snapshot"], str, int]:
+    """Resolve `(argv, ingest_source, ingest_mode, schema_name, timeout)` with zero hidden ingest/timeout magic.
+
+    Folder conventions (`sensors/`, `routines/`, `agents/`) locate the script ONLY when `run:` is omitted;
+    `ingest:` and `timeout:` always come explicitly from `bf.yaml`.
+    """
+    if loop.ingest and loop.ingest in reserved:
+        raise Error(f"loops.{loop.name}: ingest source {loop.ingest!r} is reserved")
+    if loop.run:
+        argv = loop.run
+    else:
+        found: list[tuple[str, os.stat_result]] = []
+        for fld in LOOP_DIRS:
+            for ext in ("", ".sh", ".py"):
+                cand = f"{fld}/{loop.name}{ext}"
+                try:
+                    info = store.stat(cand)
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    raise Error(f"loops.{loop.name}: {cand}: expected a regular file")
+                found.append((cand, info))
+        if not found:
+            raise Error(f"loops.{loop.name}: no run command and no script found in sensors/, routines/, or agents/")
+        if len(found) > 1:
+            names = ", ".join(c for c, _ in found)
+            raise Error(f"loops.{loop.name}: ambiguous convention scripts ({names}); keep one or set run:")
+        cand, info = found[0]
+        if info.st_mode & stat.S_IXUSR:
+            argv = (cand,)
+        elif cand.endswith(".sh"):
+            argv = ("bash", cand)
+        elif cand.endswith(".py"):
+            argv = (shutil.which("python3") or sys.executable, cand)
+        else:
+            raise Error(f"loops.{loop.name}: {cand} is not executable; run chmod +x {cand}")
+    return argv, loop.ingest, loop.mode, (loop.schema_name or loop.ingest) if loop.ingest else "", loop.timeout
 
 
 def _validate_cron(raw_expr: str, label: str) -> str:
-    expr = models.clean(raw_expr.strip(), label)
-    if (expr.startswith("@") and len(expr.split()) == 1) or len(expr.split()) == 5:
-        from croniter import croniter
-
-        if croniter.is_valid(expr):
-            with suppress(ValueError, KeyError, TypeError):
-                prev_cron(expr, datetime(2026, 1, 1, tzinfo=UTC))
-                return expr
-    raise Error(f"{label}: must be a duration (e.g. 1h, 1d), @macro, or 5-field cron expression")
+    expr = " ".join(models.clean(raw_expr.strip(), label).split())
+    if cron.is_valid_cron(expr):
+        return expr
+    raise Error(f"{label}: must be an explicit duration (e.g. 1h, 1d), @macro, or 5-field cron expression")
 
 
-def _parse_trigger_window(item: Mapping[str, object], label: str) -> tuple[int | None, int | None]:
-    backfill = models.parse_duration(item["backfill"], f"{label}.backfill") if "backfill" in item else None
-    overlap = models.parse_duration(item["overlap"], f"{label}.overlap", allow_zero=True) if "overlap" in item else None
-    return backfill, overlap
+def _check_ident(value: str, pat: re.Pattern[str], label: str, msg: str) -> str:
+    if "\n" in value or "\r" in value or not pat.fullmatch(value):
+        raise Error(f"{label}: {msg}")
+    return value
+
+
+def _check_where(raw: object, label: str) -> dict[str, Any]:
+    if not isinstance(raw, dict) or not raw:
+        raise Error(f"{label}: where must be a non-empty mapping")
+    out: dict[str, Any] = {}
+    for path_key, pred in raw.items():
+        if not isinstance(path_key, str) or "\n" in path_key or "\x00" in path_key:
+            raise Error(f"{label}: invalid where path key")
+        if isinstance(pred, str):
+            models.clean_text(pred, f"{label}.{path_key}")
+        elif isinstance(pred, dict):
+            if "prefix" in pred and isinstance(pred["prefix"], str):
+                models.clean_text(pred["prefix"], f"{label}.{path_key}.prefix")
+            elif "in" in pred and isinstance(pred["in"], list):
+                for item in pred["in"]:
+                    if isinstance(item, str):
+                        models.clean_text(item, f"{label}.{path_key}.in")
+        out[path_key] = pred
+    return out
 
 
 def _parse_when(raw_when: object, label: str) -> tuple[bool, tuple[ScheduleSpec, ...], tuple[EventMatch, ...]]:
@@ -354,126 +434,191 @@ def _parse_when(raw_when: object, label: str) -> tuple[bool, tuple[ScheduleSpec,
         schedules.append(spec)
 
     for item in items:
-        if isinstance(item, dict):
+        if isinstance(item, dict) and "event" in item:
+            ev = item["event"]
+            deb_s = (
+                models.parse_duration(item["debounce"], f"{label}.debounce", maximum=3600) if "debounce" in item else 0
+            )
+            if isinstance(ev, str):
+                ev_kind = _check_ident(ev, models.EVENT_KIND_RE, f"{label}.event", "invalid event kind")
+                events.append(EventMatch(kind=ev_kind, debounce=deb_s))
+            elif isinstance(ev, dict):
+                kind = str(ev.get("kind", ""))
+                if kind:
+                    _check_ident(kind, models.EVENT_KIND_RE, f"{label}.event.kind", "invalid event kind")
+                src = str(ev.get("source", ""))
+                if src:
+                    _check_ident(src, models.NAME_RE, f"{label}.event.source", "invalid event source")
+                where = _check_where(ev["where"], f"{label}.event.where") if "where" in ev else {}
+                events.append(EventMatch(kind, src, where, deb_s))
+        elif isinstance(item, dict) and ("every" in item or "cron" in item):
+            bf_s = models.parse_duration(item["backfill"], f"{label}.backfill") if "backfill" in item else None
+            ov_s = (
+                models.parse_duration(item["overlap"], f"{label}.overlap", allow_zero=True)
+                if "overlap" in item
+                else None
+            )
             if "every" in item:
-                every_raw = item["every"]
-                secs = models.parse_duration(every_raw, f"{label}.every")
-                bf_w, ov_w = _parse_trigger_window(item, label)
-                add_sched(ScheduleSpec(f"every:{str(every_raw).strip()}", every=secs, backfill=bf_w, overlap=ov_w))
-            elif "cron" in item:
+                secs = models.parse_duration(item["every"], f"{label}.every")
+                add_sched(ScheduleSpec(f"every:{secs}", every=secs, backfill=bf_s, overlap=ov_s))
+            else:
                 expr = _validate_cron(str(item["cron"]), f"{label}.cron")
-                bf_w, ov_w = _parse_trigger_window(item, label)
-                add_sched(ScheduleSpec(f"cron:{expr}", cron=expr, backfill=bf_w, overlap=ov_w))
-            elif "event" in item:
-                ev = item["event"]
-                events.append(
-                    EventMatch(kind=ev)
-                    if isinstance(ev, str)
-                    else EventMatch(str(ev.get("kind", "")), str(ev.get("source", "")), str(ev.get("filter", "")))
-                )
-        elif type(item) is int or (isinstance(item, str) and bool(models.DURATION_RE.fullmatch(item.strip()))):
+                add_sched(ScheduleSpec(f"cron:{expr}", cron=expr, backfill=bf_s, overlap=ov_s))
+        elif isinstance(item, str) and bool(models.DURATION_RE.fullmatch(item.strip())) and "\n" not in item:
             secs = models.parse_duration(item, label)
-            add_sched(ScheduleSpec(f"every:{str(item).strip()}", every=secs))
+            add_sched(ScheduleSpec(f"every:{secs}", every=secs))
         else:
             expr = _validate_cron(str(item), label)
             add_sched(ScheduleSpec(f"cron:{expr}", cron=expr))
     return False, tuple(schedules), tuple(events)
 
 
-def _validate_defaults(defaults: dict[str, object]) -> None:
-    if isinstance(win := defaults.get("window"), dict):
-        if "backfill" in win:
-            models.parse_duration(win["backfill"], "bf.yaml defaults.window.backfill")
-        if "overlap" in win:
-            models.parse_duration(win["overlap"], "bf.yaml defaults.window.overlap", allow_zero=True)
-    if "timeout" in defaults:
-        models.parse_duration(defaults["timeout"], "bf.yaml defaults.timeout", maximum=86_400)
-
-
-def _parse_loop(
-    name: str, raw: dict[str, object], *, defaults: dict[str, object], reserved: frozenset[str]
-) -> LoopSpec:
+def _parse_loop(name: str, raw: dict[str, object], *, reserved: frozenset[str]) -> LoopSpec:
     label = f"bf.yaml loops.{name}"
+    _check_ident(name, models.NAME_RE, label, "loop name must be lowercase letters, digits, or '-'")
     daemon, schedules, events = _parse_when(raw.get("when"), f"{label}.when")
     emit = str(raw.get("emit") or "")
+    if emit:
+        _check_ident(emit, models.EVENT_KIND_RE, f"{label}.emit", "invalid event kind")
     raw_ingest = raw.get("ingest")
-    explicit_ingest = raw_ingest is not None
-    target: Literal["memories", "usages"] = "memories"
-    if raw_ingest is False:
-        ingest, mode = "", "upsert"
-    elif isinstance(raw_ingest, str):
-        ingest, mode = name, cast("Literal['upsert', 'snapshot']", raw_ingest)
+    schema_name = ""
+    if isinstance(raw_ingest, str):
+        if raw_ingest == "snapshot":
+            ingest, mode = name, "snapshot"
+        elif raw_ingest == "upsert":
+            ingest, mode = name, "upsert"
+        else:
+            raise Error(f"{label}.ingest: must be 'upsert' or 'snapshot'")
     elif isinstance(raw_ingest, dict):
         ingest = str(raw_ingest.get("source") or name)
-        target = "usages" if raw_ingest.get("target") == "usages" else "memories"
+        _check_ident(ingest, models.NAME_RE, f"{label}.ingest.source", "invalid source name")
         mode = "snapshot" if raw_ingest.get("mode") == "snapshot" else "upsert"
+        if raw_schema := raw_ingest.get("schema"):
+            schema_name = _check_ident(str(raw_schema), models.NAME_RE, f"{label}.ingest.schema", "invalid schema name")
+            if schema_name in models.RESERVED_SOURCES:
+                raise Error(f"{label}.ingest.schema: schema name {schema_name!r} is reserved")
     else:
         ingest, mode = "", "upsert"
     if ingest and ingest in reserved:
         raise Error(f"{label}.ingest: source {ingest!r} is reserved")
 
     raw_run = raw.get("run")
-    run = tuple(str(item) for item in raw_run) if isinstance(raw_run, list) else ()
+    run = tuple(models.clean_env(str(item), f"{label}.run") for item in raw_run) if isinstance(raw_run, list) else ()
     for idx, arg in enumerate(run):
-        for match in models.PLACEHOLDER_RE.finditer(arg):
+        for match in models.ANY_PLACEHOLDER_RE.finditer(arg):
             if idx == 0:
                 raise Error(f"{label}.run[0]: placeholders are not allowed in executable name; use a relative path")
-            if match[0] != f"{{{{{match[1]}}}}}" or match[1] not in models.PLACEHOLDERS:
+            inner = match[0][2:-2].strip()
+            if match[0] != f"{{{{{inner}}}}}" or inner not in models.PLACEHOLDERS:
                 allowed = ", ".join(f"{{{{{k}}}}}" for k in sorted(models.PLACEHOLDERS))
                 raise Error(f"{label}.run: unknown placeholder {match[0]}; allowed: {allowed}")
-    def_win = dw if isinstance(dw := defaults.get("window"), dict) else {}
     own_win = rw if isinstance(rw := raw.get("window"), dict) else {}
-    win = {**def_win, **own_win}
-    bf_s = models.parse_duration(win.get("backfill", 86400), f"{label}.window.backfill")
-    ov_s = models.parse_duration(win.get("overlap", 0), f"{label}.window.overlap", allow_zero=True)
-    to_s = models.parse_duration(
-        raw["timeout"] if "timeout" in raw else defaults.get("timeout", 300), f"{label}.timeout", maximum=86_400
-    )
+    bf_s = models.parse_duration(own_win.get("backfill", "1d"), f"{label}.window.backfill")
+    ov_s = models.parse_duration(own_win.get("overlap", "0s"), f"{label}.window.overlap", allow_zero=True)
+    to_s = models.parse_duration(raw.get("timeout", "5m"), f"{label}.timeout", maximum=86_400)
     desc = models.clean_text(str(raw.get("description") or ""), f"{label}.description")
     env_m = _parse_env_map(raw.get("env"), f"{label}.env")
-    return LoopSpec(
-        name,
-        run,
-        desc,
-        daemon,
-        ingest,
-        target,
-        mode,
-        explicit_ingest,
-        emit,
-        schedules,
-        events,
-        bf_s,
-        ov_s,
-        to_s,
-        "timeout" in raw,
-        bool(raw.get("enabled", True)),
-        env_m,
+    env_from = _parse_env_from(raw.get("env_from"), f"{label}.env_from")
+    raw_pool = raw.get("pool")
+    pool = (
+        _check_ident(str(raw_pool), models.NAME_RE, f"{label}.pool", "invalid pool name")
+        if raw_pool is not None
+        else "default"
     )
+    return LoopSpec(
+        name=name,
+        run=run,
+        description=desc,
+        daemon=daemon,
+        ingest=ingest,
+        mode=mode,
+        schema_name=schema_name,
+        emit=emit,
+        schedules=schedules,
+        events=events,
+        backfill=bf_s,
+        overlap=ov_s,
+        timeout=to_s,
+        enabled=bool(raw.get("enabled", True)),
+        env=env_m,
+        env_from=env_from,
+        pool=pool,
+    )
+
+
+def _parse_concurrency(raw: object) -> tuple[int, dict[str, int]]:
+    if raw is None:
+        return 4, {}
+    if type(raw) is int:
+        return raw, {}
+    if isinstance(raw, dict):
+        pools = {
+            _check_ident(str(k), models.NAME_RE, "bf.yaml concurrency", "invalid pool name"): int(v)
+            for k, v in raw.items()
+        }
+        default_cap = pools.get("default", 4)
+        full_pools = {"default": default_cap, **pools}
+        return default_cap, full_pools
+    return 4, {}
 
 
 def _parse_config(raw: dict[str, object]) -> Config:
     if problems := validate_instance(_bf_validator(), raw, "bf.yaml"):
         raise Error("; ".join(problems))
+    brain_name = _check_ident(str(raw["name"]), models.NAME_RE, "bf.yaml name", "invalid brain name")
     description = models.clean_text(str(raw.get("description") or ""), "bf.yaml description")
     raw_notes = raw.get("notes")
-    notes = tuple(str(folder) for folder in raw_notes) if isinstance(raw_notes, list) else DEFAULT_NOTES
-    reserved = RESERVED_SOURCES | frozenset(notes)
+    if isinstance(raw_notes, list):
+        notes = tuple(
+            _check_ident(str(folder), models.NAME_RE, "bf.yaml notes", "invalid note folder name")
+            for folder in raw_notes
+        )
+        for folder in notes:
+            if folder in RESERVED_SOURCES:
+                raise Error(f"bf.yaml notes: folder {folder!r} is reserved")
+    else:
+        notes = DEFAULT_NOTES
     raw_brains = rb if isinstance(rb := raw.get("brains"), dict) else {}
-    brains = {str(alias): models.clean(str(target), f"bf.yaml brains.{alias}") for alias, target in raw_brains.items()}
+    brains = {
+        _check_ident(str(alias), models.NAME_RE, "bf.yaml brains", "invalid brain alias"): models.clean(
+            str(target), f"bf.yaml brains.{alias}"
+        )
+        for alias, target in raw_brains.items()
+    }
+    reserved = RESERVED_SOURCES | frozenset(notes)
+    raw_search = rs if isinstance(rs := raw.get("search"), dict) else {}
+    raw_excl = raw_search.get("exclude")
+    search_exclude: tuple[str, ...] = ()
+    if isinstance(raw_excl, list):
+        excl_list: list[str] = []
+        for item in raw_excl:
+            src = _check_ident(str(item), models.NAME_RE, "bf.yaml search.exclude", "invalid source name")
+            if src in reserved:
+                raise Error(f"bf.yaml search.exclude: source {src!r} is reserved")
+            excl_list.append(src)
+        search_exclude = tuple(dict.fromkeys(excl_list))
     tz = _check_tz(str(raw.get("timezone") or "UTC"), "bf.yaml timezone")
-    concurrency = c if isinstance(c := raw.get("concurrency"), int) else 4
+    concurrency, pools = _parse_concurrency(raw.get("concurrency"))
+    valid_pools = pools or {"default": concurrency}
     base_env = _parse_env_map(raw.get("env"), "bf.yaml env")
-    defaults = rd if isinstance(rd := raw.get("defaults"), dict) else {}
-    if defaults:
-        _validate_defaults(defaults)
     raw_loops = rl if isinstance(rl := raw.get("loops"), dict) else {}
     loops = {
-        str(k): _parse_loop(str(k), v, defaults=defaults, reserved=reserved)
-        for k, v in raw_loops.items()
-        if isinstance(v, dict)
+        str(k): _parse_loop(str(k), v if isinstance(v, dict) else {}, reserved=reserved) for k, v in raw_loops.items()
     }
-    return Config(str(raw["name"]), description, notes, brains, tz, concurrency, base_env, loops)
+    seen_schemas: dict[str, tuple[str, str]] = {}
+    for lp_name, lp in loops.items():
+        if not lp.daemon and lp.pool not in valid_pools:
+            raise Error(
+                f"bf.yaml loops.{lp_name}.pool: unknown concurrency pool {lp.pool!r}; declare it under concurrency:"
+            )
+        if lp.ingest:
+            eff_schema = lp.schema_name or lp.ingest
+            if (prev := seen_schemas.get(lp.ingest)) is not None and prev[1] != eff_schema:
+                raise Error(
+                    f"bf.yaml loops.{lp_name}: ingest.schema {eff_schema!r} conflicts with loops.{prev[0]} ({prev[1]!r}) for source {lp.ingest!r}"
+                )
+            seen_schemas[lp.ingest] = (lp_name, eff_schema)
+    return Config(brain_name, description, notes, brains, search_exclude, tz, concurrency, base_env, loops, pools)
 
 
 def load(store: Store) -> Config:
@@ -481,7 +626,7 @@ def load(store: Store) -> Config:
     try:
         data = store.read("bf.yaml", 1 << 20)
     except FileNotFoundError:
-        raise Error("bf.yaml is missing; pass --brain PATH, set BRAIN_LOCATION, or run bf init") from None
+        raise Error("bf.yaml is missing; pass --brain PATH, set BF_BRAIN, or run bf init") from None
     key = models.digest(data)
     with _LOADED_LOCK:
         cached = _LOADED.get(key)
@@ -498,24 +643,23 @@ def load(store: Store) -> Config:
 
 
 def inside_brain() -> Store | None:
-    """Return the nearest enclosing user-owned brain directory, or `None` outside any brain."""
+    """Return the nearest enclosing user-owned brain directory, skipping foreign/non-regular `bf.yaml` files."""
     here, owner = Path.cwd(), os.geteuid()
-    for up, candidate in enumerate((here, *here.parents)):
+    for candidate in (here, *here.parents):
         try:
             info = (candidate / "bf.yaml").lstat()
-        except FileNotFoundError, NotADirectoryError:
+            dir_info = candidate.stat()
+        except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
             continue
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or candidate.stat().st_uid != owner:
-            rel_y = f"{'../' * up or './'}bf.yaml"
-            raise Error(f"{rel_y} is not a regular file owned by you; pass --brain PATH to select a brain")
-        return Store(candidate)
+        if stat.S_ISREG(info.st_mode) and info.st_uid == owner and dir_info.st_uid == owner:
+            return Store(candidate)
     return None
 
 
 def _open_brain(chosen: str) -> Store:
     store = Store(expand(Path(chosen)))
     try:
-        info = store.mode("bf.yaml")
+        info = store.stat("bf.yaml").st_mode
     except FileNotFoundError:
         raise Error(f"{chosen} has no bf.yaml; pass the brain's root directory or run bf init") from None
     if not stat.S_ISREG(info):
@@ -529,19 +673,18 @@ def _owned_brain(path: Path, owner: int) -> bool:
 
 
 def select(value: str = "") -> Store:
-    """Resolve `--brain PATH` -> enclosing `bf.yaml` -> `BF_BRAIN` -> `BRAIN_LOCATION` -> `~/brain`."""
+    """Resolve `--brain PATH` > `BF_BRAIN` > enclosing `bf.yaml` > `~/brain`."""
     if chosen := value.strip():
+        return _open_brain(chosen)
+    if chosen := os.environ.get("BF_BRAIN", "").strip():
         return _open_brain(chosen)
     if nearest := inside_brain():
         return nearest
-    for env_key in ("BF_BRAIN", "BRAIN_LOCATION"):
-        if chosen := os.environ.get(env_key, "").strip():
-            return _open_brain(chosen)
     with suppress(RuntimeError, OSError):
         default_dir = Path.home() / "brain"
         if _owned_brain(default_dir, os.geteuid()):
             return Store(default_dir)
-    raise Error("no brain selected; pass --brain PATH, set BRAIN_LOCATION, run inside a brain, or run bf init ~/brain")
+    raise Error("no brain selected; pass --brain PATH, set BF_BRAIN, run inside a brain, or run bf init ~/brain")
 
 
 def resolve_brain(current: Store, cfg: Config, host: str) -> Store:

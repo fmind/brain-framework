@@ -11,4 +11,4 @@ links:
 
 # Retention
 
-Keep original evidence because upstream content can disappear. Compiled `memories/concepts.jsonl` records are derived from Markdown and can be rebuilt at any time with `bf build`.
+Keep original evidence because upstream content can disappear. Compiled `memories/_notes.jsonl` records are derived from Markdown and can be rebuilt at any time with `bf build`.

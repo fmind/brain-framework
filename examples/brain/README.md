@@ -1,6 +1,6 @@
 # Runnable example brain
 
-A fictional 3x3 brain with notes (`concepts/`, `projects/`, `actions/` with `index.md` bundles), convention loops (`sensors/`, `routines/`, `agents/`), and JSONL records (`memories/`, `usages/`, `logs/`), plus required per-source JSON Schemas (`schemas/*.json`), reusable `prompts/`, and a runnable Python eval (`evals/smoke.py`) without credentials or network access.
+A fictional brain with notes (`concepts/`, `projects/`, `actions/` with `index.md` bundles), convention loops (`sensors/`, `routines/`, `agents/`), and flat JSONL records (`memories/`, `logs/`), plus optional domain JSON Schemas (`schemas/*.json`), reusable `prompts/`, and a runnable Python eval (`evals/smoke.py`) without credentials or network access.
 
 Run on a disposable copy from the repository checkout after `uv sync --locked`:
 
@@ -9,7 +9,7 @@ bf_checkout=$PWD
 bf_demo=$(mktemp -d)
 cp -R examples/brain "$bf_demo/brain"
 cd "$bf_demo/brain"
-bf() { uv run --project "$bf_checkout" bf "$@"; }
+bf() { env -u BF_BRAIN uv run --project "$bf_checkout" bf "$@"; }
 
 BF_START=2026-09-18T09:00:00Z BF_END=2026-09-18T10:00:00Z python3 sensors/demo.py | bf ingest demo
 bf run usage-demo
@@ -19,19 +19,20 @@ bf review
 bf run weekly-review
 ```
 
-`bf build` writes flat JSONL files (`memories/{concepts,projects,actions}.jsonl`) alongside `memories/demo.jsonl` and `usages/usage-demo.jsonl`, and read-only `bf check` returns `"ok":true` (`6` notes, `1` memory record, `1` usage record).
+`bf build` writes `memories/_notes.jsonl` and refreshes the disposable `.bf/cache/index.sqlite3` FTS5 cache alongside `memories/demo.jsonl` and `memories/usage-demo.jsonl`, and read-only `bf check` returns `"ok":true` (`6` notes, `2` memory records).
 
-## Query JSONL records (`bf query`, `rg`, `jq`)
+## Query records (`bf query`, `jq`, `duckdb`)
 
 ```bash
-# Full-text search across all JSONL records via rg
+# Ranked BM25 full-text search across notes and memories
 bf query "upstream content can disappear"
 
-# Query heading attr_list metadata (## Intention {#intention owner=maintainer state=waiting}) via jq
-bf query --jq '. as $r | .headings[]? | select(.meta.state == "waiting") | {ref: $r.ref, id, title, meta}'
+# Find every note linking to a specific record (backlinks)
+bf query --links-to demo:retention --format text
 
-# Find notes citing demo:retention with relation metadata via jq
-bf query --jq 'select(.kind == "note") | .ref as $n | .links[]? | select(.to == "demo:retention") | {from_note: $n, rel: .meta.rel, to: .to}'
+# Filter compiled notes with structured flags or inspect links via jq
+bf query --kind note --tag retention --format text
+jq 'select(.kind == "note") | .ref as $n | .links[]? | select(.to == "demo:retention") | {from_note: $n, rel: .meta.rel, to: .to}' memories/_notes.jsonl
 ```
 
 ## Share a draft concept with an isolated team brain

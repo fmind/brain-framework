@@ -1,257 +1,75 @@
-"""Unified JSONL record storage (`memories/` and `usages/`), ingestion, structured loop logs, and `logs/events.jsonl`."""
+"""Unified JSONL record storage (`memories/<source>.jsonl`, `memories/_notes.jsonl`), validation, and ingestion."""
 
 from __future__ import annotations
 
-import os
-import re
 from collections.abc import Generator, Iterable
-from contextlib import nullcontext, suppress
+from contextlib import closing, nullcontext, suppress
 from datetime import datetime
 from typing import Any, Literal
 
-from bf import models
-from bf.models import DEFAULT_NOTES, RESERVED_SOURCES, Error, InputError, clean, decode, encode, now_utc
-from bf.storage import Store, append_regular, private_dir, tail_lines, writer
+from bf import index, models, refs, schemas, state
+from bf.models import (
+    DEFAULT_NOTES,
+    Error,
+    InputError,
+    clean,
+    decode,
+    encode,
+    failure,
+    now_utc,
+    printable,
+    redact_secrets,
+    sanitize_record_strings,
+)
+from bf.storage import Store, memory_file, valid_memory_sources, writer
 
-Target = Literal["memories", "usages"]
+__all__ = ["Mode", "forgotten_ids", "ingest", "iter_jsonl", "memory_file", "valid_memory_sources"]
 Mode = Literal["upsert", "snapshot"]
-MAX_EVENTS, COMPACT_BYTES = 1000, 8 << 20
-MAX_EVENT_LINE = 1 << 20
-_PEM_BEG_RE = re.compile(r"-----BEGIN [^-]{0,40}PRIVATE KEY-----")
-_PEM_END_RE = re.compile(r"-----END [^-]{0,40}PRIVATE KEY-----")
-_PEM_MAX_BYTES = 16384
+MAX_EVENT_REFS = 64
+MAX_EVENT_REFS_BYTES = 32_768
 
 
-def record_file(source: str, target: Target = "memories") -> str:
-    """Return the JSONL path `<target>/<source>.jsonl` (`memories/` or `usages/`)."""
-    return f"{target}/{source}.jsonl"
-
-
-def memory_file(source: str) -> str:
-    """Return the JSONL path `memories/<source>.jsonl` for a note or sensor source."""
-    return record_file(source, "memories")
-
-
-def valid_record_sources(
-    store: Store,
-    target: Target = "memories",
-    note_dirs: Iterable[str] = DEFAULT_NOTES,
-    *,
-    skipped: list[str] | None = None,
-) -> list[str]:
-    """Return sorted source names for valid `<target>/<source>.jsonl` files."""
-    notes_set = frozenset(note_dirs) if target == "memories" else frozenset()
-    _, top_files = store.subdirs(target, skipped=skipped)
-    prefix = f"{target}/"
-    out: list[str] = []
-    for rel in top_files:
-        if not rel.endswith(".jsonl"):
-            continue
-        src = rel.removeprefix(prefix).removesuffix(".jsonl")
-        if src in notes_set or (models.NAME_RE.fullmatch(src) and src not in RESERVED_SOURCES and src not in note_dirs):
-            out.append(src)
-    return sorted(out)
+def _bound_refs(refs: list[str]) -> tuple[list[str], bool]:
+    kept: list[str] = []
+    used = 0
+    for ref in refs:
+        if len(kept) >= MAX_EVENT_REFS:
+            return kept, True
+        cost = len(encode(ref))
+        if used + cost > MAX_EVENT_REFS_BYTES:
+            return kept, True
+        kept.append(ref)
+        used += cost
+    return kept, False
 
 
 def iter_jsonl(store: Store, path: str, *, check_duplicates: bool = False) -> Generator[tuple[bytes, dict[str, Any]]]:
     """Stream `(raw_line_bytes, parsed_dict)` for each non-empty line in JSONL file `path`."""
-    for idx, raw_line in enumerate(store.iter_lines(path, models.MAX_FILE), 1):
-        if not (stripped := raw_line.strip()):
-            continue
-        parsed = decode(stripped, f"{path}:{idx}", check_duplicates=check_duplicates)
-        if not isinstance(parsed, dict):
-            raise Error(f"{path}:{idx}: expected a JSON object")
-        yield stripped, parsed
+    with closing(store.iter_lines(path, models.MAX_FILE)) as lines:
+        for idx, raw_line in enumerate(lines, 1):
+            if not (stripped := raw_line.strip()):
+                continue
+            parsed = decode(stripped, f"{path}:{idx}", check_duplicates=check_duplicates)
+            if not isinstance(parsed, dict):
+                raise Error(f"{path}:{idx}: expected a JSON object")
+            yield stripped, parsed
 
 
-def forgotten_ids(store: Store, source: str, target: Target = "memories") -> set[str]:
+def forgotten_ids(store: Store, source: str) -> set[str]:
+    """Return the set of explicitly forgotten record IDs from `memories/<source>.forgotten`."""
     try:
-        raw = store.read(f"{target}/{source}.forgotten", models.MAX_NOTE)
+        raw = store.read(f"memories/{source}.forgotten", models.MAX_NOTE)
     except FileNotFoundError:
         return set()
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        raise Error(f"{target}/{source}.forgotten: file is not valid UTF-8") from None
+        raise Error(f"memories/{source}.forgotten: file is not valid UTF-8") from None
     return {ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")}
 
 
-def load_unit_state(store: Store, name: str) -> dict[str, Any]:
-    """Load `.bf/<name>.json`, returning an initialized `idle` state when absent."""
-    with suppress(FileNotFoundError):
-        state = private_dir(store, create=False)
-        if isinstance(parsed := decode(state.read(f"{name}.json", 1 << 20), f".bf/{name}.json"), dict):
-            return dict(parsed)
-    zeros = dict.fromkeys(("event_seq", "runs", "failures", "consecutive_failures", "duration_ms"), 0)
-    empty = dict.fromkeys(("last_start", "last_end", "last_success", "last_scheduled", "error"), "")
-    base = {"kind": "loop", "name": name, "status": "idle", "updated": now_utc(), "schedule_last": {}, "last_run": {}}
-    return {**base, **empty, **zeros}
-
-
-def save_unit_state(store: Store, doc: dict[str, Any], *, locked: bool = False) -> None:
-    """Write `.bf/<name>.json` atomically with `0600` permissions."""
-    state, path = private_dir(store), f"{doc['name']}.json"
-    if locked:
-        state.write(path, encode(doc), mode=0o600)
-    else:
-        with writer(store):
-            state.write(path, encode(doc), mode=0o600)
-
-
-def mark_unit_state(store: Store, name: str, **fields: Any) -> None:
-    """Atomically read-modify-write fields on `.bf/<name>.json` under `writer(store)`."""
-    with writer(store):
-        cur = load_unit_state(store, name)
-        save_unit_state(store, {**cur, "kind": "loop", "name": name, **fields}, locked=True)
-
-
-def find_orphans(store: Store, known_units: set[str]) -> list[str]:
-    """Return sorted orphaned `.bf/<loop>.json` stems not declared in `bf.yaml`."""
-    with suppress(FileNotFoundError):
-        private_dir(store, create=False)
-        _, top_files = store.subdirs(".bf")
-        return sorted(p[4:-5] for p in top_files if p.endswith(".json") and p[4:-5] not in known_units)
-    return []
-
-
-def make_stderr_logger(store: Store, name: str, run_id: str) -> Any:
-    """Return a stateful line callback that redacts multi-line PEM blocks across streamed stderr lines."""
-    in_pem, pem_bytes = False, 0
-
-    def _on_line(raw_line: bytes) -> None:
-        nonlocal in_pem, pem_bytes
-        text = raw_line.decode("utf-8", "replace")
-        begs = [m.start() for m in _PEM_BEG_RE.finditer(text)]
-        ends = [m.end() for m in _PEM_END_RE.finditer(text)]
-        last_beg, last_end = (begs[-1] if begs else -1), (ends[-1] if ends else -1)
-        if in_pem:
-            pem_bytes += len(raw_line)
-            if last_end > last_beg:
-                in_pem, pem_bytes = False, 0
-                return
-            if last_beg > last_end:
-                pem_bytes = 0
-                return
-            if pem_bytes <= _PEM_MAX_BYTES:
-                return
-            in_pem, pem_bytes = False, 0
-        if begs:
-            if last_beg > last_end:
-                in_pem, pem_bytes = True, 0
-            append_loop_stderr(store, name, run_id, b"[REDACTED]")
-            return
-        append_loop_stderr(store, name, run_id, raw_line)
-
-    return _on_line
-
-
-def append_loop_stderr(store: Store, name: str, run_id: str, raw_line: bytes) -> None:
-    """Parse one loop stderr line (structured JSONL/structlog or plain text) and append to `logs/<name>.jsonl`."""
-    text = raw_line.decode("utf-8", "replace").strip()
-    if not text:
-        return
-    if text.startswith("{"):
-        with suppress(Error):
-            parsed = decode(text, f"logs/{name}.jsonl", check_duplicates=False)
-            if isinstance(parsed, dict):
-                safe = models.redact_value(parsed)
-                if isinstance(safe, dict):
-                    ts = str(safe.pop("time", "") or safe.pop("timestamp", "") or safe.pop("time_iso", "") or "")
-                    sev = str(safe.pop("severity", "") or safe.pop("level", "") or "INFO")
-                    msg = str(safe.pop("message", "") or safe.pop("event", "") or "log")
-                    safe["loop"], safe["run"] = name, run_id
-                    line = models.log_line(msg[:4096], severity=sev, time_iso=ts, **safe)
-                    with suppress(Error, OSError):
-                        store.append_log(name, line)
-                    return
-    clean_msg = models.redact_secrets(text)[:4096]
-    with suppress(Error, OSError):
-        store.append_log(name, models.log_line(clean_msg, severity="WARN", loop=name, run=run_id))
-
-
-def latest_event_seq(store: Store) -> int:
-    """Return the highest `seq` recorded in `logs/events.jsonl` (`0` when absent or empty)."""
-    with suppress(FileNotFoundError):
-        logs_dir = private_dir(store, "logs", create=False)
-        for span in (65536, 16 << 20):
-            tail, off = logs_dir.read_tail("events.jsonl", span, label="logs/events.jsonl")
-            for ln in reversed(tail.splitlines()):
-                if stripped := ln.strip():
-                    parsed = decode(stripped, "logs/events.jsonl", check_duplicates=False)
-                    return seq if isinstance(parsed, dict) and type(seq := parsed.get("seq")) is int else 0
-            if off == 0:
-                break
-    return 0
-
-
-def read_events(store: Store, *, after_seq: int = 0) -> tuple[list[dict[str, Any]], int]:
-    """Read `logs/events.jsonl` and return `(events_after_seq, latest_seq)` with cursor reset self-healing."""
-    all_events: list[dict[str, Any]] = []
-    latest = 0
-    with suppress(FileNotFoundError):
-        raw = private_dir(store, "logs", create=False).read("events.jsonl", 16 << 20)
-        for idx, ln in enumerate(raw.splitlines(), 1):
-            if stripped := ln.strip():
-                parsed = decode(stripped, f"logs/events.jsonl:{idx}", check_duplicates=False)
-                if isinstance(parsed, dict) and type(seq := parsed.get("seq")) is int:
-                    all_events.append(dict(parsed))
-                    latest = max(latest, seq)
-    floor = 0 if (latest and after_seq > latest) else after_seq
-    return [ev for ev in all_events if int(ev["seq"]) > floor], latest
-
-
-def append_event(
-    store: Store,
-    kind: str,
-    source: str,
-    data: dict[str, Any] | None = None,
-    *,
-    dedupe: bool = False,
-    locked: bool = False,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Append one event line atomically to `logs/events.jsonl` (`0600` private, bounded compaction)."""
-    clean(kind, "event kind")
-    clean(source, "event source")
-    if not models.EVENT_KIND_RE.fullmatch(kind):
-        raise Error("event kind must start with a lowercase letter and use lowercase letters, digits, '.', '_', or '-'")
-    if not models.NAME_RE.fullmatch(source):
-        raise Error("event source must start with a lowercase letter and use lowercase letters, digits, or '-'")
-    safe_data = models.redact_value(dict(data or {}))
-    with nullcontext() if locked else writer(store):
-        logs_dir = private_dir(store, "logs")
-        msg_id = safe_data.get("id") if isinstance(safe_data, dict) else None
-        prev_seq = latest_event_seq(store)
-        if dedupe and isinstance(msg_id, str) and msg_id:
-            with suppress(FileNotFoundError):
-                needle = encode(msg_id).rstrip(b"\n")
-                for raw_ln in reversed(logs_dir.read("events.jsonl", 16 << 20).splitlines()):
-                    if (
-                        needle in raw_ln
-                        and isinstance(parsed := decode(raw_ln, "logs/events.jsonl", check_duplicates=False), dict)
-                        and parsed.get("kind") == kind
-                        and parsed.get("source") == source
-                        and isinstance(pdata := parsed.get("data"), dict)
-                        and pdata.get("id") == msg_id
-                    ):
-                        return dict(parsed)
-        seq, ts = prev_seq + 1, now_utc(now)
-        eid = f"evt-{seq}-{os.urandom(4).hex()}"
-        event = {"seq": seq, "id": eid, "time": ts, "kind": kind, "source": source, "data": safe_data}
-        raw_line = encode(event)
-        if len(raw_line) > MAX_EVENT_LINE:
-            raise Error(f"logs/events.jsonl: event exceeds {MAX_EVENT_LINE} bytes")
-        size_after = append_regular(logs_dir, "events.jsonl", raw_line, mode=0o600, label="logs/events.jsonl")
-        if size_after > COMPACT_BYTES or (seq > MAX_EVENTS and seq % 200 == 0):
-            all_lines = logs_dir.read("events.jsonl", 32 << 20).splitlines(keepends=True)
-            if len(all_lines) > MAX_EVENTS or size_after > COMPACT_BYTES:
-                kept = tail_lines(all_lines, MAX_EVENTS, COMPACT_BYTES >> 1)
-                logs_dir.write("events.jsonl", b"".join(kept), mode=0o600, durable=False)
-        return event
-
-
 def parse_batch_envelope(data: bytes, label: str = "input") -> tuple[list[dict[str, Any]], bool]:
-    """Parse a JSON array, `{"records": [...]}` envelope, single object, or JSON Lines into `(items, incomplete)`."""
+    """Parse a JSON array, `{"records": [...], "incomplete"?}` envelope, single object, or JSONL."""
     if len(data) > models.MAX_BATCH:
         raise Error(f"{label} exceeds {models.MAX_BATCH} bytes; split the batch")
     try:
@@ -293,20 +111,9 @@ def parse_batch_envelope(data: bytes, label: str = "input") -> tuple[list[dict[s
     return items, False
 
 
-def _dedupe_typed_links(links: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    typed = {(it["to"], it["kind"], it.get("anchor", ""), it.get("section", "")) for it in links if it.get("meta")}
-    return [
-        it
-        for it in links
-        if it.get("meta") or (it["to"], it["kind"], it.get("anchor", ""), it.get("section", "")) not in typed
-    ]
-
-
 def _normalize_record_links(
     raw_links: object, label: str, brain_name: str, note_dirs: Iterable[str] = DEFAULT_NOTES
 ) -> list[dict[str, Any]]:
-    from bf.markdown import add_link, parse_link, record_link_problem
-
     if raw_links is None:
         return []
     if not isinstance(raw_links, list):
@@ -317,14 +124,14 @@ def _normalize_record_links(
     seen: set[tuple[Any, ...]] = set()
 
     def add_one(tgt: str, sec: str = "", meta: dict[str, str] | None = None, req: bool = True, kind: str = "") -> None:
-        parsed = parse_link(
+        parsed = refs.parse_link(
             label, tgt, brain_name, note_dirs=dirs, section=sec, attr_meta=meta, relative_base=False, require_uri=req
         )
         if kind and parsed["kind"] != kind:
             raise Error(f"{label}.links: link kind {kind!r} does not match target")
-        if prob := record_link_problem(parsed, note_dirs=dirs):
+        if prob := refs.record_link_problem(parsed, note_dirs=dirs):
             raise Error(f"{label}: {prob}")
-        add_link(seen, out, parsed)
+        refs.add_link(seen, out, parsed)
 
     for item in raw_links:
         if isinstance(item, str):
@@ -347,23 +154,20 @@ def _normalize_record_links(
             add_one(tgt, str(item.get("section") or ""), meta, not tgt.startswith(roots), str(item.get("kind") or ""))
         else:
             raise Error(f"{label}.links entries must be target strings or link objects")
-    return _dedupe_typed_links(out)
+    return refs.dedupe_typed_links(out)
 
 
 def _prepare_record(
-    raw: dict[str, Any],
-    source: str,
-    idx: int,
-    brain_name: str,
-    note_dirs: Iterable[str],
-    *,
-    target: Target = "memories",
-) -> tuple[dict[str, Any], bool]:
-    from bf.markdown import normalize_tags
-
-    label, rec = f"{source}[{idx}]", dict(raw)
-    if not isinstance(raw_id := rec.get("id"), str):
+    raw: dict[str, Any], source: str, idx: int, brain_name: str, note_dirs: Iterable[str]
+) -> dict[str, Any]:
+    label = f"{source}[{idx}]"
+    raw_id_orig = raw.get("id")
+    if not isinstance(raw_id_orig, str):
         raise Error(f"{label}: missing required string 'id'")
+    if models.invisible(raw_id_orig):
+        raise Error(f"{label}.id must contain no invisible format characters")
+    rec = sanitize_record_strings(dict(raw))
+    raw_id = str(rec["id"])
     if not isinstance(raw_title := rec.get("title"), str):
         raise Error(f"{label}: missing required string 'title'")
     rec_id = clean(raw_id, f"{label}.id")
@@ -373,25 +177,28 @@ def _prepare_record(
         or "#" in rec_id
         or rec_id.startswith("//")
         or ("?" in rec_id and not is_http_id)
-        or models.invisible(rec_id)
     ):
-        raise Error(f"{label}.id must contain no whitespace, '#', '//' prefix, non-URL '?', or invisible characters")
-    exp_kind = "usage" if target == "usages" else "memory"
-    rec["id"], rec["title"], exp_ref = rec_id, clean(raw_title, f"{label}.title"), f"{source}:{rec_id}"
-    for key, exp in (("source", source), ("ref", exp_ref), ("kind", exp_kind)):
+        raise Error(f"{label}.id must contain no whitespace, '#', '//' prefix, or non-URL '?'")
+    exp_ref = f"{source}:{rec_id}"
+    rec["id"] = rec_id
+    rec["title"] = clean(models.strip_unsafe_text(raw_title), f"{label}.title")
+    for key, exp in (("source", source), ("ref", exp_ref), ("kind", "memory")):
         if key in rec and rec[key] != exp:
             raise Error(f"{label}.{key} must {'equal' if key == 'kind' else 'match'} {exp!r}")
-    rec["source"], rec["ref"], rec["kind"] = source, exp_ref, exp_kind
+    rec["source"], rec["ref"], rec["kind"] = source, exp_ref, "memory"
     if (txt := rec.get("text")) is None:
         rec["text"] = ""
     elif not isinstance(txt, str) or len(txt) > 4 << 20:
         raise Error(f"{label}.text {'exceeds 4 MiB' if isinstance(txt, str) else 'must be a string'}")
-    rec["tags"] = normalize_tags(rec["tags"], label) if rec.get("tags") is not None else []
+    rec["tags"] = refs.normalize_tags(rec["tags"], label) if rec.get("tags") is not None else []
     rec["links"] = _normalize_record_links(rec.get("links"), label, brain_name, note_dirs)
     if "url" in rec:
         if not isinstance(rec["url"], str):
             raise Error(f"{label}.url must be a string")
-        clean(rec["url"], f"{label}.url") if rec["url"] else rec.pop("url")
+        if rec["url"]:
+            rec["url"] = refs.validate_url(rec["url"], f"{label}.url")
+        else:
+            rec.pop("url")
     for field_name in ("created", "updated"):
         if field_name in rec:
             if not isinstance(val := rec[field_name], str):
@@ -399,61 +206,40 @@ def _prepare_record(
             if not val:
                 del rec[field_name]
             else:
-                norm = models.normalize_date if len(val) == 10 else models.normalize_time
-                rec[field_name] = norm(val, f"{label}.{field_name}")
-    if isinstance(sa := rec.get("stale_after"), str) and models.DURATION_RE.fullmatch(sa):
-        models.parse_duration_seconds(sa, f"{label}.stale_after")
-    encode(rec)
-    return rec, "updated" in rec
+                rec[field_name] = models.normalize_iso_date_or_time(val, f"{label}.{field_name}")
+    if "stale_after" in rec and rec["stale_after"] is not None:
+        sa = rec["stale_after"]
+        if not isinstance(sa, str) or not sa:
+            raise Error(f"{label}.stale_after must be an explicit duration (e.g. 90d) or ISO date")
+        if len(sa) <= 32 and models.DURATION_RE.fullmatch(sa):
+            models.parse_duration(sa, f"{label}.stale_after")
+        else:
+            rec["stale_after"] = models.normalize_iso_date_or_time(sa, f"{label}.stale_after")
+    rec.pop("ingested_at", None)
+    sanitized = sanitize_record_strings(rec)
+    if (sanitized.get("kind"), sanitized.get("source"), sanitized.get("ref")) != ("memory", source, exp_ref):
+        raise Error(f"{label}: computed record identity fields were altered")
+    encode(sanitized)
+    return sanitized
 
 
-def parse_emitted_event(raw_line: bytes, default_kind: str, label: str) -> tuple[str, dict[str, Any]]:
-    """Parse one emitted JSONL line into `(event_kind, payload_dict)` for both daemon and cycle loops."""
-    parsed = decode(raw_line, label)
-    if not isinstance(parsed, dict):
-        raise Error(f"{label}: emitted event must be a JSON object")
-    raw_k = parsed.get("kind")
-    if raw_k is not None and not isinstance(raw_k, str):
-        raise Error(f"{label}: event kind must be a string")
-    ev_kind = models.clean(raw_k or default_kind, f"{label} kind")
-    if not models.EVENT_KIND_RE.fullmatch(ev_kind):
-        raise Error(f"{label}: invalid event kind")
-    return ev_kind, dict(parsed)
-
-
-def emit_output_events(
-    store: Store, name: str, default_kind: str, out_bytes: bytes, *, now: datetime | None = None
-) -> int:
-    """Validate all JSONL stdout events first, then atomically append deduplicated events."""
-    if len(out_bytes) > models.MAX_BATCH:
-        raise Error(f"loops.{name}: emitted output exceeds {models.MAX_BATCH} bytes")
-    label = f"loops.{name}"
-    parsed_evs = [
-        parse_emitted_event(stripped, default_kind, f"{label} line {idx}")
-        for idx, raw_ln in enumerate(out_bytes.splitlines(), 1)
-        if (stripped := raw_ln.strip())
-    ]
-    if parsed_evs:
-        with writer(store):
-            for ev_k, payload in parsed_evs:
-                append_event(store, ev_k, name, payload, dedupe=True, locked=True, now=now)
-    return len(parsed_evs)
-
-
-def require_ingest_validators(store: Store, source: str, target: Target = "memories") -> list[Any]:
-    """Return all validators enforced for `<target>/<source>.jsonl` (core `record` + additive/domain schemas)."""
-    from bf.schemas import base_record_validator, load_validator, require_validator
-
-    vals: list[Any] = [base_record_validator()]
-    if (local_rec := load_validator(store, "schemas/record.json")) is not None:
-        vals.append(local_rec)
-    if target == "usages":
-        vals.append(require_validator(store, "usages"))
-        if (src_val := load_validator(store, f"schemas/{source}.json")) is not None:
-            vals.append(src_val)
-    else:
-        vals.append(require_validator(store, source))
-    return vals
+def validate_ingest_args(
+    source: str, *, mode: Mode = "upsert", schema_name: str = "", allow_removal: bool = False
+) -> None:
+    """Validate brain-independent `bf ingest` arguments before reading stdin/files or `bf.yaml`."""
+    if not models.NAME_RE.fullmatch(source):
+        raise InputError("source must start with a lowercase letter and use only lowercase letters, digits, or '-'")
+    if source in models.RESERVED_SOURCES:
+        raise InputError(f"source {source!r} is reserved; choose a sensor name")
+    if mode not in {"upsert", "snapshot"}:
+        raise InputError("mode must be upsert or snapshot")
+    if allow_removal and mode != "snapshot":
+        raise InputError("--allow-removal applies only to --mode snapshot")
+    if schema_name:
+        if not models.NAME_RE.fullmatch(schema_name):
+            raise InputError("schema name must use lowercase letters, digits, or '-'")
+        if schema_name in models.RESERVED_SOURCES:
+            raise InputError(f"schema name {schema_name!r} is reserved")
 
 
 def ingest(
@@ -461,109 +247,170 @@ def ingest(
     source: str,
     data: bytes,
     *,
-    target: Target = "memories",
     mode: Mode = "upsert",
+    schema_name: str = "",
     allow_removal: bool = False,
     dry_run: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Validate against bundled `record` + required domain schema and write `<target>/<source>.jsonl`."""
+    """Validate against native core schema + optional `schemas/<schema>.json`, write canonical JSONL, best-effort sync FTS5, and emit `records.ingested`."""
     from bf import config
-    from bf.schemas import validate_instance
 
-    if not models.NAME_RE.fullmatch(source):
-        raise InputError("source must start with a lowercase letter and use only lowercase letters, digits, or '-'")
-    if target not in {"memories", "usages"}:
-        raise InputError("target must be memories or usages")
+    validate_ingest_args(source, mode=mode, schema_name=schema_name, allow_removal=allow_removal)
     cfg = config.load(store)
     if source in cfg.reserved_sources:
         raise InputError(f"source {source!r} is reserved; choose a sensor name")
-    if mode not in {"upsert", "snapshot"}:
-        raise InputError("mode must be upsert or snapshot")
-    validators = require_ingest_validators(store, source, target)
+
+    eff_schema = schema_name or source
+    user_validator = schemas.load_validator(store, f"schemas/{eff_schema}.json")
+    if schema_name and user_validator is None:
+        raise Error(f"schemas/{schema_name}.json: explicitly requested schema not found")
 
     raw_items, incomplete = parse_batch_envelope(data)
-    prepared: list[tuple[dict[str, Any], bool]] = []
+    prepared: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     stamp = now_utc(now)
     for idx, item in enumerate(raw_items):
-        rec, explicit_updated = _prepare_record(item, source, idx, cfg.name, cfg.notes, target=target)
+        rec = _prepare_record(item, source, idx, cfg.name, cfg.notes)
         if (rec_id := str(rec["id"])) in seen_ids:
             raise Error(f"{source}: duplicate record id {rec_id!r} in input batch")
         seen_ids.add(rec_id)
-        candidate = rec if explicit_updated else {**rec, "updated": stamp}
-        for validator in validators:
-            if errs := validate_instance(validator, candidate, f"{source}[{idx}]"):
-                raise Error("; ".join(errs))
-        prepared.append((rec, explicit_updated))
+        candidate = {**rec, "ingested_at": stamp}
+        if core_errs := schemas.validate_core_record(candidate, f"{source}[{idx}]"):
+            raise Error("; ".join(core_errs))
+        if user_validator is not None and (
+            user_errs := schemas.validate_instance(user_validator, candidate, f"{source}[{idx}]")
+        ):
+            raise Error("; ".join(user_errs))
+        prepared.append(rec)
 
-    target_file = record_file(source, target)
-    with nullcontext() if dry_run else writer(store):
-        forgotten = forgotten_ids(store, source, target)
-        existing: dict[str, tuple[bytes, dict[str, Any]]] = {}
+    target_file = memory_file(source)
+    emitted_event_data: dict[str, Any] | None = None
+    with nullcontext() if dry_run else writer(store, name=index.CORPUS_LOCK):
+        forgotten = forgotten_ids(store, source)
+        pre_stat: tuple[int, int, int] | None = None
+        existing: dict[str, tuple[bytes, dict[str, Any] | None]] = {}
         with suppress(FileNotFoundError):
-            for raw_ln, parsed in iter_jsonl(store, target_file):
-                if isinstance(eid := parsed.get("id"), str) and eid:
-                    existing[eid] = (raw_ln, parsed)
+            st_pre = store.stat(target_file)
+            pre_stat = (st_pre.st_mtime_ns, st_pre.st_size, st_pre.st_ino)
+            with closing(iter_jsonl(store, target_file, check_duplicates=False)) as existing_rows:
+                for raw_ln, parsed in existing_rows:
+                    if isinstance(eid := parsed.get("id"), str) and eid:
+                        existing[eid] = (raw_ln, parsed if eid in seen_ids else None)
 
         next_lines: dict[str, bytes] = {}
+        changed_by_ref: dict[str, dict[str, Any]] = {}
+        added_refs: list[str] = []
+        updated_refs: list[str] = []
         added = updated_count = unchanged = skipped_forgotten = 0
-        for rec, explicit_updated in prepared:
+        for rec in prepared:
             rec_id = str(rec["id"])
             if rec_id in forgotten:
                 skipped_forgotten += 1
                 continue
-            stamped = rec if explicit_updated else {**rec, "updated": stamp}
+            stamped = {**rec, "ingested_at": stamp}
+            ref = f"{source}:{rec_id}"
             if rec_id not in existing:
                 next_lines[rec_id] = encode(stamped).rstrip(b"\n")
+                changed_by_ref[ref] = stamped
+                added_refs.append(ref)
                 added += 1
                 continue
             old_raw, old_rec = existing[rec_id]
-            cmp_rec = old_rec if explicit_updated else {k: v for k, v in old_rec.items() if k != "updated"}
-            if cmp_rec == rec:
+            cmp_old = {k: v for k, v in (old_rec or {}).items() if k != "ingested_at"}
+            if old_rec is not None and encode(cmp_old) == encode(rec):
                 next_lines[rec_id] = old_raw
                 unchanged += 1
             else:
                 next_lines[rec_id] = encode(stamped).rstrip(b"\n")
+                changed_by_ref[ref] = stamped
+                updated_refs.append(ref)
                 updated_count += 1
 
         snap_complete = mode == "snapshot" and not incomplete
-        if snap_complete:
-            removed_ids = [eid for eid in existing if eid not in next_lines]
-        else:
-            removed_ids = []
+        if not snap_complete:
             for eid, (old_raw, _) in existing.items():
-                if eid in forgotten:
-                    removed_ids.append(eid)
-                elif eid not in next_lines:
+                if eid not in forgotten and eid not in next_lines:
                     next_lines[eid] = old_raw
-
-        removed, existing_n, surviving = len(removed_ids), len(existing), len(next_lines)
+        removed_ids = [eid for eid in existing if eid not in next_lines]
+        removed = len(removed_ids)
+        existing_n, surviving = len(existing), len(next_lines)
         too_many = surviving == 0 or (existing_n >= 10 and removed * 2 > existing_n)
         if snap_complete and existing and not allow_removal and too_many:
             raise Error(f"{source}: snapshot would remove {removed} of {existing_n} records; pass --allow-removal")
 
+        index_warning = ""
         if not dry_run and (added or updated_count or removed):
+            row_offsets: dict[str, tuple[int, int]] = {}
             if surviving > 0:
-                payload = b"\n".join(next_lines[k] for k in sorted(next_lines)) + b"\n"
-                store.write(target_file, payload)
+                chunks: list[bytes] = []
+                pos = 0
+                for key in sorted(next_lines):
+                    line_b = next_lines[key]
+                    line_len = len(line_b) + 1
+                    row_offsets[f"{source}:{key}"] = (pos, line_len)
+                    chunks.append(line_b)
+                    chunks.append(b"\n")
+                    pos += line_len
+                if pos > models.MAX_FILE:
+                    raise Error(f"{target_file}: file exceeds {models.MAX_FILE} bytes")
+                store.write(target_file, b"".join(chunks))
             else:
                 with suppress(FileNotFoundError):
                     store.delete(target_file)
-            ev_data = {
-                "target": target,
+            # Best-effort disposable cache sync: canonical JSONL write & event emission never fail on SQLite cache errors.
+            changed_rows = [
+                (row_offsets[ref][0], row_offsets[ref][1], rec_obj)
+                for ref, rec_obj in changed_by_ref.items()
+                if ref in row_offsets
+            ]
+            index_warning = ""
+            try:
+                index.sync_source_delta(
+                    store,
+                    cfg.name,
+                    source,
+                    target_file,
+                    pre_stat=pre_stat,
+                    changed_rows=changed_rows,
+                    row_offsets=row_offsets,
+                    removed_refs=[f"{source}:{eid}" for eid in removed_ids],
+                    total_count=surviving,
+                    reserved=cfg.reserved_sources,
+                    locked=True,
+                )
+            except (Error, OSError) as err:
+                index_warning = redact_secrets(printable(failure(err)))
+            added_out, added_trunc = _bound_refs(sorted(added_refs))
+            updated_out, updated_trunc = _bound_refs(sorted(updated_refs))
+            emitted_event_data = {
                 "records": surviving,
                 "added": added,
                 "updated": updated_count,
                 "removed": removed,
+                "incomplete": incomplete,
+                **({"added_refs": added_out} if added_out else {}),
+                **({"updated_refs": updated_out} if updated_out else {}),
+                **({"refs_truncated": True} if (added_trunc or updated_trunc) else {}),
             }
-            append_event(store, "records.ingested", source, ev_data, locked=True, now=now)
-        meta = {"ok": True, "brain": cfg.name, "source": source, "target": target, "mode": mode}
-        stats = {
-            "records": surviving,
-            "added": added,
-            "updated": updated_count,
-            "unchanged": unchanged,
-            "removed": removed,
-        }
-        return {**meta, **stats, "forgotten": skipped_forgotten, "incomplete": incomplete, "dry_run": dry_run}
+
+    if emitted_event_data is not None:
+        state.append_event(store, "records.ingested", source, emitted_event_data, now=now)
+
+    out_doc: dict[str, Any] = {
+        "ok": True,
+        "brain": cfg.name,
+        "source": source,
+        "mode": mode,
+        "records": surviving,
+        "added": added,
+        "updated": updated_count,
+        "unchanged": unchanged,
+        "removed": removed,
+        "forgotten": skipped_forgotten,
+        "incomplete": incomplete,
+        "dry_run": dry_run,
+    }
+    if not dry_run and index_warning:
+        out_doc["index_warning"] = index_warning
+    return out_doc

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Offline example agent loop demonstrating the `agents/` convention (15m default timeout).
+"""Offline example agent loop demonstrating the `agents/` convention (`timeout: 15m` in `bf.yaml`).
 
-Reads `prompts/digest.md` and the trigger context JSON from `stdin`, logs a structured JSONL event
+Reads `prompts/digest.md` and any matched JSONL events from `stdin`, logs a structured JSONL event
 to `stderr` (`logs/assistant.jsonl`), and sends a plain-text reply through `routines/local.py send`.
 In a live brain, replace the local reply step with your coding harness (`agy`, `copilot`, etc.).
 """
@@ -37,11 +37,9 @@ def main() -> int:
         sys.stderr.write(json.dumps({"severity": "ERROR", "message": "missing or invalid routines/local.py"}) + "\n")
         return 1
 
-    raw_ctx = sys.stdin.read().strip()
-    ctx = json.loads(raw_ctx) if raw_ctx else {}
-    events = ctx.get("events") if isinstance(ctx, dict) else []
-    event_count = len(events) if isinstance(events, list) else 0
-    trigger = str(ctx.get("trigger") or os.environ.get("BF_TRIGGER") or "manual") if isinstance(ctx, dict) else "manual"
+    events = [json.loads(ln) for ln in sys.stdin.read().splitlines() if ln.strip()]
+    event_count = len(events)
+    trigger = os.environ.get("BF_TRIGGER") or "manual"
 
     sys.stderr.write(
         json.dumps(

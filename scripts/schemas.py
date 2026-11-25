@@ -33,7 +33,7 @@ def main() -> None:
         else:
             try:
                 actual = decode(store.read(rel, 1 << 20))
-            except OSError, Error:
+            except (OSError, Error):
                 parser.exit(1, f"{rel}: missing or invalid schema; run mise run generate:schema\n")
             if actual != schema:
                 parser.exit(1, f"{rel}: schema drift; run mise run generate:schema\n")

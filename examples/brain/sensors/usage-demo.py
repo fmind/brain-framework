@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit one fictional FinOps/prompt usage record inside BF_START..BF_END for `usages/usage-demo.jsonl`."""
+"""Emit one fictional FinOps/prompt usage record inside BF_START..BF_END for `memories/usage-demo.jsonl`."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ record = {
     "id": "demo-session-1",
     "title": "Example coding harness session",
     "type": "session",
-    "description": "Synthetic FinOps telemetry record demonstrating usages/*.jsonl.",
+    "description": "Synthetic FinOps telemetry record demonstrating memories/*.jsonl with schemas/usages.json.",
     "created": start.isoformat(),
     "updated": start.isoformat(),
     "harness": "agy",

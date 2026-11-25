@@ -252,7 +252,10 @@ def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major:
         ) from error
     if not is_major:
         return []
-    for skill in sorted([*clone.glob("src/bf/skills/*/SKILL.md"), *clone.glob("examples/*/skills/*/SKILL.md")]):
+    skills = sorted(clone.glob("skills/*/SKILL.md"))
+    if not skills:
+        raise ReleaseError("major release requires at least one skills/*/SKILL.md file to update compatibility")
+    for skill in skills:
         text, count = COMPATIBILITY.subn(rf"\g<1>{new_major}", skill.read_text())
         if count != 1:
             raise ReleaseError(f"{skill.relative_to(clone)} must hold one `compatibility: Requires Brain Framework N`")
@@ -265,16 +268,19 @@ def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major:
     for schema in sorted(clone.glob("docs/*.schema.json")):
         shutil.copy2(schema, clone / "tests/contract" / schema.name)
     # Mentions of the previous major that may mean the current release; historical ones, such as upgrade notes, stay.
-    # Python's regex, not `git grep -E`: macOS's POSIX regex has no `\b`, so the search found nothing there.
+    # Include newly copied untracked files too so relocated skills/examples are scanned before `git add --all`.
     pattern = re.compile(rf"(Brain Framework|bf`?) {old_major}\b|\b{old_major}\.[0-9]+\.[0-9]+")
     listed = run(
         "git",
         "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
         "-z",
         "--",
-        "src/bf/guides",
-        "src/bf/skills",
+        "skills",
         "examples",
+        "src/bf/starter",
         "docs/index.md",
         "docs/getting-started.md",
         "docs/authoring.md",
@@ -286,10 +292,13 @@ def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major:
         strip=False,
     )
     found = []
-    for name in sorted(filter(None, listed.split("\0"))):
+    for name in sorted(set(filter(None, listed.split("\0")))):
+        target = clone / name
+        if not target.is_file():
+            continue
         try:
-            lines = (clone / name).read_text(encoding="utf-8").splitlines()
-        except OSError, UnicodeDecodeError:
+            lines = target.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
             # Binary or unreadable files hold no prose to review.
             continue
         found.extend(f"{name}:{number}:{line}" for number, line in enumerate(lines, start=1) if pattern.search(line))

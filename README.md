@@ -1,54 +1,109 @@
 <p align="center">
   <img
     src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-framework.svg"
-    alt="Brain Framework: Plain-file knowledge and offline retrieval for humans and AI agents"
-    width="100%"
+    alt="Brain Framework logo"
+    width="128"
   />
 </p>
 
-Brain Framework (`bf`) turns a 3x3 folder of human-authored Markdown notes, shell/Python loops, and JSONL records (`memories/<source>.jsonl`, `usages/<source>.jsonl`, `logs/<loop>.jsonl`) into a schema-validated, UNIX-native knowledge brain with zero database or external indexer, ready for humans and AI coding harnesses to query offline with `rg`, `jq`, and DuckDB.
+<h1 align="center">Brain Framework</h1>
 
-- **Three formats, one job each.** **YAML for config** (`bf.yaml` `version: 18` + note frontmatter), **Markdown for humans** (`concepts/`, `projects/`, `actions/` with flat `<slug>.md` and universal `<slug>/index.md` bundles), and **JSONL for records** (`memories/`, `usages/`, and private `logs/`, validated by bundled `bf`/`record` schemas plus `schemas/<source>.json` and `schemas/usages.json`).
-- **Strict read/write boundary & UNIX composability.** `bf status`, `bf review`, `bf read`, `bf query`, `bf check`, and `bf schema` are strictly read-only and never mutate disk; flat JSONL files stay directly inspectable with `rg`, `jq`, and DuckDB.
-- **Convention-first `loops:` with zero built-in LLMs.** Under 6,500 lines of Python with just 5 minimal runtime dependencies (`croniter`, `jsonschema`, `markdown`, `pyyaml`, `watchfiles`), unifying deterministic collectors (`sensors/`), routines (`routines/`), coding-harness agents (`agents/`), and daemons (`when: daemon`) via `BF_*` env + `stdin` JSON, `stdout` JSONL data/events, `stderr` structured JSONL logs, and `logs/events.jsonl`.
+<p align="center">
+  <strong>From scattered information to informed actions, using plain files you own forever.</strong>
+</p>
 
-[![CI](https://github.com/fmind/brain-framework/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fmind/brain-framework/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/brain-framework?color=174EA6)](https://pypi.org/project/brain-framework/) [![Python](https://img.shields.io/pypi/pyversions/brain-framework)](https://pypi.org/project/brain-framework/) [![License: MIT](https://img.shields.io/badge/license-MIT-174EA6)](https://github.com/fmind/brain-framework/blob/main/LICENSE)
+<p align="center">
+  <a href="https://github.com/fmind/brain-framework/actions/workflows/ci.yml"><img src="https://github.com/fmind/brain-framework/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <a href="https://pypi.org/project/brain-framework/"><img src="https://img.shields.io/pypi/v/brain-framework?color=174EA6" alt="PyPI" /></a>
+  <a href="https://pypi.org/project/brain-framework/"><img src="https://img.shields.io/pypi/pyversions/brain-framework" alt="Python" /></a>
+  <a href="https://github.com/fmind/brain-framework/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-174EA6" alt="License: MIT" /></a>
+</p>
 
-## Try it
+AI coding agents lose context between sessions, while proprietary memory platforms lock your knowledge inside opaque databases. **Brain Framework (`bf`)** turns a plain Git folder of Markdown notes, schema-validated JSONL records, and shell or Python loops into a fast, offline knowledge brain for humans and AI coding agents.
 
-Requires Linux or macOS, [uv](https://docs.astral.sh/uv/getting-started/installation/), [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), and [jq](https://jqlang.org/), with no model or cloud account needed:
+- **Plain files, zero lock-in**: YAML for config, Markdown for humans, canonical JSONL for records. Inspect or query your data anytime with `git`, `rg`, `jq`, or DuckDB.
+- **Instant offline BM25 search**: A strictly disposable SQLite FTS5 cache ranks authored notes ahead of raw memories, resolves aliases and backlinks, and never mutates disk on read-only commands.
+- **Least-privilege automation loops**: Run deterministic collectors (`sensors/`), maintenance jobs (`routines/`), coding agents (`agents/`), and stream daemons (`when: daemon`) with per-loop secret allowlists (`env_from:`) and headless `bf watch`.
+- **Lean, model-agnostic core**: Three runtime dependencies (`jsonschema`, `markdown-it-py`, `pyyaml`) on Python 3.12+, zero built-in LLMs, and zero global config.
+
+## Quick start
+
+Requires Linux or macOS and [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python 3.12+). No model API key, database server, or cloud account is required:
 
 ```bash
-uv tool install --python 3.14 brain-framework
+uv tool install brain-framework
 bf init ~/brain
 cd ~/brain
-bf check
+bf check --format text
 bf status --format text
-bf review
-bf query --jq '{ref, title, headings}'
+bf query "welcome" --format text
 ```
 
-Explore the [four-tool walkthrough](https://github.com/fmind/brain-framework/blob/main/examples/context-hub/README.md) (Workspace, Jira, GitHub, and Google Cloud fixtures) or read [Getting started](https://fmind.github.io/brain-framework/getting-started/).
+Output on a fresh brain:
+
+```text
+Check: brain  [OK]
+  notes=1  memories=0  errors=0  warnings=0
+
+Brain: brain  [HEALTHY]
+  notes=1  memories=0  loops=0  events=1
+
+Query (fts5): 1 result(s) for 'welcome'
+
+  concepts/welcome.md#welcome  Welcome
+```
+
+If `BF_BRAIN` is already exported in your shell, unset it or pass `--brain ~/brain`.
+
+Next, follow [Getting started](https://fmind.github.io/brain-framework/getting-started/) to ingest records and write linked decisions, or run the [four-tool walkthrough](https://github.com/fmind/brain-framework/blob/main/examples/context-hub/README.md) with synthetic Workspace, Jira, GitHub, and Google Cloud fixtures.
 
 ## How it works
 
 <a href="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-loop.svg">
   <img
     src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-loop.svg"
-    alt="Gather, normalize, organize, act, and learn loop"
+    alt="Gather, normalize, connect, act, and learn loop"
     width="100%"
   />
 </a>
 
-- **Uniform notes, `index.md` bundles, & required schemas ([Authoring](https://fmind.github.io/brain-framework/authoring/)):** Organize Markdown across `concepts/`, `projects/`, `actions/` (or custom `notes:` dirs) using flat `<slug>.md` files or universal `<slug>/index.md` bundles, enforce bundled `record` + `schemas/<source>.json` / `schemas/usages.json`, attach `#id` heading anchors and `{rel=...}` link metadata, and link across notes, records (`source:id`), or declared sibling brains (`bf://`).
-- **Convention `loops:` (`sensors/`, `routines/`, `agents/`), two-stream JSONL, & `bf watch` ([Operations](https://fmind.github.io/brain-framework/operations/)):** Drop shell (`.sh`), Python (`.py`), or executable scripts in `sensors/` (auto-implies `ingest: upsert`), `routines/`, or `agents/` (15m default timeout), stream structured JSONL logs on `stderr` into `logs/<loop>.jsonl`, coordinate over `logs/events.jsonl`, and supervise with `bf watch` (interactive zero-dep ANSI dashboard on TTY, `--format text`, or `--format jsonl`).
-- **Strictly read-only retrieval & FinOps separation ([Retrieval](https://fmind.github.io/brain-framework/retrieval/)):** Resolve notes, `#anchor` sections, `source:id` records, or `bf://` URIs uniformly with `bf read`, search `memories/*.jsonl` or `usages/*.jsonl` via `bf query` (`rg`/`jq`) or DuckDB, and inspect live health with `bf status --format text`.
-- **Integrity, freshness, & schemas ([Reference](https://fmind.github.io/brain-framework/reference/)):** `bf check` validates `bf.yaml`, schemas, compiled-note sync, `memories/` & `usages/`, enabled `loops:`, links, `#anchor` headings, and declared cross-brain `bf://` refs; `bf review` surfaces `newer_evidence`, overdue `stale_after` notes, and open tasks; `bf schema` prints the 2 bundled Draft 2020-12 JSON Schemas (`bf`, `record`).
+A brain is one portable directory organized around a **3x3 layout** (three note folders, three loop folders, three JSONL record streams):
 
-## Good to know
+```text
+my-brain/
+├── bf.yaml         # Config: notes, brains, search.exclude, concurrency pools, loops
+├── concepts/       # Durable knowledge (<slug>.md or <slug>/index.md bundles)
+├── projects/       # Ongoing initiatives and decisions
+├── actions/        # Scoped requests, deliverables, and attachments
+├── sensors/        # Deterministic collectors (stdout JSONL -> memories/)
+├── routines/       # Maintenance scripts and continuous daemons (when: daemon)
+├── agents/         # Coding-harness or LLM tasks
+├── schemas/        # Optional domain JSON Schemas (core record schema always enforced)
+├── evals/          # User-owned Python/pytest contract checks
+├── memories/       # Canonical JSONL (_notes.jsonl + <source>.jsonl; gitignored)
+├── logs/           # Private 0700 structured JSONL loop logs (gitignored)
+└── .bf/            # Private 0700 runtime: disposable cache/index.sqlite3, state/, locks/
+```
 
-1. **Local-first and private.** Zero global config (`--brain` -> enclosing `bf.yaml` -> `BF_BRAIN` -> `$BRAIN_LOCATION` -> `~/brain`), `O_NOFOLLOW` path confinement, disposable `0700` `.bf/` (locks + loop cursors), and private `0700` `logs/` ([Operations](https://fmind.github.io/brain-framework/operations/)).
-2. **Harnesses reason; BF verifies.** Coding agents orient with `bf status` and `bf review`, author Markdown notes directly, emit events via `bf emit`, and verify with `bf build && bf check` plus Python/pytest suites in `evals/` ([Example brain](https://github.com/fmind/brain-framework/blob/main/examples/brain/README.md)).
-3. **Git-native collaboration.** Track notes, `bf.yaml`, `schemas/`, `sensors/`, `routines/`, `agents/`, `clients/`, `prompts/`, and `evals/` in Git while ignoring `memories/` and `usages/` (keeping `*.forgotten`), `logs/`, and `.bf/`.
+- [**Authoring**](https://fmind.github.io/brain-framework/authoring/): Write CommonMark Markdown with YAML frontmatter, `#id` heading anchors, checklist tasks, typed links (`{rel=cites}`), universal refs (`source:id`, `bf://`), and optional `schemas/<source>.json` validation.
+- [**Retrieval**](https://fmind.github.io/brain-framework/retrieval/): Search ranked BM25 hits and `--links-to` backlinks with `bf query`, resolve notes, `#anchor` sections, or aliases with `bf read`, track freshness with `bf review`, and run `rg`, `jq`, or DuckDB directly on `memories/*.jsonl`.
+- [**Operations**](https://fmind.github.io/brain-framework/operations/): Declare explicit `loops:` with named `concurrency:` pools, per-loop `env_from:` secrets, trailing-edge `debounce:`, delayed `bf emit --in|--at` wakeups, live `bf pause`/`bf resume`, and headless `bf watch` supervision.
+- [**Reference**](https://fmind.github.io/brain-framework/reference/): Full CLI contract (strict read-only vs write commands), exit codes, `BF_*` env vars, `{{...}}` placeholders, `bf.yaml` config, and published Draft 2020-12 JSON Schemas (`bf schema`).
 
-[Documentation](https://fmind.github.io/brain-framework/) · [Reference](https://fmind.github.io/brain-framework/reference/) · [Issues](https://github.com/fmind/brain-framework/issues) · [Contribute](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md) · [Governance](https://github.com/fmind/brain-framework/blob/main/GOVERNANCE.md) · [Security](https://github.com/fmind/brain-framework/blob/main/SECURITY.md) · [MIT License](https://github.com/fmind/brain-framework/blob/main/LICENSE) · [Third-party notices](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md)
+## Works with your AI coding harness
+
+`bf` pairs with Claude Code, Codex, Antigravity, Gemini CLI, OpenCode, or any terminal agent without an MCP server:
+
+- **Inside a brain**: Agents read the repo's `AGENTS.md`, orient with `bf status` and `bf review`, edit Markdown notes directly, and verify with `bf build && bf check` plus `evals/`.
+- **From any repository**: Set `export BF_BRAIN=~/brain` and install the optional [`/bf` skill](https://github.com/fmind/brain-framework/blob/main/skills/bf/SKILL.md) so your harness queries and updates your brain on demand.
+- **Always-on supervision**: Run `bf watch` headlessly under `systemd --user` or `launchd` and monitor live in any terminal with `watch -n 2 bf status --format text`.
+
+## Design principles
+
+1. **Strict read/write boundary**: `bf status`, `bf review`, `bf read`, `bf query`, `bf events`, `bf check`, and `bf schema` never touch disk. Cache readers open `.bf/cache/index.sqlite3` in strict read-only mode (`mode=ro`) with automatic JSONL fallback.
+2. **Private and confined by default**: Every path opens via `O_NOFOLLOW` directory descriptors, `.bf/` and `logs/` enforce `0700`/`0600` owner-only permissions, secrets stay scoped to each loop's `env_from:`, and logs redact credentials automatically.
+3. **Git-native collaboration**: Track notes, config, schemas, loops, and evals in Git while keeping generated `memories/`, private `logs/`, `.env`, and `.bf/` local.
+
+---
+
+[Documentation](https://fmind.github.io/brain-framework/) · [Examples](https://github.com/fmind/brain-framework/blob/main/examples/README.md) · [Issues](https://github.com/fmind/brain-framework/issues) · [Contributing](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md) · [Governance](https://github.com/fmind/brain-framework/blob/main/GOVERNANCE.md) · [Security](https://github.com/fmind/brain-framework/blob/main/SECURITY.md) · [Third-party notices](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md)

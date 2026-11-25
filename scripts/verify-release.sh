@@ -73,7 +73,7 @@ uv tool install --quiet --no-config --no-cache --python 3.14 "${work}/assets/${w
   fail "could not install the verified ${wheel}"
 
 # The installed bf runs with its own configuration and state, never the caller's registered brains.
-unset BF_BRAIN BRAIN_LOCATION
+unset BF_BRAIN
 export XDG_CONFIG_HOME="${work}/config" XDG_STATE_HOME="${work}/state"
 bf="${work}/bin/bf"
 brain="${work}/brain"
@@ -94,14 +94,17 @@ description: Launch a product website that helps visitors understand the product
 
 Start with a single product page because visitors need a clear explanation before signing up. Evidence: [brief](workspace:brief).
 EOF
-printf '{"type":"object"}\n' >"${brain}/schemas/workspace.json"
 printf '%s\n' '[{"id":"brief","title":"Website brief","text":"Single product page.","created":"2026-09-20T09:00:00Z"}]' |
   "${bf}" ingest workspace --brain "${brain}" | grep -F '"added":1' > /dev/null ||
   fail "bf ingest rejected the sample record"
 "${bf}" build --brain "${brain}" | grep -F '"problems":[]' > /dev/null || fail "bf build failed on the sample brain"
 # grep -F reads the whole reply: grep -q could exit first and fail bf's write under pipefail.
 "${bf}" check --brain "${brain}" | grep -F '"ok":true' > /dev/null || fail "bf check rejected the sample brain"
+"${bf}" query "product page" --brain "${brain}" | grep -F '"engine":"fts5"' > /dev/null ||
+  fail "bf query failed on the sample brain"
+"${bf}" read "bf:///projects/new-website.md#decision" --brain "${brain}" | grep -F '"kind":"section"' > /dev/null ||
+  fail "bf read failed on the sample brain"
 "${bf}" review --brain "${brain}" | grep -F '"problems":[]' > /dev/null || fail "bf review failed on the sample brain"
 
 echo "verify-release: ${tag} at ${commit} is published at ${url}; PyPI digests and build attestations match ${wheel}" \
-  "and ${sdist}, and the installed bf ${version} initialized, ingested, built, validated and reviewed a brain"
+  "and ${sdist}, and the installed bf ${version} initialized, ingested, built, validated, queried, read and reviewed a brain"

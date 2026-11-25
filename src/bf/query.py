@@ -1,18 +1,22 @@
-"""Strictly read-only offline retrieval over `memories/*.jsonl` and `usages/*.jsonl` via `rg` and `jq`."""
+"""Strictly read-only offline retrieval via offset-indexed SQLite FTS5 cache (`.bf/cache/index.sqlite3`) with JSONL fallback."""
 
 from __future__ import annotations
 
 import re
-import subprocess
-import threading
-from collections.abc import Callable, Iterable
-from contextlib import suppress
-from typing import IO, Any
+import sqlite3
+import sys
+import unicodedata
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import closing, suppress
+from typing import Any, Literal, overload
 from urllib.parse import quote, urlsplit
 
-from bf import models, proc, records
-from bf.models import MAX_BATCH, MAX_NOTE, Error, InputError, clean, decode, terminal
+from bf import config, engine, index, markdown, models, records, refs
+from bf.models import MAX_NOTE, NOTES_FILE, Error, InputError, clean, decode, terminal
 from bf.storage import Store, relative
+
+_QUERY_TOK_RE = re.compile(r'"([^"]+)"|(\S+)')
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
 def _as_input[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -22,395 +26,603 @@ def _as_input[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         raise InputError(str(error)) from error
 
 
-def _target_files(store: Store, scope: str, kind: str, note_dirs: tuple[str, ...]) -> tuple[list[str], str]:
-    from bf import markdown as md
+def _fold_ascii(value: str) -> str:
+    """Fold Latin combining diacritics (`0x0300..0x036F`) while preserving Hangul and Japanese dakuten/handakuten."""
+    stripped = "".join(ch for ch in unicodedata.normalize("NFD", value) if not (0x0300 <= ord(ch) <= 0x036F))
+    return unicodedata.normalize("NFC", stripped).lower()
 
-    notes_set = frozenset(note_dirs)
 
-    def allowed(bucket: records.Target, source: str) -> bool:
-        if kind == "note":
-            return bucket == "memories" and source in notes_set
-        if kind == "memory":
-            return bucket == "memories" and source not in notes_set
-        if kind == "usage":
-            return bucket == "usages"
-        return True
-
-    def valid_source(bucket: records.Target, source: str) -> bool:
-        if bucket == "memories" and source in notes_set:
-            return True
-        return bool(
-            models.NAME_RE.fullmatch(source) and source not in models.RESERVED_SOURCES and source not in notes_set
-        )
-
-    if stripped := scope.strip():
-        _as_input(relative, cl := stripped.rstrip("/"))
-        if md.is_authored_note(store, cl, note_dirs):
-            src = cl.split("/")[0]
-            mf = records.memory_file(src)
-            return ([mf] if allowed("memories", src) and store.exists(mf) else []), cl
-        if cl in {"memories", "usages"}:
-            bucket: records.Target = "usages" if cl == "usages" else "memories"
-            if not store.is_dir(bucket):
-                return [], ""
-            sources = records.valid_record_sources(store, bucket, note_dirs)
-            return [records.record_file(s, bucket) for s in sources if allowed(bucket, s)], ""
-        for bucket in models.RECORD_DIRS:
-            pfx = f"{bucket}/"
-            if cl.startswith(pfx):
-                rest = cl.removeprefix(pfx)
-                if "/" in rest:
-                    return [], ""
-                src = rest.removesuffix(".jsonl")
-                if not valid_source(bucket, src):
-                    return [], ""
-                rf = records.record_file(src, bucket)
-                return ([rf] if allowed(bucket, src) and store.exists(rf) else []), ""
-        src = cl.split("/")[0]
-        for bucket in ("usages", "memories") if kind == "usage" else ("memories", "usages"):
-            if not valid_source(bucket, src):
+def _parse_scan_clauses(raw: str) -> list[tuple[str, str]]:
+    """Parse free-text query into `("phrase"|"prefix"|"word", folded)` clauses matching `build_fts_query` semantics."""
+    # Reuse `build_fts_query` length & clause-count limits uniformly across FTS5 and scan paths.
+    index.build_fts_query(raw)
+    clauses: list[tuple[str, str]] = []
+    for m in _QUERY_TOK_RE.finditer(raw.strip()):
+        phrase, word = m.group(1), m.group(2)
+        if phrase is not None:
+            words = _WORD_RE.findall(_fold_ascii(phrase))
+            if words:
+                clauses.append(("phrase", " ".join(words)))
+        elif word:
+            prefix = word.endswith("*") and len(word) > 1
+            core = word[:-1] if prefix else word
+            parts = _WORD_RE.findall(_fold_ascii(core))
+            if not parts:
                 continue
-            rf = records.record_file(src, bucket)
-            if allowed(bucket, src) and store.exists(rf):
-                return [rf], (cl if "/" in cl else "")
-        return [], ""
-
-    buckets: tuple[records.Target, ...] = ("usages",) if kind == "usage" else ("memories",)
-    files: list[str] = []
-    for bucket in buckets:
-        if store.is_dir(bucket):
-            sources = records.valid_record_sources(store, bucket, note_dirs)
-            files.extend(records.record_file(s, bucket) for s in sources if allowed(bucket, s))
-    return files, ""
+            if prefix:
+                clauses.extend(("word", p) for p in parts[:-1])
+                clauses.append(("prefix", parts[-1]))
+            else:
+                clauses.extend(("word", p) for p in parts)
+    return clauses
 
 
-def _ref_matches(rec: dict[str, Any], scope_ref: str) -> bool:
-    if not scope_ref:
-        return True
-    ref = str(rec.get("ref") or "")
-    return (
-        ref == scope_ref
-        or ref == f"{scope_ref}.md"
-        or ref == f"{scope_ref}/index.md"
-        or ref.startswith(f"{scope_ref}/")
-    )
+def _field_matches(words: list[str], word_set: set[str], joined: str, kind: str, val: str) -> bool:
+    if kind == "word":
+        return val in word_set
+    if kind == "prefix":
+        return any(w.startswith(val) for w in words)
+    return f" {val} " in f" {joined} "
 
 
-def _extract_snippet(rec: dict[str, Any], rx: re.Pattern[str] | None, width: int = 240) -> tuple[str, str]:
-    def center(raw: str, pat: re.Pattern[str] | None = rx) -> str:
-        if len(flat := re.sub(r"\s+", " ", raw).strip()) <= width:
+def _extract_snippet(rec: dict[str, Any], query_text: str, width: int = 240) -> tuple[str, str]:
+    terms = [t for t in _WORD_RE.findall(_fold_ascii(query_text)) if len(t) >= 2] if query_text else []
+
+    def center(raw: str) -> str:
+        flat = re.sub(r"\s+", " ", raw).strip()
+        if len(flat) <= width:
             return flat
-        pos = m.start() if pat and (m := pat.search(flat)) else 0
-        start = 0 if pos <= width // 3 else min(pos - width // 3, len(flat) - width)
-        return flat[start : start + width]
+        if terms:
+            folded = _fold_ascii(flat)
+            pos = min((p for t in terms if (p := folded.find(t)) >= 0), default=-1)
+            if pos >= 0:
+                start = 0 if pos <= width // 3 else min(pos - width // 3, len(flat) - width)
+                return flat[start : start + width]
+        return flat[:width]
 
-    if rx is not None:
+    if terms:
         for key, tf, af in (("headings", "title", "id"), ("tasks", "text", "section")):
             for item in rec.get(key) or ():
-                if isinstance(item, dict) and rx.search(txt := str(item.get(tf) or "")):
-                    return center(txt), str(item.get(af) or "")
-        if isinstance(txt := rec.get("text"), str) and (match := rx.search(txt)):
-            anc, cur = "", 0
-            for heading in rec.get("headings") or ():
-                if (
-                    isinstance(heading, dict)
-                    and (t0 := heading.get("title"))
-                    and 0 <= (ix := txt.find(str(t0), cur)) <= match.start()
-                ):
-                    anc, cur = str(heading.get("id") or ""), ix + len(str(t0))
-            return center(txt), anc
-        priority = ("title", "description")
-        stack: list[tuple[str, Any]] = [(k, rec[k]) for k in priority if k in rec]
-        stack.extend((k, v) for k, v in rec.items() if k not in {"sha256", "kind", "source", *priority})
-        while stack:
-            fk, val = stack.pop(0)
-            if isinstance(val, str) and rx.search(val):
-                ttl = str(rec.get("title") or "")
-                snip = f"{ttl} ({val})" if fk in {"id", "ref"} and ttl else val
-                return center(snip, None if fk in {"id", "ref"} else rx), ""
-            if isinstance(val, (list, dict)):
-                stack.extend(((fk, x) for x in val) if isinstance(val, list) else val.items())
+                if isinstance(item, dict):
+                    txt = str(item.get(tf) or "")
+                    ft = _fold_ascii(txt)
+                    if any(t in ft for t in terms):
+                        return center(txt), str(item.get(af) or "")
+        if isinstance(txt := rec.get("text"), str) and txt:
+            folded_txt = _fold_ascii(txt)
+            pos = min((p for t in terms if (p := folded_txt.find(t)) >= 0), default=-1)
+            if pos >= 0:
+                anc, cur = "", 0
+                for heading in rec.get("headings") or ():
+                    if (
+                        isinstance(heading, dict)
+                        and (t0 := heading.get("title"))
+                        and 0 <= (ix := txt.find(str(t0), cur)) <= pos
+                    ):
+                        anc, cur = str(heading.get("id") or ""), ix + len(str(t0))
+                return center(txt), anc
     return center(str(rec.get("description") or rec.get("title") or rec.get("text") or rec.get("ref") or "")), ""
 
 
-def _summary_row(rec: dict[str, Any], *, snippet: str = "", anchor: str = "") -> dict[str, Any]:
-    row = {
+def _summary_row(rec: dict[str, Any], *, snippet: str = "", anchor: str = "", score: float = 0.0) -> dict[str, Any]:
+    row: dict[str, Any] = {
         "ref": rec.get("ref", ""),
         "source": rec.get("source", ""),
         "kind": rec.get("kind", "memory"),
         "title": rec.get("title", ""),
     }
+    if rtype := rec.get("type"):
+        row["type"] = rtype
+    if st := rec.get("status"):
+        row["status"] = st
     if upd := rec.get("updated") or rec.get("created"):
         row["updated"] = upd
-    if snippet or (desc := rec.get("description")):
-        row["snippet" if snippet else "description"] = snippet or desc
+    if score:
+        row["score"] = score
+    desc = str(rec.get("description") or "")
+    if desc:
+        row["description"] = desc
+    if snippet and snippet != desc:
+        row["snippet"] = snippet
     return {**row, "anchor": anchor} if anchor else row
 
 
-def _rg_run(
+def _resolve_scope(scope: str, kind: str, cfg: config.Config, mem_sources: list[str]) -> tuple[str, str, str]:
+    """Validate `--scope` + `--kind`, returning `(effective_kind, source_filter, ref_prefix)` or raising `InputError`."""
+    if not scope:
+        return kind, "", ""
+    cl = scope.strip().rstrip("/")
+    if not cl:
+        raise InputError("scope must be nonempty")
+    _as_input(relative, cl)
+    notes_set = frozenset(cfg.notes)
+    mem_set = frozenset(mem_sources) | {lp.ingest for lp in cfg.loops.values() if lp.ingest}
+
+    if cl == "memories":
+        if kind == "note":
+            raise InputError("scope 'memories' conflicts with --kind note")
+        return "memory", "", ""
+    if cl.startswith("memories/"):
+        rest = cl.removeprefix("memories/")
+        if "/" in rest:
+            raise InputError(f"invalid scope {scope!r}")
+        src = rest.removesuffix(".jsonl")
+        if src == "_notes":
+            if kind == "memory":
+                raise InputError("scope 'memories/_notes.jsonl' conflicts with --kind memory")
+            return "note", "", ""
+        if src not in mem_set:
+            raise InputError(f"unknown memory source {src!r} in --scope")
+        if kind == "note":
+            raise InputError(f"memory source {src!r} conflicts with --kind note")
+        return "memory", src, ""
+
+    head = cl.split("/", 1)[0]
+    if head in notes_set:
+        if kind == "memory":
+            raise InputError(f"note scope {scope!r} conflicts with --kind memory")
+        return "note", head, (cl if "/" in cl else "")
+
+    if "/" not in cl and cl in mem_set:
+        if kind == "note":
+            raise InputError(f"memory source {cl!r} conflicts with --kind note")
+        return "memory", cl, ""
+
+    raise InputError(f"unknown scope {scope!r}; expected a note folder/path or declared memory source")
+
+
+def _normalize_exclude(raw_items: Iterable[str]) -> set[str]:
+    out: set[str] = set()
+    for raw in raw_items:
+        val = raw.strip().rstrip("/")
+        if not val:
+            raise InputError("--exclude must be nonempty")
+        if val.startswith("memories/"):
+            val = val.removeprefix("memories/").removesuffix(".jsonl")
+        if not models.NAME_RE.fullmatch(val):
+            raise InputError(f"invalid --exclude source {raw!r}")
+        out.add(val)
+    return out
+
+
+def _add_alias_variants(bucket: list[str], value: str) -> None:
+    if not value:
+        return
+    bucket.append(value)
+    if value.lower().startswith("urn:"):
+        bucket.append(value[4:])
+    elif not value.startswith(("http://", "https://", "mailto:", "bf://")):
+        bucket.append(f"urn:{value}")
+
+
+def _normalize_links_to(store: Store, cfg: config.Config, raw: str) -> tuple[str, ...]:
+    target = _as_input(clean, raw.strip(), "--links-to")
+    bare = target.partition("#")[0]
+    for pfx in (f"bf://{cfg.name}/", "bf:///"):
+        if bare.startswith(pfx):
+            bare = bare.removeprefix(pfx)
+            break
+    if not bare:
+        raise InputError("--links-to target must be nonempty")
+    cands: list[str] = []
+    _add_alias_variants(cands, bare)
+    if refs.is_allowed_note_path(bare, cfg.notes) and not bare.endswith(".md"):
+        cands.extend(ext for ext in (f"{bare}.md", f"{bare}/index.md") if store.exists(ext))
+    target_rec: dict[str, Any] | None = None
+    note_cand = next((c for c in cands if refs.is_allowed_note_path(c, cfg.notes) and store.exists(c)), "")
+    if note_cand:
+        with suppress(Error, OSError):
+            target_rec = markdown.compile_note(
+                note_cand, store.read(note_cand, MAX_NOTE), brain_name=cfg.name, note_dirs=cfg.notes
+            )
+    elif (rec_parts := refs.parse_record_ref(bare, cfg.reserved_sources)) is not None:
+        con = index.open_readonly(store)
+        if con is not None:
+            try:
+                if index.is_source_fresh(con, store, rec_parts[0], records.memory_file(rec_parts[0])):
+                    target_rec = index.lookup_ref(con, store, bare)
+            except (sqlite3.Error, index.IndexStaleError, Error):
+                pass
+            finally:
+                con.close()
+        if target_rec is None and (hit := _find_record_scan(store, rec_parts[0], bare)) is not None:
+            target_rec = hit[1]
+    if target_rec is None and (al_hit := find_by_alias(store, bare)) is not None:
+        target_rec = al_hit[1]
+    if target_rec is not None:
+        if isinstance(r := target_rec.get("ref"), str) and r:
+            cands.append(r)
+        if isinstance(ent := target_rec.get("entity"), str) and ent:
+            _add_alias_variants(cands, ent)
+        for al in target_rec.get("aliases") or ():
+            if isinstance(al, str) and al:
+                _add_alias_variants(cands, al)
+    return tuple(dict.fromkeys(cands))
+
+
+def _ref_matches(ref: str, ref_prefix: str) -> bool:
+    if not ref_prefix:
+        return True
+    return (
+        ref == ref_prefix
+        or ref == f"{ref_prefix}.md"
+        or ref == f"{ref_prefix}/index.md"
+        or ref.startswith(f"{ref_prefix}/")
+    )
+
+
+def _norm_link_to(ref_s: str, brain_name: str) -> str:
+    bare = ref_s.partition("#")[0]
+    for pfx in (f"bf://{brain_name}/", "bf:///"):
+        if bare.startswith(pfx):
+            return bare.removeprefix(pfx)
+    return bare
+
+
+def _scan_fallback(
     store: Store,
-    pattern: str,
-    files: list[str],
     *,
-    scope_ref: str = "",
-    limit: int | None = None,
-    json_out: bool = False,
-) -> tuple[list[tuple[bytes, str]], bool]:
-    rg_bin = proc.resolve_tool("rg")
-
-    def fail(rc: int, err_b: bytes) -> None:
-        if rc not in {0, 1} or (rc == 1 and err_b.strip()):
-            et = err_b.decode("utf-8", "replace").strip()
-            msg = f"rg failed: {et.splitlines()[-1] if et else 'invalid regex pattern'}"
-            raise InputError(msg) if rc == 2 else Error(msg)
-
-    if not files:
-        try:
-            kw: dict[str, Any] = {"input": b"", "capture_output": True, "cwd": "/", "env": proc.safe_env(rg_bin)}
-            chk = subprocess.run([rg_bin, "--no-config", "-e", pattern], **kw, timeout=5, check=False)  # noqa: S603
-        except subprocess.TimeoutExpired as err:
-            raise Error("rg timed out after 5s") from err
-        fail(chk.returncode, chk.stderr)
+    brain_name: str,
+    query_text: str,
+    kind: str,
+    source: str,
+    ref_prefix: str,
+    rtype: str,
+    status: str,
+    tag: str,
+    since_key: str,
+    links_to: Sequence[str],
+    exclude: set[str],
+    mem_sources: list[str],
+    limit: int | None,
+) -> tuple[list[tuple[dict[str, Any], float]], bool]:
+    """Read-only JSONL fallback when `.bf/cache/index.sqlite3` is absent or stale (bounded top-K memory, zero disk mutation)."""
+    clauses = _parse_scan_clauses(query_text) if query_text else []
+    if query_text and not clauses:
         return [], False
-
-    flags = ["--no-config", "--no-ignore", "--no-follow"]
-    flags.extend(("--json", "-i") if json_out else ("--no-filename", "--no-line-number", "-i"))
-    cmd = [rg_bin, *flags, "-e", pattern, *(str(store.root / f) for f in files)]
-    hits: list[tuple[bytes, str]] = []
-    hit_bytes = 0
-
-    def read_rg(stdout: IO[bytes]) -> bool:
-        nonlocal hit_bytes
-        while ln := stdout.readline(MAX_BATCH + 1):
-            if len(ln) > MAX_BATCH:
-                raise Error(f"rg output line exceeds {MAX_BATCH} bytes")
-            if not (stripped := ln.strip()):
+    links_to_set = set(links_to)
+    files: list[str] = []
+    if kind in {"", "note"} and store.exists(NOTES_FILE):
+        files.append(NOTES_FILE)
+    if kind in {"", "memory"}:
+        for src in mem_sources:
+            if source and src != source:
                 continue
-            sub = ""
-            if json_out:
-                try:
-                    ev = decode(stripped, "rg output", check_duplicates=False)
-                except Error:
-                    continue
-                if (
-                    not isinstance(ev, dict)
-                    or ev.get("type") != "match"
-                    or not isinstance(data := ev.get("data"), dict)
-                ):
-                    continue
-                raw_txt = data.get("lines", {}).get("text") if isinstance(data.get("lines"), dict) else None
-                if not isinstance(raw_txt, str) or not (line_b := raw_txt.strip().encode("utf-8")):
-                    continue
-                if (
-                    isinstance(subs := data.get("submatches"), list)
-                    and subs
-                    and isinstance(subs[0], dict)
-                    and isinstance(m := subs[0].get("match"), dict)
-                    and isinstance(mt := m.get("text"), str)
-                ):
-                    sub = mt
-            else:
-                line_b = stripped
-            if scope_ref:
-                try:
-                    parsed = decode(line_b, "rg output", check_duplicates=False)
-                except Error:
-                    continue
-                if not isinstance(parsed, dict) or not _ref_matches(parsed, scope_ref):
-                    continue
-            hits.append((line_b, sub))
-            hit_bytes += len(line_b)
-            if limit is None and (len(hits) > models.MAX_TOTAL_FILES or hit_bytes > models.MAX_FILE):
-                raise Error("rg+jq match buffer exceeded safety limit; narrow PATTERN or --scope")
-            if limit is not None and len(hits) > limit:
-                return False
-        return True
+            if src in exclude:
+                continue
+            files.append(records.memory_file(src))
 
-    rc, err_bytes, timed_out = proc.stream_proc(cmd, rg_bin, read_rg)
-    if not (trunc := limit is not None and len(hits) > limit):
-        if timed_out:
-            raise Error("rg timed out after 30s")
-        fail(rc, err_bytes)
-    return hits[:limit], trunc
-
-
-def _run_jq_stream(lines: Iterable[bytes], expr: str, limit: int) -> tuple[list[Any], bool]:
-    jq_bin, feeder_err, out = proc.resolve_tool("jq"), [], []
-
-    def feed_jq(stdin: IO[bytes], stop: threading.Event) -> None:
-        try:
-            for data in lines:
-                if stop.is_set():
-                    break
-                stdin.write(data if data.endswith(b"\n") else data + b"\n")
-            stdin.flush()
-        except (Error, OSError) as error:
-            if not isinstance(error, BrokenPipeError) and not stop.is_set():
-                feeder_err.append(error)
-        finally:
-            with suppress(OSError):
-                stdin.close()
-
-    def read_jq(stdout: IO[bytes]) -> bool:
-        while raw_line := stdout.readline(MAX_BATCH + 1):
-            if len(raw_line) > MAX_BATCH:
-                raise Error(f"jq output line exceeds {MAX_BATCH} bytes")
-            if stripped := raw_line.strip():
-                out.append(decode(stripped, "jq output", check_duplicates=False))
-                if len(out) > limit:
-                    return False
-        return True
-
-    cmd = [jq_bin, "-L", "/dev/null", "-c", "--", f"{proc.JQ_PRELUDE}\n{expr}"]
-    rc, err_bytes, timed_out = proc.stream_proc(cmd, jq_bin, read_jq, feed_jq)
-    if not (trunc := len(out) > limit):
-        if timed_out:
-            raise Error("jq timed out after 30s")
-        if feeder_err:
-            raise feeder_err[0]
-        if rc != 0:
-            err = err_bytes.decode("utf-8", "replace").strip()
-            msg = f"jq failed: {err.splitlines()[-1] if err else 'jq filter failed'}"
-            raise InputError(msg) if rc == 3 or (rc == 5 and "parse error:" not in err) else Error(msg)
-    return out[:limit], trunc
-
-
-def _iter_file_lines(store: Store, files: list[str], scope_ref: str) -> Iterable[bytes]:
-    total = 0
+    matches: list[tuple[float, str, str, dict[str, Any]]] = []
+    scanned = 0
     for path in files:
-        if not scope_ref:
-            for raw_ln in store.iter_lines(path, models.MAX_FILE):
-                if not raw_ln.strip():
+        with suppress(FileNotFoundError), closing(records.iter_jsonl(store, path, check_duplicates=False)) as rows:
+            for _, rec in rows:
+                scanned += 1
+                if scanned > models.MAX_TOTAL_FILES:
+                    raise Error(f"memories exceeds the {models.MAX_TOTAL_FILES:,}-record total scan limit")
+                rk = "note" if path == NOTES_FILE else "memory"
+                rs = str(rec.get("source") or "")
+                rr = str(rec.get("ref") or "")
+                if kind and rk != kind:
                     continue
-                total += 1
-                if total > models.MAX_TOTAL_FILES:
-                    raise Error(f"records exceed the {models.MAX_TOTAL_FILES:,}-record total scan limit")
-                yield raw_ln
-        else:
-            for raw_ln, obj in records.iter_jsonl(store, path):
-                total += 1
-                if total > models.MAX_TOTAL_FILES:
-                    raise Error(f"records exceed the {models.MAX_TOTAL_FILES:,}-record total scan limit")
-                if _ref_matches(obj, scope_ref):
-                    yield raw_ln
+                if source and rs != source:
+                    continue
+                if rs in exclude:
+                    continue
+                if ref_prefix and not _ref_matches(rr, ref_prefix):
+                    continue
+                if rtype and str(rec.get("type") or "") != rtype:
+                    continue
+                if status and str(rec.get("status") or "") != status:
+                    continue
+                if tag and tag not in (rec.get("tags") or ()):
+                    continue
+                sort_ts = models.ts_key(str(rec.get("updated") or rec.get("created") or ""))
+                if since_key and sort_ts < since_key:
+                    continue
+                if links_to_set:
+                    lks = rec.get("links") or ()
+                    if not any(
+                        isinstance(lk, dict)
+                        and isinstance(lk.get("to"), str)
+                        and _norm_link_to(str(lk["to"]), brain_name) in links_to_set
+                        for lk in lks
+                    ):
+                        continue
+                score = 0.0
+                if clauses:
+                    aliases_raw = [
+                        *(str(a) for a in (rec.get("aliases") or ()) if isinstance(a, str)),
+                        str(rec.get("entity") or ""),
+                    ]
+                    fields = (
+                        (10.0, _WORD_RE.findall(_fold_ascii(str(rec.get("title") or "")))),
+                        (5.0, _WORD_RE.findall(_fold_ascii(str(rec.get("description") or "")))),
+                        (3.0, _WORD_RE.findall(_fold_ascii(" ".join(str(x) for x in (rec.get("tags") or ()))))),
+                        (4.0, _WORD_RE.findall(_fold_ascii(" ".join(aliases_raw)))),
+                        (2.0, _WORD_RE.findall(_fold_ascii(rr))),
+                        (1.0, _WORD_RE.findall(_fold_ascii(str(rec.get("text") or "")))),
+                    )
+                    field_pre = [(w, toks, set(toks), " ".join(toks)) for w, toks in fields]
+                    matched_all = True
+                    for c_kind, c_val in clauses:
+                        c_score = sum(
+                            w
+                            for w, toks, tset, joined in field_pre
+                            if _field_matches(toks, tset, joined, c_kind, c_val)
+                        )
+                        if c_score == 0.0:
+                            matched_all = False
+                            break
+                        score += c_score
+                    if not matched_all:
+                        continue
+                    if rk == "note":
+                        score *= index.NOTE_BOOST
+                matches.append((score, sort_ts, rr, rec))
+                if limit is not None and len(matches) > max(limit * 4, 200):
+                    matches.sort(key=lambda x: x[2])
+                    matches.sort(key=lambda x: x[1], reverse=True)
+                    if clauses:
+                        matches.sort(key=lambda x: -x[0])
+                    else:
+                        matches.sort(key=lambda x: 0 if x[3].get("kind") == "note" else 1)
+                    del matches[limit + 1 :]
+
+    matches.sort(key=lambda x: x[2])
+    matches.sort(key=lambda x: x[1], reverse=True)
+    if clauses:
+        matches.sort(key=lambda x: -x[0])
+    else:
+        matches.sort(key=lambda x: 0 if x[3].get("kind") == "note" else 1)
+
+    trunc = limit is not None and len(matches) > limit
+    picked = matches[:limit] if limit is not None else matches
+    return [(rec, round(sc, 4)) for sc, _, _, rec in picked], trunc
+
+
+def validate_query_args(
+    query_text: str | None = None,
+    *,
+    kind: str = "",
+    scope: str = "",
+    rtype: str = "",
+    status: str = "",
+    tag: str = "",
+    since: str = "",
+    links_to: str = "",
+    exclude: Iterable[str] = (),
+    limit: int = 20,
+    all_items: bool = False,
+) -> tuple[str, str, set[str]]:
+    """Validate brain-independent `bf query` arguments, returning `(clean_query, since_key, exclude_set)`."""
+    if scope and not scope.strip():
+        raise InputError("scope must be nonempty")
+    for flag, val in (("--type", rtype), ("--status", status), ("--tag", tag), ("--links-to", links_to)):
+        if val and not val.strip():
+            raise InputError(f"{flag} must be nonempty")
+    q_clean = _as_input(clean, query_text, "query") if query_text is not None else ""
+    if q_clean:
+        index.build_fts_query(q_clean)
+    if not any((q_clean, kind, scope.strip(), rtype, status, tag, since, links_to)):
+        raise InputError(
+            "pass QUERY or at least one filter (--kind, --scope, --type, --status, --tag, --since, --links-to)"
+        )
+    if not all_items and (limit < 1 or limit > 5000):
+        raise InputError("limit must be between 1 and 5000")
+    if kind not in {"", "note", "memory"}:
+        raise InputError("kind must be 'note' or 'memory'")
+    since_key = ""
+    if since:
+        since_norm = _as_input(models.normalize_iso_date_or_time, since, "--since")
+        since_key = models.ts_key(since_norm, start_of_day=True)
+    excl_set = _normalize_exclude(exclude)
+    return q_clean, since_key, excl_set
 
 
 def query(
     store: Store,
-    pattern: str | None = None,
+    query_text: str | None = None,
     *,
-    jq_expr: str | None = None,
-    scope: str = "",
     kind: str = "",
+    scope: str = "",
+    rtype: str = "",
+    status: str = "",
+    tag: str = "",
+    since: str = "",
+    links_to: str = "",
+    exclude: Iterable[str] = (),
+    all_sources: bool = False,
     limit: int = 20,
+    all_items: bool = False,
 ) -> dict[str, Any]:
-    """Read-only query over `memories/*.jsonl` (and `usages/*.jsonl` when scoped) via `rg` and `jq`."""
-    from bf import config as cfg_m
+    """Read-only ranked BM25 FTS5 & structured query over notes and `memories/*.jsonl`."""
+    q_clean, since_key, excl_set = validate_query_args(
+        query_text,
+        kind=kind,
+        scope=scope,
+        rtype=rtype,
+        status=status,
+        tag=tag,
+        since=since,
+        links_to=links_to,
+        exclude=exclude,
+        limit=limit,
+        all_items=all_items,
+    )
 
-    if scope and not scope.strip():
-        raise InputError("scope must be nonempty")
-    if pattern is None and jq_expr is None and not (kind or scope.strip()):
-        raise InputError("pass PATTERN, --jq EXPR, or a filter (--kind, --scope)")
-    for label, val in (("query", pattern), ("jq filter", jq_expr)):
-        if val is not None:
-            _as_input(clean, val, label)
-    if limit < 1 or limit > 5000:
-        raise InputError("limit must be between 1 and 5000")
-    if kind not in {"", "note", "memory", "usage"}:
-        raise InputError("kind must be 'note', 'memory', or 'usage'")
-    cfg = cfg_m.load(store)
-    files, scope_ref = _target_files(store, scope, kind, cfg.notes)
-    extra: dict[str, Any] = {}
+    cfg = config.load(store)
+    mem_sources = records.valid_memory_sources(store, reserved=cfg.reserved_sources)
+    eff_kind, source_filter, ref_prefix = _resolve_scope(scope, kind, cfg, mem_sources)
+    default_excl: list[str] = []
+    if cfg.search_exclude and not all_sources and not source_filter and eff_kind != "note":
+        default_excl = sorted(set(cfg.search_exclude))
+        excl_set.update(default_excl)
+    links_to_cands = _normalize_links_to(store, cfg, links_to) if links_to else ()
+    eff_limit = None if all_items else limit
 
-    if pattern is not None and jq_expr is None:
-        eng_name, q_str = "rg", pattern
-        raw_hits, trunc = _rg_run(store, pattern, files, scope_ref=scope_ref, limit=limit, json_out=True)
-        items: list[Any] = []
-        for raw_ln, sub in raw_hits:
-            if isinstance(rec := decode(raw_ln, "memories", check_duplicates=False), dict):
-                rx = re.compile(re.escape(sub), re.IGNORECASE) if sub else None
-                snip, anc = _extract_snippet(rec, rx)
-                items.append(_summary_row(rec, snippet=snip, anchor=anc))
-    elif pattern is not None and jq_expr is not None:
-        eng_name, q_str, extra = "rg+jq", pattern, {"jq": jq_expr}
-        raw_hits, _ = _rg_run(store, pattern, files, scope_ref=scope_ref, limit=None, json_out=False)
-        items, trunc = _run_jq_stream((ln for ln, _ in raw_hits), jq_expr, limit)
-    elif jq_expr is not None:
-        eng_name, q_str = "jq", jq_expr
-        items, trunc = _run_jq_stream(_iter_file_lines(store, files, scope_ref), jq_expr, limit)
+    # Per-source freshness check so one stale memory source never invalidates `--kind note` or another fresh `--scope`.
+    if eff_kind == "note":
+        stale_idx = index.is_stale(store, (), include_notes=True, exact_sources=False)
+    elif eff_kind == "memory" and source_filter:
+        stale_idx = index.is_stale(store, (source_filter,), include_notes=False, exact_sources=False)
+    elif eff_kind == "memory":
+        stale_idx = index.is_stale(store, mem_sources, include_notes=False, exact_sources=True, ignore_sources=excl_set)
     else:
-        eng_name, q_str = "list", scope or kind
-        items, trunc = [], False
-        for path in files:
-            for _, rec in records.iter_jsonl(store, path):
-                if scope_ref and not _ref_matches(rec, scope_ref):
-                    continue
-                if len(items) >= limit:
-                    trunc = True
-                    break
-                items.append(_summary_row(rec))
-            if trunc:
-                break
+        stale_idx = index.is_stale(store, mem_sources, include_notes=True, exact_sources=True, ignore_sources=excl_set)
+
+    con = None if stale_idx else index.open_readonly(store)
+    hits: list[tuple[dict[str, Any], float]] = []
+    trunc = False
+    eng_name = "scan"
+    if con is not None:
+        try:
+            hits, trunc = index.search_fts(
+                con,
+                store,
+                query_text=q_clean,
+                kind=eff_kind,
+                source=source_filter,
+                ref_prefix=ref_prefix,
+                rtype=rtype.strip(),
+                status=status.strip(),
+                tag=tag.strip(),
+                since_key=since_key,
+                links_to=links_to_cands,
+                exclude=excl_set,
+                limit=eff_limit,
+            )
+            eng_name = "fts5"
+        except (sqlite3.Error, index.IndexStaleError, Error):
+            stale_idx = True
+        finally:
+            con.close()
+    if eng_name != "fts5":
+        hits, trunc = _scan_fallback(
+            store,
+            brain_name=cfg.name,
+            query_text=q_clean,
+            kind=eff_kind,
+            source=source_filter,
+            ref_prefix=ref_prefix,
+            rtype=rtype.strip(),
+            status=status.strip(),
+            tag=tag.strip(),
+            since_key=since_key,
+            links_to=links_to_cands,
+            exclude=excl_set,
+            mem_sources=mem_sources,
+            limit=eff_limit,
+        )
+
+    items = []
+    for rec, score in hits:
+        snip, anc = _extract_snippet(rec, q_clean) if q_clean else ("", "")
+        items.append(_summary_row(rec, snippet=snip, anchor=anc, score=score))
 
     unbuilt: list[str] = []
-    if kind in {"", "note"}:
-        from bf.status import unbuilt_note_dirs
+    if eff_kind in {"", "note"}:
+        all_unbuilt = engine.unbuilt_note_dirs(store, cfg.notes, fast=True)
+        unbuilt = (
+            [d for d in all_unbuilt if d == source_filter]
+            if (source_filter and source_filter in cfg.notes)
+            else all_unbuilt
+        )
 
-        sc = scope.strip().rstrip("/")
-        if not sc or sc == "memories":
-            cand_dirs = list(cfg.notes)
-        elif sc == "usages" or sc.startswith("usages/"):
-            cand_dirs = []
-        elif sc.startswith("memories/"):
-            rest = sc.removeprefix("memories/")
-            src = rest.removesuffix(".jsonl")
-            cand_dirs = [src] if "/" not in rest and src in cfg.notes else []
-        else:
-            head = sc.split("/", 1)[0]
-            cand_dirs = [head] if head in cfg.notes else []
-        unbuilt = unbuilt_note_dirs(store, cand_dirs)
     return {
         "ok": True,
         "brain": cfg.name,
         "engine": eng_name,
-        "query": q_str,
-        **extra,
+        **({"query": q_clean} if q_clean else {}),
+        **({"excluded_sources": default_excl} if default_excl else {}),
         "count": len(items),
         "truncated": trunc,
         "items": items,
         **({"unbuilt_notes": unbuilt} if unbuilt else {}),
+        **({"index_stale": True} if stale_idx else {}),
     }
 
 
-def _find_record(store: Store, source: str, ref: str) -> tuple[str, dict[str, Any]] | None:
-    for bucket in models.RECORD_DIRS:
-        rec_path = records.record_file(source, bucket)
-        if not store.exists(rec_path):
-            continue
-        for _, rec in records.iter_jsonl(store, rec_path):
-            if rec.get("ref") == ref:
-                return rec_path, rec
+def _find_record_scan(store: Store, source: str, ref: str) -> tuple[str, dict[str, Any]] | None:
+    rec_path = records.memory_file(source)
+    if not store.exists(rec_path):
+        return None
+    needle = models.encode(ref).rstrip(b"\n")
+    with closing(store.iter_lines(rec_path, models.MAX_FILE)) as lines:
+        for idx_ln, raw_ln in enumerate(lines, 1):
+            if needle not in raw_ln and b"\\u" not in raw_ln and b"\\/" not in raw_ln:
+                continue
+            if not (stripped := raw_ln.strip()):
+                continue
+            parsed = decode(stripped, f"{rec_path}:{idx_ln}", check_duplicates=False)
+            if isinstance(parsed, dict) and parsed.get("ref") == ref:
+                return rec_path, parsed
     return None
 
 
-def find_by_alias(
-    store: Store, identity: str, note_dirs: Iterable[str] = models.DEFAULT_NOTES
-) -> tuple[str, dict[str, Any]] | None:
-    """Locate a JSONL record whose `entity` or `aliases` equals `identity`, preferring authored notes."""
-    notes_set = frozenset(note_dirs)
-    sources = records.valid_record_sources(store, "memories", note_dirs)
-    note_files = [records.memory_file(s) for s in sources if s in notes_set]
-    mem_files = [records.memory_file(s) for s in sources if s not in notes_set]
-    usage_files = [records.record_file(s, "usages") for s in records.valid_record_sources(store, "usages", note_dirs)]
-    for group in (note_files, mem_files, usage_files):
-        if not group:
-            continue
+def find_by_alias(store: Store, identity: str) -> tuple[str, dict[str, Any]] | None:
+    """Resolve `identity` via `aliases` or `entity` (O(1) via SQLite index when fresh, else JSONL scan)."""
+    reserved = models.RESERVED_SOURCES | frozenset(models.DEFAULT_NOTES)
+    with suppress(Error):
+        reserved = config.load(store).reserved_sources
+    mem_sources = records.valid_memory_sources(store, reserved=reserved)
+    if not index.is_stale(store, mem_sources):
+        con = index.open_readonly(store)
+        if con is not None:
+            try:
+                if hit := index.lookup_alias(con, store, identity):
+                    hp = (
+                        str(hit["ref"])
+                        if hit.get("kind") == "note"
+                        else records.memory_file(str(hit.get("source", "")))
+                    )
+                    return hp, hit
+                return None
+            except (sqlite3.Error, index.IndexStaleError, Error):
+                pass
+            finally:
+                con.close()
+
+    candidates = {identity}
+    if identity.lower().startswith("urn:"):
+        candidates.add(identity[4:])
+    else:
+        candidates.add(f"urn:{identity}")
+    needles = [models.encode(c).rstrip(b"\n") for c in candidates]
+    groups: list[list[str]] = []
+    if store.exists(NOTES_FILE):
+        groups.append([NOTES_FILE])
+    groups.append([records.memory_file(s) for s in mem_sources])
+
+    scanned = 0
+    for group in groups:
         matched: list[tuple[str, dict[str, Any]]] = []
         for path in group:
-            with suppress(Error, OSError):
-                for _, rec in records.iter_jsonl(store, path):
-                    if rec.get("entity") == identity or (isinstance(al := rec.get("aliases"), list) and identity in al):
-                        matched.append((path, rec))
+            try:
+                with closing(store.iter_lines(path, models.MAX_FILE)) as lines:
+                    for raw_ln in lines:
+                        if not raw_ln.strip():
+                            continue
+                        scanned += 1
+                        if scanned > models.MAX_TOTAL_FILES:
+                            raise Error(f"memories exceeds the {models.MAX_TOTAL_FILES:,}-record total scan limit")
+                        if not any(n in raw_ln for n in needles) and b"\\u" not in raw_ln and b"\\/" not in raw_ln:
+                            continue
+                        with suppress(Error):
+                            rec = decode(raw_ln.strip(), path, check_duplicates=False)
+                            if isinstance(rec, dict):
+                                ent = rec.get("entity")
+                                al = rec.get("aliases")
+                                if (isinstance(ent, str) and ent in candidates) or (
+                                    isinstance(al, list) and any(isinstance(a, str) and a in candidates for a in al)
+                                ):
+                                    is_note_bucket = path == NOTES_FILE and rec.get("kind") == "note"
+                                    safe_rec = rec if is_note_bucket else {**rec, "kind": "memory"}
+                                    hp = str(safe_rec.get("ref") or path) if is_note_bucket else path
+                                    matched.append((hp, safe_rec))
+            except (Error, OSError) as err:
+                if isinstance(err, Error) and "total scan limit" in str(err):
+                    raise
         if matched:
             matched.sort(key=lambda pair: str(pair[1].get("ref") or ""))
             return matched[0]
@@ -424,9 +636,9 @@ def _cap_json_bytes(out: dict[str, Any], max_bytes: int) -> dict[str, Any]:
     holder: dict[str, Any] | None = None
     if isinstance(cand.get("text"), str) and cand["text"]:
         holder = cand
-    elif isinstance(rec := cand.get("record"), dict) and isinstance(rec.get("text"), str) and rec["text"]:
+    elif isinstance(rec := cand.get("record"), dict):
         holder = cand["record"] = dict(rec)
-    if holder is not None:
+    if holder is not None and isinstance(holder.get("text"), str) and holder["text"]:
         val = str(holder["text"])
         lo, hi, best = 0, len(val), ""
         while lo <= hi:
@@ -438,30 +650,145 @@ def _cap_json_bytes(out: dict[str, Any], max_bytes: int) -> dict[str, Any]:
         holder["text"] = best
         if len(terminal(cand)) <= max_bytes:
             return cand
-    bulky = ("record", "text", "heading")
-    keep_last = ("path", "anchor", "kind", "brain", "ref", "ok")
-    extra = [k for k in cand if k not in {*bulky, *keep_last, "truncated"}]
-    for drop in (*bulky, *extra, *keep_last):
-        if len(terminal(cand)) <= max_bytes:
-            break
-        cand.pop(drop, None)
+    # Shrink heavy optional fields inside `record` without ever silently dropping `record` itself.
+    if isinstance(rec_d := cand.get("record"), dict):
+        for drop_k in (
+            "text",
+            "links",
+            "headings",
+            "tasks",
+            "attributes",
+            "sources",
+            "description",
+            "aliases",
+            "tags",
+            "sha256",
+        ):
+            if len(terminal(cand)) <= max_bytes:
+                return cand
+            rec_d.pop(drop_k, None)
+    else:
+        for drop in ("text", "heading", "anchor"):
+            if len(terminal(cand)) <= max_bytes:
+                return cand
+            cand.pop(drop, None)
     if len(terminal(cand)) > max_bytes:
-        raise InputError(f"max-bytes {max_bytes} too small")
+        raise InputError(f"--max-bytes {max_bytes} is too small for JSON envelope")
     return cand
 
 
-def read_target(store: Store, raw_target: str, *, raw: bool = False, max_bytes: int | None = None) -> dict[str, Any]:
-    """Read-only resolver for a note, `note#anchor` section, `source:id` record, alias, or `bf://` URI."""
-    from bf import config as cfg_m
-    from bf import markdown as md
+def _cap_raw_bytes(text: str, max_bytes: int, *, warn: bool = False) -> str:
+    raw_b = text.encode("utf-8")
+    if len(raw_b) <= max_bytes:
+        return text
+    if warn:
+        sys.stderr.write(f"bf: warning: truncated output to {max_bytes} bytes\n")
+    return raw_b[:max_bytes].decode("utf-8", errors="ignore")
 
+
+def _read_note_file(
+    store: Store,
+    cfg: config.Config,
+    to: str,
+    *,
+    anchor: str,
+    fmt: str,
+    max_bytes: int | None,
+    warn_raw_trunc: bool,
+) -> dict[str, Any] | str:
+    if not store.exists(to) and not to.endswith(".md"):
+        for cand in (f"{to}.md", f"{to}/index.md"):
+            if store.exists(cand):
+                to = cand
+                break
+    if not store.exists(to):
+        raise Error(f"note {to} not found")
+    raw_bytes = store.read(to, MAX_NOTE)
+    text = raw_bytes.decode("utf-8").removeprefix("\ufeff")
+    is_note = markdown.is_authored_note(store, to, cfg.notes)
+    if anchor:
+        if not is_note:
+            raise Error(f"{to}: missing anchor #{anchor}")
+        comp = markdown.compile_note(to, raw_bytes, brain_name=cfg.name, note_dirs=cfg.notes)
+        sec = markdown.extract_section(text, anchor, comp)
+        if fmt == "raw":
+            raw_sec = str(sec["text"])
+            return _cap_raw_bytes(raw_sec, max_bytes, warn=warn_raw_trunc) if max_bytes is not None else raw_sec
+        out = {"ok": True, "brain": cfg.name, "kind": "section", "ref": to, "path": to, **sec}
+        return _cap_json_bytes(out, max_bytes) if max_bytes is not None else out
+    if fmt == "raw":
+        return _cap_raw_bytes(text, max_bytes, warn=warn_raw_trunc) if max_bytes is not None else text
+    if not is_note:
+        out = {"ok": True, "brain": cfg.name, "kind": "file", "ref": to, "path": to, "text": text}
+        return _cap_json_bytes(out, max_bytes) if max_bytes is not None else out
+    comp = markdown.compile_note(to, raw_bytes, brain_name=cfg.name, note_dirs=cfg.notes)
+    out = {"ok": True, "brain": cfg.name, "kind": "note", "ref": to, "path": to, "record": comp}
+    return _cap_json_bytes(out, max_bytes) if max_bytes is not None else out
+
+
+@overload
+def read_target(
+    store: Store, raw_target: str, *, fmt: Literal["raw"], max_bytes: int | None = None, warn_raw_trunc: bool = False
+) -> str: ...
+@overload
+def read_target(
+    store: Store,
+    raw_target: str,
+    *,
+    fmt: Literal["json"] = "json",
+    max_bytes: int | None = None,
+    warn_raw_trunc: bool = False,
+) -> dict[str, Any]: ...
+@overload
+def read_target(
+    store: Store, raw_target: str, *, fmt: str = "json", max_bytes: int | None = None, warn_raw_trunc: bool = False
+) -> dict[str, Any] | str: ...
+def validate_read_args(raw_target: str, *, fmt: str = "json", max_bytes: int | None = None) -> str:
+    """Validate brain-independent `bf read` arguments and return the stripped, control-free target."""
+    if fmt not in {"json", "raw"}:
+        raise InputError("format must be 'json' or 'raw'")
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 1):
-        raise InputError("max_bytes must be at least 1")
+        raise InputError("--max-bytes must be at least 1")
     if not (target := raw_target.strip()):
         raise InputError("target is required; use bf status for brain overview")
-    cfg = cfg_m.load(store)
-    reserved = cfg.reserved_sources
-    parsed = _as_input(md.parse_link, "<read>", target, cfg.name, note_dirs=cfg.notes, relative_base=False)
+    target = _as_input(clean, target, "target")
+    if target.startswith("#"):
+        raise InputError("target cannot be a bare #anchor fragment; include a note path or alias")
+    return target
+
+
+def read_target(
+    store: Store, raw_target: str, *, fmt: str = "json", max_bytes: int | None = None, warn_raw_trunc: bool = False
+) -> dict[str, Any] | str:
+    """Strictly read-only allowlisted resolver for notes, `#anchor` sections, `source:id` records, aliases, or `bf://` URIs."""
+    target = validate_read_args(raw_target, fmt=fmt, max_bytes=max_bytes)
+
+    cfg = config.load(store)
+
+    def rec_out(hp: str, hr: dict[str, Any], default_ref: str, *, anchor: str = "") -> dict[str, Any] | str:
+        rk, rr = str(hr.get("kind", "memory")), str(hr.get("ref", default_ref))
+        if rk == "note" and refs.is_allowed_note_path(rr, cfg.notes) and store.exists(rr):
+            return _read_note_file(
+                store, cfg, rr, anchor=anchor, fmt=fmt, max_bytes=max_bytes, warn_raw_trunc=warn_raw_trunc
+            )
+        if anchor:
+            raise InputError("JSON records do not support #fragments")
+        if fmt == "raw":
+            txt = str(hr.get("text") or "")
+            return _cap_raw_bytes(txt, max_bytes, warn=warn_raw_trunc) if max_bytes is not None else txt
+        env = {"ok": True, "brain": cfg.name, "kind": rk, "ref": rr, "path": hp, "record": hr}
+        return _cap_json_bytes(env, max_bytes) if max_bytes is not None else env
+
+    # Try plain non-path alias (including `<alias>#<anchor>`) when head is nonempty and has no `/`, `:`, `?`, or `.md`.
+    al_head, has_al_hash, al_anchor = target.partition("#")
+    if al_head and "/" not in al_head and ":" not in al_head and "?" not in al_head and not al_head.endswith(".md"):
+        if has_al_hash and not al_anchor:
+            raise InputError("invalid empty #anchor fragment")
+        if alias_hit := find_by_alias(store, al_head):
+            return rec_out(alias_hit[0], alias_hit[1], al_head, anchor=al_anchor)
+        raise Error(f"target {target} not found")
+
+    parsed = _as_input(refs.parse_link, "target", target, cfg.name, note_dirs=cfg.notes, relative_base=False)
     kind, to, anchor = str(parsed["kind"]), str(parsed["to"]), str(parsed["anchor"])
     if kind == "brain":
         host, _, rest = to.removeprefix("bf://").partition("/")
@@ -470,61 +797,46 @@ def read_target(store: Store, raw_target: str, *, raw: bool = False, max_bytes: 
         http_q = uri.query if uri and raw_r.partition(":")[2].lower().startswith(("https://", "http://")) else ""
         fwd = (
             (f"{raw_r}?{http_q}" if http_q else raw_r)
-            if uri and md.is_record_ref(raw_r, models.RESERVED_SOURCES)
+            if uri and refs.is_record_ref(raw_r, models.RESERVED_SOURCES)
             else quote(rest, safe="/:@")
         )
         sub = f"bf:///{fwd}" + (f"#{quote(anchor, safe='')}" if anchor else "")
-        sib = cfg_m.resolve_brain(store, cfg, host)
-        return read_target(sib, sub, raw=raw, max_bytes=max_bytes)
-
-    def rec_out(hp: str, hr: dict[str, Any], default_ref: str) -> dict[str, Any]:
-        if raw:
-            raise InputError("--raw applies only to Markdown notes or plain files")
-        rk, rr = str(hr.get("kind", "memory")), str(hr.get("ref", default_ref))
-        return {"ok": True, "brain": cfg.name, "kind": rk, "ref": rr, "path": rr if rk == "note" else hp, "record": hr}
+        sib = config.resolve_brain(store, cfg, host)
+        return read_target(sib, sub, fmt=fmt, max_bytes=max_bytes, warn_raw_trunc=warn_raw_trunc)
 
     if kind == "url":
-        hit = find_by_alias(store, to, cfg.notes) or (
-            find_by_alias(store, to[4:], cfg.notes) if to[:4] == "urn:" else None
-        )
+        hit = find_by_alias(store, to)
         if hit is None:
-            raise InputError("external URLs are not read offline; pass a note path, source:id, or bf:// URI")
-        out = rec_out(hit[0], hit[1], to)
-    elif anchor and kind == "record":
-        raise InputError("JSON records do not support #fragments; pipe bf read into jq")
-    elif kind == "record":
-        parsed_r = md.parse_record_ref(to, reserved)
-        found = _find_record(store, parsed_r[0], to) if parsed_r is not None else None
+            raise InputError("external URLs are not read offline; pass a note path, source:id, alias, or bf:// URI")
+        return rec_out(hit[0], hit[1], to, anchor=anchor)
+
+    if kind == "record":
+        parsed_r = refs.parse_record_ref(to, cfg.reserved_sources)
+        found: tuple[str, dict[str, Any]] | None = None
+        if not anchor and parsed_r is not None:
+            rec_path = records.memory_file(parsed_r[0])
+            con = index.open_readonly(store)
+            if con is not None:
+                try:
+                    if index.is_source_fresh(con, store, parsed_r[0], rec_path):
+                        found = (rec_path, hit_r) if (hit_r := index.lookup_ref(con, store, to)) else ("", {})
+                except (sqlite3.Error, index.IndexStaleError, Error):
+                    found = None
+                finally:
+                    con.close()
+            if found is None:
+                found = _find_record_scan(store, parsed_r[0], to)
+            elif not found[0]:
+                found = None
         if found is not None:
-            out = rec_out(found[0], found[1], to)
-        elif (alias_hit := find_by_alias(store, to, cfg.notes)) is not None:
-            out = rec_out(alias_hit[0], alias_hit[1], to)
-        else:
-            raise Error(f"record {to} not found")
-    elif any(part.startswith(".") for part in to.split("/")) or to.split("/")[0].lower() == "logs":
-        raise InputError(f"{to}: private or runtime paths are not readable via bf read")
-    else:
-        if not store.exists(to) and to.split("/")[0] in cfg.notes and not to.endswith(".md"):
-            for cand in (f"{to}.md", f"{to}/index.md"):
-                if store.exists(cand):
-                    to = cand
-                    break
-        if not store.exists(to):
-            raise Error(f"note {to} not found")
-        raw_bytes = store.read(to, MAX_NOTE)
-        text = raw_bytes.decode("utf-8").removeprefix("\ufeff")
-        is_note = md.is_authored_note(store, to, cfg.notes)
+            return rec_out(found[0], found[1], to)
+        if (alias_hit := find_by_alias(store, to)) is not None:
+            return rec_out(alias_hit[0], alias_hit[1], to, anchor=anchor)
         if anchor:
-            if not is_note:
-                raise Error(f"{to}: missing anchor #{anchor}")
-            if raw:
-                raise InputError("--raw cannot be combined with #anchor")
-            comp = md.compile_note(to, raw_bytes, brain_name=cfg.name, note_dirs=cfg.notes)
-            sec = md.extract_section(text, anchor, comp)
-            out = {"ok": True, "brain": cfg.name, "kind": "section", "ref": to, **sec}
-        elif raw or not is_note:
-            out = {"ok": True, "brain": cfg.name, "kind": "note" if is_note else "file", "ref": to, "text": text}
-        else:
-            comp = md.compile_note(to, raw_bytes, brain_name=cfg.name, note_dirs=cfg.notes)
-            out = {"ok": True, "brain": cfg.name, "kind": "note", "ref": to, "path": to, "record": comp}
-    return _cap_json_bytes(out, max_bytes) if max_bytes is not None else out
+            raise InputError("JSON records do not support #fragments")
+        raise Error(f"record {to} not found")
+
+    if not refs.is_allowed_note_path(to, cfg.notes):
+        raise InputError(f"{to}: only configured note directories are readable via bf read")
+
+    return _read_note_file(store, cfg, to, anchor=anchor, fmt=fmt, max_bytes=max_bytes, warn_raw_trunc=warn_raw_trunc)

@@ -1,4 +1,4 @@
-"""Tests for init_brain, JSONL build, validate, required schemas, usages, and review."""
+"""Tests for init_brain, incremental build, unified memories/_notes.jsonl, optional schemas, validate, and review."""
 
 from __future__ import annotations
 
@@ -8,14 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from bf import engine, markdown, models, query, records, status
-from bf.models import FORMAT, Error, InputError, encode
+from bf import engine, index, markdown, models, query, records, refs, render, status
+from bf.models import FORMAT, NOTES_FILE, Error, InputError, encode
 from bf.storage import Store
 
 OBJ_SCHEMA = b'{"type":"object"}\n'
 
 
-def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
+def test_init_brain_incremental_build_sync_and_note_pruning(tmp_path: Path) -> None:
     created = engine.init_brain(tmp_path / "123--My Brain!!")
     assert created["ok"] is True
     assert created["brain"] == "brain-123-my-brain"
@@ -23,21 +23,22 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     store = Store(root)
     assert not (root / ".agents").exists()
     assert not (root / "skills").exists()
-    assert (root / "memories" / "concepts.jsonl").is_file()
+    assert not (root / "usages").exists()
     assert not (root / "docs").exists()
-    for starter_schema in ("concepts.json", "projects.json", "actions.json", "usages.json"):
+    assert (root / NOTES_FILE).is_file()
+    assert (root / ".bf" / "cache" / index.INDEX_NAME).is_file()
+    for starter_schema in ("concepts.json", "projects.json", "actions.json"):
         assert (root / "schemas" / starter_schema).is_file()
+    assert not (root / "schemas" / "usages.json").exists()
     assert (root / "evals" / "smoke.py").is_file()
-    assert not (root / "evals" / "smoke.yaml").exists()
     gi = (root / ".gitignore").read_text()
     assert "/memories/*\n!/memories/*.forgotten" in gi
-    assert "/usages/*\n!/usages/*.forgotten" in gi
+    assert "/usages/" not in gi
     for folder in (
         "projects",
         "concepts",
         "actions",
         "memories",
-        "usages",
         "schemas",
         "logs",
         "evals",
@@ -49,7 +50,15 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     for deferred in ("services", "channels", "prompts", "settings"):
         assert not (root / deferred).exists()
     assert engine.validate(store)["ok"]
-    assert engine.build(store)["ok"]
+
+    # Second build with unchanged notes and schemas reuses all notes incrementally!
+    reuse_build = engine.build(store)
+    assert reuse_build["ok"]
+    assert reuse_build["notes"] == 1
+    assert reuse_build["written"] == 0
+    assert reuse_build["reused"] == 1
+    assert reuse_build["output"] == NOTES_FILE
+    assert reuse_build["dry_run"] is False
 
     # Universal `index.md` bundle: sibling files and subdirs (even symlinks) inside a bundle dir are never recursed!
     (root / "actions" / "ship-jsonl" / "inputs").mkdir(parents=True)
@@ -58,11 +67,29 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
         "actions/ship-jsonl/index.md", b"---\ntype: action\nstatus: open\ncreated: 2026-11-15\n---\n\n# Ship JSONL\n"
     )
     store.write("actions/ship-jsonl/notes.md", b"# Ignored sibling\n")
+
+    # `build(dry_run=True)` previews counts without mutating `memories/_notes.jsonl`.
+    before_dry = store.read(NOTES_FILE)
+    dry_action = engine.build(store, dry_run=True)
+    assert dry_action["ok"]
+    assert dry_action["dry_run"] is True
+    assert (dry_action["notes"], dry_action["written"], dry_action["reused"]) == (2, 1, 1)
+    assert store.read(NOTES_FILE) == before_dry
+
     built_action = engine.build(store)
     assert built_action["ok"]
-    assert store.exists("memories/actions.jsonl")
-    assert len(list(records.iter_jsonl(store, "memories/actions.jsonl"))) == 1
+    assert (built_action["notes"], built_action["written"], built_action["reused"]) == (2, 1, 1)
+    assert len(list(records.iter_jsonl(store, NOTES_FILE))) == 2
     assert engine.validate(store)["ok"]
+
+    # Schema edit invalidates build_sig and forces full recompile (reused == 0).
+    store.write(
+        "schemas/concepts.json",
+        json.dumps({"type": "object", "required": ["type", "status"], "additionalProperties": True}).encode(),
+    )
+    rebuilt_sig = engine.build(store)
+    assert rebuilt_sig["ok"]
+    assert rebuilt_sig["reused"] == 0
 
     # `validate` is strictly read-only: detects unbuilt, orphaned, out-of-sync, and corrupt JSONL without writing!
     raw_welcome = store.read("concepts/welcome.md")
@@ -73,58 +100,77 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     store.delete("concepts/unbuilt.md")
     assert engine.validate(store)["ok"]
 
-    orig_concepts = store.read("memories/concepts.jsonl")
+    orig_notes = store.read(NOTES_FILE)
     store.write(
-        "memories/concepts.jsonl",
-        orig_concepts + b'{"ref":"concepts/orphan.md","source":"concepts","kind":"note","title":"Orphan"}\n',
+        NOTES_FILE,
+        orig_notes + b'{"ref":"concepts/orphan.md","source":"concepts","kind":"note","title":"Orphan"}\n',
     )
     val_orphan = engine.validate(store)
     assert not val_orphan["ok"]
     assert any("orphaned compiled note" in p for p in val_orphan["problems"])
     engine.build(store)
-    assert "concepts/orphan.md" not in store.read("memories/concepts.jsonl").decode()
+    assert "concepts/orphan.md" not in store.read(NOTES_FILE).decode()
     assert engine.validate(store)["ok"]
 
-    compiled_bytes = store.read("memories/concepts.jsonl")
+    compiled_bytes = store.read(NOTES_FILE)
     store.write("concepts/welcome.md", raw_welcome + b"\nEdited without rebuild.\n")
     assert any("out of sync with concepts/welcome.md" in p for p in engine.validate(store)["problems"])
-    store.write("memories/concepts.jsonl", b"{corrupt\n")
+    store.write(NOTES_FILE, b"{corrupt\n")
     assert any("invalid JSON" in p for p in engine.validate(store)["problems"])
     store.write("concepts/welcome.md", raw_welcome)
-    store.write("memories/concepts.jsonl", compiled_bytes)
+    store.write(NOTES_FILE, compiled_bytes)
     assert engine.validate(store)["ok"]
 
-    # Tampered compiled record with matching `sha256` is caught by validate and fixed automatically by `build`!
-    tampered = json.loads(store.read("memories/actions.jsonl").decode().strip())
-    tampered["title"] = "Tampered Title"
-    store.write("memories/actions.jsonl", encode(tampered))
+    # Tampered compiled record with matching `sha256` is caught by validate and fixed by full rebuild when schema/content changes!
+    rows = [json.loads(ln) for ln in store.read(NOTES_FILE).decode().splitlines() if ln.strip()]
+    for r in rows:
+        if r["ref"] == "actions/ship-jsonl/index.md":
+            r["title"] = "Tampered Title"
+    store.write(NOTES_FILE, b"".join(encode(r) for r in rows))
     assert any("out of sync with actions/ship-jsonl/index.md" in p for p in engine.validate(store)["problems"])
+    # Removing .bf/cache/index.sqlite3 forces recompile so tampered note is rewritten cleanly.
+    store.delete(f".bf/cache/{index.INDEX_NAME}")
     assert engine.build(store)["written"] == 1
     assert engine.validate(store)["ok"]
 
-    # Partial build failure preserves existing compiled notes for the broken folder instead of wiping them!
+    # Partial build failure preserves existing compiled notes instead of wiping them!
     store.write("concepts/broken-fm.md", b"---\nstatus: [\n---\n# Broken\n")
     bad_build = engine.build(store)
     assert not bad_build["ok"]
-    assert "concepts/welcome.md" in store.read("memories/concepts.jsonl").decode()
+    assert "concepts/welcome.md" in store.read(NOTES_FILE).decode()
     store.delete("concepts/broken-fm.md")
     assert engine.build(store)["ok"]
 
-    # Deleting the last note in a folder removes its `memories/<dir>.jsonl` completely (never 0-byte JSONL)!
-    store.write("projects/temp.md", b"---\ntype: project\nstatus: active\n---\n# Temp\n")
-    engine.build(store)
-    assert store.exists("memories/projects.jsonl")
-    store.delete("projects/temp.md")
-    built_after = engine.build(store)
+    # Deleting all notes removes `memories/_notes.jsonl` completely (never 0-byte JSONL)!
+    empty_b = tmp_path / "empty-notes"
+    engine.init_brain(empty_b, name="empty-notes")
+    empty_st = Store(empty_b)
+    assert empty_st.exists(NOTES_FILE)
+    empty_st.delete("concepts/welcome.md")
+    assert engine.unbuilt_note_dirs(empty_st, ("concepts", "projects", "actions")) == [
+        "concepts",
+        "projects",
+        "actions",
+    ]
+    built_after = engine.build(empty_st)
     assert built_after["removed"] == 1
-    assert not store.exists("memories/projects.jsonl")
+    assert not empty_st.exists(NOTES_FILE)
+    assert engine.unbuilt_note_dirs(empty_st, ("concepts", "projects", "actions")) == []
+    empty_st.write("concepts/only.md", b"# Only\n")
+    assert engine.unbuilt_note_dirs(empty_st, ("concepts", "projects", "actions")) == ["concepts"]
+    empty_st.write(NOTES_FILE, b'{"ref":"retired/old.md","source":"retired","kind":"note","title":"Old"}\n')
+    assert engine.unbuilt_note_dirs(empty_st, ("concepts", "projects", "actions")) == [
+        "actions",
+        "concepts",
+        "projects",
+    ]
 
     with pytest.raises(Error, match="not empty"):
         engine.init_brain(root)
 
     file_dst = tmp_path / "not-a-dir"
     file_dst.write_text("x")
-    with pytest.raises(Error, match="not a directory"):
+    with pytest.raises(Error, match="not a real directory"):
         engine.init_brain(file_dst)
 
     with pytest.raises(InputError, match="lowercase letter"):
@@ -133,13 +179,13 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
 
     dangling = tmp_path / "dangling-link"
     dangling.symlink_to(tmp_path / "missing-target")
-    with pytest.raises(Error, match="not a directory"):
+    with pytest.raises(Error, match="not a real directory"):
         engine.init_brain(dangling)
     empty_real = tmp_path / "empty-real"
     empty_real.mkdir()
     sym_dir = tmp_path / "sym-empty-dir"
     sym_dir.symlink_to(empty_real)
-    with pytest.raises(Error, match="not a directory"):
+    with pytest.raises(Error, match="not a real directory"):
         engine.init_brain(sym_dir)
 
     # Same-brain `bf:///` and uppercase `BF://<host>` frontmatter links compile cleanly.
@@ -150,23 +196,25 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
         "concepts/up-uri.md",
         b"---\ntype: guide\nstatus: stable\nlinks:\n  - BF://brain-123-my-brain/concepts/welcome.md\n---\n# U\n",
     )
-    engine.build(store)
+    assert engine.build(store)["ok"]
     comp_up = markdown.compile_note("concepts/up-uri.md", store.read("concepts/up-uri.md"), brain_name="renamed")
     assert comp_up["links"][0]["kind"] == "brain"
 
-    # Custom `notes:` directory requires `schemas/wiki.json` (fail closed!), supports `index.md` bundles & detects flat/bundle collisions!
+    # Custom `notes:` directory works WITHOUT a domain schema (optional schemas!), supports bundles & detects collisions!
     store.write(
         "bf.yaml",
         f"version: {FORMAT}\nname: brain-123-my-brain\nnotes: [concepts, projects, actions, wiki]\n".encode(),
     )
     store.write("wiki/bundle-topic/index.md", b"---\ntype: wiki\nstatus: stable\n---\n# Bundle Topic\n")
     store.write("wiki/bundle-topic/outputs/draft.md", b"# Ignored Output\n")
-    assert any("missing required schema for source 'wiki'" in p for p in engine.build(store)["problems"])
-    assert not store.exists("memories/wiki.jsonl")
-    assert any("missing required schema for note folder 'wiki'" in p for p in engine.validate(store)["problems"])
+    assert engine.build(store)["ok"]
+    assert engine.validate(store)["ok"]
+    # Adding optional `schemas/wiki.json` enforces domain constraints!
+    store.write("schemas/wiki.json", json.dumps({"type": "object", "required": ["owner"]}).encode())
+    assert any("missing required 'owner'" in p for p in engine.build(store)["problems"])
+    assert any("missing required 'owner'" in p for p in engine.validate(store)["problems"])
     store.write("schemas/wiki.json", OBJ_SCHEMA)
     assert engine.build(store)["ok"]
-    assert store.exists("memories/wiki.jsonl")
     assert engine.validate(store)["ok"]
     # Flat vs bundle collision:
     store.write("wiki/bundle-topic.md", b"---\ntype: wiki\nstatus: stable\n---\n# Colliding Flat\n")
@@ -179,7 +227,8 @@ def test_init_brain_build_sync_and_stale_note_pruning(tmp_path: Path) -> None:
     assert query.read_target(store, "wiki/bundle-topic")["ref"] == "wiki/bundle-topic/index.md"
     assert query.read_target(store, "wiki/bundle-topic/outputs/draft.md")["kind"] == "file"
     assert query.query(store, "Bundle Topic", kind="note", scope="wiki")["count"] == 1
-    assert query.query(store, "Bundle Topic", kind="memory")["count"] == 0
+    with pytest.raises(InputError, match="conflicts with --kind memory"):
+        query.query(store, "Bundle Topic", kind="memory", scope="wiki")
     with pytest.raises(InputError, match="reserved"):
         records.ingest(store, "wiki", b"[]")
     assert status.status_summary(store)["counts"]["notes"] >= 3
@@ -194,12 +243,12 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
     invalid_cfg = engine.validate(Store(bad_root))
     assert not invalid_cfg["ok"]
     assert "version 99" in invalid_cfg["problems"][0]
+    assert invalid_cfg["summary"]["errors"] == 1
 
     # Sibling brain for cross-brain link checks.
     sib_root = tmp_path / "sib"
     engine.init_brain(sib_root, name="sib")
     sib = Store(sib_root)
-    sib.write("schemas/events.json", OBJ_SCHEMA)
     records.ingest(sib, "events", b'[{"id":"ev-1","title":"Event 1","aliases":["repo:acme/demo"]}]')
     sib.write("memories/corrupt.jsonl", b"{bad\n")
     sib.write("concepts/shared.md", b"---\ntype: guide\nstatus: stable\n---\n\n# Shared\n\n## Known {#known}\n")
@@ -211,7 +260,7 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
         f"version: {FORMAT}\nname: fixture\nbrains:\n  sib: {sib_root}\n  missing-sib: {tmp_path / 'nope'}\n".encode(),
     )
 
-    # Schema and .env errors (`evals/` holds user Python/pytest scripts and is not enforced by `bf check`).
+    # Schema and .env errors.
     brain.write(".env", b'BAD_QUOTE="unclosed\\"\n', mode=0o600)
     brain.write("schemas/nested/extra.json", b"{}")
     brain.write("schemas/broken.json", b'{"type": "nope"}')
@@ -224,20 +273,18 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
     brain.write("actions/demo/outputs/report.md", b"# Report\n\n## Summary {#summary}\n")
     brain.write("actions/demo/outputs/bad.md", b"\xff\xfe")
 
-    # JSONL memory errors: stray non-jsonl, subdir under memories/, reserved source, missing schema, corrupt jsonl, duplicate id + mismatched source/ref.
+    # JSONL memory errors: stray non-jsonl, subdir under memories/, reserved source, corrupt jsonl, duplicate id + bad links.
+    # Note: `memories/noschema.jsonl` without `schemas/noschema.json` is VALID in v19 (optional domain schemas)!
     brain.write("memories/stray.txt", b"bad")
     brain.write("memories/nested/old.json", b"{}\n")
     brain.write("memories/repos.forgotten", b"ignored\n")
-    brain.write("schemas/scalar.json", OBJ_SCHEMA)
     brain.write("memories/scalar.jsonl", b"123\n")
     brain.write("memories/notes.jsonl", b"{}\n")
     brain.write(
         "memories/noschema.jsonl",
         b'{"id":"n1","ref":"noschema:n1","source":"noschema","kind":"memory","title":"No Schema"}\n',
     )
-    brain.write("schemas/corrupt.json", OBJ_SCHEMA)
     brain.write("memories/corrupt.jsonl", b"{broken\n")
-    brain.write("schemas/dupes.json", OBJ_SCHEMA)
     dupe_line = json.dumps(
         {
             "id": "d1",
@@ -251,7 +298,6 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
         }
     ).encode()
     brain.write("memories/dupes.jsonl", dupe_line + b"\n" + dupe_line + b"\n")
-    brain.write("schemas/relbad.json", OBJ_SCHEMA)
     brain.write(
         "memories/relbad.jsonl",
         json.dumps(
@@ -275,7 +321,6 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
         ).encode()
         + b"\n",
     )
-    brain.write("schemas/wrongkind.json", OBJ_SCHEMA)
     brain.write(
         "memories/wrongkind.jsonl",
         json.dumps(
@@ -284,7 +329,6 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
         + b"\n",
     )
 
-    brain.write("schemas/repos.json", OBJ_SCHEMA)
     records.ingest(brain, "repos", b'[{"id":"r1","title":"Local repo","aliases":["repo:local/one"]}]')
 
     brain.write("projects/badstale.md", b"---\ntype: project\nstatus: draft\nowner: alice\nstale_after: -5\n---\n# S\n")
@@ -321,9 +365,10 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
     report = engine.validate(brain, all_problems=True)
     assert not report["ok"]
     joined = "\n".join(report["problems"])
+    assert "noschema" not in joined
     for expected in (
         ".env:1: unclosed quote",
-        "schemas/nested/extra.json: schemas/ holds only flat",
+        "schemas/nested: schemas/ holds only flat",
         "schemas/broken.json: invalid JSON Schema",
         "projects/offline.md: missing required 'owner'",
         "projects/badstale.md:",
@@ -334,7 +379,6 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
         "memories/nested: memories/ holds flat <source>.jsonl files",
         "memories/scalar.jsonl:1: expected a JSON object",
         "memories/notes.jsonl: invalid or reserved source",
-        "schemas/noschema.json: missing required schema for source 'noschema'",
         "memories/corrupt.jsonl:1: invalid JSON",
         "duplicate record id 'd1' in dupes",
         "memories/dupes.jsonl:1: source must equal 'dupes'",
@@ -342,7 +386,7 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
         "memories/relbad.jsonl:1: record link 'concepts:welcome' must use <source>:<id>",
         "memories/relbad.jsonl:1: note link 'projects:bad' must target a configured note directory",
         "memories/relbad.jsonl:1: note link 'projects/../../etc/passwd' must target a configured note directory",
-        "memories/relbad.jsonl:1: url link 'javascript:alert(1)' must use https://",
+        "memories/relbad.jsonl:1: url link must use https://",
         "memories/relbad.jsonl:1: cross-brain link 'bf://sib/notes:bad' must use bf://<brain>/<ref>",
         "memories/wrongkind.jsonl:1: kind must equal 'memory'",
         "bf.yaml brains.missing-sib:",
@@ -359,9 +403,9 @@ def test_validate_catches_schema_link_anchor_memory_and_cross_brain_errors(tmp_p
     ):
         assert expected in joined, f"missing expected problem {expected!r} in:\n{joined}"
 
-    assert markdown.record_link_problem({"kind": "record", "to": "github:foo\nbar", "anchor": ""})
-    assert markdown.record_link_problem({"kind": "url", "to": "https://example.com\n", "anchor": ""})
-    assert markdown.record_link_problem({"kind": "brain", "to": "bf://sib\\x/concepts/a.md", "anchor": ""})
+    assert refs.record_link_problem({"kind": "record", "to": "github:foo\nbar", "anchor": ""})
+    assert refs.record_link_problem({"kind": "url", "to": "https://example.com\n", "anchor": ""})
+    assert refs.record_link_problem({"kind": "brain", "to": "bf://sib\\x/concepts/a.md", "anchor": ""})
 
 
 def test_review_computes_newer_evidence_due_future_updated_and_tasks(brain: Store) -> None:
@@ -403,7 +447,6 @@ def test_review_computes_newer_evidence_due_future_updated_and_tasks(brain: Stor
         "projects/overflow-dur.md",
         b"---\ntype: project\nstatus: active\nupdated: 2026-11-15\nstale_after: 9999y\n---\n\n# Overflow Dur\n",
     )
-    brain.write("schemas/jira.json", OBJ_SCHEMA)
     records.ingest(
         brain,
         "jira",
@@ -453,7 +496,6 @@ def test_review_computes_newer_evidence_due_future_updated_and_tasks(brain: Stor
         "concepts/undated-dur.md",
         b"---\ntype: guide\nstatus: stable\nstale_after: 7d\n---\n# Undated Dur\n",
     )
-    brain.write("schemas/github.json", OBJ_SCHEMA)
     records.ingest(
         brain,
         "github",
@@ -474,9 +516,12 @@ def test_review_computes_newer_evidence_due_future_updated_and_tasks(brain: Stor
     )
 
     engine.build(brain)
+    # Remove SQLite index first to verify JSONL fallback path (including broken.jsonl diagnostic and index_stale).
+    brain.delete(f".bf/cache/{index.INDEX_NAME}")
     rep = engine.review(brain, now=now)
     assert rep["brain"] == "fixture"
     assert rep["ok"] is False
+    assert rep["index_stale"] is True
     assert len(rep["problems"]) == 1
     assert "memories/broken.jsonl" in rep["problems"][0]
     assert rep["total_tasks_open"] == 2
@@ -515,9 +560,21 @@ def test_review_computes_newer_evidence_due_future_updated_and_tasks(brain: Stor
         "newer": ["github:pr-7"],
     }
 
+    # Indexed SQLite review produces identical staleness when memories/ and notes are valid!
+    for bad_f in ("memories/broken.jsonl", "memories/notes.jsonl", "memories/scalar.jsonl", "projects/overflow-dur.md"):
+        brain.delete(bad_f)
+    assert engine.build(brain)["ok"]
+    rep_idx = engine.review(brain, now=now)
+    assert rep_idx["ok"] is True
+    assert "index_stale" not in rep_idx
+    idx_by_ref = {item["ref"]: item for item in rep_idx["stale"]}
+    assert idx_by_ref["projects/offline.md"] == stale_by_ref["projects/offline.md"]
+    assert idx_by_ref["projects/aliased.md"] == stale_by_ref["projects/aliased.md"]
+    assert idx_by_ref["concepts/created-only.md"] == stale_by_ref["concepts/created-only.md"]
 
-def test_validate_warnings_strict_limit_and_validated_cache(tmp_path: Path) -> None:
-    created = engine.init_brain(tmp_path / "v17")
+
+def test_validate_warnings_strict_limit_and_review_caps(tmp_path: Path) -> None:
+    created = engine.init_brain(tmp_path / "v19")
     store = Store(Path(created["path"]))
     now = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
 
@@ -525,12 +582,10 @@ def test_validate_warnings_strict_limit_and_validated_cache(tmp_path: Path) -> N
     store.write(
         "bf.yaml",
         (
-            f"version: {FORMAT}\nname: v17\nloops:\n"
+            f"version: {FORMAT}\nname: v19\nloops:\n"
             "  snap:\n    run: [echo, ok]\n    ingest:\n      source: snapsrc\n      mode: snapshot\n"
         ).encode(),
     )
-    store.write("schemas/snapsrc.json", OBJ_SCHEMA)
-    store.write("schemas/fgsrc.json", OBJ_SCHEMA)
     records.ingest(store, "snapsrc", b'[{"id":"kept","title":"Kept"}]\n', now=now)
     records.ingest(store, "fgsrc", b'[{"id":"gone","title":"Gone"}]\n', now=now)
     store.write("memories/fgsrc.forgotten", b"gone\n")
@@ -543,10 +598,10 @@ def test_validate_warnings_strict_limit_and_validated_cache(tmp_path: Path) -> N
     engine.build(store)
     w_only = engine.validate(store, limit=2)
     assert not w_only["ok"]
-    assert w_only["summary"]["truncated"] is True
+    assert w_only["truncated"] is True
     assert len(w_only["problems"]) == 2
-    assert w_only["warnings_count"] == 2
-    assert w_only["errors_count"] == 1
+    assert w_only["summary"]["warnings"] == 2
+    assert w_only["summary"]["errors"] == 1
 
     # Remove unknown link: warnings remain -> ok=True unless strict=True!
     store.write(
@@ -557,14 +612,37 @@ def test_validate_warnings_strict_limit_and_validated_cache(tmp_path: Path) -> N
     engine.build(store)
     ok_warn = engine.validate(store)
     assert ok_warn["ok"] is True
-    assert ok_warn["warnings_count"] == 2
+    assert ok_warn["summary"]["warnings"] == 2
     assert not engine.validate(store, strict=True)["ok"]
-    assert not (store.root / ".bf" / "validated.json").exists()
     with pytest.raises(InputError):
         engine.validate(store, limit=0)
+    with pytest.raises(InputError):
+        engine.validate(store, limit=5001)
 
-    # Review newer[:5] cap and limit validation!
-    store.write("schemas/ev.json", OBJ_SCHEMA)
+    # Unreferenced missing `brains:` path emits a warning (ok=True unless --strict); referenced missing path is an error!
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: v19\nbrains:\n  offline-sib: {tmp_path / 'not-mounted'}\n".encode(),
+    )
+    store.delete("concepts/refs.md")
+    engine.build(store)
+    w_sib = engine.validate(store)
+    assert w_sib["ok"] is True
+    assert w_sib["summary"]["warnings"] == 1
+    assert any("bf.yaml brains.offline-sib:" in p for p in w_sib["problems"])
+    assert engine.validate(store, strict=True)["ok"] is False
+    store.write(
+        "concepts/use-sib.md", b"---\ntype: guide\nstatus: stable\n---\n# Use\n\n[X](bf://offline-sib/concepts/a.md)\n"
+    )
+    engine.build(store)
+    err_sib = engine.validate(store)
+    assert err_sib["ok"] is False
+    assert err_sib["summary"]["errors"] >= 1
+    store.delete("concepts/use-sib.md")
+    store.write("bf.yaml", f"version: {FORMAT}\nname: v19\n".encode())
+    engine.build(store)
+
+    # Review newer[:5] cap (`newer_truncated`) and limit validation!
     recs = [{"id": f"n{i}", "title": f"N{i}", "updated": "2026-11-19T12:00:00Z"} for i in range(7)]
     records.ingest(store, "ev", json.dumps(recs).encode(), now=now)
     links_md = " ".join(f"[N{i}](ev:n{i})" for i in range(7))
@@ -576,22 +654,22 @@ def test_validate_warnings_strict_limit_and_validated_cache(tmp_path: Path) -> N
     rev_lim = engine.review(store, now=now, limit=1)
     assert rev_lim["total_stale"] >= 1
     assert rev_lim["stale"][0]["newer_count"] == 7
-    assert rev_lim["stale"][0]["truncated"] is True
+    assert rev_lim["stale"][0]["newer_truncated"] is True
     assert len(rev_lim["stale"][0]["newer"]) == 5
     with pytest.raises(InputError):
         engine.review(store, limit=0)
+    with pytest.raises(InputError):
+        engine.review(store, limit=5001)
 
 
-def test_engine_edge_paths_and_validated_cache_guards(tmp_path: Path) -> None:
+def test_engine_edge_paths_readonly_and_scan_caps(tmp_path: Path) -> None:
     sib = engine.init_brain(tmp_path / "sib")
     sib_store = Store(Path(sib["path"]))
-    sib_store.write("schemas/ev.json", OBJ_SCHEMA)
     records.ingest(sib_store, "ev", b'[{"id":"e1","title":"E1","created":"2026-11-18T10:00:00Z"}]')
 
     main = engine.init_brain(tmp_path / "main")
     store = Store(Path(main["path"]))
     store.write("bf.yaml", f"version: {FORMAT}\nname: main\nbrains:\n  sib: ../sib\n".encode())
-    store.write("schemas/ev.json", OBJ_SCHEMA)
     records.ingest(store, "ev", b'[{"id":"r1","title":"R1","created":"2026-11-18T10:00:00Z"}]')
     store.write(
         "concepts/edges.md",
@@ -612,7 +690,7 @@ def test_engine_edge_paths_and_validated_cache_guards(tmp_path: Path) -> None:
     assert any("note is not UTF-8" in p for p in val_unreadable["problems"])
     store.delete("concepts/bad.md")
 
-    # Nested notes, `.bf/validated.json` invalidation, read-only preservation, and scan caps.
+    # Nested notes, schema tightening, broken local `schemas/record.json`, symlink scan failure, and read-only `.bf/`.
     inv_root = tmp_path / "cache-inv"
     engine.init_brain(inv_root, name="cache-inv")
     inv_store = Store(inv_root)
@@ -627,7 +705,6 @@ def test_engine_edge_paths_and_validated_cache_guards(tmp_path: Path) -> None:
     assert rev["total_tasks_open"] == 1
     assert any(it["ref"] == "projects/sub/roadmap.md" and "due" in it["reasons"] for it in rev["stale"])
 
-    inv_store.write("schemas/src1.json", OBJ_SCHEMA)
     records.ingest(
         inv_store,
         "src1",
@@ -645,56 +722,38 @@ def test_engine_edge_paths_and_validated_cache_guards(tmp_path: Path) -> None:
     inv_store.write("schemas/src1.json", OBJ_SCHEMA)
     assert engine.validate(inv_store)["ok"] is True
 
-    # Broken local `schemas/record.json` is reported as a validation problem instead of crashing, and `build` preserves existing files!
-    inv_store.write("schemas/record.json", b"{broken")
-    before_c = inv_store.read("memories/concepts.jsonl")
+    # Reserved `schemas/record.json` is rejected by `validate()`, and broken `schemas/concepts.json` fails `build()` without wiping existing files!
+    inv_store.write("schemas/record.json", b'{"type":"object"}')
+    assert any("reserved schema name 'record'" in p for p in engine.validate(inv_store)["problems"])
+    inv_store.delete("schemas/record.json")
+
+    inv_store.write("schemas/concepts.json", b"{broken")
+    before_c = inv_store.read(NOTES_FILE)
     bad_b = engine.build(inv_store)
     assert not bad_b["ok"]
     assert bad_b["written"] == 0
-    assert inv_store.read("memories/concepts.jsonl") == before_c
-    assert any("schemas/record.json" in p for p in engine.validate(inv_store)["problems"])
-    inv_store.delete("schemas/record.json")
+    assert inv_store.read(NOTES_FILE) == before_c
+    assert any("schemas/concepts.json" in p for p in engine.validate(inv_store)["problems"])
+    inv_store.write("schemas/concepts.json", OBJ_SCHEMA)
 
-    # Symlink scan failure in `concepts/` preserves `memories/concepts.jsonl` with `written == 0`!
+    # Symlink scan failure in `concepts/` preserves `memories/_notes.jsonl` with `written == 0`!
     (inv_root / "concepts" / "bad-link.md").symlink_to(inv_root / "bf.yaml")
     scan_fail = engine.build(inv_store)
     assert not scan_fail["ok"]
     assert scan_fail["written"] == 0
-    assert inv_store.read("memories/concepts.jsonl") == before_c
+    assert inv_store.read(NOTES_FILE) == before_c
     (inv_root / "concepts" / "bad-link.md").unlink()
 
-    # Cross-folder compiled note (project ref inside `memories/concepts.jsonl`) is caught by validate!
-    orig_c = inv_store.read("memories/concepts.jsonl")
+    # Duplicate compiled note in `memories/_notes.jsonl` is caught by validate!
+    orig_c = inv_store.read(NOTES_FILE)
     inv_store.write(
-        "memories/concepts.jsonl",
-        orig_c + b'{"ref":"projects/sub/roadmap.md","source":"concepts","kind":"note","title":"Wrong Folder"}\n',
+        NOTES_FILE,
+        orig_c + b'{"ref":"concepts/welcome.md","source":"concepts","kind":"note","title":"Dup"}\n',
     )
-    assert any(
-        "orphaned compiled note" in p and "projects/sub/roadmap.md" in p for p in engine.validate(inv_store)["problems"]
-    )
-    inv_store.write("memories/concepts.jsonl", orig_c)
-
-    # First-class `usages/<source>.jsonl` (`kind: "usage"`): ingest, validate, query, read, and missing schema checks!
-    u_res = records.ingest(
-        inv_store,
-        "llm",
-        b'[{"id":"u1","title":"Claude turn","model":"claude-4","input_tokens":100,"output_tokens":50,"cost_usd":0.01}]',
-        target="usages",
-        now=now,
-    )
-    assert (u_res["target"], u_res["added"]) == ("usages", 1)
-    assert engine.validate(inv_store)["ok"] is True
-    assert query.query(inv_store, "Claude", kind="usage")["count"] == 1
-    assert query.query(inv_store, None, scope="usages")["count"] == 1
-    assert query.read_target(inv_store, "llm:u1")["kind"] == "usage"
-    assert status.status_summary(inv_store)["counts"]["usages"] == 1
-    inv_store.write("usages/bad.txt", b"stray")
-    assert any("usages/bad.txt" in p for p in engine.validate(inv_store)["problems"])
-    inv_store.delete("usages/bad.txt")
-    inv_store.delete("usages/llm.jsonl")
+    assert any("duplicate compiled note" in p for p in engine.validate(inv_store)["problems"])
+    inv_store.write(NOTES_FILE, orig_c)
 
     # Read-only `.bf/` works without failing or mutating disk!
-    (inv_root / ".bf").mkdir(mode=0o700, exist_ok=True)
     (inv_root / ".bf").chmod(0o500)
     try:
         assert engine.validate(inv_store)["ok"] is True
@@ -702,22 +761,22 @@ def test_engine_edge_paths_and_validated_cache_guards(tmp_path: Path) -> None:
     finally:
         (inv_root / ".bf").chmod(0o700)
 
-    # Deleting `src1.jsonl` evicts alias immediately!
+    # Deleting `src1.jsonl` evicts alias immediately (index sees stale/missing source -> JSONL fallback)!
     src1_path = records.memory_file("src1")
     assert query.find_by_alias(inv_store, "urn:demo:r1") is not None
     inv_store.delete(src1_path)
     assert query.find_by_alias(inv_store, "urn:demo:r1") is None
 
-    # `MAX_TOTAL_FILES` cap enforced across `validate`, `query`, and `status_summary`.
-    inv_store.write("schemas/cap2.json", OBJ_SCHEMA)
+    # `MAX_TOTAL_FILES` cap enforced across `validate`, `query` (scan fallback), and `status_summary` (scan fallback).
     records.ingest(inv_store, "cap2", b'[{"id":"c1","title":"Cap1"},{"id":"c2","title":"Cap2"}]')
+    inv_store.delete(f".bf/cache/{index.INDEX_NAME}")
     with pytest.MonkeyPatch.context() as mp_cap:
         mp_cap.setattr(models, "MAX_TOTAL_FILES", 1)
         mp_cap.setattr(engine, "MAX_TOTAL_FILES", 1)
         with pytest.raises(models.Error, match="total scan limit"):
             engine.validate(inv_store)
         with pytest.raises(models.Error, match="total scan limit"):
-            query.query(inv_store, None, jq_expr=".")
+            query.query(inv_store, kind="memory")
         with pytest.raises(models.Error, match="total scan limit"):
             status.status_summary(inv_store)
 
@@ -750,103 +809,76 @@ def test_engine_edge_paths_and_validated_cache_guards(tmp_path: Path) -> None:
     assert ([it["id"] for it in ls_items], ls_inc) == (["u1", "u2"], False)
 
 
-def test_validate_checks_loops_scripts_jq_filters_and_usages_schema(tmp_path: Path) -> None:
+def test_validate_checks_loops_explicit_run_scripts_and_explicit_schema(tmp_path: Path) -> None:
     root = tmp_path / "loop-val"
     engine.init_brain(root, name="loop-val")
     store = Store(root)
     store.write(
         "bf.yaml",
-        f"version: {FORMAT}\nname: loop-val\n"
-        "loops:\n"
-        "  no-script:\n    when: 1h\n"
-        "  bad-jq:\n    when:\n      - event:\n          kind: custom.ev\n          filter: '[[['\n    run: [echo, hi]\n"
-        "  no-schema:\n    run: [echo, '[]']\n    ingest: upsert\n"
-        "  usage-loop:\n    run: [echo, '[]']\n    ingest:\n      source: tok\n      target: usages\n".encode(),
+        (
+            f"version: {FORMAT}\nname: loop-val\n"
+            "loops:\n"
+            "  no-script:\n    when: 1h\n"
+            "  bad-explicit-run:\n    run: [python3, routines/missing.py]\n"
+            "  missing-schema:\n    run: [echo, '[]']\n    ingest:\n      source: gmail-2026\n      schema: gmail\n"
+            "  optional-schema:\n    run: [echo, '[]']\n    ingest: upsert\n"
+        ).encode(),
     )
-    store.delete("schemas/usages.json")
-    store.write("usages/tok.jsonl", b"{broken\n")
     rep = engine.validate(store, all_problems=True)
     assert not rep["ok"]
     joined = "\n".join(rep["problems"])
     for expected in (
         "loops.no-script:",
-        "invalid jq event filter",
-        "schemas/no-schema.json",
-        "schemas/usages.json",
-        "usages/tok.jsonl:1: invalid JSON",
+        "loops.bad-explicit-run: script routines/missing.py must be a regular file inside brain",
+        "loops.missing-schema: explicit schema schemas/gmail.json not found",
     ):
         assert expected in joined, f"missing {expected!r} in:\n{joined}"
-
-    # `validate` catches stray subdir under `usages/`, reserved sources, and bad usage records!
-    store.write("schemas/usages.json", OBJ_SCHEMA)
-    store.delete("usages/tok.jsonl")
-    store.write("usages/sub/x.jsonl", b"{}\n")
-    store.write("usages/notes.jsonl", b"{}\n")
-    store.write("usages/notes.forgotten", b"x\n")
-    store.write(
-        "usages/badrec.jsonl", b'{"id":"b1","ref":"badrec:b1","source":"badrec","kind":"memory","title":"Wrong"}\n'
-    )
-    store.write("usages/noid.jsonl", b'{"ref":"concepts/x.md","source":"other","kind":"note","title":"No ID"}\n')
-    store.write(
-        "usages/concepts.jsonl", b'{"id":"c1","ref":"concepts:c1","source":"concepts","kind":"usage","title":"X"}\n'
-    )
-    assert query.query(store, "X", scope="concepts", kind="usage")["count"] == 0
-    rep_u = engine.validate(store, all_problems=True)
-    joined_u = "\n".join(rep_u["problems"])
-    assert "usages/sub: usages/ holds flat <source>.jsonl files" in joined_u
-    assert "usages/notes.jsonl: invalid or reserved source" in joined_u
-    assert "usages/notes.forgotten: invalid or reserved source" in joined_u
-    assert "kind must equal 'usage'" in joined_u
-    assert "usages/noid.jsonl:1: source must equal 'noid'" in joined_u
-    assert "usages/noid.jsonl:1: kind must equal 'usage'" in joined_u
+    assert "optional-schema" not in joined
 
 
 def test_validate_notes_only_and_text_formatters(tmp_path: Path) -> None:
     root = tmp_path / "fastcheck"
     engine.init_brain(root, name="fastcheck")
     store = Store(root)
-    store.write("schemas/feed.json", OBJ_SCHEMA)
     store.write("memories/feed.jsonl", b"{corrupt\n")
     assert not engine.validate(store)["ok"]
     notes_rep = engine.validate(store, notes_only=True)
     assert notes_rep["ok"] is True
-    assert notes_rep["records"] == 0
+    assert notes_rep["notes_only"] is True
+    assert notes_rep["counts"]["memories"] is None
 
-    # Text formatters cover OK, FAILED, truncated, FRESH, STALE (with newer & title detail), problems, and ANSI color.
-    chk_ok_txt = status.format_check_text(notes_rep, color=True, notes_only=True)
+    # Text formatters cover OK, FAILED, truncated, FRESH, STALE (with newer & title detail), query text, and ANSI color.
+    chk_ok_txt = render.format_check_text(notes_rep, color=True)
     assert "OK" in chk_ok_txt
     assert "memories=skipped" in chk_ok_txt
-    assert "usages=skipped" in chk_ok_txt
     assert "\033[32m" in chk_ok_txt
-    chk_fail_txt = status.format_check_text(
+    chk_fail_txt = render.format_check_text(
         {
             "ok": False,
             "brain": "b",
-            "notes": 1,
-            "records": 0,
-            "usages": 0,
-            "errors_count": 2,
-            "warnings_count": 0,
+            "notes_only": False,
+            "counts": {"notes": 1, "memories": 0},
+            "summary": {"errors": 2, "warnings": 0, "by_kind": {"note": 2}},
+            "truncated": True,
             "problems": ["p1"],
-            "summary": {"truncated": True},
         },
         color=False,
     )
     assert "FAILED (2 errors, 0 warnings)" in chk_fail_txt
     assert "truncated" in chk_fail_txt
 
-    rev_fresh = status.format_review_text(
+    rev_fresh = render.format_review_text(
         {"ok": True, "brain": "b", "total_stale": 0, "total_tasks_open": 0, "stale": []}
     )
     assert "[FRESH]" in rev_fresh
-    rev_fail = status.format_review_text(
+    rev_fail = render.format_review_text(
         {"ok": False, "brain": "b", "total_stale": 0, "total_tasks_open": 0, "stale": [], "problems": ["broken.jsonl"]},
         color=True,
     )
     assert "FAILED (1 problems)" in rev_fail
     assert "FRESH" not in rev_fail
     assert "broken.jsonl" in rev_fail
-    rev_stale = status.format_review_text(
+    rev_stale = render.format_review_text(
         {
             "ok": True,
             "brain": "b",
@@ -857,32 +889,147 @@ def test_validate_notes_only_and_text_formatters(tmp_path: Path) -> None:
                 {"ref": "projects/p.md", "title": "P", "reasons": ["newer_evidence"], "newer": ["jira:1"]},
             ],
             "truncated": True,
+            "unbuilt_notes": ["concepts"],
         },
         color=True,
     )
     assert "STALE (2)" in rev_stale
     assert "newer: jira:1" in rev_stale
     assert "truncated" in rev_stale
+    assert "unbuilt notes: concepts" in rev_stale
 
-    # All-disabled loops omit the table header; multi-line descriptions and orphan names stay sanitized.
-    all_off = status.format_status_text(
+    q_txt = render.format_query_text(
+        {
+            "engine": "fts5",
+            "query": "alpha",
+            "items": [{"ref": "concepts/a.md", "title": "Alpha", "anchor": "top", "snippet": "Match alpha here"}],
+            "truncated": True,
+            "index_stale": True,
+            "unbuilt_notes": ["concepts"],
+            "excluded_sources": ["agent-telemetry"],
+        },
+        color=True,
+    )
+    assert "Query (fts5): 1 result(s) for 'alpha'" in q_txt
+    assert "concepts/a.md#top" in q_txt
+    assert "Match alpha here" in q_txt
+    assert "truncated" in q_txt
+    assert "index stale" in q_txt
+    assert "unbuilt notes: concepts" in q_txt
+    assert "excluded by bf.yaml: agent-telemetry" in q_txt
+
+    # All-disabled loops omit the table header; crashed loops, index_stale, problems-without-attention, and orphans render cleanly!
+    all_off = render.format_status_text(
         {
             "brain": "b",
-            "ok": True,
-            "counts": {"notes": 1, "records": 0, "usages": 0, "sources": 0, "loops": 1},
+            "ok": False,
+            "counts": {"notes": 1, "memories": 0, "sources": 0, "loops": 1},
             "events_seq": 0,
-            "orphaned_states": ["bad\nname"],
+            "index_stale": True,
+            "problems": ["bf.yaml: broken"],
+            "orphans": {"states": ["bad\nname"], "dirs": [], "logs": []},
             "loops": {"off": {"enabled": False, "status": "idle", "description": "line1\nline2"}},
         }
     )
     assert "LOOP" not in all_off
     assert "(1 disabled loop(s))" in all_off
-    assert "bad name" in all_off or "bad\\nname" not in all_off
+    assert "bad\\u000aname" in all_off
+    assert "bf state prune" in all_off
+    assert "index: stale" in all_off
+    assert "bf.yaml: broken" in all_off
 
-    from bf import watch
+    crashed_txt = render.format_status_text(
+        {
+            "brain": "b",
+            "ok": False,
+            "counts": {"notes": 1, "memories": 0, "sources": 0, "loops": 1},
+            "events_seq": 0,
+            "attention": [{"name": "d1", "reason": "crashed", "status": "stopped"}],
+            "loops": {"d1": {"enabled": True, "status": "stopped", "crashed": True, "mode": "daemon"}},
+        }
+    )
+    assert "crashed" in crashed_txt
 
-    bad_build_ln = watch.format_watch_line(
+    bad_build_ln = render.format_watch_line(
         "watch.build", {"ok": False, "notes": 1, "written": 0, "problems": ["bad note", "second"]}, color=False
     )
     assert "bad note" in bad_build_ln
     assert "+1 more" in bad_build_ln
+    rem_build_ln = render.format_watch_line(
+        "watch.build", {"ok": True, "notes": 1, "written": 0, "removed": 2}, color=False
+    )
+    assert "2 removed" in rem_build_ln
+
+
+def test_validation_scale_warning_bool_drift_review_tz_and_anchor_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "hard"
+    engine.init_brain(root, name="hard")
+    store = Store(root)
+
+    # Empty directory inside schemas/ is caught by store.subdirs("schemas").
+    (root / "schemas" / "nested").mkdir()
+    rep_dir = engine.validate(store)
+    assert not rep_dir["ok"]
+    assert any("schemas/nested" in p for p in rep_dir["problems"])
+    (root / "schemas" / "nested").rmdir()
+
+    # Soft scale warning fires when a JSONL file exceeds SCALE_WARN_RECORDS (non-fatal unless --strict).
+    records.ingest(store, "src", b'[{"id":"a","title":"A"},{"id":"b","title":"B"}]')
+    monkeypatch.setattr(models, "SCALE_WARN_RECORDS", 1)
+    rep_scale = engine.validate(store)
+    assert rep_scale["ok"] is True
+    assert rep_scale["summary"]["warnings"] == 1
+    assert any("consider partitioning" in p for p in rep_scale["problems"])
+    assert engine.validate(store, strict=True)["ok"] is False
+    st_scale = status.status_summary(store, include_loops=True)
+    assert st_scale["scale_warnings"]
+    assert "scale warnings:" in render.format_status_text(st_scale)
+    monkeypatch.setattr(models, "SCALE_WARN_RECORDS", 20_000)
+
+    # bool <-> int drift is caught by canonical JSON comparison in validate().
+    store.write(
+        "concepts/bools.md",
+        b"---\ntype: guide\nstatus: stable\nflag: 1\n---\n# Bools\n",
+    )
+    engine.build(store)
+    raw_mem = store.read(NOTES_FILE).replace(b'"flag":1', b'"flag":true')
+    store.write(NOTES_FILE, raw_mem)
+    rep_bool = engine.validate(store)
+    assert not rep_bool["ok"]
+    assert any("out of sync" in p for p in rep_bool["problems"])
+    store.delete(f".bf/cache/{index.INDEX_NAME}")
+    engine.build(store)
+
+    # review() handles non-UTC timestamp offsets cleanly with explicit `stale_after: 1d`.
+    store.write(
+        "concepts/tz.md",
+        b'---\ntype: guide\nstatus: stable\nupdated: "2026-11-10T23:30:00-02:00"\nstale_after: 1d\n---\n# TZ\n',
+    )
+    engine.build(store)
+    # 2026-11-10T23:30:00-02:00 == 2026-11-11T01:30:00Z -> +1d == 2026-11-12T01:30:00Z!
+    rev_before = engine.review(store, now=datetime(2026, 11, 12, 1, 0, tzinfo=UTC))
+    assert all(it["ref"] != "concepts/tz.md" for it in rev_before["stale"])
+    rev_after = engine.review(store, now=datetime(2026, 11, 12, 2, 0, tzinfo=UTC))
+    assert any(it["ref"] == "concepts/tz.md" and "due" in it["reasons"] for it in rev_after["stale"])
+
+    # check_anchor catches OSError cleanly without aborting validate().
+    store.write("actions/demo/index.md", b"---\ntype: action\nstatus: open\ncreated: 2026-11-12\n---\n# Demo\n")
+    store.write("actions/demo/outputs/extra.md", b"# Extra\n")
+    store.write(
+        "concepts/link-extra.md",
+        b"---\ntype: guide\nstatus: stable\n---\n# Link\n\nSee [Extra](../actions/demo/outputs/extra.md#extra).\n",
+    )
+    engine.build(store)
+    real_read = Store.read
+
+    def _boom_read(self: Store, name: str, limit: int = models.MAX_FILE, *, private: bool = False) -> bytes:
+        if name == "actions/demo/outputs/extra.md":
+            raise PermissionError("denied")
+        return real_read(self, name, limit, private=private)
+
+    monkeypatch.setattr(Store, "read", _boom_read)
+    rep_perm = engine.validate(store)
+    assert not rep_perm["ok"]
+    assert any("unreadable file" in p for p in rep_perm["problems"])

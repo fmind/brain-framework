@@ -12,6 +12,7 @@ import os
 import re
 import stat
 import sys
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -23,19 +24,23 @@ TOTAL_BYTES = 64 << 20
 MAX_BYTES = 16 << 20
 TEXT_CHARS = 4096
 CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
-_PEM_TAG = r"[A-Z0-9 ]{0,32}PRIVATE KEY-----"
-_PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,16384}}"
+_PEM_TAG = r"[A-Z0-9 ]{0,40}(?:PRIVATE KEY|PRIVATE KEY BLOCK)-----"
+_PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,65536}}"
 _KV_KEY = (
-    r"(?i:(?<![A-Za-z0-9])(?:password|passwd|(?:client[_-]?)?secret(?:[_-]?access[_-]?key|[_-]?key)?"
-    r"|private[_-]?key|api[_-]?key"
-    r"|(?:access|refresh|auth|api|session|id|bot|private|gh|github|oauth|bearer)[_-]?token))"
+    r"(?i:(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]{1,128}(?:\\?[\"'])?\s*[:=])"
+    r"(?:(?:[A-Za-z0-9_-]{0,64}?(?:password|passwd|passphrase|secret|private[_-]?key|api[_-]?key"
+    r"|access[_-]?key|credential[s]?|authorization|cookie)(?:[_-][A-Za-z0-9_-]{1,64}+)?)"
+    r"|(?:(?:[A-Za-z0-9_-]{1,64}?[_-])?(?:token|jwt)))(?![A-Za-z0-9_-]))"
 )
-_KV_VAL = r'(?:\\?"[^"\r\n]{1,8192}"?|\\?\'[^\'\r\n]{1,8192}\'?|[^\s"\',;}{\]]{1,8192})'
+_KV_VAL = r'(?:\\?"(?:[^"\\\r\n]|\\.){1,8192}"?|\\?\'(?:[^\'\\\r\n]|\\.){1,8192}\'?|[^\s"\',;}{\]]{1,8192})'
 REDACT = re.compile(
-    r"(?:(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{8,}|\bauthorization\s*[:=]\s*basic\s+[A-Za-z0-9+/=-]{8,})"
-    r"|(?<=://)[^/\s:@]{1,64}:[^/\s@]{1,128}(?=@)"
-    r"|(?:gh[pousr]_|github_pat_|AKIA|ASIA|AIza|ya29\.|sk-|xox[baprs]-)[A-Za-z0-9._-]{8,}"
-    rf"|-----BEGIN {_PEM_TAG}{_PEM_BODY}(?:-----END {_PEM_TAG})?|{_KV_KEY}(?:\\?[\"'])?\s*[:=]\s*{_KV_VAL})"
+    r"(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"
+    r"|\b(?:proxy[_-]?)?authorization(?:\\?[\"'])?\s*[:=]\s*(?:\\?[\"'])?[A-Za-z0-9._-]+\s+[A-Za-z0-9._~+/=,-]{8,}(?:\\?[\"'])?"
+    r"|\b(?:set-)?cookie(?:\\?[\"'])?\s*[:=]\s*(?:\\?[\"'])?[^\r\n\"']{6,2048}(?:\\?[\"'])?)"
+    r"|(?<=://)[^/\s:@]{0,128}:[^/\s@]{1,4096}(?=@)"
+    r"|(?:gh[pousr]_|github_pat_|glpat-|AKIA|ASIA|AIza|ya29\.|sk-|sk_live_|sk_test_|rk_live_|whsec_|xox[baprs]-|npm_|pypi-|hf_)[A-Za-z0-9._-]{8,}"
+    r"|\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+    rf"|-----BEGIN {_PEM_TAG}{_PEM_BODY}(?:-----END {_PEM_TAG})?|{_KV_KEY}(?:\\?[\"'])?\s*[:=]\s*{_KV_VAL}"
 )
 
 
@@ -52,6 +57,15 @@ def parse_window_iso(value: str, label: str) -> datetime:
     if dt.tzinfo is None:
         raise InvalidError(f"{label} must include a timezone offset")
     return dt.astimezone(UTC)
+
+
+def nameable(relative: str) -> bool:
+    """Whether a relative path is safe to embed in record attributes (UTF-8, no control/format chars)."""
+    try:
+        relative.encode()
+    except UnicodeEncodeError:
+        return False
+    return not CONTROL.search(relative) and not any(unicodedata.category(ch) == "Cf" for ch in relative)
 
 
 def sanitize(value: str, limit: int = TEXT_CHARS) -> str:
@@ -120,14 +134,19 @@ def collect(harness: str, root: Path, start: datetime, end: datetime) -> list[di
         if prefix.count("/") > MAX_DEPTH:
             raise InvalidError(f"{prefix}: directory tree exceeds {MAX_DEPTH} levels")
         with os.scandir(dir_fd) as it:
-            entries = sorted(it, key=lambda e: e.name)
+            selected = []
+            for entry in it:
+                visited += 1
+                if visited > MAX_ENTRIES:
+                    raise InvalidError(f"root exceeds {MAX_ENTRIES} entries")
+                selected.append(entry)
+            entries = sorted(selected, key=lambda e: e.name)
         for entry in entries:
-            visited += 1
-            if visited > MAX_ENTRIES:
-                raise InvalidError(f"root exceeds {MAX_ENTRIES} entries")
             if entry.name.startswith("."):
                 continue
             rel = prefix + entry.name
+            if not nameable(rel):
+                continue
             info = entry.stat(follow_symlinks=False)
             if stat.S_ISLNK(info.st_mode):
                 raise InvalidError(f"{rel}: symlinks are refused")
@@ -244,7 +263,7 @@ def main() -> None:
     except InvalidError as error:
         sys.stderr.write(f"Agent telemetry collection failed: {error}.\n")
         sys.exit(1)
-    except (OSError, UnicodeError, ValueError):
+    except (OSError, UnicodeError, ValueError, RecursionError):
         sys.stderr.write(
             "Agent telemetry collection failed; check the session directory, permissions, and JSON logs.\n"
         )

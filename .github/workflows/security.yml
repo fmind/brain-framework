@@ -49,8 +49,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The newest Python release too: requires-python has no upper bound, so users can install it there.
-        python: ["3.14", "3.15"]
+        # Cover the declared >=3.12 floor alongside current and upcoming Python releases.
+        python: ["3.12", "3.14", "3.15"]
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -306,7 +306,7 @@ def test_verify_release_checks_every_published_artifact(published: Path) -> None
     result = verify_release(published)
     assert result.returncode == 0, result.stderr
     assert f"v{__version__} at {git(published, 'rev-parse', 'HEAD')}" in result.stdout
-    assert "initialized, ingested, built, validated and reviewed a brain" in result.stdout
+    assert "initialized, ingested, built, validated, queried, read and reviewed a brain" in result.stdout
     assert not list((published.parent / "cache").iterdir())  # the temporary folder, installed tool included, is gone
 
 
