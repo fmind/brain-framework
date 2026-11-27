@@ -1977,7 +1977,7 @@ def test_always_on_pools_debounce_backoff_split_timers_pause_and_lag(
     (root / "routines" / "mix.py").write_text(
         "import json, os, sys\n"
         "trig = os.environ['BF_TRIGGER']\n"
-        "if trig == 'schedule':\n"
+        "if trig == 'schedule' or '--fail' in sys.argv:\n"
         "    sys.stderr.write('transient schedule failure\\n')\n"
         "    sys.exit(1)\n"
         "evs = [json.loads(ln) for ln in sys.stdin.read().splitlines() if ln.strip()]\n"
@@ -2150,6 +2150,20 @@ def test_always_on_pools_debounce_backoff_split_timers_pause_and_lag(
     st_cr = status.status_summary(store, include_loops=True, now=t_wk + timedelta(minutes=2))
     assert st_cr["attention"][0]["reason"] == "crashed"
     assert st_cr["attention"][0]["events_missed"] == 299
+    # Manual `bf run` forwards `BF_EVENTS_MISSED`, preserves lag on failure, and clears `pending_events_missed` on success!
+    loops.save_unit_state(store, {**st_ff, "status": "ok", "consecutive_failures": 0, "error": ""})
+    man_fail = loops.run_loops(store, ["mixed"], extra_args=["--fail"], now=t_wk + timedelta(minutes=3))
+    assert man_fail["ok"] is False
+    assert man_fail["results"][0]["events_missed"] == 299
+    assert loops.load_unit_state(store, "mixed")["pending_events_missed"] == 299
+    man_ok = loops.run_loops(store, ["mixed"], now=t_wk + timedelta(minutes=4))
+    assert man_ok["ok"] is True
+    assert man_ok["results"][0]["events_missed"] == 299
+    assert man_ok["results"][0]["summary"]["missed"] == "299"
+    assert loops.load_unit_state(store, "mixed")["pending_events_missed"] == 0
+    assert not any(
+        a["name"] == "mixed" for a in status.status_summary(store, now=t_wk + timedelta(minutes=4))["attention"]
+    )
 
     # 6. `bf pause` / `bf resume` for cycle loops & live daemon supervision under `bf watch`!
     (root / "routines" / "d_flag.py").write_text(

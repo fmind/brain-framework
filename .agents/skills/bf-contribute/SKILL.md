@@ -2,6 +2,8 @@
 name: bf-contribute
 description: Review, change and release the Brain Framework Python framework while preserving evidence and execution boundaries. Use for this repository, not private-brain upkeep.
 license: MIT
+metadata:
+  internal: true
 ---
 
 # bf-contribute

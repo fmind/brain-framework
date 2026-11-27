@@ -540,13 +540,7 @@ def compile_note(
             raise Error(f"{path}: url must be a string")
         fm["url"] = refs.validate_url(fm["url"], f"{path}: url")
     if "stale_after" in fm and fm["stale_after"] is not None:
-        sa = fm["stale_after"]
-        if not isinstance(sa, str) or not sa:
-            raise Error(f"{path}: stale_after must be an explicit duration (e.g. 90d) or ISO date")
-        if models.DURATION_RE.fullmatch(sa) and "\n" not in sa:
-            models.parse_duration(sa, f"{path}: stale_after")
-        else:
-            fm["stale_after"] = normalize_iso_date_or_time(sa, f"{path}: stale_after")
+        fm["stale_after"] = models.validate_stale_after(fm["stale_after"], f"{path}: stale_after")
 
     fm_specs: list[tuple[str, dict[str, str], str]] = []
     bad_fm = f"{path}: frontmatter links must be a list of link targets or {{to, meta}} objects"

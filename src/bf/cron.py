@@ -328,6 +328,18 @@ def backoff_cap(loop: _ScheduledLoop) -> int:
     return min(max(base * 2, _MIN_BACKOFF_CAP), _MAX_BACKOFF_CAP)
 
 
+def _jittered_backoff_remaining(
+    seed_prefix: str, attempts: int, last_end: str, *, base_secs: int, max_shift: int, cap: int, now: datetime
+) -> float:
+    last_dt = parse_dt(last_end) if attempts > 0 else None
+    if last_dt is None:
+        return 0.0
+    raw_wait = min(base_secs * (1 << min(attempts - 1, max_shift)), cap)
+    seed = f"{seed_prefix}:{attempts}:{last_end}".encode()
+    jitter = 0.85 + 0.15 * (int.from_bytes(hashlib.sha256(seed).digest()[:4], "big") / 0xFFFFFFFF)
+    return max(0.0, raw_wait * jitter - max(0.0, (now - last_dt).total_seconds()))
+
+
 def backoff_remaining(doc: Mapping[str, object], cap: int, now: datetime) -> float:
     raw_sf = doc.get("schedule_failures")
     ev_f = int(ev_v) if type(ev_v := doc.get("event_failures")) is int else 0
@@ -335,30 +347,19 @@ def backoff_remaining(doc: Mapping[str, object], cap: int, now: datetime) -> flo
     consec = int(val) if type(val := doc.get("consecutive_failures")) is int else 0
     fails = raw_sf if type(raw_sf) is int and (raw_sf > 0 or ev_f > 0 or dl_n > 0) else consec
     incomp = int(iv) if type(iv := doc.get("incomplete_runs")) is int else 0
-    attempts = max(fails, incomp)
     last_end = str(doc.get("last_schedule_end") or doc.get("last_end") or "")
-    last_dt = parse_dt(last_end) if attempts > 0 else None
-    if last_dt is None:
-        return 0.0
-    raw_wait = min(60 * (1 << min(attempts - 1, 10)), cap)
-    seed = f"{doc.get('name', '')}:{attempts}:{last_end}".encode()
-    jitter = 0.85 + 0.15 * (int.from_bytes(hashlib.sha256(seed).digest()[:4], "big") / 0xFFFFFFFF)
-    wait = raw_wait * jitter
-    return max(0.0, wait - max(0.0, (now - last_dt).total_seconds()))
+    return _jittered_backoff_remaining(
+        str(doc.get("name", "")), max(fails, incomp), last_end, base_secs=60, max_shift=10, cap=cap, now=now
+    )
 
 
 def event_backoff_remaining(doc: Mapping[str, object], now: datetime) -> float:
     """Short exponential retry backoff (`10s..60s`) for failing event triggers, isolated from schedule failures."""
     ev_fails = int(val) if type(val := doc.get("event_failures")) is int else 0
     last_end = str(doc.get("last_event_end") or doc.get("last_end") or "")
-    last_dt = parse_dt(last_end) if ev_fails > 0 else None
-    if last_dt is None:
-        return 0.0
-    raw_wait = min(10 * (1 << min(ev_fails - 1, 6)), 60)
-    seed = f"{doc.get('name', '')}:ev:{ev_fails}:{last_end}".encode()
-    jitter = 0.85 + 0.15 * (int.from_bytes(hashlib.sha256(seed).digest()[:4], "big") / 0xFFFFFFFF)
-    wait = raw_wait * jitter
-    return max(0.0, wait - max(0.0, (now - last_dt).total_seconds()))
+    return _jittered_backoff_remaining(
+        f"{doc.get('name', '')}:ev", ev_fails, last_end, base_secs=10, max_shift=6, cap=60, now=now
+    )
 
 
 def sched_anchor(doc: Mapping[str, object], sched: ScheduleSpec | None = None) -> str:

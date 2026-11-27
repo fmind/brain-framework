@@ -47,7 +47,7 @@ Brain selection resolves `--brain PATH` -> `BF_BRAIN` -> nearest enclosing `bf.y
 ## Brain layout
 
 - **Notes (`notes:`):** `concepts/`, `projects/`, `actions/` (flat `<slug>.md` or `<slug>/index.md` bundles).
-- **Loops (`loops:`):** `sensors/`, `routines/`, `agents/` (folder convention resolves script path only; declare `ingest:` and `timeout:` explicitly on cycle loops).
+- **Loops (`loops:`):** `sensors/`, `routines/`, `agents/` (folder convention resolves script path only; declare `ingest:` explicitly on cycle loops that ingest `stdout` records—forbidden with `emit:` or `when: daemon`—and override `timeout:` from its `5m` default when needed).
 - **Records (three JSONL streams across `memories/` and `logs/`):** `memories/_notes.jsonl`, `memories/<source>.jsonl` (plus `<source>.forgotten`), and private `logs/<loop>.jsonl` (`0700` dir, `0600` files).
 - **Supporting & runtime:** optional `schemas/` (`<source>.json`), `evals/` (user Python/pytest evals), reserved `clients/` & `prompts/` (convention-only), optional gitignored `0600` `.env`, and private `0700` `.bf/` (`cache/index.sqlite3`, `state/<loop>.json`, `state/<loop>/`, `state/events.jsonl`, `state/timers.jsonl`, `watch.lock`, `write.lock`, `logs.lock`, `corpus.lock`, `locks/loop-*.lock`).
 

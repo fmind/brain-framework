@@ -217,27 +217,21 @@ def build(store: Store, *, dry_run: bool = False, now: datetime | None = None) -
         failed_mtimes: list[int] = []
         note_count = written = reused = 0
 
+        def _preserve_failed_folder(folder_name: str, paths: list[str]) -> None:
+            for p in paths:
+                with suppress(Error, OSError):
+                    st_f = store.stat(p)
+                    failed_mtimes.append(min(st_f.st_mtime_ns, st_f.st_ctime_ns))
+            for ref, (prev_raw, _) in existing.items():
+                if ref.startswith(f"{folder_name}/"):
+                    desired[ref] = prev_raw
+
         for folder in cfg.notes:
             folder_skips: list[str] = []
             folder_paths = authored_notes(store, (folder,), skipped=folder_skips)
-            if folder_skips:
+            if folder_skips or folder in bad_schema_dirs:
                 problems.extend(folder_skips)
-                for p in folder_paths:
-                    with suppress(Error, OSError):
-                        st_f = store.stat(p)
-                        failed_mtimes.append(min(st_f.st_mtime_ns, st_f.st_ctime_ns))
-                for ref, (prev_raw, _) in existing.items():
-                    if ref.startswith(f"{folder}/"):
-                        desired[ref] = prev_raw
-                continue
-            if folder in bad_schema_dirs:
-                for p in folder_paths:
-                    with suppress(Error, OSError):
-                        st_f = store.stat(p)
-                        failed_mtimes.append(min(st_f.st_mtime_ns, st_f.st_ctime_ns))
-                for ref, (prev_raw, _) in existing.items():
-                    if ref.startswith(f"{folder}/"):
-                        desired[ref] = prev_raw
+                _preserve_failed_folder(folder, folder_paths)
                 continue
             user_val = dir_vals.get(folder)
             for path in folder_paths:
@@ -699,11 +693,8 @@ def review(store: Store, *, now: datetime | None = None, limit: int = 20, all_it
     today, now_iso = instant.date(), now_utc(instant)
     problems: list[str] = []
 
-    prefixes = (f"bf://{cfg.name}/", "bf:///")
-
     def norm(ref_s: str) -> str:
-        bare = ref_s.partition("#")[0]
-        return next((bare.removeprefix(p) for p in prefixes if bare.startswith(p)), bare)
+        return refs.strip_local_uri(ref_s, cfg.name)
 
     note_entries: list[dict[str, Any]] = []
     note_time: dict[str, str] = {}
@@ -742,9 +733,7 @@ def review(store: Store, *, now: datetime | None = None, limit: int = 20, all_it
                 wanted_refs.add(norm(str(lk["to"])))
         for raw_id in (entry.get("entity"), *(entry["aliases"] if isinstance(entry.get("aliases"), list) else ())):
             if isinstance(raw_id, str) and raw_id:
-                nr = norm(raw_id)
-                bare = nr.removeprefix("urn:")
-                wanted_incoming.update((nr, bare, f"urn:{bare}"))
+                wanted_incoming.update(refs.alias_variants(norm(raw_id)))
 
     mem_sources = records.valid_memory_sources(store, reserved=cfg.reserved_sources, skipped=problems)
     stale_idx = index.is_stale(store, mem_sources, include_notes=False, exact_sources=True)
@@ -872,9 +861,7 @@ def review(store: Store, *, now: datetime | None = None, limit: int = 20, all_it
             linked = outs | incoming.get(ref, set())
             for raw_id in (entry.get("entity"), *(entry["aliases"] if isinstance(entry.get("aliases"), list) else ())):
                 if isinstance(raw_id, str) and raw_id:
-                    nr = norm(raw_id)
-                    bare = nr.removeprefix("urn:")
-                    linked.update(*(incoming.get(k, ()) for k in (nr, bare, f"urn:{bare}")))
+                    linked.update(*(incoming.get(k, ()) for k in refs.alias_variants(norm(raw_id))))
             linked.discard(ref)
             if newer := [t for t in sorted(linked) if (rec_time.get(t) or note_time.get(t) or "") > note_time[ref]]:
                 reasons.append("newer_evidence")

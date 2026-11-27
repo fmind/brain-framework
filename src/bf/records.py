@@ -208,19 +208,10 @@ def _prepare_record(
             else:
                 rec[field_name] = models.normalize_iso_date_or_time(val, f"{label}.{field_name}")
     if "stale_after" in rec and rec["stale_after"] is not None:
-        sa = rec["stale_after"]
-        if not isinstance(sa, str) or not sa:
-            raise Error(f"{label}.stale_after must be an explicit duration (e.g. 90d) or ISO date")
-        if len(sa) <= 32 and models.DURATION_RE.fullmatch(sa):
-            models.parse_duration(sa, f"{label}.stale_after")
-        else:
-            rec["stale_after"] = models.normalize_iso_date_or_time(sa, f"{label}.stale_after")
+        rec["stale_after"] = models.validate_stale_after(rec["stale_after"], f"{label}.stale_after")
     rec.pop("ingested_at", None)
-    sanitized = sanitize_record_strings(rec)
-    if (sanitized.get("kind"), sanitized.get("source"), sanitized.get("ref")) != ("memory", source, exp_ref):
-        raise Error(f"{label}: computed record identity fields were altered")
-    encode(sanitized)
-    return sanitized
+    encode(rec)
+    return rec
 
 
 def validate_ingest_args(

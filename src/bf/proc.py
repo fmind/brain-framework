@@ -88,33 +88,14 @@ def drain_tail(
                 del buf[:-limit]
 
     keep_chars = max(8192, max((len(s) for s in secret_tuple), default=0))
-    pem_active = False
-
-    def _sync_pem_markers(text: str, *, emit_if_changed: bool) -> bool:
-        """Track PEM begin/end markers across raw chunks and optionally sync `on_line`'s multi-line PEM state."""
-        nonlocal pem_active
-        begs = [m.start() for m in models.PEM_BEG_RE.finditer(text)]
-        ends = [m.start() for m in models.PEM_END_RE.finditer(text)]
-        if not begs and not ends:
-            return False
-        last_beg, last_end = (begs[-1] if begs else -1), (ends[-1] if ends else -1)
-        if last_beg > last_end:
-            was_active = pem_active
-            pem_active = True
-            if emit_if_changed and not was_active:
-                _append_redacted(b"-----BEGIN PRIVATE KEY-----")
-            return True
-        if last_end > last_beg:
-            was_active = pem_active
-            pem_active = False
-            if emit_if_changed and was_active:
-                _append_redacted(b"-----END PRIVATE KEY-----")
-            return True
-        return False
+    pem = models.PemFilter()
 
     def _emit_normal(raw_line: bytes) -> None:
-        _sync_pem_markers(raw_line.decode("utf-8", "replace"), emit_if_changed=False)
-        _append_redacted(raw_line)
+        action = pem.filter_line(raw_line.decode("utf-8", "replace"), len(raw_line))
+        if action == "redact":
+            _append_redacted(b"[REDACTED]")
+        elif action == "pass":
+            _append_redacted(raw_line)
 
     def _emit_oversized(raw_prefix: bytes) -> None:
         end = len(raw_prefix)
@@ -126,14 +107,18 @@ def drain_tail(
                     end -= back
                 break
         raw_text = raw_prefix[:end].decode("utf-8", "replace")
-        was_pem = pem_active
-        saw_pem = _sync_pem_markers(raw_text, emit_if_changed=True)
-        if was_pem or saw_pem:
-            if saw_pem and not was_pem and not pem_active:
-                _append_redacted(b"[REDACTED]")
+        action = pem.filter_line(raw_text, len(raw_prefix), oversized=True)
+        if action == "drop":
+            return
+        if action == "redact":
+            _append_redacted(b"[REDACTED]")
             return
         prefix = models.redact_truncated_prefix(raw_text, keep_chars, secrets=secret_tuple)
         _append_redacted((f"{prefix} [truncated]" if prefix else "[truncated]").encode("utf-8"))
+
+    def _scan_dropped(raw_chunk: bytes) -> None:
+        if pem.scan_dropped(raw_chunk.decode("utf-8", "replace")):
+            _append_redacted(b"[REDACTED]")
 
     def _read() -> None:
         pending = bytearray()
@@ -159,21 +144,18 @@ def drain_tail(
                     nl = pending.find(b"\n")
                     if nl == -1:
                         scan_bytes = drop_tail + bytes(pending)
-                        _sync_pem_markers(scan_bytes.decode("utf-8", "replace"), emit_if_changed=True)
+                        _scan_dropped(scan_bytes)
                         drop_tail = scan_bytes[-160:]
                         pending.clear()
                         continue
-                    scan_bytes = drop_tail + bytes(pending[:nl])
-                    _sync_pem_markers(scan_bytes.decode("utf-8", "replace"), emit_if_changed=True)
+                    _scan_dropped(drop_tail + bytes(pending[:nl]))
                     drop_tail = b""
                     del pending[: nl + 1]
                     dropping = False
                 while (nl := pending.find(b"\n")) != -1:
                     if nl >= 65536:
                         _emit_oversized(bytes(pending[:65536]))
-                        _sync_pem_markers(
-                            bytes(pending[65536 - 160 : nl]).decode("utf-8", "replace"), emit_if_changed=True
-                        )
+                        _scan_dropped(bytes(pending[65536 - 160 : nl]))
                     else:
                         _emit_normal(bytes(pending[:nl]))
                     del pending[: nl + 1]
@@ -181,7 +163,7 @@ def drain_tail(
                     # Redact 64 KiB prefix in original-char coordinates and track PEM markers across discarded bytes.
                     _emit_oversized(bytes(pending[:65536]))
                     drop_tail = bytes(pending[65536 - 160 :])
-                    _sync_pem_markers(drop_tail.decode("utf-8", "replace"), emit_if_changed=True)
+                    _scan_dropped(drop_tail)
                     drop_tail = drop_tail[-160:]
                     pending.clear()
                     dropping = True
@@ -455,11 +437,6 @@ def prepare_unit(
             env[key] = host_val
             if len(host_val) >= 8:
                 secret_vals.append(host_val)
-
-    if is_self_bf:
-        for k in list(env):
-            if k.startswith(("PYTHON", "LD_", "DYLD_", "OPENSSL_")) or k == "SSLKEYLOGFILE":
-                env.pop(k, None)
 
     bf_env = {
         "LC_ALL": "C.UTF-8",

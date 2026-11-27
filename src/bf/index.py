@@ -17,7 +17,7 @@ from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import closing, nullcontext, suppress
 from typing import Any
 
-from bf import models
+from bf import models, refs
 from bf.models import NOTES_FILE, Error, InputError, decode, now_utc
 from bf.storage import Store, open_regular, private_dir, valid_memory_sources, writer
 
@@ -269,14 +269,6 @@ def open_readonly(store: Store) -> sqlite3.Connection | None:
         raise
 
 
-def _norm_target(ref_s: str, brain_name: str) -> str:
-    bare = ref_s.partition("#")[0]
-    for pfx in (f"bf://{brain_name}/", "bf:///"):
-        if bare.startswith(pfx):
-            return bare.removeprefix(pfx)
-    return bare
-
-
 def _delete_bucket_rows(con: sqlite3.Connection, bucket_key: str) -> None:
     if bucket_key == "_notes":
         con.execute("DELETE FROM fts WHERE rowid IN (SELECT rowid FROM records WHERE kind = 'note')")
@@ -366,7 +358,7 @@ def _batch_insert(
                 alias_rows.extend((a, ref) for a in alias_vals)
             for lk in obj.get("links") or ():
                 if isinstance(lk, Mapping) and isinstance(lk.get("to"), str):
-                    to_ref = _norm_target(str(lk["to"]), brain_name)
+                    to_ref = refs.strip_local_uri(str(lk["to"]), brain_name)
                     meta = lk.get("meta") if isinstance(lk.get("meta"), Mapping) else {}
                     link_rows.append(
                         (
@@ -741,33 +733,42 @@ def _fold_marks(value: str) -> str:
     return "".join(ch for ch in unicodedata.normalize("NFC", value) if not unicodedata.combining(ch))
 
 
-def build_fts_query(raw: str) -> str:
-    """Convert free-text query into a safe SQLite FTS5 MATCH expression (multi-term AND, phrases, prefix `*`)."""
+def parse_query_clauses(raw: str, *, fold: Callable[[str], str] = _fold_marks) -> list[tuple[str, str]]:
+    """Tokenize free-text query into `("phrase"|"prefix"|"word", folded)` clauses enforcing length & term bounds."""
     stripped = raw.strip()
     if len(stripped) > _MAX_QUERY_CHARS:
         raise InputError(f"query exceeds {_MAX_QUERY_CHARS} characters")
-    clauses: list[str] = []
+    clauses: list[tuple[str, str]] = []
     for m in _FTS_TOKEN_RE.finditer(stripped):
         phrase, word = m.group(1), m.group(2)
         if phrase is not None:
-            words = _FTS_WORD_RE.findall(_fold_marks(phrase))
+            words = _FTS_WORD_RE.findall(fold(phrase))
             if words:
-                escaped = " ".join(w.replace('"', '""') for w in words)
-                clauses.append(f'"{escaped}"')
+                clauses.append(("phrase", " ".join(words)))
         elif word:
             prefix = word.endswith("*") and len(word) > 1
             core = word[:-1] if prefix else word
-            parts = _FTS_WORD_RE.findall(_fold_marks(core))
+            parts = _FTS_WORD_RE.findall(fold(core))
             if not parts:
                 continue
             if prefix:
-                clauses.extend(f'"{p}"' for p in parts[:-1])
-                clauses.append(f'"{parts[-1]}"*')
+                clauses.extend(("word", p) for p in parts[:-1])
+                clauses.append(("prefix", parts[-1]))
             else:
-                clauses.extend(f'"{p}"' for p in parts)
+                clauses.extend(("word", p) for p in parts)
         if len(clauses) > _MAX_QUERY_CLAUSES:
             raise InputError(f"query exceeds {_MAX_QUERY_CLAUSES} terms")
-    return " AND ".join(clauses)
+    return clauses
+
+
+def build_fts_query(raw: str) -> str:
+    """Convert free-text query into a safe SQLite FTS5 MATCH expression (multi-term AND, phrases, prefix `*`)."""
+    clauses = parse_query_clauses(raw, fold=_fold_marks)
+    out: list[str] = []
+    for kind, val in clauses:
+        escaped = val.replace('"', '""')
+        out.append(f'"{escaped}"*' if kind == "prefix" else f'"{escaped}"')
+    return " AND ".join(out)
 
 
 def search_fts(
@@ -874,11 +875,9 @@ def lookup_ref(con: sqlite3.Connection, store: Store, ref: str) -> dict[str, Any
 
 def lookup_alias(con: sqlite3.Connection, store: Store, identity: str) -> dict[str, Any] | None:
     """Resolve `identity` via `aliases` / `entity` preferring authored notes, then alphabetical ref."""
-    candidates = [identity]
-    if identity.lower().startswith("urn:"):
-        candidates.append(identity[4:])
-    else:
-        candidates.append(f"urn:{identity}")
+    candidates = list(refs.alias_variants(identity))
+    if not candidates:
+        return None
     placeholders = ", ".join("?" for _ in candidates)
     sql = (
         "SELECT r.ref, r.source, r.kind, r.file_offset, r.byte_len "  # noqa: S608

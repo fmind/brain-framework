@@ -35,6 +35,15 @@ my-brain/
 2. **Loops (`sensors/`, `routines/`, `agents/`)**: Plain shell, Python, or executable scripts declared in `bf.yaml`. Loops read `BF_*` env, per-loop `env_from:` secrets, and matched JSONL events on `stdin`; emit data or events on `stdout`; and log structured JSONL on `stderr`.
 3. **Records (`memories/_notes.jsonl`, `memories/<source>.jsonl`, `logs/<loop>.jsonl`)**: Always validated against bundled `bf` and `record` schemas, with optional `schemas/<source>.json` files for stricter domain checks. Read-only retrieval commands never mutate disk.
 
+## How `bf` compares
+
+| Approach                        | Storage & ownership                           | Agent interface & retrieval                                 | Automation & trust boundary                                      |
+| ------------------------------- | --------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------- |
+| **Brain Framework (`bf`)**      | Plain Git Markdown + canonical JSONL          | Read-only CLI, offset-indexed BM25 FTS5, `rg`/`jq`/DuckDB   | Explicit `loops:` with per-loop `env_from:`, pools, `bf watch`   |
+| **Plain Markdown / Obsidian**   | Local Markdown files (human-first)            | Filename/grep search; no record schemas or staleness review | Manual upkeep or UI plugins; no structured sensor ingestion      |
+| **Hosted / MCP memory servers** | Opaque or remote DB with auto-extracted facts | Always-on MCP tool schemas + model-mediated recall          | Extra service/API keys; inferred facts harder to audit in Git    |
+| **Generic vector RAG**          | Chunked embeddings in a vector index          | Semantic similarity over opaque chunks                      | Requires embedding models/pipelines; weak provenance & backlinks |
+
 ## Guides
 
 | Guide                                 | What you will learn                                                                                           |

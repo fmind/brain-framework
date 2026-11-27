@@ -329,6 +329,23 @@ def _emit_fmt(res: dict[str, Any], fmt: str, *, review: bool = False) -> None:
     return None
 
 
+def _parse_emit_data(raw: bytes | str, max_bytes: int, *, dedupe: bool, empty_msg: str) -> dict[str, Any]:
+    size = len(raw) if isinstance(raw, bytes) else len(raw.encode("utf-8"))
+    if size > max_bytes:
+        raise Error(f"--data exceeds {max_bytes} bytes")
+    if not raw.strip():
+        raise InputError(empty_msg)
+    try:
+        parsed = models.decode(raw, "--data")
+    except Error as err:
+        raise InputError(str(err)) from err
+    if not isinstance(parsed, dict):
+        raise InputError("--data must be a JSON object")
+    if dedupe and (not isinstance(parsed.get("id"), str) or not str(parsed["id"]).strip()):
+        raise InputError("--dedupe requires a non-empty string 'id' in --data")
+    return parsed
+
+
 def _resolve_brain_arg(args: argparse.Namespace) -> str:
     cmd = args.command
     root_vals = getattr(args, "root_brain", None) or []
@@ -459,46 +476,21 @@ def _dispatch(args: argparse.Namespace, extra: list[str], has_passthrough: bool)
                     target_dt = datetime.fromisoformat(models.normalize_time(args.deliver_at, "--at"))
             except Error as err:
                 raise InputError(str(err)) from err
-        raw_data: object = {}
+        raw_data: dict[str, Any] = {}
         if args.data is not None and args.data != "-":
-            if not args.data.strip():
-                raise InputError("--data must be a JSON object or '-'")
-            if len(args.data.encode("utf-8")) > state.MAX_EVENT_LINE:
-                raise Error(f"--data exceeds {state.MAX_EVENT_LINE} bytes")
-            try:
-                raw_data = models.decode(args.data, "--data")
-            except Error as err:
-                raise InputError(str(err)) from err
-            if not isinstance(raw_data, dict):
-                raise InputError("--data must be a JSON object")
-        if (
-            args.data != "-"
-            and args.dedupe
-            and (
-                not isinstance(raw_data, dict)
-                or not isinstance(raw_data.get("id"), str)
-                or not str(raw_data["id"]).strip()
+            raw_data = _parse_emit_data(
+                args.data, state.MAX_EVENT_LINE, dedupe=args.dedupe, empty_msg="--data must be a JSON object or '-'"
             )
-        ):
+        elif args.data is None and args.dedupe:
             raise InputError("--dedupe requires a non-empty string 'id' in --data")
         store = config.select(brain_arg)
         brain_name = config.load(store).name
         if args.data == "-":
             _check_piped_stdin("pipe JSON object or pass --data JSON")
             raw_in = sys.stdin.buffer.read(state.MAX_EVENT_LINE + 1)
-            if len(raw_in) > state.MAX_EVENT_LINE:
-                raise Error(f"--data exceeds {state.MAX_EVENT_LINE} bytes")
-            if not raw_in.strip():
-                raise InputError("--data - received empty stdin")
-            try:
-                raw_data = models.decode(raw_in, "--data")
-            except Error as err:
-                raise InputError(str(err)) from err
-            if not isinstance(raw_data, dict):
-                raise InputError("--data must be a JSON object")
-            if args.dedupe and (not isinstance(raw_data.get("id"), str) or not str(raw_data["id"]).strip()):
-                raise InputError("--dedupe requires a non-empty string 'id' in --data")
-        assert isinstance(raw_data, dict)  # noqa: S101
+            raw_data = _parse_emit_data(
+                raw_in, state.MAX_EVENT_LINE, dedupe=args.dedupe, empty_msg="--data - received empty stdin"
+            )
         if delay_s is not None or target_dt is not None:
             now_dt = datetime.now(UTC)
             eff_target = now_dt + timedelta(seconds=delay_s) if delay_s is not None else target_dt

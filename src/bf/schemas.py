@@ -406,20 +406,15 @@ def validate_core_record(obj: object, label: str) -> list[str]:
 
     if "stale_after" in obj:
         sa = obj["stale_after"]
-        if not isinstance(sa, str) or not sa:
-            out.append(f"{label}: stale_after: expected explicit duration (e.g. 90d) or ISO date")
-        elif len(sa) <= 32 and models.DURATION_RE.fullmatch(sa):
-            try:
-                models.parse_duration(sa, f"{label}: stale_after")
-            except Error as err:
-                out.append(str(err))
-        elif _ISO_DT_RE.fullmatch(sa):
-            try:
-                models.normalize_iso_date_or_time(sa, f"{label}: stale_after")
-            except Error as err:
-                out.append(str(err))
-        else:
+        if not isinstance(sa, str) or (
+            not (len(sa) <= 32 and models.DURATION_RE.fullmatch(sa)) and not _ISO_DT_RE.fullmatch(sa)
+        ):
             out.append(f"{label}: stale_after: expected explicit duration (<=32 chars) or ISO date/timestamp")
+        else:
+            try:
+                models.validate_stale_after(sa, f"{label}: stale_after")
+            except Error as err:
+                out.append(str(err))
 
     if "tags" in obj:
         tv = obj["tags"]

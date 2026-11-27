@@ -99,7 +99,14 @@ bf review --format text
 `bf` uses zero global config and resolves `--brain PATH` -> `BF_BRAIN` -> nearest enclosing `bf.yaml` -> `~/brain`:
 
 - **Inside a brain**: Coding harnesses read the repo's `AGENTS.md`, orient with `bf status` and `bf review`, and edit Markdown notes directly.
-- **Outside a brain**: Set `export BF_BRAIN="$HOME/my-brain"` (or use `~/brain`) and copy [`skills/bf/SKILL.md`](https://github.com/fmind/brain-framework/blob/main/skills/bf/SKILL.md) into your harness's skills folder so `/bf` routes commands to your brain.
+- **Outside a brain**: Set `export BF_BRAIN="$HOME/my-brain"` (or use `~/brain`) and install the [`/bf` skill](https://github.com/fmind/brain-framework/blob/main/skills/bf/SKILL.md) so `/bf` routes commands to your brain:
+
+```bash
+npx skills add fmind/brain-framework --skill bf
+
+# Without Node.js, fetch directly into your harness's skills directory (for example ~/.agents/skills/bf/)
+curl -fsSL --create-dirs -o ~/.agents/skills/bf/SKILL.md https://raw.githubusercontent.com/fmind/brain-framework/main/skills/bf/SKILL.md
+```
 
 ## Upgrade and pinned runtimes {#upgrade-and-pinned-runtimes}
 

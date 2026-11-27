@@ -13,7 +13,7 @@ wheels = [
 
 [[package]]
 name = "brain-framework"
-version = "34.0.1"
+version = "34.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },

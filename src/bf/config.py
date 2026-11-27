@@ -307,6 +307,18 @@ def _check_brain_relative_arg(store: Store, raw: str, name: str) -> None:
             raise Error(f"loops.{name}: symlink {raw} is not allowed inside brain")
 
 
+def _check_script_arg(store: Store, tok: str, name: str, *, flag_rhs: bool = False) -> None:
+    if tok.startswith(("http://", "https://", "bf://", "~")):
+        return
+    if (raw_rel := _extract_loop_script_target(tok, store.root, loop_name=name)) is not None:
+        relative(raw_rel)
+        if not (store.exists(raw_rel) or store.is_dir(raw_rel)):
+            what = f"path {raw_rel} must exist" if flag_rhs else f"script {raw_rel} must be a regular file"
+            raise Error(f"loops.{name}: {what} inside brain")
+    else:
+        _check_brain_relative_arg(store, tok, name)
+
+
 def validate_loop_scripts(store: Store, argv: Sequence[str], name: str) -> None:
     """Verify every brain-relative or `{{brain}}/...` script path in `argv` has no `.`/`..` segments and exists via `O_NOFOLLOW`."""
     if not argv:
@@ -324,23 +336,9 @@ def validate_loop_scripts(store: Store, argv: Sequence[str], name: str) -> None:
     for tok in argv[1:]:
         if tok.startswith("-"):
             if "=" in tok:
-                rhs = tok.split("=", 1)[1]
-                if not rhs.startswith(("http://", "https://", "bf://", "~")):
-                    if (raw_rhs := _extract_loop_script_target(rhs, store.root, loop_name=name)) is not None:
-                        relative(raw_rhs)
-                        if not (store.exists(raw_rhs) or store.is_dir(raw_rhs)):
-                            raise Error(f"loops.{name}: path {raw_rhs} must exist inside brain")
-                    else:
-                        _check_brain_relative_arg(store, rhs, name)
+                _check_script_arg(store, tok.split("=", 1)[1], name, flag_rhs=True)
             continue
-        if tok.startswith(("http://", "https://", "bf://", "~")):
-            continue
-        if (raw_rel := _extract_loop_script_target(tok, store.root, loop_name=name)) is not None:
-            relative(raw_rel)
-            if not (store.exists(raw_rel) or store.is_dir(raw_rel)):
-                raise Error(f"loops.{name}: script {raw_rel} must be a regular file inside brain")
-        else:
-            _check_brain_relative_arg(store, tok, name)
+        _check_script_arg(store, tok, name)
 
 
 def resolve_loop(

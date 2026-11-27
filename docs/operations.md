@@ -115,7 +115,7 @@ loops:
 
 ### Folder conventions and concurrency pools
 
-- **Explicit paths, zero hidden defaults**: omit `run:` when a zero-argument script lives at `<dir>/<name>`, `<dir>/<name>.sh`, or `<dir>/<name>.py` under `sensors/`, `routines/`, or `agents/` (ambiguous duplicates fail closed; scripts taking arguments declare `run:`). Always declare `ingest:` and `timeout:` (default `5m`) explicitly on cycle loops.
+- **Explicit paths, zero hidden defaults**: omit `run:` when a zero-argument script lives at `<dir>/<name>`, `<dir>/<name>.sh`, or `<dir>/<name>.py` under `sensors/`, `routines/`, or `agents/` (ambiguous duplicates fail closed; scripts taking arguments declare `run:`). Declare `ingest:` explicitly on cycle loops that ingest `stdout` records (forbidden when `emit:` or `when: daemon` is set); `timeout:` defaults to `5m` unless overridden explicitly.
 - **Named pools and priority**: set `concurrency:` to an integer (`1..32`, default `4`) or a pool map (`{default: 4, agents: 2, interactive: 2}`), and assign cycle loops with `pool: <name>` so long agents never starve fast sensors or chat replies. Event-triggered loops always dispatch ahead of schedules.
 - **Supporting folders**: keep ad-hoc API scripts in `clients/` and reusable LLM prompts in `prompts/`.
 
@@ -164,14 +164,15 @@ loops:
 
 **Prune removed loop artifacts**
 
-1. Preview with `bf state prune --dry-run` and copy any `.bf/state/<loop>/` or `logs/<loop>.jsonl` files you want to keep.
+1. Preview with `bf state prune --dry-run` and copy any `.bf/state/<loop>.json`, `.bf/state/<loop>/`, or `logs/<loop>.jsonl` files you want to keep.
 2. Run `bf state prune`.
 3. Blast radius: permanently deletes orphaned state files, state dirs, unlocked lock files, and logs for loops removed from `bf.yaml` (active locked loops are skipped). Verify `orphans` clears in `bf status --format text`.
 
 **Rebuild a corrupt or stale FTS5 cache**
 
-1. Remove only `.bf/cache/` (`rm -rf .bf/cache`, never `.bf/state/`).
-2. Run `bf build` and confirm `index_stale` disappears in `bf status --format text`.
+1. Confirm `index: stale` in `bf status --format text` (or `"index_stale": true` in `bf status`), and stop `bf watch` if it is running so no writer races the rebuild.
+2. Remove only `.bf/cache/` (`rm -rf .bf/cache`, never `.bf/state/`). Blast radius: `.bf/cache/` is strictly disposable and rebuilt from canonical `memories/*.jsonl`; concurrent read-only queries fall back to JSONL scans until `bf build` completes.
+3. Run `bf build` and verify `index: stale` disappears in `bf status --format text` (and `"index_stale"` is absent in `bf status`).
 
 ## Limits and safeguards {#limits-and-safeguards}
 

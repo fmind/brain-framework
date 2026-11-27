@@ -210,7 +210,7 @@ def parse_link(
         for key, val in (attr_meta or {}).items():
             if not META_KEY_RE.fullmatch(key):
                 raise Error(f"{source_path}: invalid link attribute {key!r}")
-            cleaned = clean(val, f"{source_path}: link attribute {key}")
+            cleaned = _clean_vis(val, f"{source_path}: link attribute {key}")
             if key in meta and meta[key] != cleaned:
                 raise Error(f"{source_path}: conflicting link attribute {key!r}")
             meta[key] = cleaned
@@ -326,6 +326,28 @@ def dedupe_typed_links(links: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for it in links
         if it.get("meta") or (it["to"], it["kind"], it.get("anchor", ""), it.get("section", "")) not in typed
     ]
+
+
+def strip_local_uri(ref_s: str, brain_name: str) -> str:
+    """Strip `#anchor` and local `bf://<brain>/` or `bf:///` prefixes from a reference string."""
+    bare = ref_s.partition("#")[0]
+    for pfx in (f"bf://{brain_name}/", "bf:///"):
+        if bare.startswith(pfx):
+            return bare.removeprefix(pfx)
+    return bare
+
+
+def alias_variants(value: str) -> tuple[str, ...]:
+    """Return deduplicated `value` plus its case-insensitive `urn:`-toggled variant (skipping URL/bf schemes)."""
+    if not value:
+        return ()
+    low = value.lower()
+    if low.startswith("urn:"):
+        bare = value[4:]
+        return tuple(dict.fromkeys((value, bare, f"urn:{bare}"))) if bare else (value,)
+    if low.startswith(("http://", "https://", "mailto:", "bf://")):
+        return (value,)
+    return (value, f"urn:{value}")
 
 
 def normalize_tags(raw_tags: object, label: str) -> list[str]:

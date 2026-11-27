@@ -15,7 +15,6 @@ from bf import config, engine, index, markdown, models, records, refs
 from bf.models import MAX_NOTE, NOTES_FILE, Error, InputError, clean, decode, terminal
 from bf.storage import Store, relative
 
-_QUERY_TOK_RE = re.compile(r'"([^"]+)"|(\S+)')
 _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
@@ -30,31 +29,6 @@ def _fold_ascii(value: str) -> str:
     """Fold Latin combining diacritics (`0x0300..0x036F`) while preserving Hangul and Japanese dakuten/handakuten."""
     stripped = "".join(ch for ch in unicodedata.normalize("NFD", value) if not (0x0300 <= ord(ch) <= 0x036F))
     return unicodedata.normalize("NFC", stripped).lower()
-
-
-def _parse_scan_clauses(raw: str) -> list[tuple[str, str]]:
-    """Parse free-text query into `("phrase"|"prefix"|"word", folded)` clauses matching `build_fts_query` semantics."""
-    # Reuse `build_fts_query` length & clause-count limits uniformly across FTS5 and scan paths.
-    index.build_fts_query(raw)
-    clauses: list[tuple[str, str]] = []
-    for m in _QUERY_TOK_RE.finditer(raw.strip()):
-        phrase, word = m.group(1), m.group(2)
-        if phrase is not None:
-            words = _WORD_RE.findall(_fold_ascii(phrase))
-            if words:
-                clauses.append(("phrase", " ".join(words)))
-        elif word:
-            prefix = word.endswith("*") and len(word) > 1
-            core = word[:-1] if prefix else word
-            parts = _WORD_RE.findall(_fold_ascii(core))
-            if not parts:
-                continue
-            if prefix:
-                clauses.extend(("word", p) for p in parts[:-1])
-                clauses.append(("prefix", parts[-1]))
-            else:
-                clauses.extend(("word", p) for p in parts)
-    return clauses
 
 
 def _field_matches(words: list[str], word_set: set[str], joined: str, kind: str, val: str) -> bool:
@@ -185,27 +159,12 @@ def _normalize_exclude(raw_items: Iterable[str]) -> set[str]:
     return out
 
 
-def _add_alias_variants(bucket: list[str], value: str) -> None:
-    if not value:
-        return
-    bucket.append(value)
-    if value.lower().startswith("urn:"):
-        bucket.append(value[4:])
-    elif not value.startswith(("http://", "https://", "mailto:", "bf://")):
-        bucket.append(f"urn:{value}")
-
-
 def _normalize_links_to(store: Store, cfg: config.Config, raw: str) -> tuple[str, ...]:
     target = _as_input(clean, raw.strip(), "--links-to")
-    bare = target.partition("#")[0]
-    for pfx in (f"bf://{cfg.name}/", "bf:///"):
-        if bare.startswith(pfx):
-            bare = bare.removeprefix(pfx)
-            break
+    bare = refs.strip_local_uri(target, cfg.name)
     if not bare:
         raise InputError("--links-to target must be nonempty")
-    cands: list[str] = []
-    _add_alias_variants(cands, bare)
+    cands: list[str] = list(refs.alias_variants(bare))
     if refs.is_allowed_note_path(bare, cfg.notes) and not bare.endswith(".md"):
         cands.extend(ext for ext in (f"{bare}.md", f"{bare}/index.md") if store.exists(ext))
     target_rec: dict[str, Any] | None = None
@@ -233,10 +192,10 @@ def _normalize_links_to(store: Store, cfg: config.Config, raw: str) -> tuple[str
         if isinstance(r := target_rec.get("ref"), str) and r:
             cands.append(r)
         if isinstance(ent := target_rec.get("entity"), str) and ent:
-            _add_alias_variants(cands, ent)
+            cands.extend(refs.alias_variants(ent))
         for al in target_rec.get("aliases") or ():
             if isinstance(al, str) and al:
-                _add_alias_variants(cands, al)
+                cands.extend(refs.alias_variants(al))
     return tuple(dict.fromkeys(cands))
 
 
@@ -251,12 +210,13 @@ def _ref_matches(ref: str, ref_prefix: str) -> bool:
     )
 
 
-def _norm_link_to(ref_s: str, brain_name: str) -> str:
-    bare = ref_s.partition("#")[0]
-    for pfx in (f"bf://{brain_name}/", "bf:///"):
-        if bare.startswith(pfx):
-            return bare.removeprefix(pfx)
-    return bare
+def _sort_scan_matches(matches: list[tuple[float, str, str, dict[str, Any]]], *, has_clauses: bool) -> None:
+    matches.sort(key=lambda x: x[2])
+    matches.sort(key=lambda x: x[1], reverse=True)
+    if has_clauses:
+        matches.sort(key=lambda x: -x[0])
+    else:
+        matches.sort(key=lambda x: 0 if x[3].get("kind") == "note" else 1)
 
 
 def _scan_fallback(
@@ -277,7 +237,7 @@ def _scan_fallback(
     limit: int | None,
 ) -> tuple[list[tuple[dict[str, Any], float]], bool]:
     """Read-only JSONL fallback when `.bf/cache/index.sqlite3` is absent or stale (bounded top-K memory, zero disk mutation)."""
-    clauses = _parse_scan_clauses(query_text) if query_text else []
+    clauses = index.parse_query_clauses(query_text, fold=_fold_ascii) if query_text else []
     if query_text and not clauses:
         return [], False
     links_to_set = set(links_to)
@@ -325,7 +285,7 @@ def _scan_fallback(
                     if not any(
                         isinstance(lk, dict)
                         and isinstance(lk.get("to"), str)
-                        and _norm_link_to(str(lk["to"]), brain_name) in links_to_set
+                        and refs.strip_local_uri(str(lk["to"]), brain_name) in links_to_set
                         for lk in lks
                     ):
                         continue
@@ -361,20 +321,10 @@ def _scan_fallback(
                         score *= index.NOTE_BOOST
                 matches.append((score, sort_ts, rr, rec))
                 if limit is not None and len(matches) > max(limit * 4, 200):
-                    matches.sort(key=lambda x: x[2])
-                    matches.sort(key=lambda x: x[1], reverse=True)
-                    if clauses:
-                        matches.sort(key=lambda x: -x[0])
-                    else:
-                        matches.sort(key=lambda x: 0 if x[3].get("kind") == "note" else 1)
+                    _sort_scan_matches(matches, has_clauses=bool(clauses))
                     del matches[limit + 1 :]
 
-    matches.sort(key=lambda x: x[2])
-    matches.sort(key=lambda x: x[1], reverse=True)
-    if clauses:
-        matches.sort(key=lambda x: -x[0])
-    else:
-        matches.sort(key=lambda x: 0 if x[3].get("kind") == "note" else 1)
+    _sort_scan_matches(matches, has_clauses=bool(clauses))
 
     trunc = limit is not None and len(matches) > limit
     picked = matches[:limit] if limit is not None else matches
@@ -583,11 +533,7 @@ def find_by_alias(store: Store, identity: str) -> tuple[str, dict[str, Any]] | N
             finally:
                 con.close()
 
-    candidates = {identity}
-    if identity.lower().startswith("urn:"):
-        candidates.add(identity[4:])
-    else:
-        candidates.add(f"urn:{identity}")
+    candidates = set(refs.alias_variants(identity))
     needles = [models.encode(c).rstrip(b"\n") for c in candidates]
     groups: list[list[str]] = []
     if store.exists(NOTES_FILE):

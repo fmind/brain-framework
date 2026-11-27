@@ -10,7 +10,7 @@ import unicodedata
 from collections.abc import Collection
 from contextlib import suppress
 from datetime import UTC, date, datetime
-from typing import Any, overload
+from typing import Any, Literal, overload
 
 FORMAT = 19
 DEFAULT_NOTES = ("concepts", "projects", "actions")
@@ -65,6 +65,56 @@ _PEM_TAG = r"[A-Z0-9 ]{0,40}(?:PRIVATE KEY|PRIVATE KEY BLOCK)-----"
 PEM_BEG_RE = re.compile(rf"-----BEGIN {_PEM_TAG}")
 PEM_END_RE = re.compile(rf"-----END {_PEM_TAG}")
 _PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,65536}}"
+
+
+class PemFilter:
+    """Stateful multi-line PEM private-key suppressor shared by `proc.drain_tail` and `state.make_stderr_logger`."""
+
+    __slots__ = ("in_pem", "max_bytes", "pem_bytes")
+
+    def __init__(self, max_bytes: int = 16384) -> None:
+        self.in_pem = False
+        self.pem_bytes = 0
+        self.max_bytes = max_bytes
+
+    def filter_line(self, text: str, nbytes: int, *, oversized: bool = False) -> Literal["pass", "drop", "redact"]:
+        """Classify one line: `'drop'` (suppress), `'redact'` (emit `[REDACTED]`), or `'pass'` (normal processing)."""
+        begs = [m.start() for m in PEM_BEG_RE.finditer(text)]
+        ends = [m.start() for m in PEM_END_RE.finditer(text)]
+        last_beg, last_end = (begs[-1] if begs else -1), (ends[-1] if ends else -1)
+        if self.in_pem:
+            self.pem_bytes += nbytes
+            if last_end > last_beg:
+                self.in_pem, self.pem_bytes = False, 0
+                return "drop"
+            if last_beg > last_end:
+                self.pem_bytes = 0
+                return "drop"
+            if oversized or self.pem_bytes <= self.max_bytes:
+                return "drop"
+            self.in_pem, self.pem_bytes = False, 0
+        if begs:
+            if last_beg > last_end:
+                self.in_pem, self.pem_bytes = True, 0
+            return "redact"
+        return "pass"
+
+    def scan_dropped(self, text: str) -> bool:
+        """Track PEM markers across discarded chunks of an oversized line; return True when entering a new PEM block."""
+        begs = [m.start() for m in PEM_BEG_RE.finditer(text)]
+        ends = [m.start() for m in PEM_END_RE.finditer(text)]
+        if not begs and not ends:
+            return False
+        last_beg, last_end = (begs[-1] if begs else -1), (ends[-1] if ends else -1)
+        if last_beg > last_end:
+            entered = not self.in_pem
+            self.in_pem, self.pem_bytes = True, 0
+            return entered
+        if last_end > last_beg:
+            self.in_pem, self.pem_bytes = False, 0
+        return False
+
+
 _KV_KEY = (
     r"(?i:(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]{1,128}(?:\\?[\"'])?\s*[:=])"
     r"(?:(?:[A-Za-z0-9_-]{0,64}?(?:password|passwd|passphrase|secret|private[_-]?key|api[_-]?key"
@@ -397,6 +447,16 @@ def normalize_time(value: str, label: str = "timestamp") -> str:
 def normalize_iso_date_or_time(value: str, label: str = "date") -> str:
     """Validate and normalize either `YYYY-MM-DD` or an ISO 8601 timestamp with timezone."""
     return normalize_date(value, label) if len(value) == 10 else normalize_time(value, label)
+
+
+def validate_stale_after(value: object, label: str = "stale_after") -> str:
+    """Validate and normalize `stale_after` as either an explicit duration (`<=32` chars) or ISO date/timestamp."""
+    if not isinstance(value, str) or not value:
+        raise Error(f"{label} must be an explicit duration (e.g. 90d) or ISO date")
+    if len(value) <= 32 and "\n" not in value and "\r" not in value and DURATION_RE.fullmatch(value):
+        parse_duration(value, label)
+        return value
+    return normalize_iso_date_or_time(value, label)
 
 
 def ts_key(raw: str, *, start_of_day: bool = False) -> str:

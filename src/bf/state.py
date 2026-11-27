@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from bf import models
-from bf.models import PEM_BEG_RE, PEM_END_RE, Error, InputError, clean, decode, encode, now_utc
+from bf.models import Error, InputError, PemFilter, clean, decode, encode, now_utc
 from bf.storage import Store, append_regular, private_dir, tail_lines, writer
 
 MAX_EVENTS = 10_000
@@ -176,28 +176,13 @@ def make_stderr_logger(
 ) -> Callable[[bytes], str]:
     """Return a stateful line callback redacting exact secrets & multi-line PEM blocks before persisting to `logs/`."""
     secret_tuple = tuple(sorted({s for s in secrets if len(s) >= 8}, key=len, reverse=True))
-    in_pem, pem_bytes = False, 0
+    pem = PemFilter(_PEM_MAX_BYTES)
 
     def _on_line(raw_line: bytes) -> str:
-        nonlocal in_pem, pem_bytes
-        text = raw_line.decode("utf-8", "replace")
-        begs = [m.start() for m in PEM_BEG_RE.finditer(text)]
-        ends = [m.start() for m in PEM_END_RE.finditer(text)]
-        last_beg, last_end = (begs[-1] if begs else -1), (ends[-1] if ends else -1)
-        if in_pem:
-            pem_bytes += len(raw_line)
-            if last_end > last_beg:
-                in_pem, pem_bytes = False, 0
-                return ""
-            if last_beg > last_end:
-                pem_bytes = 0
-                return ""
-            if pem_bytes <= _PEM_MAX_BYTES:
-                return ""
-            in_pem, pem_bytes = False, 0
-        if begs:
-            if last_beg > last_end:
-                in_pem, pem_bytes = True, 0
+        action = pem.filter_line(raw_line.decode("utf-8", "replace"), len(raw_line))
+        if action == "drop":
+            return ""
+        if action == "redact":
             append_loop_stderr(store, name, run_id, b"[REDACTED]", secrets=secret_tuple)
             return "[REDACTED]"
         return append_loop_stderr(store, name, run_id, raw_line, secrets=secret_tuple)

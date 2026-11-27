@@ -4,6 +4,19 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v34.0.2](https://github.com/fmind/brain-framework/releases/tag/v34.0.2) - 2026-11-27
+
+A patch release fixing manual `bf run` clearing of `pending_events_missed`, simplifying internal runtime helpers, correcting operations runbooks and contract docs, and adding `npx skills` installation for `/bf`. The brain format (`version: 19`), `bf.yaml`, published JSON Schemas, and CLI outputs are unchanged; no migration is needed from `v34.0.1`.
+
+### Fixed
+
+- **Clear `pending_events_missed` on successful manual `bf run`.** Manual `bf run <loop>` now forwards stored `pending_events_missed` via `BF_EVENTS_MISSED` (preserving it if the run fails and clearing it on exit `0`) so event-only loops no longer stay stuck in `ATTENTION` after a manual catch-up run.
+- **Documentation, runbook, and skill-install parity.** Corrected the `ingest:`/`timeout:` guidance in `docs/operations.md`, `docs/reference.md`, `skills/bf/SKILL.md`, and starter `AGENTS.md` to match `bf.schema.json` (`ingest:` is explicit when ingesting `stdout` records and forbidden with `emit:`/`when: daemon`; `timeout:` defaults to `5m`), fixed the FTS5 cache-rebuild runbook verification (`index: stale` in `bf status --format text`) and prune backup step (`.bf/state/<loop>.json`), documented `v34.0.1` tracked non-private repo links in `docs/authoring.md`, added a concise comparison table to `docs/index.md`, documented `npx skills add fmind/brain-framework --skill bf` (with a `curl` fallback) in `README.md` and `docs/getting-started.md`, and marked `.agents/skills/bf-contribute/SKILL.md` as `metadata.internal: true` so end-user skill discovery lists only `/bf`.
+
+### Changed
+
+- **Internal cleanup & deduplication across runtime modules.** Removed the unreachable `is_self_bf` env-scrub loop in `proc.py` and redundant second full-record sanitize walk in `records.py`, unified multi-line PEM redaction (`models.PemFilter`), `stale_after` validation (`models.validate_stale_after`), local URI stripping and case-insensitive `urn:` alias expansion (`refs.strip_local_uri`, `refs.alias_variants`), query clause tokenization (`index.parse_query_clauses`), backoff jitter, loop state updates, and CLI `--data` parsing.
+
 ## [v34.0.1](https://github.com/fmind/brain-framework/releases/tag/v34.0.1) - 2026-11-25
 
 A patch release restoring same-brain Markdown and `bf:///` links from authored notes to tracked non-private repository files (such as `../README.md`, `../AGENTS.md`, `../skills/*/SKILL.md`, and `bf:///bf.yaml`) while keeping `bf read`, ingested memory records, and cross-brain links strictly confined to configured note directories. The brain format (`version: 19`), `bf.yaml`, published JSON Schemas, and CLI outputs are unchanged; no migration is needed from `v34.0.0`.

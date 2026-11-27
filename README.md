@@ -95,7 +95,7 @@ my-brain/
 `bf` pairs with Claude Code, Codex, Antigravity, Gemini CLI, OpenCode, or any terminal agent without an MCP server:
 
 - **Inside a brain**: Agents read the repo's `AGENTS.md`, orient with `bf status` and `bf review`, edit Markdown notes directly, and verify with `bf build && bf check` plus `evals/`.
-- **From any repository**: Set `export BF_BRAIN=~/brain` and install the optional [`/bf` skill](https://github.com/fmind/brain-framework/blob/main/skills/bf/SKILL.md) so your harness queries and updates your brain on demand.
+- **From any repository**: Set `export BF_BRAIN=~/brain` and install the optional [`/bf` skill](https://github.com/fmind/brain-framework/blob/main/skills/bf/SKILL.md) (`npx skills add fmind/brain-framework --skill bf`) so your harness queries and updates your brain on demand.
 - **Always-on supervision**: Run `bf watch` headlessly under `systemd --user` or `launchd` and monitor live in any terminal with `watch -n 2 bf status --format text`.
 
 ## Design principles

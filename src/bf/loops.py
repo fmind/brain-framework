@@ -349,6 +349,7 @@ def execute_one_loop(
     except Error:
         state_doc = {"schedule_last": {}, "last_run": {}}
     win_start = cron.schedule_window_start(loop, state_doc, instant, trigger=trigger, schedules=schedules)
+    eff_missed = events_missed or (state.int_field(state_doc, "pending_events_missed") if trigger == "manual" else 0)
     resolved_run, ingest_src, ingest_mode, ingest_schema, timeout = resolve_loop(store, loop, cfg.reserved_sources)
 
     b_env = cfg.env if base_env is None else base_env
@@ -361,7 +362,7 @@ def execute_one_loop(
         end_iso=started_iso,
         trigger=trigger,
         events=events,
-        events_missed=events_missed,
+        events_missed=eff_missed,
         base_env=b_env,
         unit_env=loop.env,
         unit_env_from=loop.env_from,
@@ -458,7 +459,7 @@ def execute_one_loop(
                 stderr=err_txt,
                 summary=summary,
                 cursor_seq=cursor_target_seq,
-                events_missed=events_missed,
+                events_missed=eff_missed,
                 emit_loop_event=True,
                 trigger=trigger,
                 schedule_keys=s_keys,
@@ -477,8 +478,8 @@ def execute_one_loop(
         "exit_code": code,
         "duration_ms": dur_ms,
     }
-    if events_missed > 0:
-        res["events_missed"] = events_missed
+    if eff_missed > 0:
+        res["events_missed"] = eff_missed
     return {**res, **({"error": err_msg} if err_msg else {}), **({"summary": summary} if summary else {})}
 
 
@@ -785,6 +786,28 @@ def run_loops(
     }
 
 
+def _select_state_targets(store: Store, selectors: Sequence[str], *, all_loops: bool) -> tuple[Config, list[str]]:
+    if bool(selectors) == bool(all_loops):
+        raise InputError("specify loop names/patterns or --all (mutually exclusive)")
+    cfg = config.load(store)
+    targets = (
+        sorted(cfg.loops)
+        if all_loops
+        else _expand_loop_selectors(cfg, selectors, allow_daemons=True, allow_disabled=True)
+    )
+    return cfg, targets
+
+
+def _update_loop_states(store: Store, targets: Sequence[str], updates: Mapping[str, Any]) -> None:
+    with writer(store):
+        for name in targets:
+            try:
+                cur = load_unit_state(store, name)
+            except Error:
+                cur = state.default_unit_state(name, event_seq=latest_event_seq(store))
+            save_unit_state(store, {**cur, "name": name, **updates}, locked=True)
+
+
 def pause_loops(
     store: Store,
     selectors: Sequence[str],
@@ -795,42 +818,18 @@ def pause_loops(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Pause named/glob loops or `--all` indefinitely (or for `duration_s` seconds) without editing `bf.yaml`."""
-    if bool(selectors) == bool(all_loops):
-        raise InputError("specify loop names/patterns or --all (mutually exclusive)")
-    cfg = config.load(store)
-    targets = (
-        sorted(cfg.loops)
-        if all_loops
-        else _expand_loop_selectors(cfg, selectors, allow_daemons=True, allow_disabled=True)
-    )
+    cfg, targets = _select_state_targets(store, selectors, all_loops=all_loops)
     instant = datetime.now(UTC) if now is None else now.astimezone(UTC)
     now_iso = now_utc(instant)
     until_iso = now_utc(instant + timedelta(seconds=duration_s)) if duration_s is not None else ""
-    if dry_run:
-        return {
-            "ok": True,
-            "brain": cfg.name,
-            "paused": targets,
-            **({"paused_until": until_iso} if until_iso else {}),
-            "dry_run": True,
-        }
-    with writer(store):
-        for name in targets:
-            try:
-                cur = load_unit_state(store, name)
-            except Error:
-                cur = state.default_unit_state(name, event_seq=latest_event_seq(store))
-            save_unit_state(
-                store,
-                {**cur, "name": name, "paused": True, "paused_until": until_iso, "updated": now_iso},
-                locked=True,
-            )
+    if not dry_run:
+        _update_loop_states(store, targets, {"paused": True, "paused_until": until_iso, "updated": now_iso})
     return {
         "ok": True,
         "brain": cfg.name,
         "paused": targets,
         **({"paused_until": until_iso} if until_iso else {}),
-        "dry_run": False,
+        "dry_run": dry_run,
     }
 
 
@@ -843,50 +842,23 @@ def resume_loops(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Resume paused named/glob loops or `--all`."""
-    if bool(selectors) == bool(all_loops):
-        raise InputError("specify loop names/patterns or --all (mutually exclusive)")
-    cfg = config.load(store)
-    targets = (
-        sorted(cfg.loops)
-        if all_loops
-        else _expand_loop_selectors(cfg, selectors, allow_daemons=True, allow_disabled=True)
-    )
-    now_iso = now_utc(now)
-    if dry_run:
-        return {"ok": True, "brain": cfg.name, "resumed": targets, "dry_run": True}
-    with writer(store):
-        for name in targets:
-            try:
-                cur = load_unit_state(store, name)
-            except Error:
-                cur = state.default_unit_state(name, event_seq=latest_event_seq(store))
-            save_unit_state(
-                store,
-                {**cur, "name": name, "paused": False, "paused_until": "", "updated": now_iso},
-                locked=True,
-            )
-    return {"ok": True, "brain": cfg.name, "resumed": targets, "dry_run": False}
+    cfg, targets = _select_state_targets(store, selectors, all_loops=all_loops)
+    if not dry_run:
+        _update_loop_states(store, targets, {"paused": False, "paused_until": "", "updated": now_utc(now)})
+    return {"ok": True, "brain": cfg.name, "resumed": targets, "dry_run": dry_run}
 
 
 def reset_loops(
     store: Store, selectors: Sequence[str], *, all_loops: bool = False, dry_run: bool = False
 ) -> dict[str, Any]:
     """Reset `.bf/state/<loop>.json` state to idle anchored at `latest_event_seq()` (preventing historical event replay)."""
-    if bool(selectors) == bool(all_loops):
-        raise InputError("specify loop names/patterns or --all (mutually exclusive)")
-    cfg = config.load(store)
-    targets = (
-        sorted(cfg.loops)
-        if all_loops
-        else _expand_loop_selectors(cfg, selectors, allow_daemons=True, allow_disabled=True)
-    )
+    cfg, targets = _select_state_targets(store, selectors, all_loops=all_loops)
     if dry_run:
         return {"ok": True, "brain": cfg.name, "reset": targets, "event_seq": latest_event_seq(store), "dry_run": True}
     with writer(store):
         cur_seq = latest_event_seq(store)
         for name in targets:
-            doc = state.default_unit_state(name, event_seq=cur_seq)
-            save_unit_state(store, doc, locked=True)
+            save_unit_state(store, state.default_unit_state(name, event_seq=cur_seq), locked=True)
     return {"ok": True, "brain": cfg.name, "reset": targets, "event_seq": cur_seq, "dry_run": False}
 
 
