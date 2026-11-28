@@ -1,0 +1,3 @@
+# Fmind light theme for VHS recordings: https://github.com/charmbracelet/vhs#set-theme
+# Copied from ~/.agents/themes/vhs/fmind.tape (fmind/theme). VHS reads the theme as one JSON line.
+Set Theme {"name": "fmind", "background": "#ffffff", "foreground": "#202124", "cursor": "#4285f4", "cursorAccent": "#202124", "selection": "#d2e3fc", "black": "#202124", "red": "#a50e0e", "green": "#0d652d", "yellow": "#934900", "blue": "#174ea6", "magenta": "#681da8", "cyan": "#00636d", "white": "#202124", "brightBlack": "#595d62", "brightRed": "#a50e0e", "brightGreen": "#0d652d", "brightYellow": "#934900", "brightBlue": "#174ea6", "brightMagenta": "#681da8", "brightCyan": "#00636d", "brightWhite": "#202124"}

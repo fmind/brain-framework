@@ -604,7 +604,6 @@ def _cap_json_bytes(out: dict[str, Any], max_bytes: int) -> dict[str, Any]:
             "headings",
             "tasks",
             "attributes",
-            "sources",
             "description",
             "aliases",
             "tags",
@@ -655,8 +654,7 @@ def _read_note_file(
     if anchor:
         if not is_note:
             raise Error(f"{to}: missing anchor #{anchor}")
-        comp = markdown.compile_note(to, raw_bytes, brain_name=cfg.name, note_dirs=cfg.notes)
-        sec = markdown.extract_section(text, anchor, comp)
+        sec = markdown.compile_note_section(to, raw_bytes, anchor, brain_name=cfg.name, note_dirs=cfg.notes)
         if fmt == "raw":
             raw_sec = str(sec["text"])
             return _cap_raw_bytes(raw_sec, max_bytes, warn=warn_raw_trunc) if max_bytes is not None else raw_sec

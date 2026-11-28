@@ -1,9 +1,10 @@
-"""Headless UNIX supervisor (`bf watch`): zero-dep stdlib polling watcher, daemon loops, note rebuilds, and cycle loops."""
+"""UNIX supervisor (`bf watch`): zero-dep stdlib polling watcher, live/text/jsonl output, daemon loops, note rebuilds, and cycle loops."""
 
 from __future__ import annotations
 
 import os
 import random
+import shutil
 import signal
 import subprocess
 import sys
@@ -30,6 +31,8 @@ _HEALTHY_SECS = 30.0
 _DAEMON_MAX_BACKOFF = 300.0
 _EVENT_RATE_WINDOW = 60.0
 _EVENT_RATE_MAX = 10
+_CORPUS_CACHE_TTL = 15.0
+_LIVE_REFRESH_SECS = 1.0
 
 
 class DaemonStream:
@@ -255,24 +258,33 @@ class DaemonStream:
 
 
 def next_due_delay(
-    store: Store, cfg: Config, now: datetime, *, exclude: frozenset[str] = frozenset(), max_wait: float = 60.0
+    store: Store,
+    cfg: Config,
+    now: datetime,
+    *,
+    exclude: frozenset[str] = frozenset(),
+    max_wait: float = 60.0,
+    snapshot: loops.DueSnapshot | None = None,
 ) -> float:
     """Compute seconds until the earliest next schedule, delayed timer, debounce, event backoff, or pause expiry."""
     soonest = max_wait
     if (tmr_rem := state.next_timer_delay(store, now)) is not None:
         soonest = min(soonest, tmr_rem)
-    latest_seq: int | None = None
-    cached_events: tuple[list[dict[str, Any]], int, int] | None = None
+    latest_seq: int | None = snapshot.latest_seq if snapshot is not None else None
+    cached_events: tuple[list[dict[str, Any]], int, int] | None = snapshot.events if snapshot is not None else None
     active_loops: list[tuple[str, LoopSpec, dict[str, Any]]] = []
     for name, loop in cfg.loops.items():
         if not loop.enabled or name in exclude:
             continue
         if loop.events and latest_seq is None:
             _, latest_seq = state.event_bounds(store)
-        try:
-            state_doc = state.load_unit_state(store, name, default_event_seq=latest_seq if loop.events else 0)
-        except Error:
-            continue
+        if snapshot is not None and name in snapshot.states:
+            state_doc = snapshot.states[name]
+        else:
+            try:
+                state_doc = state.load_unit_state(store, name, default_event_seq=latest_seq if loop.events else 0)
+            except Error:
+                continue
         if state.is_paused(state_doc, now):
             if (p_rem := state.pause_remaining(state_doc, now)) is not None:
                 soonest = min(soonest, p_rem)
@@ -288,7 +300,9 @@ def next_due_delay(
             if lp.events and (cur_seq := state.int_field(doc, "event_seq")) != latest_seq
         ]
         if lag_floors:
-            cached_events = state.read_events_meta(store, after_seq=min(lag_floors))
+            need_floor = min(lag_floors)
+            if cached_events is None or (snapshot is not None and need_floor < snapshot.cached_floor):
+                cached_events = state.read_events_meta(store, after_seq=need_floor)
 
     for name, loop, state_doc in active_loops:
         if (rem := cron.next_schedule_delay(loop, state_doc, now, tz_name=cfg.timezone)) is not None:
@@ -364,10 +378,10 @@ def _poll_changes(
 def serve(
     store: Store,
     *,
-    fmt: Literal["auto", "text", "jsonl"] = "auto",
+    fmt: Literal["auto", "live", "text", "jsonl"] = "auto",
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
-    """Supervise notes, events, daemon loops, and concurrent cycle loops headlessly (`text` or `jsonl`)."""
+    """Supervise notes, events, daemon loops, and concurrent cycle loops (`live`, `text`, or `jsonl`)."""
     cfg = config.load(store)
     busy = "another bf watch is already running for this brain; stop it before starting a new one"
     with writer(store, wait=0.0, busy=busy, name="watch.lock"):
@@ -378,28 +392,34 @@ def _serve_locked(
     store: Store,
     cfg: config.Config,
     *,
-    fmt: Literal["auto", "text", "jsonl"] = "auto",
+    fmt: Literal["auto", "live", "text", "jsonl"] = "auto",
     stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     stop_ev = stop_event if stop_event is not None else threading.Event()
-    term_ev, wake_event, note_dirty, cfg_dirty = (threading.Event() for _ in range(4))
+    term_ev, wake_event, note_dirty, cfg_dirty, render_dirty = (threading.Event() for _ in range(5))
     reconcile_lock, flight_lock, rate_lock, emit_lock = (threading.Lock() for _ in range(4))
     daemons: dict[str, tuple[object, threading.Event, DaemonStream]] = {}
     terminating_daemons: set[DaemonStream] = set()
     in_flight: dict[str, str] = {}
     busy_until: dict[str, float] = {}
     event_rates: dict[str, deque[float]] = {}
+    recent_lines: deque[str] = deque(maxlen=5)
+    corpus_cache: tuple[float, tuple[dict[str, int], list[str], bool, list[str], list[str]]] | None = None
+    corpus_gen = 0
     pool_closed = False
     is_tty = sys.stdout.isatty()
     term_dumb = os.environ.get("TERM", "") in {"", "dumb"}
-    use_text = fmt == "text" or (fmt == "auto" and is_tty and not term_dumb)
-    use_color = use_text and is_tty and not term_dumb and not os.environ.get("NO_COLOR", "")
+    use_live = fmt == "live" or (fmt == "auto" and is_tty and not term_dumb)
+    use_text = fmt == "text"
+    use_alt = use_live and is_tty and not term_dumb
+    use_color = (use_live or use_text) and is_tty and not term_dumb and not os.environ.get("NO_COLOR", "")
     last_summary = {"brain": cfg.name, "time": now_utc(), "built": 0, "loops_ran": 0, "ok": True, "exit_code": 0}
     term_hit = False
 
     def _stop_all() -> None:
         stop_ev.set()
         wake_event.set()
+        render_dirty.set()
 
     def write_out(data: bytes) -> None:
         with emit_lock:
@@ -413,7 +433,18 @@ def _serve_locked(
                 pass
 
     def emit_event(kind: str, payload: dict[str, Any]) -> None:
+        nonlocal corpus_cache, corpus_gen
         ts, body = str(payload.get("time") or now_utc()), {"brain": cfg.name, **payload}
+        if use_live:
+            if kind not in {"watch.started", "watch.stopped"}:
+                line = render.format_watch_line(kind, {"time": ts, **body}, color=use_color).rstrip("\n")
+                with emit_lock:
+                    recent_lines.append(line)
+                    if kind in {"watch.build", "watch.loop"}:
+                        corpus_cache = None
+                        corpus_gen += 1
+                render_dirty.set()
+            return
         if use_text:
             write_out(render.format_watch_line(kind, {"time": ts, **body}, color=use_color).encode("utf-8"))
         else:
@@ -424,6 +455,42 @@ def _serve_locked(
                 or (kind == "watch.daemon" and bool(body.get("error")))
             )
             write_out(models.log_line(kind, severity="ERROR" if is_err else "INFO", time_iso=ts, **body))
+
+    def _paint_live() -> None:
+        nonlocal corpus_cache
+        cur_cfg = cfg
+        now_m = time.monotonic()
+        with emit_lock:
+            cached, snap_gen, recent_snap = corpus_cache, corpus_gen, list(recent_lines)
+        if cached is None or (now_m - cached[0]) >= _CORPUS_CACHE_TTL:
+            sw: list[str] = []
+            c_probs: list[str] = []
+            try:
+                cnts, unb, stale_i = status.corpus_counts(store, cur_cfg, scale_warnings=sw, problems=c_probs)
+                cached_tuple = (cnts, unb, stale_i, sw, c_probs)
+                with emit_lock:
+                    if corpus_gen == snap_gen:
+                        corpus_cache = (now_m, cached_tuple)
+            except models.FAILURES:
+                cached_tuple = None
+        else:
+            cached_tuple = cached[1]
+        eff_p = cur_cfg.effective_pools()
+        pool_lbl = ", ".join(f"{k}:{v}" for k, v in eff_p.items()) if len(eff_p) > 1 else f"{cur_cfg.concurrency}w"
+        with suppress(*models.FAILURES):
+            summary = status.status_summary(
+                store, include_loops=True, cfg=cur_cfg, check_inside=False, cached_corpus=cached_tuple
+            )
+            cols, rows = shutil.get_terminal_size((100, 30)) if use_alt else (None, None)
+            frame = render.format_live_screen(
+                summary,
+                recent=recent_snap,
+                footer=f"Watching {cur_cfg.name} ({pool_lbl}) · Ctrl+C to stop",
+                color=use_color,
+                cols=cols,
+                rows=rows,
+            )
+            write_out(render.paint_frame(frame, tty=use_alt))
 
     def _allow_event_trigger(name: str) -> bool:
         now_m = time.monotonic()
@@ -444,7 +511,7 @@ def _serve_locked(
             waits = [max(0.5, _EVENT_RATE_WINDOW - (now_m - q[0])) for n in names if (q := event_rates.get(n))]
         return min(waits) if waits else None
 
-    def _daemon_sig(unit: LoopSpec, base_env: Mapping[str, str], dotenv_sig: str) -> object:
+    def _daemon_sig(unit: LoopSpec, base_env: Mapping[str, str], dotenv: Mapping[str, str]) -> object:
         resolved_argv: tuple[str, ...] = ()
         scripts: list[tuple[str, str]] = []
         with suppress(Error, OSError):
@@ -453,45 +520,72 @@ def _serve_locked(
                 if rel := config.normalize_brain_script(tok, store.root):
                     sig = models.digest(store.read(rel, models.MAX_NOTE)) if store.exists(rel) else "invalid"
                     scripts.append((rel, sig))
+        scoped_dotenv = {k: dotenv[k] for k in unit.env_from if k in dotenv}
         return (
             unit,
             models.digest(models.encode(dict(base_env))),
-            dotenv_sig,
+            models.digest(models.encode(scoped_dotenv)),
             resolved_argv,
             tuple(scripts),
         )
 
-    def _daemon_paused(name: str, now_dt: datetime) -> bool:
+    pause_lock = threading.Lock()
+    pause_cache: dict[str, tuple[tuple[int, int, int], bool, str]] = {}
+
+    def _is_paused_cached(name: str, now_dt: datetime, st_dir: Store | None = None) -> bool:
+        try:
+            sdir = private_dir(store, ".bf", "state", create=False) if st_dir is None else st_dir
+            info = sdir.stat(f"{name}.json")
+            sig = (info.st_mtime_ns, info.st_size, info.st_ino)
+        except (FileNotFoundError, Error, OSError):
+            with pause_lock:
+                pause_cache.pop(name, None)
+            return False
+        with pause_lock:
+            cached = pause_cache.get(name)
+        if cached is not None and cached[0] == sig:
+            return state.is_paused({"paused": cached[1], "paused_until": cached[2]}, now_dt)
         with suppress(Error, OSError):
-            return state.is_paused(state.load_unit_state(store, name, default_event_seq=0), now_dt)
+            doc = state.load_unit_state(store, name, default_event_seq=0)
+            paused_f, until_s = bool(doc.get("paused")), str(doc.get("paused_until") or "")
+            with pause_lock:
+                if len(pause_cache) >= 256 and name not in pause_cache:
+                    pause_cache.clear()
+                pause_cache[name] = (sig, paused_f, until_s)
+            return state.is_paused(doc, now_dt)
+        with pause_lock:
+            pause_cache.pop(name, None)
         return False
 
     def _watched_state_names() -> tuple[str, ...]:
         now_dt = datetime.now(UTC)
+        try:
+            st_dir: Store | None = private_dir(store, ".bf", "state", create=False)
+        except (FileNotFoundError, Error, OSError):
+            st_dir = None
         names: list[str] = []
         for n, lp in cfg.loops.items():
             if not lp.enabled:
                 continue
-            if lp.daemon or _daemon_paused(n, now_dt):
+            if lp.daemon or (st_dir is not None and _is_paused_cached(n, now_dt, st_dir)):
                 names.append(n)
         return tuple(names)
 
     def reconcile_config() -> bool:
-        nonlocal cfg
+        nonlocal cfg, corpus_cache, corpus_gen
         prev_key = (cfg.name, cfg.notes)
         try:
             new_cfg = config.load(store)
-            dotenv_sig = models.digest(models.encode(config.load_dotenv(store)))
+            dotenv = config.load_dotenv(store)
         except models.FAILURES as err:
             emit_event("watch.error", {"ok": False, "error": redact_secrets(printable(failure(err)))})
             return False
-        if (new_cfg.name, new_cfg.notes) != prev_key:
-            note_dirty.set()
+        notes_changed = (new_cfg.name, new_cfg.notes) != prev_key
         now_dt = datetime.now(UTC)
         desired = {
-            u.name: (_daemon_sig(u, new_cfg.env, dotenv_sig), u, new_cfg.env)
+            u.name: (_daemon_sig(u, new_cfg.env, dotenv), u, new_cfg.env)
             for u in new_cfg.loops.values()
-            if u.enabled and u.daemon and not _daemon_paused(u.name, now_dt)
+            if u.enabled and u.daemon and not _is_paused_cached(u.name, now_dt)
         }
         with reconcile_lock:
             cfg = new_cfg
@@ -502,6 +596,11 @@ def _serve_locked(
             )
             for _, _, d_stream in stale:
                 terminating_daemons.add(d_stream)
+        if notes_changed:
+            note_dirty.set()
+            with emit_lock:
+                corpus_cache = None
+                corpus_gen += 1
         for _, u_stop, d_stream in stale:
             u_stop.set()
             d_stream.signal_stop()
@@ -525,6 +624,8 @@ def _serve_locked(
                     )
                     daemons[key] = (sig, u_stop, stream)
                     stream.start()
+        if use_live:
+            render_dirty.set()
         return True
 
     def _classify(rel: str) -> str:
@@ -550,6 +651,8 @@ def _serve_locked(
                 if k in kinds:
                     ev.set()
             wake_event.set()
+            if use_live:
+                render_dirty.set()
 
     init_snap: dict[str, tuple[int, int, int]] | None = None
 
@@ -634,7 +737,7 @@ def _serve_locked(
                 running_daemons = frozenset(daemons)
                 cur_loops = tuple(cfg.loops.values())
             daemon_drift = any(
-                (u.name in running_daemons) == _daemon_paused(u.name, tick_now)
+                (u.name in running_daemons) == _is_paused_cached(u.name, tick_now)
                 for u in cur_loops
                 if u.enabled and u.daemon
             )
@@ -658,7 +761,9 @@ def _serve_locked(
                         busy_until.pop(k, None)
                     busy = frozenset(in_flight) | frozenset(busy_until)
                     soonest_busy = min((exp - now_m for exp in busy_until.values()), default=None)
-                due_items, pre_fails = loops.select_due_loops(store, cur_cfg, sched_now=datetime.now(UTC), exclude=busy)
+                due_items, pre_fails, due_snap = loops.select_due_with_snapshot(
+                    store, cur_cfg, sched_now=datetime.now(UTC), exclude=busy
+                )
                 for pf in pre_fails:
                     emit_event("watch.loop", {**pf, "ok": False})
                 rate_limited: set[str] = set()
@@ -700,7 +805,7 @@ def _serve_locked(
                             "error": "event rate limit reached; pausing triggers",
                         },
                     )
-                nxt = next_due_delay(store, cur_cfg, datetime.now(UTC), exclude=busy_after)
+                nxt = next_due_delay(store, cur_cfg, datetime.now(UTC), exclude=busy_after, snapshot=due_snap)
                 if soonest_busy is not None:
                     nxt = min(nxt, max(0.5, soonest_busy))
                 if (rl_wait := _next_rate_limit_delay(rate_limited)) is not None:
@@ -745,12 +850,17 @@ def _serve_locked(
     def _on_term_sig(*_a: object) -> None:
         nonlocal term_hit
         term_hit = True
+        render_dirty.set()
 
     prev_term = signal.signal(signal.SIGTERM, _on_term_sig) if on_main else None
     try:
         eff_pools = cfg.effective_pools()
         pool = ThreadPoolExecutor(max_workers=max(64, cfg.total_concurrency()), thread_name_prefix="bf-worker")
-        if use_text:
+        if use_live:
+            if use_alt:
+                write_out(render.ALT_ENTER)
+            _paint_live()
+        elif use_text:
             with suppress(Error):
                 st_txt = render.format_status_text(status.status_summary(store, include_loops=True), color=use_color)
                 pool_lbl = (
@@ -768,38 +878,63 @@ def _serve_locked(
         files_thread.start()
         tick_thread = threading.Thread(target=run_ticks, name="bf-tick", daemon=True)
         tick_thread.start()
+        last_paint = time.monotonic()
         while not stop_ev.is_set():
             if term_hit:
                 break
-            stop_ev.wait(0.2)
+            if use_live:
+                render_dirty.wait(timeout=0.2)
+                if stop_ev.is_set() or term_hit:
+                    break
+                if render_dirty.is_set() or (time.monotonic() - last_paint) >= _LIVE_REFRESH_SECS:
+                    render_dirty.clear()
+                    _paint_live()
+                    last_paint = time.monotonic()
+            else:
+                stop_ev.wait(0.2)
     finally:
-        with flight_lock:
-            pool_closed = True
-        if term_hit:
-            term_ev.set()
-        _stop_all()
-        with reconcile_lock:
-            active_daemons = list(daemons.values())
-            daemons.clear()
-            extra_daemons = list(terminating_daemons)
-        for _, u_stop, daemon in active_daemons:
-            u_stop.set()
-            daemon.signal_stop()
-        for daemon in extra_daemons:
-            daemon.signal_stop()
-        if pool is not None:
-            pool.shutdown(wait=True, cancel_futures=True)
-        if tick_thread is not None and tick_thread.is_alive():
-            tick_thread.join(timeout=12)
-        for _, _, daemon in active_daemons:
-            daemon.terminate()
-        for daemon in extra_daemons:
-            daemon.terminate()
-        if files_thread is not None and files_thread.is_alive():
-            files_thread.join(timeout=2)
-        emit_event("watch.stopped", {"ok": True})
-        with suppress(OSError, ValueError):
-            if on_main and prev_term is not None:
-                signal.signal(signal.SIGTERM, prev_term)
+        alt_exited = False
+        try:
+            with flight_lock:
+                pool_closed = True
+            if term_hit:
+                term_ev.set()
+            _stop_all()
+            with reconcile_lock:
+                active_daemons = list(daemons.values())
+                daemons.clear()
+                extra_daemons = list(terminating_daemons)
+            for _, u_stop, daemon in active_daemons:
+                u_stop.set()
+                daemon.signal_stop()
+            for daemon in extra_daemons:
+                daemon.signal_stop()
+            if pool is not None:
+                pool.shutdown(wait=True, cancel_futures=True)
+            if tick_thread is not None and tick_thread.is_alive():
+                tick_thread.join(timeout=12)
+            for _, _, daemon in active_daemons:
+                daemon.terminate()
+            for daemon in extra_daemons:
+                daemon.terminate()
+            if files_thread is not None and files_thread.is_alive():
+                files_thread.join(timeout=2)
+            if use_alt:
+                write_out(render.ALT_EXIT)
+                alt_exited = True
+            if use_live:
+                write_out(
+                    render.format_watch_line(
+                        "watch.stopped", {"time": now_utc(), "brain": cfg.name}, color=use_color
+                    ).encode("utf-8")
+                )
+            else:
+                emit_event("watch.stopped", {"ok": True})
+        finally:
+            if use_alt and not alt_exited:
+                write_out(render.ALT_EXIT)
+            with suppress(OSError, ValueError):
+                if on_main and prev_term is not None:
+                    signal.signal(signal.SIGTERM, prev_term)
     last_summary["exit_code"] = 143 if term_hit else 0
     return last_summary

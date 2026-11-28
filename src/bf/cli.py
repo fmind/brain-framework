@@ -43,10 +43,21 @@ def _add_brain_opt(parser: argparse.ArgumentParser, dest: str = "brain") -> None
 
 def _build_parser() -> _Parser:
     p_epilog = (
-        "Brain: --brain > BF_BRAIN > enclosing bf.yaml > ~/brain. "
+        "Start small (core):\n"
+        "  init, build, query, read, review, check, status, schema\n\n"
+        "Automate when ready (sensors, loops & supervision):\n"
+        "  ingest, run, watch, emit, events, pause, resume, state\n\n"
+        "Brain: --brain > BF_BRAIN > enclosing bf.yaml > ~/brain.\n"
         "Exit codes: 0=ok, 1=error, 2=invalid input, 130=SIGINT, 143=SIGTERM."
     )
-    p = _Parser(prog="bf", description="Brain Framework CLI.", epilog=p_epilog, allow_abbrev=False, **_PARSER_EXTRA)
+    p = _Parser(
+        prog="bf",
+        description="Brain Framework CLI.",
+        epilog=p_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
+        **_PARSER_EXTRA,
+    )
     p.add_argument("--version", action="version", version=__version__)
     _add_brain_opt(p, dest="root_brain")
     sub = p.add_subparsers(dest="command", metavar="COMMAND", parser_class=_Parser)
@@ -65,6 +76,12 @@ def _build_parser() -> _Parser:
             _add_brain_opt(sp)
         return sp
 
+    def add_lim(sp: _Parser, dest: str, default_n: int, what: str) -> None:
+        grp = sp.add_mutually_exclusive_group()
+        grp.add_argument("-n", "--limit", type=int, default=None, metavar="N", help=f"Max {what} ({default_n}).")
+        grp.add_argument("--all", dest=dest, action="store_true", help=f"Return all {what}.")
+
+    # Core commands: notes, search, reading, verification, status, and schemas.
     sp = cmd("init", "Initialize a new brain directory.", with_brain=False, epilog="Example: bf init ~/brain")
     sp.add_argument("path", help="Target directory (new or empty).")
     sp.add_argument("--name", default=None, help="Brain identifier (lowercase letters, digits, hyphens).")
@@ -76,28 +93,6 @@ def _build_parser() -> _Parser:
         epilog="Example: bf build --dry-run",
     )
     sp.add_argument("--dry-run", action="store_true", help="Compile and validate notes without writing files.")
-
-    ing_h = "Validate and save JSON/JSONL records into memories/<source>.jsonl and sync .bf/cache/index.sqlite3."
-    sp = cmd("ingest", ing_h, epilog="Example: sensors/github.py | bf ingest github-issues --mode upsert")
-    a = sp.add_argument
-    a("source", help="Source name (memories/<source>.jsonl).")
-    a("--input", default="-", metavar="FILE", help="Regular JSON/JSONL file path or '-' for stdin (default: -).")
-    a("--mode", choices=("upsert", "snapshot"), default="upsert", help="Write mode (default: upsert).")
-    a("--schema", default=None, metavar="NAME", help="Optional schemas/<NAME>.json override (for partitioned sources).")
-    a("--allow-removal", action="store_true", help="Allow --mode snapshot to empty/drop >50%% of 10+ records.")
-    a("--dry-run", action="store_true", help="Validate and preview counts without writing files.")
-
-    read_h = "Read a note, #anchor section, source:id record, alias, or declared bf:// URI (read-only)."
-    sp = cmd("read", read_h, epilog="Example: bf read concepts/welcome.md#conventions --format raw")
-    a = sp.add_argument
-    a("target", help="Note path, note#anchor, source:id, alias, or bf:// URI.")
-    a("--format", choices=("json", "raw"), default="json", help="Output format: json (default) or raw UTF-8 text.")
-    a("--max-bytes", type=int, default=None, metavar="N", help="Maximum UTF-8 response size in bytes.")
-
-    def add_lim(sp: _Parser, dest: str, default_n: int, what: str) -> None:
-        grp = sp.add_mutually_exclusive_group()
-        grp.add_argument("-n", "--limit", type=int, default=None, metavar="N", help=f"Max {what} ({default_n}).")
-        grp.add_argument("--all", dest=dest, action="store_true", help=f"Return all {what}.")
 
     q_h = "Search and filter notes and memories via disposable SQLite FTS5 BM25 cache (read-only)."
     sp = cmd("query", q_h, epilog="Example: bf query 'retention policy' --kind note --format text")
@@ -118,6 +113,13 @@ def _build_parser() -> _Parser:
     )
     add_lim(sp, "all_items", 20, "results")
     a("--format", choices=("json", "jsonl", "text"), default="json", help="Output format (default: json).")
+
+    read_h = "Read a note, #anchor section, source:id record, alias, or declared bf:// URI (read-only)."
+    sp = cmd("read", read_h, epilog="Example: bf read concepts/welcome.md#conventions --format raw")
+    a = sp.add_argument
+    a("target", help="Note path, note#anchor, source:id, alias, or bf:// URI.")
+    a("--format", choices=("json", "raw"), default="json", help="Output format: json (default) or raw UTF-8 text.")
+    a("--max-bytes", type=int, default=None, metavar="N", help="Maximum UTF-8 response size in bytes.")
 
     sp = cmd(
         "review",
@@ -144,8 +146,43 @@ def _build_parser() -> _Parser:
     )
     a("--format", choices=("json", "text"), default="json", help="Output format (default: json).")
 
+    sp = cmd(
+        "status",
+        "Inspect brain health, counts, and attention loops (read-only; use --check to exit 1 or --watch for live refresh).",
+        epilog="Example: bf status --watch",
+    )
+    a = sp.add_argument
+    a("--loops", action="store_true", help="Include full per-loop status map in JSON output.")
+    a("--check", action="store_true", help="Exit 1 when brain health reports attention or config problems.")
+    a(
+        "--watch",
+        nargs="?",
+        const=2.0,
+        default=None,
+        type=float,
+        metavar="SECONDS",
+        help="Live-refresh the failure-first status table every SECONDS (default: 2, read-only).",
+    )
+    a(
+        "--format",
+        choices=("json", "text"),
+        default=None,
+        help="Output format (default: json; text for overview table).",
+    )
+
     sp = cmd("schema", "Print bundled Draft 2020-12 JSON Schemas.", with_brain=False, epilog="Example: bf schema bf")
     sp.add_argument("name", nargs="?", default=None, help="Schema name: bf or record.")
+
+    # Automation commands: ingestion, loops, supervision, events, and runtime state.
+    ing_h = "Validate and save JSON/JSONL records into memories/<source>.jsonl and sync .bf/cache/index.sqlite3."
+    sp = cmd("ingest", ing_h, epilog="Example: sensors/github.py | bf ingest github-issues --mode upsert")
+    a = sp.add_argument
+    a("source", help="Source name (memories/<source>.jsonl).")
+    a("--input", default="-", metavar="FILE", help="Regular JSON/JSONL file path or '-' for stdin (default: -).")
+    a("--mode", choices=("upsert", "snapshot"), default="upsert", help="Write mode (default: upsert).")
+    a("--schema", default=None, metavar="NAME", help="Optional schemas/<NAME>.json override (for partitioned sources).")
+    a("--allow-removal", action="store_true", help="Allow --mode snapshot to empty/drop >50%% of 10+ records.")
+    a("--dry-run", action="store_true", help="Validate and preview counts without writing files.")
 
     run_h = "Execute named/glob, --all, or --due cycle loops."
     sp = cmd("run", run_h, epilog="Pass extra args to one loop with `--`: bf run my-loop -- --verbose")
@@ -154,6 +191,40 @@ def _build_parser() -> _Parser:
     rgrp.add_argument("--due", action="store_true", help="Run scheduled and event-triggered loops due now.")
     rgrp.add_argument("--all", dest="all_loops", action="store_true", help="Run all enabled cycle loops.")
     sp.add_argument("--dry-run", action="store_true", help="Validate and preview actions without running.")
+
+    sp = cmd(
+        "watch",
+        "Supervisor for daemon loops, note rebuilds, and concurrent cycle loops.",
+        epilog="Example: bf watch --format jsonl",
+    )
+    w_h = "Output mode: auto (live table on TTY, jsonl on pipe/TERM=dumb), live (in-place table), text (scrolling log), or jsonl."
+    sp.add_argument("--format", choices=("auto", "live", "text", "jsonl"), default="auto", help=w_h)
+
+    emit_e = 'Example: bf emit loop.wake --in 15m --data \'{"id":"ci-1"}\' --dedupe'
+    sp = cmd("emit", "Append a custom event to .bf/state/events.jsonl (or schedule via --in/--at).", epilog=emit_e)
+    a = sp.add_argument
+    a("kind", help="Event kind identifier (e.g. task.ready).")
+    a("--source", default="bf", help="Event source name (default: bf).")
+    a("--data", default=None, metavar="JSON", help="Optional JSON object payload, or '-' to read stdin.")
+    dgrp = sp.add_mutually_exclusive_group()
+    dgrp.add_argument("--in", dest="delay_in", default=None, metavar="DURATION", help="Delay delivery (e.g. 15m, 2h).")
+    dgrp.add_argument("--at", dest="deliver_at", default=None, metavar="ISO", help="Deliver at ISO timestamp with TZ.")
+    a("--dedupe", action="store_true", help="Deduplicate on kind, source, and string data.id.")
+    a("--dry-run", action="store_true", help="Validate event without appending to .bf/state/.")
+
+    sp = cmd(
+        "events",
+        "Inspect recent events in .bf/state/events.jsonl or pending delayed --timers (read-only).",
+        epilog="Example: bf events --kind loop.message --format text",
+    )
+    a = sp.add_argument
+    egrp = sp.add_mutually_exclusive_group()
+    egrp.add_argument("--since", type=int, default=None, metavar="SEQ", help="Return events with seq > SEQ (forward).")
+    egrp.add_argument("--timers", action="store_true", help="List pending delayed events in .bf/state/timers.jsonl.")
+    a("--kind", default=None, metavar="KIND", help="Filter by exact event kind.")
+    a("--source", default=None, metavar="NAME", help="Filter by exact event source.")
+    add_lim(sp, "all_items", 20, "events")
+    a("--format", choices=("json", "jsonl", "text"), default="json", help="Output format (default: json).")
 
     sp = cmd(
         "pause",
@@ -205,55 +276,6 @@ def _build_parser() -> _Parser:
     )
     _add_brain_opt(st_prune)
     st_prune.add_argument("--dry-run", action="store_true", help="Preview orphans without deleting.")
-
-    emit_e = 'Example: bf emit loop.wake --in 15m --data \'{"id":"ci-1"}\' --dedupe'
-    sp = cmd("emit", "Append a custom event to .bf/state/events.jsonl (or schedule via --in/--at).", epilog=emit_e)
-    a = sp.add_argument
-    a("kind", help="Event kind identifier (e.g. task.ready).")
-    a("--source", default="bf", help="Event source name (default: bf).")
-    a("--data", default=None, metavar="JSON", help="Optional JSON object payload, or '-' to read stdin.")
-    dgrp = sp.add_mutually_exclusive_group()
-    dgrp.add_argument("--in", dest="delay_in", default=None, metavar="DURATION", help="Delay delivery (e.g. 15m, 2h).")
-    dgrp.add_argument("--at", dest="deliver_at", default=None, metavar="ISO", help="Deliver at ISO timestamp with TZ.")
-    a("--dedupe", action="store_true", help="Deduplicate on kind, source, and string data.id.")
-    a("--dry-run", action="store_true", help="Validate event without appending to .bf/state/.")
-
-    sp = cmd(
-        "events",
-        "Inspect recent events in .bf/state/events.jsonl or pending delayed --timers (read-only).",
-        epilog="Example: bf events --kind loop.message --format text",
-    )
-    a = sp.add_argument
-    egrp = sp.add_mutually_exclusive_group()
-    egrp.add_argument("--since", type=int, default=None, metavar="SEQ", help="Return events with seq > SEQ (forward).")
-    egrp.add_argument("--timers", action="store_true", help="List pending delayed events in .bf/state/timers.jsonl.")
-    a("--kind", default=None, metavar="KIND", help="Filter by exact event kind.")
-    a("--source", default=None, metavar="NAME", help="Filter by exact event source.")
-    add_lim(sp, "all_items", 20, "events")
-    a("--format", choices=("json", "jsonl", "text"), default="json", help="Output format (default: json).")
-
-    sp = cmd(
-        "status",
-        "Inspect brain health, counts, and attention loops (read-only; use --check to exit 1 on attention).",
-        epilog="Example: watch -n 2 bf status --format text",
-    )
-    a = sp.add_argument
-    a("--loops", action="store_true", help="Include full per-loop status map in JSON output.")
-    a("--check", action="store_true", help="Exit 1 when brain health reports attention or config problems.")
-    a(
-        "--format",
-        choices=("json", "text"),
-        default=None,
-        help="Output format (default: json; text for overview table).",
-    )
-
-    sp = cmd(
-        "watch",
-        "Headless supervisor for daemon loops, note rebuilds, and concurrent cycle loops.",
-        epilog="Example: bf watch --format jsonl",
-    )
-    w_h = "Output mode: auto (text on non-dumb TTY, jsonl on pipe/TERM=dumb), text (scrolling log), or jsonl."
-    sp.add_argument("--format", choices=("auto", "text", "jsonl"), default="auto", help=w_h)
     return p
 
 
@@ -362,6 +384,24 @@ def _resolve_brain_arg(args: argparse.Namespace) -> str:
     return vals[0] if vals else ""
 
 
+def _nonempty_opts(*pairs: tuple[str, str | None]) -> None:
+    for flag, val in pairs:
+        if val is not None and not val.strip():
+            raise InputError(f"{flag} must be nonempty")
+
+
+def _check_limit(limit: int | None, *, default: int, all_items: bool) -> int:
+    lim = default if limit is None else limit
+    if not all_items and not (1 <= lim <= 5000):
+        raise InputError("limit must be between 1 and 5000")
+    return lim
+
+
+def _check_loop_xor(loop_names: Sequence[str], all_loops: bool) -> None:
+    if bool(loop_names) == bool(all_loops):
+        raise InputError("specify loop names/patterns or --all (mutually exclusive)")
+
+
 def _dispatch(args: argparse.Namespace, extra: list[str], has_passthrough: bool) -> int:
     cmd, brain_arg = args.command, _resolve_brain_arg(args)
     if cmd == "schema":
@@ -372,10 +412,7 @@ def _dispatch(args: argparse.Namespace, extra: list[str], has_passthrough: bool)
     if cmd == "init":
         from bf import engine
 
-        if not args.path.strip():
-            raise InputError("path must be nonempty")
-        if args.name is not None and not args.name.strip():
-            raise InputError("--name must be nonempty")
+        _nonempty_opts(("path", args.path), ("--name", args.name))
         _emit(engine.init_brain(Path(args.path), name=args.name or "", description=args.description))
         return 0
 
@@ -388,6 +425,13 @@ def _dispatch(args: argparse.Namespace, extra: list[str], has_passthrough: bool)
     if cmd == "status":
         from bf import status
 
+        if args.watch is not None:
+            if args.format == "json":
+                raise InputError("--watch cannot be combined with --format json")
+            if args.check:
+                raise InputError("--watch cannot be combined with --check")
+            status.validate_watch_interval(args.watch)
+            return status.watch_status(config.select(brain_arg), interval=args.watch, color=_use_color())
         eff_fmt = args.format or "json"
         res = status.status_summary(config.select(brain_arg), include_loops=args.loops or eff_fmt == "text")
         if eff_fmt == "text":
@@ -400,8 +444,7 @@ def _dispatch(args: argparse.Namespace, extra: list[str], has_passthrough: bool)
     if cmd == "pause":
         from bf import loops
 
-        if bool(args.loops) == bool(args.all_loops):
-            raise InputError("specify loop names/patterns or --all (mutually exclusive)")
+        _check_loop_xor(args.loops, args.all_loops)
         dur_s: int | None = None
         if args.pause_for is not None:
             try:
@@ -414,17 +457,14 @@ def _dispatch(args: argparse.Namespace, extra: list[str], has_passthrough: bool)
     if cmd == "resume":
         from bf import loops
 
-        if bool(args.loops) == bool(args.all_loops):
-            raise InputError("specify loop names/patterns or --all (mutually exclusive)")
+        _check_loop_xor(args.loops, args.all_loops)
         store = config.select(brain_arg)
         _emit(loops.resume_loops(store, args.loops, all_loops=args.all_loops, dry_run=args.dry_run))
         return 0
     if cmd == "events":
         from bf import state
 
-        for flag, val in (("--kind", args.kind), ("--source", args.source)):
-            if val is not None and not val.strip():
-                raise InputError(f"{flag} must be nonempty")
+        _nonempty_opts(("--kind", args.kind), ("--source", args.source))
         lim = 20 if args.limit is None else args.limit
         state.validate_list_events_args(
             since=args.since, kind=args.kind or "", source=args.source or "", limit=lim, all_items=args.all_items
@@ -453,8 +493,7 @@ def _dispatch(args: argparse.Namespace, extra: list[str], has_passthrough: bool)
         if args.state_action == "prune":
             _emit(loops.prune_state(config.select(brain_arg), dry_run=args.dry_run))
             return 0
-        if bool(args.loops) == bool(args.all_loops):
-            raise InputError("specify loop names/patterns or --all (mutually exclusive)")
+        _check_loop_xor(args.loops, args.all_loops)
         _emit(loops.reset_loops(config.select(brain_arg), args.loops, all_loops=args.all_loops, dry_run=args.dry_run))
         return 0
     if cmd == "emit":
@@ -524,9 +563,7 @@ def _dispatch(args: argparse.Namespace, extra: list[str], has_passthrough: bool)
     if cmd == "check":
         from bf import engine
 
-        lim = 50 if args.limit is None else args.limit
-        if not args.all_problems and (lim < 1 or lim > 5000):
-            raise InputError("limit must be between 1 and 5000")
+        lim = _check_limit(args.limit, default=50, all_items=args.all_problems)
         res = engine.validate(
             config.select(brain_arg),
             limit=lim,
@@ -592,10 +629,7 @@ def _dispatch(args: argparse.Namespace, extra: list[str], has_passthrough: bool)
     if cmd == "ingest":
         from bf import records
 
-        if not args.input.strip():
-            raise InputError("--input must be nonempty")
-        if args.schema is not None and not args.schema.strip():
-            raise InputError("--schema must be nonempty")
+        _nonempty_opts(("--input", args.input), ("--schema", args.schema))
         records.validate_ingest_args(
             args.source, mode=args.mode, schema_name=args.schema or "", allow_removal=args.allow_removal
         )
@@ -634,47 +668,31 @@ def _dispatch(args: argparse.Namespace, extra: list[str], has_passthrough: bool)
     if cmd == "query":
         from bf import query
 
-        for flag, val in (
+        _nonempty_opts(
             ("--scope", args.scope),
             ("--type", args.rtype),
             ("--status", args.status),
             ("--tag", args.tag),
             ("--since", args.since),
             ("--links-to", args.links_to),
-        ):
-            if val is not None and not val.strip():
-                raise InputError(f"{flag} must be nonempty")
+        )
         if any(not e.strip() for e in args.exclude):
             raise InputError("--exclude must be nonempty")
         lim = 20 if args.limit is None else args.limit
-        query.validate_query_args(
-            args.query,
-            kind=args.kind,
-            scope=args.scope or "",
-            rtype=args.rtype or "",
-            status=args.status or "",
-            tag=args.tag or "",
-            since=args.since or "",
-            links_to=args.links_to or "",
-            exclude=args.exclude,
-            limit=lim,
-            all_items=args.all_items,
-        )
-        res = query.query(
-            config.select(brain_arg),
-            args.query,
-            kind=args.kind,
-            scope=args.scope or "",
-            rtype=args.rtype or "",
-            status=args.status or "",
-            tag=args.tag or "",
-            since=args.since or "",
-            links_to=args.links_to or "",
-            exclude=args.exclude,
-            all_sources=args.all_sources,
-            limit=lim,
-            all_items=args.all_items,
-        )
+        q_kw: dict[str, Any] = {
+            "kind": args.kind,
+            "scope": args.scope or "",
+            "rtype": args.rtype or "",
+            "status": args.status or "",
+            "tag": args.tag or "",
+            "since": args.since or "",
+            "links_to": args.links_to or "",
+            "exclude": args.exclude,
+            "limit": lim,
+            "all_items": args.all_items,
+        }
+        query.validate_query_args(args.query, **q_kw)
+        res = query.query(config.select(brain_arg), args.query, all_sources=args.all_sources, **q_kw)
         if args.format == "text":
             from bf import render
 
@@ -700,9 +718,7 @@ def _dispatch(args: argparse.Namespace, extra: list[str], has_passthrough: bool)
 
     from bf import engine
 
-    lim_rev = 20 if args.limit is None else args.limit
-    if not args.all_items and (lim_rev < 1 or lim_rev > 5000):
-        raise InputError("limit must be between 1 and 5000")
+    lim_rev = _check_limit(args.limit, default=20, all_items=args.all_items)
     res = engine.review(config.select(brain_arg), limit=lim_rev, all_items=args.all_items)
     if args.format == "text":
         from bf import render

@@ -355,7 +355,6 @@ def ingest(
                 for ref, rec_obj in changed_by_ref.items()
                 if ref in row_offsets
             ]
-            index_warning = ""
             try:
                 index.sync_source_delta(
                     store,

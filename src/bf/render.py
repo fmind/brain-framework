@@ -1,23 +1,27 @@
-"""Human text formatters for `bf status`, `bf watch`, `bf check`, `bf review`, `bf query`, and `bf events`."""
+"""Human text formatters and zero-termios live screen renderer for `bf status`, `bf watch`, `bf check`, `bf review`, `bf query`, and `bf events`."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
 from bf.models import now_utc, printable
 
-_STATE_ORDER = {"failed": 0, "running": 1, "ok": 2, "paused": 3, "stopped": 4, "idle": 5}
+ALT_ENTER = b"\033[?1049h\033[?25l\033[H\033[2J"
+ALT_EXIT = b"\033[?25h\033[?1049l"
+_ANSI_SGR = re.compile(r"\033\[[0-9;]*m")
+_STATE_ORDER = {"failed": 0, "running": 5, "ok": 6, "paused": 7, "stopped": 8, "idle": 9}
 
 
 def _ansi_codes(color: bool) -> tuple[str, str, str, str, str]:
     """Return `(ok, err, running, dim, reset)` ANSI SGR codes when `color` is enabled."""
     if not color:
         return ("", "", "", "", "")
-    return ("\033[32m", "\033[31;1m", "\033[36;1m", "\033[2m", "\033[0m")
+    return ("\033[32m", "\033[31;1m", "\033[36;1m", "\033[90m", "\033[0m")
 
 
 def _fmt_age(raw_iso: str, now: datetime, *, live: bool = False) -> str:
@@ -117,19 +121,31 @@ def _summary_head(summary: Mapping[str, Any], *, color: bool) -> list[str]:
     return [f"Brain: {printable(str(summary.get('brain', '')))}  [{badge}]", counts_line]
 
 
+def _neg_epoch(raw_iso: str) -> float:
+    with suppress(ValueError, TypeError):
+        if raw_iso:
+            return -datetime.fromisoformat(raw_iso).timestamp()
+    return 0.0
+
+
 def _loop_sort_key(item: tuple[str, dict[str, Any]]) -> tuple[Any, ...]:
-    data = item[1]
-    st = str(data.get("status", "idle"))
-    rank = _STATE_ORDER.get(st, 5)
-    if st != "paused" and (
-        int(data.get("consecutive_failures") or 0) > 0
-        or data.get("crashed")
-        or data.get("events_missed")
-        or data.get("degraded")
-        or data.get("overdue")
-    ):
-        rank = min(rank, 0)
-    return (rank, item[0])
+    name, data = item
+    st = str(data.get("status") or "idle")
+    consec = int(data.get("consecutive_failures") or 0)
+    ts = str(data.get("last_start" if st == "running" else "last_end") or data.get("last_success") or "")
+    if st == "paused":
+        return (7, 0, 0.0, name)
+    if st == "failed" or consec > 0:
+        return (0, -consec, _neg_epoch(ts), name)
+    if data.get("crashed"):
+        return (1, 0, _neg_epoch(ts), name)
+    if ev_m := int(data.get("events_missed") or 0):
+        return (2, -ev_m, _neg_epoch(ts), name)
+    if data.get("degraded"):
+        return (3, 0, _neg_epoch(ts), name)
+    if data.get("overdue"):
+        return (4, 0, _neg_epoch(ts), name)
+    return (_STATE_ORDER.get(st, 9), 0, _neg_epoch(ts), name)
 
 
 def _build_loop_rows(loops_map: Mapping[str, Any], instant: datetime, *, color: bool) -> tuple[str, list[str], int]:
@@ -202,6 +218,75 @@ def format_status_text(summary: Mapping[str, Any], *, color: bool = False, now: 
             lines.append(f"  {c_dim}({disabled} disabled loop(s)){c_rst}")
     lines.extend(_alert_lines(summary))
     return "\n".join(lines) + "\n"
+
+
+def _clip_ansi(line: str, width: int) -> str:
+    """Clamp one line containing SGR escapes to `width` display columns without slicing escape sequences."""
+    if width < 4 or len(_ANSI_SGR.sub("", line)) <= width:
+        return line
+    out: list[str] = []
+    vis = pos = 0
+    limit = width - 1
+    had_ansi = False
+    for m in _ANSI_SGR.finditer(line):
+        seg = line[pos : m.start()]
+        if vis + len(seg) >= limit:
+            out.append(seg[: max(0, limit - vis)])
+            break
+        out.append(seg)
+        vis += len(seg)
+        out.append(m.group(0))
+        had_ansi = True
+        pos = m.end()
+    else:
+        out.append(line[pos : pos + max(0, limit - vis)])
+    out.append("…")
+    if had_ansi:
+        out.append("\033[0m")
+    return "".join(out)
+
+
+def format_live_screen(
+    summary: Mapping[str, Any],
+    *,
+    recent: Sequence[str] = (),
+    footer: str = "",
+    color: bool = False,
+    now: datetime | None = None,
+    cols: int | None = None,
+    rows: int | None = None,
+) -> str:
+    """Format a failure-first live status screen with optional recent activity lines and terminal bounds."""
+    _, _, _, c_dim, c_rst = _ansi_codes(color)
+    body = format_status_text(summary, color=color, now=now).rstrip("\n").splitlines()
+    foot_lines = ["", f"{c_dim}{printable(footer)}{c_rst}"] if footer else []
+    recent_clean = [f"  {ln.rstrip()}" for ln in recent[-5:] if ln.strip()]
+
+    if rows is not None and rows >= 6:
+        avail_body = max(3, rows - len(foot_lines))
+        if len(body) > avail_body:
+            hidden = len(body) - (avail_body - 1)
+            body = [*body[: avail_body - 1], f"  {c_dim}… (+{hidden} more; run bf status --format text){c_rst}"]
+            recent_clean = []
+        elif recent_clean:
+            spare = avail_body - len(body) - 2
+            recent_clean = recent_clean[-spare:] if spare > 0 else []
+
+    out = list(body)
+    if recent_clean:
+        out.extend(["", f"  {c_dim}RECENT{c_rst}", *recent_clean])
+    out.extend(foot_lines)
+    if cols is not None and cols >= 16:
+        out = [_clip_ansi(ln, cols) for ln in out]
+    return "\n".join(out) + "\n"
+
+
+def paint_frame(frame: str, *, tty: bool) -> bytes:
+    """Render `frame` as a flicker-free ANSI in-place repaint on TTYs or plain UTF-8 text otherwise."""
+    if not tty:
+        return frame.encode("utf-8")
+    lines = frame.rstrip("\n").splitlines()
+    return ("\033[H" + "\n".join(f"{ln}\033[K" for ln in lines) + "\033[J").encode("utf-8")
 
 
 def format_watch_line(event: str, payload: Mapping[str, Any], *, color: bool = False) -> str:

@@ -1318,8 +1318,13 @@ def test_watch_live_reload_rate_limit_broken_pipe_and_proc_status_edges(
                     break
                 time.sleep(0.03)
             assert "event rate limit reached" in rl_out
-            # Rotate `.env` and edit daemon script -> live daemon restarts!
-            live_store.write(".env", b"D_TAG=rotated\n", mode=0o600)
+            # Changing an unrelated `.env` key must NOT restart a daemon that does not allowlist it.
+            start_before = loops.load_unit_state(live_store, "live-d")["last_start"]
+            live_store.write(".env", b"D_TAG=init\nUNRELATED_KEY=changed\n", mode=0o600)
+            time.sleep(0.7)
+            assert loops.load_unit_state(live_store, "live-d")["last_start"] == start_before
+            # Rotate allowlisted `.env` key and edit daemon script -> live daemon restarts!
+            live_store.write(".env", b"D_TAG=rotated\nUNRELATED_KEY=changed\n", mode=0o600)
             assert wait_event_id("v1-rotated")
             live_store.write(
                 "routines/live_d.py",
@@ -2401,3 +2406,257 @@ def test_review_regressions_event_race_status_toctou_and_clock_step(
     res_t = loops.execute_one_loop(store, slow_loop, trigger="manual", stop_event=stop_e, term_event=term_e)
     tt.join(timeout=2.0)
     assert res_t["exit_code"] == 143
+
+    # `lock-probe-contention-race`: transient `LOCK_SH` probe does not fail `execute_one_loop` with spurious `BusyError`.
+    import fcntl
+
+    quick_loop = config.LoopSpec("quick-ok", run=(sys.executable, "-c", "pass"))
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: reg\nloops:\n  quick-ok:\n    run: [{sys.executable!r}, -c, 'pass']\n".encode(),
+    )
+    locks_p = private_dir(store, ".bf", "locks")
+    locks_p.write("loop-quick-ok.lock", b"", mode=0o600)
+    probe_fd = os.open(store.root / ".bf" / "locks" / "loop-quick-ok.lock", os.O_RDONLY)
+    fcntl.flock(probe_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+
+    def _drop_probe() -> None:
+        time.sleep(0.015)
+        os.close(probe_fd)
+
+    pt = threading.Thread(target=_drop_probe, daemon=True)
+    pt.start()
+    try:
+        ok_res = loops.execute_one_loop(store, quick_loop, trigger="manual")
+    finally:
+        pt.join(timeout=1.0)
+    assert ok_res["status"] == "ok"
+
+    # `select_due_with_snapshot` + `next_due_delay(..., snapshot=...)` reuses loaded state/events without re-reading disk.
+    store.write(
+        "bf.yaml",
+        f"version: {FORMAT}\nname: reg\nloops:\n  quick-ok:\n    when: 1h\n    run: [{sys.executable!r}, -c, 'pass']\n".encode(),
+    )
+    t_snap = datetime(2026, 11, 25, 13, 0, tzinfo=UTC)
+    state.mark_unit_state(store, "quick-ok", paused=True, paused_until="2026-11-25T13:00:45Z")
+    cfg_snap = config.load(store)
+    _, _, snap = loops.select_due_with_snapshot(store, cfg_snap, sched_now=t_snap)
+    assert "quick-ok" in snap.states
+    expected_delay = watch.next_due_delay(store, cfg_snap, t_snap, max_wait=120.0)
+    assert 44.0 <= expected_delay <= 46.0
+    with monkeypatch.context() as mp_snap:
+        mp_snap.setattr(state, "load_unit_state", lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("disk read")))
+        assert watch.next_due_delay(store, cfg_snap, t_snap, max_wait=120.0, snapshot=snap) == expected_delay
+
+
+def test_status_watch_and_live_watch_screen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise read-only `status.watch_status` and zero-termios live `bf watch` across TTY, non-TTY, signals, and errors."""
+    import io
+
+    from bf.models import InputError
+
+    # 1. Interval validation boundaries.
+    assert status.validate_watch_interval(0.5) == 0.5
+    assert status.validate_watch_interval(2.0) == 2.0
+    assert status.validate_watch_interval(3600.0) == 3600.0
+    for bad_iv in (0.0, 0.49, 3600.1, float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(InputError, match=r"between 0\.5 and 3600"):
+            status.validate_watch_interval(bad_iv)
+
+    root = tmp_path / "live-brain"
+    engine.init_brain(root, name="live-brain")
+    store = Store(root)
+    store.write(
+        "bf.yaml",
+        (
+            f"version: {FORMAT}\nname: live-brain\n"
+            "concurrency:\n  default: 2\n  llm: 1\n"
+            "loops:\n"
+            f"  ok-loop:\n    when: 1m\n    run: [{sys.executable!r}, -c, 'print(1)']\n"
+            f"  bad-loop:\n    pool: llm\n    when: 1m\n    run: [{sys.executable!r}, -c, 'import sys; sys.stderr.write(\"boom\\n\"); sys.exit(1)']\n"
+        ).encode(),
+    )
+
+    # 2. `status_summary(..., cached_corpus=...)` reuses counts/warnings/problems and keeps live loop count.
+    cached_res = status.status_summary(
+        store,
+        include_loops=True,
+        cached_corpus=(
+            {"notes": 7, "memories": 42, "sources": 2, "loops": 99},
+            ["concepts"],
+            True,
+            ["big file"],
+            ["cprob"],
+        ),
+    )
+    assert cached_res["counts"] == {"notes": 7, "memories": 42, "sources": 2, "loops": 2}
+    assert cached_res["unbuilt_notes"] == ["concepts"]
+    assert cached_res["index_stale"] is True
+    assert cached_res["scale_warnings"] == ["big file"]
+    assert "cprob" in cached_res["problems"]
+
+    class _FakeStream:
+        def __init__(self, *, tty: bool, fail_pipe: bool = False) -> None:
+            self._tty = tty
+            self._fail_pipe = fail_pipe
+            self.raw = io.BytesIO()
+            self.buffer: Any = self
+
+        def isatty(self) -> bool:
+            return self._tty
+
+        def write(self, data: bytes) -> int:
+            if self._fail_pipe:
+                raise BrokenPipeError
+            return self.raw.write(data)
+
+        def flush(self) -> None:
+            return None
+
+    # 3. `status.watch_status`: non-TTY read-only (no alt-screen, never creates `.bf/`).
+    ro_root = tmp_path / "ro-watch"
+    ro_root.mkdir()
+    ro_store = Store(ro_root)
+    ro_store.write("bf.yaml", f"version: {FORMAT}\nname: ro-watch\n".encode())
+    ev_stop = threading.Event()
+    ev_stop.set()
+    non_tty = _FakeStream(tty=False)
+    with monkeypatch.context() as mp:
+        mp.setattr(sys, "stdout", non_tty)
+        rc = status.watch_status(ro_store, interval=1.0, stop_event=ev_stop)
+    assert rc == 0
+    assert not (ro_root / ".bf").exists()
+    out_plain = non_tty.raw.getvalue()
+    assert render.ALT_ENTER not in out_plain
+    assert b"Brain: ro-watch" in out_plain
+    assert b"Refreshing every 1s" in out_plain
+
+    # 4. `status.watch_status`: fake TTY alt-screen + color + clean exit on stop_event, KeyboardInterrupt (130), BrokenPipeError (0), SIGTERM (143).
+    tty_out = _FakeStream(tty=True)
+    with monkeypatch.context() as mp:
+        mp.setattr(sys, "stdout", tty_out)
+        mp.setenv("TERM", "xterm-256color")
+        mp.delenv("NO_COLOR", raising=False)
+        rc_tty = status.watch_status(store, interval=0.5, stop_event=ev_stop)
+    assert rc_tty == 0
+    raw_tty = tty_out.raw.getvalue()
+    assert raw_tty.startswith(render.ALT_ENTER)
+    assert raw_tty.endswith(render.ALT_EXIT)
+    assert b"\033[H" in raw_tty
+    assert b"\033[J" in raw_tty
+
+    class _InterruptEvent(threading.Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            assert timeout == 0.5
+            raise KeyboardInterrupt
+
+    ki_out = _FakeStream(tty=True)
+    with monkeypatch.context() as mp:
+        mp.setattr(sys, "stdout", ki_out)
+        mp.setenv("TERM", "xterm-256color")
+        assert status.watch_status(store, interval=0.5, stop_event=_InterruptEvent()) == 130
+    assert ki_out.raw.getvalue().endswith(render.ALT_EXIT)
+
+    pipe_out = _FakeStream(tty=False, fail_pipe=True)
+    with monkeypatch.context() as mp:
+        mp.setattr(sys, "stdout", pipe_out)
+        assert status.watch_status(store, interval=0.5, stop_event=ev_stop) == 0
+
+    class _TermEvent(threading.Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            assert timeout == 0.5
+            os.kill(os.getpid(), signal.SIGTERM)
+            return super().wait(1.0)
+
+    term_out = _FakeStream(tty=False)
+    with monkeypatch.context() as mp:
+        mp.setattr(sys, "stdout", term_out)
+        assert status.watch_status(store, interval=0.5, stop_event=_TermEvent()) == 143
+
+    # 5. `watch.serve` with `fmt="auto"` on fake TTY runs live failure-first screen, caches corpus, repaints on events/notes, exits alt-screen cleanly!
+    live_tty = _FakeStream(tty=True)
+    w_stop = threading.Event()
+    real_corpus = status.corpus_counts
+    corpus_calls = [0]
+
+    def _spy_corpus(st: Store, cfg_c: config.Config, **kw: Any) -> tuple[dict[str, int], list[str], bool]:
+        corpus_calls[0] += 1
+        if corpus_calls[0] == 1:
+            raise Error("transient scan error")
+        return real_corpus(st, cfg_c, **kw)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(sys, "stdout", live_tty)
+        mp.setenv("TERM", "xterm-256color")
+        mp.delenv("NO_COLOR", raising=False)
+        mp.setattr(status, "corpus_counts", _spy_corpus)
+        mp.setattr(watch, "_LIVE_REFRESH_SECS", 0.08)
+        wt = threading.Thread(target=lambda: watch.serve(store, fmt="auto", stop_event=w_stop), daemon=True)
+        wt.start()
+        try:
+            dl = time.monotonic() + 6.0
+            while time.monotonic() < dl:
+                st_bad = state.load_unit_state(store, "bad-loop", default_event_seq=0)
+                st_ok = state.load_unit_state(store, "ok-loop", default_event_seq=0)
+                if st_bad.get("failures", 0) >= 1 and st_ok.get("runs", 0) >= 1:
+                    break
+                time.sleep(0.04)
+            # Trigger note change so `_handle_changes` also exercises `render_dirty.set()`, plus wait one periodic tick for cache hit!
+            store.write("concepts/live-note.md", b"---\ntype: guide\nstatus: stable\n---\n# Live\n")
+            time.sleep(0.25)
+        finally:
+            w_stop.set()
+            wt.join(timeout=6.0)
+            assert not wt.is_alive()
+
+    raw_live = live_tty.raw.getvalue()
+    assert raw_live.startswith(render.ALT_ENTER)
+    assert render.ALT_EXIT in raw_live
+    assert b"RECENT" in raw_live
+    assert b"Watching live-brain (default:2, llm:1)" in raw_live
+    # Final stopped line appears AFTER ALT_EXIT on the normal screen!
+    after_exit = raw_live.split(render.ALT_EXIT)[-1]
+    assert b"stop" in after_exit
+    assert b"live-brain" in after_exit
+    # Failure row appears above ok row in the rendered frame once loops ran!
+    last_frame = raw_live.split(b"\033[H")[-1].decode("utf-8", "replace")
+    assert "bad-loop" in last_frame
+    assert "ok-loop" in last_frame
+    assert last_frame.index("bad-loop") < last_frame.index("ok-loop")
+
+    # 6. `watch.serve(..., fmt="live")` on non-TTY skips alt-screen escapes and emits plain UTF-8 frames + final stop line!
+    live_plain = _FakeStream(tty=False)
+    p_stop = threading.Event()
+    threading.Timer(0.15, p_stop.set).start()
+    with monkeypatch.context() as mp:
+        mp.setattr(sys, "stdout", live_plain)
+        res_plain = watch.serve(store, fmt="live", stop_event=p_stop)
+    assert res_plain["exit_code"] == 0
+    plain_watch = live_plain.raw.getvalue()
+    assert render.ALT_ENTER not in plain_watch
+    assert render.ALT_EXIT not in plain_watch
+    assert b"Brain: live-brain" in plain_watch
+    assert b"stop" in plain_watch
+
+    # 7. Double-interrupt during `watch.serve` teardown still writes `ALT_EXIT` via inner `finally:`!
+    from concurrent.futures import ThreadPoolExecutor
+
+    ki_watch = _FakeStream(tty=True)
+    real_shutdown = ThreadPoolExecutor.shutdown
+    shot = [False]
+
+    def _boom_shutdown(self_p: ThreadPoolExecutor, *a: Any, **kw: Any) -> None:
+        real_shutdown(self_p, *a, **kw)
+        if not shot[0]:
+            shot[0] = True
+            raise KeyboardInterrupt
+
+    ki_stop = threading.Event()
+    ki_stop.set()
+    with monkeypatch.context() as mp:
+        mp.setattr(sys, "stdout", ki_watch)
+        mp.setenv("TERM", "xterm-256color")
+        mp.setattr(ThreadPoolExecutor, "shutdown", _boom_shutdown)
+        with pytest.raises(KeyboardInterrupt):
+            watch.serve(store, fmt="live", stop_event=ki_stop)
+    assert ki_watch.raw.getvalue().endswith(render.ALT_EXIT)

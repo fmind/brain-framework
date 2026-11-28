@@ -144,7 +144,7 @@ Guides = [
   { "getting-started.md" = "Create a brain, ingest a record, write a Markdown decision with heading anchors and typed links, and search with BM25 bf query, bf read, and bf review." },
   { "authoring.md" = "Write YAML-frontmatter Markdown with CommonMark attr_list metadata, connect notes and brains with universal refs and bf:// URLs, and add optional JSON Schemas in schemas/." },
   { "retrieval.md" = "Orient with bf status and bf review, resolve universal refs with bf read, and search ranked BM25 results and backlinks across memories/ with bf query, rg, jq, DuckDB, and bf check." },
-  { "operations.md" = "Compose explicit, least-privilege loops with per-loop env_from allowlists, per-trigger windows, stdout/stderr JSONL streams, when triggers, and headless bf watch." },
+  { "operations.md" = "Compose explicit, least-privilege loops with per-loop env_from allowlists, per-trigger windows, stdout/stderr JSONL streams, when triggers, and bf watch." },
 ]
 Reference = [
   { "reference.md" = "Complete contract lookup for bf CLI commands, exit codes, 3x3 brain layout, bf.yaml v19, and published JSON Schemas." },

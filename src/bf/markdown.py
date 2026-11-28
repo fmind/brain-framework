@@ -485,11 +485,7 @@ def compiled_anchors(item: dict[str, Any]) -> set[str]:
     }
 
 
-def extract_section(text: str, anchor: str, compiled: dict[str, Any]) -> dict[str, Any]:
-    """Extract the exact raw Markdown section for heading `#anchor` using the single CommonMark AST line map."""
-    ref = str(compiled.get("ref") or "<note>")
-    _, body = _split_frontmatter(ref, text.encode("utf-8"), parse_yaml=False)
-    _, parsed_headings, _, _, _ = _parse_body(ref, body)
+def _section_from_parsed(ref: str, body: str, parsed_headings: list[_ParsedHeading], anchor: str) -> dict[str, Any]:
     target_idx = next((i for i, h in enumerate(parsed_headings) if h.id == anchor), None)
     if target_idx is None:
         raise Error(f"{ref}: missing anchor #{anchor}")
@@ -509,10 +505,10 @@ def extract_section(text: str, anchor: str, compiled: dict[str, Any]) -> dict[st
     }
 
 
-def compile_note(
+def _compile_note_parts(
     path: str, data: bytes, *, brain_name: str, note_dirs: Iterable[str] = DEFAULT_NOTES
-) -> dict[str, Any]:
-    """Compile a Markdown note into a sanitized, schema-ready JSON record (`kind: 'note'`)."""
+) -> tuple[dict[str, Any], str, list[_ParsedHeading]]:
+    """Compile a Markdown note in one AST pass, returning `(compiled_record, raw_body, parsed_headings)`."""
     if (role := note_role(path, note_dirs)) is None:
         raise Error(f"{path}: not an authored note path")
     source_dir, is_bundle = role
@@ -583,4 +579,19 @@ def compile_note(
     sanitized = sanitize_record_strings(merged)
     compiled = {k: v for k, v in sanitized.items() if not (k in _OMIT_OPT and v in ("", {}, [], None))}
     encode(compiled)
-    return compiled
+    return compiled, body, parsed_headings
+
+
+def compile_note(
+    path: str, data: bytes, *, brain_name: str, note_dirs: Iterable[str] = DEFAULT_NOTES
+) -> dict[str, Any]:
+    """Compile a Markdown note into a sanitized, schema-ready JSON record (`kind: 'note'`)."""
+    return _compile_note_parts(path, data, brain_name=brain_name, note_dirs=note_dirs)[0]
+
+
+def compile_note_section(
+    path: str, data: bytes, anchor: str, *, brain_name: str, note_dirs: Iterable[str] = DEFAULT_NOTES
+) -> dict[str, Any]:
+    """Validate and extract `#anchor` from an authored Markdown note in a single frontmatter + AST pass."""
+    _, body, parsed_headings = _compile_note_parts(path, data, brain_name=brain_name, note_dirs=note_dirs)
+    return _section_from_parsed(path, body, parsed_headings, anchor)

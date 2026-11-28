@@ -4,6 +4,24 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v34.1.0](https://github.com/fmind/brain-framework/releases/tag/v34.1.0) - 2026-11-28
+
+A minor release adding a zero-`termios`, failure-first live status screen to `bf watch` and read-only `bf status --watch`, a reproducible terminal demo in `README.md`, grouped Core/Automation CLI help and progressive onboarding docs, a per-loop lock-probe contention fix, and internal runtime deduplication. The brain format (`version: 19`), `bf.yaml`, published JSON Schemas, and existing JSON/JSONL CLI outputs are unchanged; no upgrade step is needed from `v34.0.2`.
+
+### Added
+
+- **Non-interactive failure-first live status screen (`bf watch --format live` and `bf status --watch`).** `bf watch --format auto` now renders an in-place, zero-`termios` ANSI status screen on interactive TTYs (explicitly selectable via `--format live`, keeping `--format text` scrolling and `--format jsonl` for pipes/`systemd`/`launchd`), pairing the loop table with a compact 5-line recent activity tail; read-only `bf status --watch [SECONDS]` provides the same live table view on Linux and macOS without external `watch`. Loops sort with failures and attention states pinned first (`failed` → `crashed` → `lagging` → `degraded` → `overdue` → `running` → `ok` → `paused` → `stopped` → `idle`, newest/most-failing first), with native terminal copy-paste and muted `\033[90m` ANSI styling (meeting WCAG AA contrast in `docs/assets/theme.tape`).
+- **Reproducible VHS terminal demo in `README.md`.** Added `docs/assets/demo.tape`, `docs/assets/theme.tape`, and `docs/assets/demo.gif` showing offline BM25 `bf query`, `--links-to` backlinks, `bf ingest` + `bf review` staleness detection, and failure-first live `bf watch`.
+
+### Fixed
+
+- **Eliminate lock-probe contention race on per-loop locks.** `execute_one_loop()` (`loop_lock(..., wait=0.05)`) and `storage.try_unlink_loop_lock()` now retry briefly on transient `BlockingIOError` so concurrent read-only `LOCK_SH` probes (`bf status` on crashed `"running"` loops or `bf state prune --dry-run`) never trigger spurious `BusyError` failures or skip orphan lock cleanup.
+
+### Changed
+
+- **Grouped `bf --help` and progressive onboarding docs.** Organized `bf --help` into Core (`init`, `build`, `query`, `read`, `review`, `check`, `status`, `schema`) and Automation (`ingest`, `run`, `watch`, `emit`, `events`, `pause`, `resume`, `state`) tiers, added a two-tier progression table to `README.md` and `docs/index.md`, and added a cross-repo coding-harness snippet to `README.md`.
+- **Internal runtime deduplication and hot-path tightening.** Reused `loops.DueSnapshot` across `watch.run_ticks` -> `watch.next_due_delay` and stat-cached `_watched_state_names` pause checks, scoped daemon `.env` hot-reload hashes to each daemon's `env_from:` keys, replaced `markdown.extract_section` with single-pass `markdown.compile_note_section` on `bf read <note>#<anchor>`, combined `index.sync_source_delta` with `meta_updates` in `engine.build`, unified `state.py` dry-run event/timer planning and `config.normalize_brain_script`, removed the redundant `PemFilter` in `state.make_stderr_logger`, and tightened `cli.py` argument validation helpers.
+
 ## [v34.0.2](https://github.com/fmind/brain-framework/releases/tag/v34.0.2) - 2026-11-27
 
 A patch release fixing manual `bf run` clearing of `pending_events_missed`, simplifying internal runtime helpers, correcting operations runbooks and contract docs, and adding `npx skills` installation for `/bf`. The brain format (`version: 19`), `bf.yaml`, published JSON Schemas, and CLI outputs are unchanged; no migration is needed from `v34.0.1`.

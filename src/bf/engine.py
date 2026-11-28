@@ -296,7 +296,11 @@ def build(store: Store, *, dry_run: bool = False, now: datetime | None = None) -
                         chunks.append(b"\n")
                         pos += len(line_b) + 1
                     payload = b"".join(chunks)
-                    cur_bytes = store.read(NOTES_FILE) if has_notes_file else b""
+                    cur_bytes = (
+                        b"".join(existing[ref][0] + b"\n" for ref in existing_order)
+                        if (has_notes_file and existing_clean)
+                        else (store.read(NOTES_FILE) if has_notes_file else b"")
+                    )
                     if payload != cur_bytes:
                         store.write(NOTES_FILE, payload, durable=True)
                         touched = True
@@ -311,9 +315,10 @@ def build(store: Store, *, dry_run: bool = False, now: datetime | None = None) -
                     store.sync_dirs(["memories"])
 
             # Best-effort disposable cache sync while holding `corpus.lock` (discovers `mem_sources` under lock).
-            index_warning = ""
             try:
                 mem_sources = records.valid_memory_sources(store, reserved=cfg.reserved_sources)
+                meta_upd = {"build_sig": cur_sig} if not problems else None
+                delta_synced = False
                 if touched and existing_clean:
                     changed_notes = [
                         (row_offsets[ref][0], row_offsets[ref][1], comp)
@@ -331,13 +336,14 @@ def build(store: Store, *, dry_run: bool = False, now: datetime | None = None) -
                         removed_refs=removed_refs,
                         total_count=len(desired),
                         reserved=cfg.reserved_sources,
+                        meta_updates=meta_upd,
                         locked=True,
                     )
-                meta_upd = {"build_sig": cur_sig} if not problems else None
+                    delta_synced = True
                 if (
                     (touched and not existing_clean)
-                    or index.is_stale(store, mem_sources)
-                    or (meta_upd is not None and index.get_meta(store, "build_sig") != cur_sig)
+                    or index.is_stale(store, mem_sources, include_notes=not delta_synced)
+                    or (not delta_synced and meta_upd is not None and index.get_meta(store, "build_sig") != cur_sig)
                 ):
                     index.sync_all(
                         store,

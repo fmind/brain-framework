@@ -1024,6 +1024,10 @@ def test_cron_edge_cases_wrap_around_and_config_errors(tmp_path: Path) -> None:
     assert config.normalize_brain_script("/abs/path.py") == ""
     assert config.normalize_brain_script("./sensors/a.py") == "sensors/a.py"
     assert config.normalize_brain_script("../escape.py") == ""
+    assert config.normalize_brain_script("https://example.com/script.py") == ""
+    assert config.normalize_brain_script("{{state}}/cursor.json") == ""
+    assert config.normalize_brain_script("custom/helper.py") == "custom/helper.py"
+    assert config.normalize_brain_script(f"{st.root}/sensors/a.py", st.root) == "sensors/a.py"
     config.validate_loop_scripts(st, (), "u")
 
     # Reserved ingest source name and non-file bf.yaml rejected.
@@ -1222,3 +1226,28 @@ def test_concurrency_pools_debounce_and_logs_lock_isolation(tmp_path: Path) -> N
             priv.read("nested/item.jsonl")
     finally:
         nested_dir.chmod(0o700)
+
+    # Transient `LOCK_SH` probe contention must not cause `try_unlink_loop_lock` to skip unlinking an unlocked orphan.
+    import fcntl
+    import threading
+    import time
+
+    from bf.storage import try_unlink_loop_lock
+
+    locks_dir = private_dir(log_store, ".bf", "locks")
+    locks_dir.write("loop-transient.lock", b"", mode=0o600)
+    lock_file = b / ".bf" / "locks" / "loop-transient.lock"
+    sh_fd = os.open(lock_file, os.O_RDONLY)
+    fcntl.flock(sh_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+
+    def _release_soon() -> None:
+        time.sleep(0.015)
+        os.close(sh_fd)
+
+    rel_t = threading.Thread(target=_release_soon, daemon=True)
+    rel_t.start()
+    try:
+        assert try_unlink_loop_lock(log_store, "loop-transient.lock", wait=0.2) is True
+    finally:
+        rel_t.join(timeout=1.0)
+    assert not lock_file.exists()

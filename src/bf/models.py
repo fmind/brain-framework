@@ -68,7 +68,7 @@ _PEM_BODY = rf"(?:(?!-----(?:BEGIN|END) {_PEM_TAG})[\s\S]){{0,65536}}"
 
 
 class PemFilter:
-    """Stateful multi-line PEM private-key suppressor shared by `proc.drain_tail` and `state.make_stderr_logger`."""
+    """Stateful multi-line PEM private-key suppressor used by `proc.drain_tail`."""
 
     __slots__ = ("in_pem", "max_bytes", "pem_bytes")
 

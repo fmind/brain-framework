@@ -163,7 +163,10 @@ def test_compile_note_empty_body_isolation_setext_h1_and_unicode_sanitization() 
     c_h1 = markdown.compile_note("concepts/h1.md", setext_h1.encode(), brain_name="b")
     assert c_h1["title"] == "Main Title"
     assert c_h1["headings"][0] == {"id": "main", "title": "Main Title", "level": 1}
-    assert "Body under H1." in markdown.extract_section(setext_h1, "main", c_h1)["text"]
+    assert (
+        "Body under H1."
+        in markdown.compile_note_section("concepts/h1.md", setext_h1.encode(), "main", brain_name="b")["text"]
+    )
 
     # P1 regression: post-parse recursive Unicode sanitization strips YAML-escaped Cf / Unicode Tags / ANSI!
     evil_yaml = (
@@ -449,8 +452,7 @@ def test_anchor_ids_handles_frontmatter_and_rejects_bad_files() -> None:
         "Setext Section {#setext-id}\n--------------\n\n"
         "- list item\n  wrapped before hr\n---\n\nAfter hr.\n\n## Next\n\nTail.\n"
     )
-    comp = markdown.compile_note("concepts/setext.md", tricky.encode(), brain_name="demo")
-    sliced = markdown.extract_section(tricky, "setext-id", comp)
+    sliced = markdown.compile_note_section("concepts/setext.md", tricky.encode(), "setext-id", brain_name="demo")
     assert "After hr." in sliced["text"]
     assert "Tail." not in sliced["text"]
 
@@ -534,8 +536,7 @@ def test_url_whitespace_footnote_nested_list_and_html_comment_section() -> None:
         "# Top\n\n<!--\n```\n## Fake heading inside fenced comment\n-->\n\n"
         "    <!-- indented code block, not a comment\n\n## Real {#real}\n\nActual body.\n"
     )
-    comp_c = markdown.compile_note("concepts/c.md", comment_md.encode(), brain_name="brain")
-    sec = markdown.extract_section(comment_md, "real", comp_c)
+    sec = markdown.compile_note_section("concepts/c.md", comment_md.encode(), "real", brain_name="brain")
     assert "Actual body." in sec["text"]
     assert "Fake heading" not in sec["text"]
 

@@ -1,11 +1,11 @@
 ---
 icon: lucide/shield-check
-description: Compose explicit, least-privilege loops with per-loop env_from allowlists, per-trigger windows, stdout/stderr JSONL streams, when triggers, and headless bf watch.
+description: Compose explicit, least-privilege loops with per-loop env_from allowlists, per-trigger windows, stdout/stderr JSONL streams, when triggers, and bf watch.
 ---
 
 # Operations
 
-Run deterministic sensors, maintenance routines, coding agents, and stream listeners under one explicit `loops:` contract in `bf.yaml`. Supervise everything headlessly with `bf watch`, inspect health with `bf status`, and manage state explicitly with `bf pause`, `bf resume`, and `bf state`.
+Run deterministic sensors, maintenance routines, coding agents, and stream listeners under one explicit `loops:` contract in `bf.yaml`. Supervise everything with `bf watch` (live failure-first screen on a TTY; JSONL when piped), inspect health with `bf status` (or `bf status --watch`), and manage state explicitly with `bf pause`, `bf resume`, and `bf state`.
 
 ## Start with one loop {#ingest-sensor-records}
 
@@ -34,11 +34,11 @@ bf run github-issues --dry-run
 bf run github-issues
 bf status --format text
 
-# Run all scheduled, event-driven, and daemon loops continuously
+# Run all scheduled, event-driven, and daemon loops continuously (live failure-first table on TTY; jsonl when piped)
 bf watch
 
-# Monitor live from another terminal
-watch -n 2 bf status --format text
+# Attach a read-only live view from another terminal (useful when bf watch runs under systemd/launchd)
+bf status --watch
 ```
 
 Starter stdlib sensors live in [examples/sensors/](https://github.com/fmind/brain-framework/tree/main/examples/sensors) (`git-history.py`, `github-issues.py`, `gmail-headers.py`, `local-documents.py`, and self-monitoring `agent-telemetry.py`).
@@ -151,7 +151,7 @@ loops:
 - **Event bus and cursors**: `emit: <kind>`, `bf emit`, `bf build`, `bf ingest`, and triggered loops append deduplicated events to `.bf/state/events.jsonl` (`0600`, compacted at `10,000` lines / `16 MiB`). New or reset loops anchor at current `event_seq` so history never replays; lagging loops surface `events_missed` in `bf status`.
 - **Delayed wakeups and inspection**: schedule durable timers with `bf emit KIND --in DURATION | --at ISO` into `.bf/state/timers.jsonl` (promoted by `bf watch` and `bf run --due`), and inspect events or timers read-only via `bf events [--timers]`.
 - **Live pause and locks**: mute or unmute cycle loops and daemons without editing `bf.yaml` via `bf pause [LOOP ...] [--for DURATION]` and `bf resume`. Per-loop `.bf/locks/loop-<name>.lock` files prevent concurrent overlap and flag crashed loops in `bf status`.
-- **Headless `bf watch`**: holds `.bf/watch.lock`, polls managed folders via stdlib `O_NOFOLLOW` scanning (skipping `.git/`, `.venv/`, `memories/`, `logs/`), promotes due timers, honors live pause/resume, and supervises builds, daemons, and pooled cycle loops under `systemd --user` or `journald`. `--format auto` picks `text` on TTY and `jsonl` when piped, and `SIGTERM` exits `143` after draining daemons.
+- **Supervision (`bf watch`)**: holds `.bf/watch.lock`, polls managed folders via stdlib `O_NOFOLLOW` scanning (skipping `.git/`, `.venv/`, `memories/`, `logs/`), promotes due timers, honors live pause/resume, and supervises builds, daemons, and pooled cycle loops. `--format auto` renders a zero-`termios` failure-first live table (plus recent activity) on non-dumb TTYs and structured `jsonl` when piped or under `systemd --user` / `launchd` (`--format text` keeps plain scrolling event lines); `SIGTERM` exits `143` after draining daemons.
 - **Atomic JSONL storage and guards**: `bf ingest` writes `memories/<source>.jsonl` atomically (deleting empty files for DuckDB) and updates `.bf/cache/index.sqlite3` best-effort. It honors `memories/<source>.forgotten`, holds watermarks when `incomplete` is set (`degraded` in `bf status`), and blocks emptying a source or dropping >50% of 10+ records without `--allow-removal`.
 
 ## Maintenance runbook

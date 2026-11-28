@@ -116,4 +116,4 @@ Upgrade the installed CLI with `uv tool upgrade brain-framework`. Before crossin
 
 - [Authoring](authoring.md): Write folder bundles (`<slug>/index.md`), cross-brain `bf://` links, and optional domain schemas.
 - [Retrieval](retrieval.md): Combine `bf query` backlinks with direct `rg`, `jq`, and DuckDB queries over `memories/*.jsonl`.
-- [Operations](operations.md): Automate sensors, routines, and agents with explicit `loops:` and headless `bf watch`.
+- [Operations](operations.md): Automate sensors, routines, and agents with explicit `loops:` and `bf watch`.

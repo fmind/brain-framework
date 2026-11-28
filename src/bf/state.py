@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from bf import models
-from bf.models import Error, InputError, PemFilter, clean, decode, encode, now_utc
+from bf.models import Error, InputError, clean, decode, encode, now_utc
 from bf.storage import Store, append_regular, private_dir, tail_lines, writer
 
 MAX_EVENTS = 10_000
@@ -23,7 +23,6 @@ TIMERS_FILE = "timers.jsonl"
 MAX_TIMERS = 1000
 MAX_TIMERS_FILE = 4 << 20
 STATE_PARTS = (".bf", "state")
-_PEM_MAX_BYTES = 16384
 _MAX_DT = datetime.max.replace(tzinfo=UTC)
 
 
@@ -174,20 +173,9 @@ def find_orphans(store: Store, known_loops: Collection[str]) -> dict[str, list[s
 def make_stderr_logger(
     store: Store, name: str, run_id: str, *, secrets: Collection[str] = ()
 ) -> Callable[[bytes], str]:
-    """Return a stateful line callback redacting exact secrets & multi-line PEM blocks before persisting to `logs/`."""
+    """Return a line callback redacting forwarded secrets before persisting to `logs/` (PEM filtered by `proc.drain_tail`)."""
     secret_tuple = tuple(sorted({s for s in secrets if len(s) >= 8}, key=len, reverse=True))
-    pem = PemFilter(_PEM_MAX_BYTES)
-
-    def _on_line(raw_line: bytes) -> str:
-        action = pem.filter_line(raw_line.decode("utf-8", "replace"), len(raw_line))
-        if action == "drop":
-            return ""
-        if action == "redact":
-            append_loop_stderr(store, name, run_id, b"[REDACTED]", secrets=secret_tuple)
-            return "[REDACTED]"
-        return append_loop_stderr(store, name, run_id, raw_line, secrets=secret_tuple)
-
-    return _on_line
+    return lambda raw_line: append_loop_stderr(store, name, run_id, raw_line, secrets=secret_tuple)
 
 
 def append_loop_stderr(store: Store, name: str, run_id: str, raw_line: bytes, *, secrets: Collection[str] = ()) -> str:
@@ -413,6 +401,45 @@ def _find_dedupe_hits(
     return existing_by_key
 
 
+def _plan_events(
+    prev_seq: int,
+    existing_by_key: dict[tuple[str, str, str], dict[str, Any]],
+    prepared: Sequence[tuple[str, str, Any, bool]],
+    *,
+    ts: str,
+) -> tuple[list[dict[str, Any]], list[bytes], int, bool]:
+    """Plan new/deduped events in one shared pass used by both locked writes and `dry_run` previews."""
+    seq = prev_seq
+    batch_bytes: list[bytes] = []
+    written_events: list[dict[str, Any]] = []
+    deduped_any = False
+    for src, ev_k, safe_data, dedupe in prepared:
+        if dedupe and isinstance(safe_data, dict) and isinstance(msg_id := safe_data.get("id"), str) and msg_id:
+            dk = (src, ev_k, msg_id)
+            if dk in existing_by_key:
+                deduped_any = True
+                if len(prepared) == 1 and existing_by_key[dk]:
+                    return [existing_by_key[dk]], [], seq, True
+                continue
+            existing_by_key[dk] = {}
+        seq += 1
+        event = {
+            "seq": seq,
+            "id": f"evt-{seq}-{os.urandom(4).hex()}",
+            "time": ts,
+            "kind": ev_k,
+            "source": src,
+            "data": safe_data,
+        }
+        if len(raw_line := encode(event)) > MAX_EVENT_LINE:
+            raise Error(f".bf/state/{EVENTS_FILE}: event exceeds {MAX_EVENT_LINE} bytes")
+        batch_bytes.append(raw_line)
+        written_events.append(event)
+        if dedupe and isinstance(safe_data, dict) and isinstance(msg_id := safe_data.get("id"), str) and msg_id:
+            existing_by_key[(src, ev_k, msg_id)] = event
+    return written_events, batch_bytes, seq, deduped_any
+
+
 def _append_mixed_events_locked(
     st_dir: Store,
     prepared: Sequence[tuple[str, str, Any, bool]],
@@ -431,38 +458,12 @@ def _append_mixed_events_locked(
         prev_seq = _event_tail(st_dir)[0]
 
     existing_by_key = _find_dedupe_hits(st_dir, wanted_keys) if wanted_keys else {}
-
-    seq = prev_seq
-    batch_bytes: list[bytes] = []
-    written_events: list[dict[str, Any]] = []
-    deduped_any = False
-    for src, ev_k, safe_data, dedupe in prepared:
-        if dedupe and isinstance(safe_data, dict) and isinstance(msg_id := safe_data.get("id"), str) and msg_id:
-            dk = (src, ev_k, msg_id)
-            if dk in existing_by_key:
-                deduped_any = True
-                continue
-            existing_by_key[dk] = {}
-        seq += 1
-        eid = f"evt-{seq}-{os.urandom(4).hex()}"
-        event = {"seq": seq, "id": eid, "time": ts, "kind": ev_k, "source": src, "data": safe_data}
-        if len(raw_line := encode(event)) > MAX_EVENT_LINE:
-            raise Error(f".bf/state/{EVENTS_FILE}: event exceeds {MAX_EVENT_LINE} bytes")
-        batch_bytes.append(raw_line)
-        written_events.append(event)
-        if dedupe and isinstance(safe_data, dict) and isinstance(msg_id := safe_data.get("id"), str) and msg_id:
-            existing_by_key[(src, ev_k, msg_id)] = event
-
+    written_events, batch_bytes, seq, deduped_any = _plan_events(prev_seq, existing_by_key, prepared, ts=ts)
     if batch_bytes:
         size_after = append_regular(
             st_dir, EVENTS_FILE, b"".join(batch_bytes), label=f".bf/state/{EVENTS_FILE}", durable=True
         )
         _maybe_compact_events(st_dir, size_after, prev_seq, seq)
-    elif len(prepared) == 1 and deduped_any:
-        src, ev_k, safe_data, _ = prepared[0]
-        existing_hit = existing_by_key.get((src, ev_k, str(safe_data.get("id"))))
-        if existing_hit:
-            return [existing_hit], True
     return written_events, deduped_any
 
 
@@ -491,14 +492,13 @@ def _append_events_batch(
             )
         prepared.append((source, ev_k, models.redact_value(dict(payload), secrets=secrets), dedupe))
 
-    wanted_keys: set[tuple[str, str, str]] = {
-        (src, ev_k, sd["id"])
-        for src, ev_k, sd, ded in prepared
-        if ded and isinstance(sd, dict) and isinstance(sd.get("id"), str) and sd["id"]
-    }
     ts = now_utc(now)
-
     if dry_run:
+        wanted_keys: set[tuple[str, str, str]] = {
+            (src, ev_k, sd["id"])
+            for src, ev_k, sd, ded in prepared
+            if ded and isinstance(sd, dict) and isinstance(sd.get("id"), str) and sd["id"]
+        }
         prev_seq = 0
         existing_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
         with suppress(FileNotFoundError):
@@ -506,30 +506,7 @@ def _append_events_batch(
             prev_seq = _event_tail(st_dir)[0]
             if wanted_keys:
                 existing_by_key = _find_dedupe_hits(st_dir, wanted_keys)
-        seq = prev_seq
-        preview: list[dict[str, Any]] = []
-        deduped_any = False
-        for src, ev_k, safe_data, ded in prepared:
-            if ded and isinstance(safe_data, dict) and isinstance(msg_id := safe_data.get("id"), str) and msg_id:
-                dk = (src, ev_k, msg_id)
-                if dk in existing_by_key:
-                    deduped_any = True
-                    if len(prepared) == 1 and existing_by_key[dk]:
-                        return [existing_by_key[dk]], True
-                    continue
-                existing_by_key[dk] = {}
-            seq += 1
-            event = {
-                "seq": seq,
-                "id": f"evt-{seq}-{os.urandom(4).hex()}",
-                "time": ts,
-                "kind": ev_k,
-                "source": src,
-                "data": safe_data,
-            }
-            if len(encode(event)) > MAX_EVENT_LINE:
-                raise Error(f".bf/state/{EVENTS_FILE}: event exceeds {MAX_EVENT_LINE} bytes")
-            preview.append(event)
+        preview, _, _, deduped_any = _plan_events(prev_seq, existing_by_key, prepared, ts=ts)
         return preview, deduped_any
 
     with writer(store):
@@ -686,40 +663,34 @@ def schedule_event(
     if len(raw_line) > MAX_EVENT_LINE:
         raise Error(f".bf/state/{TIMERS_FILE}: timer event exceeds {MAX_EVENT_LINE} bytes")
 
-    def _find_dup(existing: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
-        if not dedupe_id:
-            return None
-        for item in existing:
-            if (
-                item.get("kind") == kind
-                and item.get("source") == source
-                and isinstance(item_d := item.get("data"), dict)
-                and item_d.get("id") == dedupe_id
-            ):
-                return item
-        return None
-
-    if dry_run:
-        existing = read_timers(store)
-        if hit := _find_dup(existing):
-            return hit, True
-        if len(existing) >= MAX_TIMERS:
-            raise Error(f".bf/state/{TIMERS_FILE}: exceeds {MAX_TIMERS} pending timers")
-        return timer, False
-
-    with writer(store):
-        st_dir = _state_dir(store)
-        existing = _read_timers_dir(st_dir)
-        if hit := _find_dup(existing):
-            return hit, True
+    def _plan(existing: Sequence[dict[str, Any]]) -> tuple[dict[str, Any], bytes | None]:
+        if dedupe_id:
+            for item in existing:
+                if (
+                    item.get("kind") == kind
+                    and item.get("source") == source
+                    and isinstance(item_d := item.get("data"), dict)
+                    and item_d.get("id") == dedupe_id
+                ):
+                    return item, None
         if len(existing) >= MAX_TIMERS:
             raise Error(f".bf/state/{TIMERS_FILE}: exceeds {MAX_TIMERS} pending timers")
         updated = sorted([*existing, timer], key=_timer_sort_key)
         blob = b"".join(encode(item) for item in updated)
         if len(blob) > MAX_TIMERS_FILE:
             raise Error(f".bf/state/{TIMERS_FILE}: exceeds {MAX_TIMERS_FILE} bytes")
-        st_dir.write(TIMERS_FILE, blob, mode=0o600, durable=True)
-    return timer, False
+        return timer, blob
+
+    if dry_run:
+        res_tmr, blob = _plan(read_timers(store))
+        return res_tmr, blob is None
+
+    with writer(store):
+        st_dir = _state_dir(store)
+        res_tmr, blob = _plan(_read_timers_dir(st_dir))
+        if blob is not None:
+            st_dir.write(TIMERS_FILE, blob, mode=0o600, durable=True)
+    return res_tmr, blob is None
 
 
 def promote_due_timers(store: Store, *, now: datetime | None = None) -> list[dict[str, Any]]:

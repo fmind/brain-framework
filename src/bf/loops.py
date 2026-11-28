@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -34,6 +35,16 @@ MAX_EVENT_RETRIES = 3
 
 type _Events = tuple[list[dict[str, Any]], int, int]
 type _DueItem = tuple[LoopSpec, str, list[dict[str, Any]], int | None, tuple[ScheduleSpec, ...], int]
+
+
+@dataclass(frozen=True)
+class DueSnapshot:
+    """Reusable state/event snapshot loaded during `select_due_with_snapshot` to avoid duplicate `bf watch` disk scans."""
+
+    states: dict[str, dict[str, Any]]
+    latest_seq: int | None
+    events: _Events | None
+    cached_floor: int = 0
 
 
 def _resolve_dot_path(obj: Mapping[str, Any], path: str) -> tuple[bool, Any]:
@@ -380,7 +391,7 @@ def execute_one_loop(
             **ing,
         }
 
-    with loop_lock(store, loop.name, wait=0.0):
+    with loop_lock(store, loop.name, wait=0.05):
         t0, summary, err_msg, err_txt = time.monotonic(), {}, "", ""
         recorded = False
         mark_unit_state(store, loop.name, status="running", updated=started_iso, last_start=started_iso)
@@ -506,7 +517,7 @@ def record_failure(
     return {"loop": name, "run": pre_id, "status": "failed", "exit_code": 1, "duration_ms": 0, "error": msg}
 
 
-def select_due_loops(
+def select_due_with_snapshot(
     store: Store,
     cfg: Config,
     *,
@@ -514,8 +525,8 @@ def select_due_loops(
     exclude: frozenset[str] = frozenset(),
     dry_run: bool = False,
     now: datetime | None = None,
-) -> tuple[list[_DueItem], list[dict[str, Any]]]:
-    """Promote due timers and select enabled unpaused due/event cycle loops, prioritizing events ahead of schedules."""
+) -> tuple[list[_DueItem], list[dict[str, Any]], DueSnapshot]:
+    """Promote due timers, select enabled due/event cycle loops, and return the loaded state/event snapshot."""
     if not dry_run:
         with suppress(Error, OSError):
             state.promote_due_timers(store, now=sched_now)
@@ -527,10 +538,11 @@ def select_due_loops(
     advance_cursors: list[tuple[str, int, int]] = []
     init_cursors: list[tuple[str, int]] = []
     failures: list[dict[str, Any]] = []
+    loaded_states: dict[str, dict[str, Any]] = {}
 
     loaded_loops: list[tuple[str, LoopSpec, bool, dict[str, Any]]] = []
     for name, loop in cfg.loops.items():
-        if not loop.enabled or loop.daemon or name in exclude or not (loop.schedules or loop.events):
+        if not loop.enabled or name in exclude:
             continue
         if loop.events and latest_disk_seq is None:
             first_disk_seq, latest_disk_seq = state.event_bounds(store)
@@ -538,11 +550,14 @@ def select_due_loops(
         try:
             state_doc = load_unit_state(store, name, default_event_seq=latest_disk_seq if loop.events else 0)
         except Error as err:
+            if loop.daemon or not (loop.schedules or loop.events):
+                continue
             if dry_run:
                 raise
             failures.append(record_failure(store, name, "state", err, now=now))
             continue
-        if state.is_paused(state_doc, sched_now):
+        loaded_states[name] = state_doc
+        if loop.daemon or not (loop.schedules or loop.events) or state.is_paused(state_doc, sched_now):
             continue
         loaded_loops.append((name, loop, has_state, state_doc))
 
@@ -606,9 +621,9 @@ def select_due_loops(
             for init_name, init_seq in init_cursors:
                 if not state.has_unit_state(store, init_name):
                     anchor = min(init_seq, disk_seq)
-                    save_unit_state(
-                        store, state.default_unit_state(init_name, event_seq=anchor), locked=True, durable=False
-                    )
+                    new_doc = state.default_unit_state(init_name, event_seq=anchor)
+                    save_unit_state(store, new_doc, locked=True, durable=False)
+                    loaded_states[init_name] = new_doc
                     wrote_any = True
             for cursor_name, cursor_seq, gap_missed in advance_cursors:
                 with suppress(Error):
@@ -616,12 +631,9 @@ def select_due_loops(
                     stored = state.int_field(latest, "event_seq")
                     if (nxt := _merge_cursor(stored, cursor_seq, disk_seq)) != stored:
                         next_pending = state.int_field(latest, "pending_events_missed") + gap_missed
-                        save_unit_state(
-                            store,
-                            {**latest, "event_seq": nxt, "pending_events_missed": next_pending},
-                            locked=True,
-                            durable=False,
-                        )
+                        upd_doc = {**latest, "event_seq": nxt, "pending_events_missed": next_pending}
+                        save_unit_state(store, upd_doc, locked=True, durable=False)
+                        loaded_states[cursor_name] = upd_doc
                         wrote_any = True
                         if gap_missed > 0:
                             missed_logs.append((cursor_name, gap_missed))
@@ -638,7 +650,27 @@ def select_due_loops(
                         events_missed=gap_n,
                     ),
                 )
-    return [*selected_events, *selected_scheds], failures
+    return (
+        [*selected_events, *selected_scheds],
+        failures,
+        DueSnapshot(loaded_states, latest_disk_seq, cached_events, cached_floor),
+    )
+
+
+def select_due_loops(
+    store: Store,
+    cfg: Config,
+    *,
+    sched_now: datetime,
+    exclude: frozenset[str] = frozenset(),
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> tuple[list[_DueItem], list[dict[str, Any]]]:
+    """Promote due timers and select enabled unpaused due/event cycle loops, prioritizing events ahead of schedules."""
+    selected, failures, _ = select_due_with_snapshot(
+        store, cfg, sched_now=sched_now, exclude=exclude, dry_run=dry_run, now=now
+    )
+    return selected, failures
 
 
 def _expand_loop_selectors(

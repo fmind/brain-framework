@@ -23,8 +23,16 @@ AI coding agents lose context between sessions, while proprietary memory platfor
 
 - **Plain files, zero lock-in**: YAML for config, Markdown for humans, canonical JSONL for records. Inspect or query your data anytime with `git`, `rg`, `jq`, or DuckDB.
 - **Instant offline BM25 search**: A strictly disposable SQLite FTS5 cache ranks authored notes ahead of raw memories, resolves aliases and backlinks, and never mutates disk on read-only commands.
-- **Least-privilege automation loops**: Run deterministic collectors (`sensors/`), maintenance jobs (`routines/`), coding agents (`agents/`), and stream daemons (`when: daemon`) with per-loop secret allowlists (`env_from:`) and headless `bf watch`.
+- **Least-privilege automation loops**: Run deterministic collectors (`sensors/`), maintenance jobs (`routines/`), coding agents (`agents/`), and stream daemons (`when: daemon`) with per-loop secret allowlists (`env_from:`) and live `bf watch` supervision.
 - **Lean, model-agnostic core**: Three runtime dependencies (`jsonschema`, `markdown-it-py`, `pyyaml`) on Python 3.12+, zero built-in LLMs, and zero global config.
+
+<p align="center">
+  <img
+    src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/demo.gif"
+    alt="Brain Framework terminal demo: ranked BM25 query, backlinks, staleness review, and failure-first live bf watch"
+    width="100%"
+  />
+</p>
 
 ## Quick start
 
@@ -87,8 +95,17 @@ my-brain/
 
 - [**Authoring**](https://fmind.github.io/brain-framework/authoring/): Write CommonMark Markdown with YAML frontmatter, `#id` heading anchors, checklist tasks, typed links (`{rel=cites}`), universal refs (`source:id`, `bf://`), and optional `schemas/<source>.json` validation.
 - [**Retrieval**](https://fmind.github.io/brain-framework/retrieval/): Search ranked BM25 hits and `--links-to` backlinks with `bf query`, resolve notes, `#anchor` sections, or aliases with `bf read`, track freshness with `bf review`, and run `rg`, `jq`, or DuckDB directly on `memories/*.jsonl`.
-- [**Operations**](https://fmind.github.io/brain-framework/operations/): Declare explicit `loops:` with named `concurrency:` pools, per-loop `env_from:` secrets, trailing-edge `debounce:`, delayed `bf emit --in|--at` wakeups, live `bf pause`/`bf resume`, and headless `bf watch` supervision.
+- [**Operations**](https://fmind.github.io/brain-framework/operations/): Declare explicit `loops:` with named `concurrency:` pools, per-loop `env_from:` secrets, trailing-edge `debounce:`, delayed `bf emit --in|--at` wakeups, live `bf pause`/`bf resume`, and `bf watch` supervision.
 - [**Reference**](https://fmind.github.io/brain-framework/reference/): Full CLI contract (strict read-only vs write commands), exit codes, `BF_*` env vars, `{{...}}` placeholders, `bf.yaml` config, and published Draft 2020-12 JSON Schemas (`bf schema`).
+
+### Start small, automate when ready
+
+You only need the core commands on day 1; add sensors and `bf watch` only when you want automated collection:
+
+| Tier              | Goal                                                                      | Commands                                                                |
+| ----------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| **1. Core**       | Write Markdown notes, validate links, and search offline                  | `init`, `build`, `query`, `read`, `review`, `check`, `status`, `schema` |
+| **2. Automation** | Ingest tool feeds, trigger routines or agents, and supervise continuously | `ingest`, `run`, `watch`, `emit`, `events`, `pause`, `resume`, `state`  |
 
 ## Works with your AI coding harness
 
@@ -96,7 +113,17 @@ my-brain/
 
 - **Inside a brain**: Agents read the repo's `AGENTS.md`, orient with `bf status` and `bf review`, edit Markdown notes directly, and verify with `bf build && bf check` plus `evals/`.
 - **From any repository**: Set `export BF_BRAIN=~/brain` and install the optional [`/bf` skill](https://github.com/fmind/brain-framework/blob/main/skills/bf/SKILL.md) (`npx skills add fmind/brain-framework --skill bf`) so your harness queries and updates your brain on demand.
-- **Always-on supervision**: Run `bf watch` headlessly under `systemd --user` or `launchd` and monitor live in any terminal with `watch -n 2 bf status --format text`.
+- **Always-on supervision**: Run `bf watch` in a terminal for a live failure-first loop table (or headlessly as `jsonl` under `systemd --user` / `launchd`), and attach anytime with read-only `bf status --watch`.
+
+Typical coding-agent session from another repository (`BF_BRAIN=~/brain`):
+
+```bash
+bf status --format text                          # Orient: counts, health, unbuilt notes
+bf query "launch decision" --kind note           # Ranked BM25 search across notes
+bf read "projects/new-website.md#decision"       # Load only the cited #anchor section
+bf query --links-to "workspace:brief"            # Follow backlinks to linked records
+bf review --format text                          # Spot stale notes with newer evidence
+```
 
 ## Design principles
 

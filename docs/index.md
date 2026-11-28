@@ -44,6 +44,15 @@ my-brain/
 | **Hosted / MCP memory servers** | Opaque or remote DB with auto-extracted facts | Always-on MCP tool schemas + model-mediated recall          | Extra service/API keys; inferred facts harder to audit in Git    |
 | **Generic vector RAG**          | Chunked embeddings in a vector index          | Semantic similarity over opaque chunks                      | Requires embedding models/pipelines; weak provenance & backlinks |
 
+## Start small, automate when ready
+
+Adopt `bf` in two tiers without changing your folder layout:
+
+| Tier              | Goal                                                                   | Commands                                                                |
+| ----------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| **1. Core**       | Author Markdown notes, validate links, and search offline              | `init`, `build`, `query`, `read`, `review`, `check`, `status`, `schema` |
+| **2. Automation** | Ingest tool feeds, trigger loops or agents, and supervise continuously | `ingest`, `run`, `watch`, `emit`, `events`, `pause`, `resume`, `state`  |
+
 ## Guides
 
 | Guide                                 | What you will learn                                                                                           |

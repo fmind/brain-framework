@@ -589,10 +589,11 @@ def is_loop_locked(store: Store, name: str) -> bool:
         os.close(fd)
 
 
-def try_unlink_loop_lock(store: Store, lock_name: str) -> bool:
-    """Safely unlink an orphaned `.bf/locks/loop-*.lock` only if non-blocking `LOCK_EX` succeeds on the live inode."""
+def try_unlink_loop_lock(store: Store, lock_name: str, *, wait: float = 0.05) -> bool:
+    """Safely unlink an orphaned `.bf/locks/loop-*.lock` only if `LOCK_EX` succeeds on the live inode."""
     if not (lock_name.startswith("loop-") and lock_name.endswith(".lock")):
         return False
+    deadline = time.monotonic() + max(0.0, wait)
     try:
         locks_dir = private_dir(store, ".bf", "locks", create=False)
         with locks_dir.parent(lock_name) as (parent, leaf):
@@ -601,10 +602,14 @@ def try_unlink_loop_lock(store: Store, lock_name: str) -> bool:
                 st_fd = os.fstat(fd)
                 if not stat.S_ISREG(st_fd.st_mode) or st_fd.st_uid != os.geteuid():
                     return False
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    return False
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            return False
+                        time.sleep(0.01)
                 st_path = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
                 if (st_fd.st_dev, st_fd.st_ino) != (st_path.st_dev, st_path.st_ino):
                     return False

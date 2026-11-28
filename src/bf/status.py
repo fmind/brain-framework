@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import math
+import os
+import shutil
+import signal
 import sqlite3
+import sys
+import threading
 from contextlib import closing, suppress
 from datetime import UTC, datetime
 from typing import Any
 
-from bf import config, cron, engine, index, markdown, models, records, state
+from bf import config, cron, engine, index, markdown, models, records, render, state
 from bf.config import LoopSpec
-from bf.models import Error, decode
+from bf.models import Error, InputError, decode
 from bf.storage import Store, is_loop_locked, private_dir
 
 
@@ -145,6 +151,7 @@ def status_summary(
     cfg: config.Config | None = None,
     check_inside: bool = True,
     now: datetime | None = None,
+    cached_corpus: tuple[dict[str, int], list[str], bool, list[str], list[str]] | None = None,
 ) -> dict[str, Any]:
     """Strictly read-only brain counts, failing/degraded/overdue/crashed attention loops, orphans, and optional `loops`."""
     try:
@@ -299,10 +306,15 @@ def status_summary(
                 **{key: val for key, val in optional.items() if val},
             }
 
-    scale_warnings: list[str] = []
-    counts, unbuilt_notes, index_stale = corpus_counts(
-        store, active_cfg, scale_warnings=scale_warnings, problems=problems
-    )
+    if cached_corpus is not None:
+        raw_counts, unbuilt_notes, index_stale, scale_warnings, corpus_probs = cached_corpus
+        counts = {**raw_counts, "loops": len(active_cfg.loops)}
+        problems.extend(corpus_probs)
+    else:
+        scale_warnings = []
+        counts, unbuilt_notes, index_stale = corpus_counts(
+            store, active_cfg, scale_warnings=scale_warnings, problems=problems
+        )
 
     inside = _is_inside(store, check_inside)
 
@@ -329,3 +341,67 @@ def status_summary(
     if include_loops:
         out["loops"] = loops_out
     return out
+
+
+def validate_watch_interval(interval: float) -> float:
+    """Validate `--watch` refresh interval in seconds (`0.5..3600`), raising `InputError` otherwise."""
+    if not math.isfinite(interval) or interval < 0.5 or interval > 3600.0:
+        raise InputError("--watch interval must be between 0.5 and 3600 seconds")
+    return interval
+
+
+def watch_status(
+    store: Store,
+    *,
+    interval: float = 2.0,
+    color: bool | None = None,
+    stop_event: threading.Event | None = None,
+) -> int:
+    """Strictly read-only live failure-first status screen refreshing every `interval` seconds without raw TTY."""
+    validate_watch_interval(interval)
+    is_tty = sys.stdout.isatty()
+    term_dumb = os.environ.get("TERM", "") in {"", "dumb"}
+    use_alt = is_tty and not term_dumb
+    use_color = (use_alt and not os.environ.get("NO_COLOR", "")) if color is None else color
+    stop_ev = stop_event if stop_event is not None else threading.Event()
+    term_hit = False
+    on_main = threading.current_thread() is threading.main_thread()
+
+    def _on_term(*_a: object) -> None:
+        nonlocal term_hit
+        term_hit = True
+        stop_ev.set()
+
+    prev_term = signal.signal(signal.SIGTERM, _on_term) if on_main else None
+    footer = f"Refreshing every {interval:g}s · Ctrl+C to stop"
+    try:
+        if use_alt:
+            sys.stdout.buffer.write(render.ALT_ENTER)
+            sys.stdout.buffer.flush()
+        while True:
+            cols, rows = shutil.get_terminal_size((100, 30)) if use_alt else (None, None)
+            frame = render.format_live_screen(
+                status_summary(store, include_loops=True),
+                footer=footer,
+                color=use_color,
+                cols=cols,
+                rows=rows,
+            )
+            sys.stdout.buffer.write(render.paint_frame(frame, tty=use_alt))
+            sys.stdout.buffer.flush()
+            if stop_ev.wait(interval) or term_hit:
+                break
+    except KeyboardInterrupt:
+        return 130
+    except BrokenPipeError:
+        models.silence_broken_pipe()
+        return 0
+    finally:
+        if use_alt:
+            with suppress(OSError):
+                sys.stdout.buffer.write(render.ALT_EXIT)
+                sys.stdout.buffer.flush()
+        if on_main and prev_term is not None:
+            with suppress(OSError, ValueError):
+                signal.signal(signal.SIGTERM, prev_term)
+    return 143 if term_hit else 0

@@ -13,13 +13,13 @@ Retrieval preserves a **strict read/write boundary**: `bf status`, `bf review`, 
 
 ```bash
 bf status --format text
-watch -n 2 bf status --format text
+bf status --watch
 bf status --loops
 bf status --check
 bf review --limit 10 --format text
 ```
 
-- `bf status` gives a compact JSON or text health overview (counts, attention loops, orphans, unbuilt notes, and optional `--loops` details; see [Reference](reference.md#cli-commands) for the exact fields). It exits `0` whenever readable; pass `--check` to exit `1` when `"ok": false` (use `bf check` in CI to fail on schema/note/link issues), or combine `--format text` with `watch -n 2 bf status --format text`.
+- `bf status` gives a compact JSON or text health overview (counts, attention loops, orphans, unbuilt notes, and optional `--loops` details; see [Reference](reference.md#cli-commands) for the exact fields). It exits `0` whenever readable; pass `--check` to exit `1` when `"ok": false` (use `bf check` in CI to fail on schema/note/link issues), or pass `--watch [SECONDS]` (default `2`) for a read-only live-refreshing failure-first table in any terminal.
 - `bf review` uses `.bf/cache/index.sqlite3` (with JSONL fallback) to report bounded `stale` notes (`newer_evidence` capped to 5 items per note with `newer_count`, `due`, `future_updated`) and `total_tasks_open` (`--limit 20` default, `--all`, `--format json|jsonl|text`).
 
 ## 2. Read uniformly (`bf read`)

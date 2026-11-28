@@ -110,7 +110,6 @@ def test_cli_commands_and_exit_codes(
         ["query", "--jq", ".", "--brain", str(target)],
         ["query", "--sql", "SELECT 1", "--brain", str(target)],
         ["read", "concepts/welcome.md", "--raw", "--brain", str(target)],
-        ["status", "--watch", "--brain", str(target)],
         ["status", "--all", "--brain", str(target)],
         ["watch", "--format", "tui", "--brain", str(target)],
         ["run", "--prune", "--brain", str(target)],
@@ -638,7 +637,15 @@ def test_cli_schema_state_formats_and_sigterm_exit_143(
         assert cli.run(empty_argv) == 2
         capsys.readouterr()
 
-    # `bf state` missing action includes `--help` hint; `bf state reset --help` uses `event_seq` (no internal fn name)!
+    # `bf --help` groups commands into Core and Automation tiers; `bf state` missing action includes `--help` hint.
+    with pytest.raises(SystemExit) as root_help:
+        cli.run(["--help"])
+    assert root_help.value.code == 0
+    root_help_txt = capsys.readouterr().out
+    assert "Start small (core):" in root_help_txt
+    assert "Automate when ready (sensors, loops & supervision):" in root_help_txt
+    assert root_help_txt.index("init") < root_help_txt.index("ingest")
+
     assert cli.run(["state"]) == 2
     assert "bf state --help" in capsys.readouterr().err
     with pytest.raises(SystemExit) as st_help:
@@ -801,6 +808,10 @@ def test_cli_validation_order_jsonl_hints_and_broken_status(
             ["query", "--brain", target_brain],
             ["query", "--limit", "0", "--brain", target_brain],
             ["query", "--tag", "  ", "--brain", target_brain],
+            ["status", "--watch", "0.1", "--brain", target_brain],
+            ["status", "--watch", "3601", "--brain", target_brain],
+            ["status", "--watch", "--format", "json", "--brain", target_brain],
+            ["status", "--watch", "--check", "--brain", target_brain],
         ):
             assert cli.run(argv) == 2, argv
             capsys.readouterr()
@@ -843,3 +854,29 @@ def test_cli_validation_order_jsonl_hints_and_broken_status(
     assert "unbuilt notes in concepts" in rev_err
     assert cli.run(["read", "#only-fragment", "--brain", str(qb)]) == 2
     capsys.readouterr()
+
+    # `bf status --watch [SECONDS]` and `bf watch --format live` dispatch with exact interval/format arguments!
+    from bf import status as status_mod
+    from bf import watch as watch_mod
+
+    seen_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def _fake_watch_status(st: Store, *, interval: float = 2.0, color: bool | None = None) -> int:
+        seen_calls.append(("status", (st.root.name, interval, isinstance(color, bool))))
+        return 0
+
+    def _fake_serve(st: Store, *, fmt: str = "auto") -> dict[str, int]:
+        seen_calls.append(("watch", (st.root.name, fmt)))
+        return {"exit_code": 0}
+
+    with monkeypatch.context() as mp_w:
+        mp_w.setattr(status_mod, "watch_status", _fake_watch_status)
+        mp_w.setattr(watch_mod, "serve", _fake_serve)
+        assert cli.run(["status", "--watch", "--brain", str(qb)]) == 0
+        assert cli.run(["status", "--watch", "1.5", "--format", "text", "--brain", str(qb)]) == 0
+        assert cli.run(["watch", "--format", "live", "--brain", str(qb)]) == 0
+    assert seen_calls == [
+        ("status", ("qhint", 2.0, True)),
+        ("status", ("qhint", 1.5, True)),
+        ("watch", ("qhint", "live")),
+    ]

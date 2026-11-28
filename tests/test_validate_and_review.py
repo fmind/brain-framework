@@ -1078,3 +1078,172 @@ def test_authored_note_links_to_tracked_repo_files_validate_while_bf_read_stays_
     assert "broken link to MISSING.md" in joined
     assert "missing anchor #nope in README.md" in joined
     assert "broken link to LINK.md" in joined
+
+
+def test_live_screen_sorting_clipping_and_painting() -> None:
+    """Default status sort pins failures/attention first; live screen clips ANSI/rows and paints TTY frames."""
+    now_dt = datetime(2026, 11, 27, 12, 0, 0, tzinfo=UTC)
+    summary = {
+        "brain": "ops-brain",
+        "ok": False,
+        "counts": {"notes": 12, "memories": 340, "sources": 4, "loops": 16},
+        "events_seq": 99,
+        "attention": [{"name": "fail-high", "reason": "failed"}],
+        "loops": {
+            "idle-b": {"enabled": True, "status": "idle", "trigger": "manual"},
+            "idle-a": {"enabled": True, "status": "idle", "trigger": "manual"},
+            "stop-1": {"enabled": True, "status": "stopped", "trigger": "daemon"},
+            "pause-1": {
+                "enabled": True,
+                "status": "paused",
+                "paused": True,
+                "paused_until": "2026-11-27T13:00:00Z",
+                "trigger": "every 1h",
+            },
+            "ok-old": {
+                "enabled": True,
+                "status": "ok",
+                "last_end": "2026-11-27T09:00:00Z",
+                "trigger": "every 1h",
+            },
+            "ok-new": {
+                "enabled": True,
+                "status": "ok",
+                "last_end": "2026-11-27T11:55:00Z",
+                "trigger": "every 15m",
+            },
+            "run-old": {
+                "enabled": True,
+                "status": "running",
+                "last_start": "2026-11-27T11:30:00Z",
+                "trigger": "daemon",
+            },
+            "run-new": {
+                "enabled": True,
+                "status": "running",
+                "last_start": "2026-11-27T11:59:00Z",
+                "trigger": "every 5m",
+            },
+            "over-1": {"enabled": True, "status": "ok", "overdue": True, "trigger": "every 1h"},
+            "deg-1": {"enabled": True, "status": "ok", "degraded": True, "trigger": "every 1h"},
+            "lag-low": {"enabled": True, "status": "ok", "events_missed": 2, "trigger": "on a"},
+            "lag-high": {"enabled": True, "status": "ok", "events_missed": 10, "trigger": "on b"},
+            "crash-1": {"enabled": True, "status": "stopped", "crashed": True, "trigger": "daemon"},
+            "fail-old": {
+                "enabled": True,
+                "status": "failed",
+                "consecutive_failures": 2,
+                "last_end": "2026-11-27T10:00:00Z",
+                "error": "old timeout",
+                "trigger": "every 5m",
+            },
+            "fail-new": {
+                "enabled": True,
+                "status": "failed",
+                "consecutive_failures": 2,
+                "last_end": "2026-11-27T11:05:00Z",
+                "error": "new auth error",
+                "trigger": "every 5m",
+            },
+            "fail-high": {
+                "enabled": True,
+                "status": "failed",
+                "consecutive_failures": 5,
+                "last_end": "2026-11-27T11:00:00Z",
+                "error": "repeated failure",
+                "trigger": "every 5m",
+            },
+        },
+    }
+    rendered = render.format_status_text(summary, color=False, now=now_dt)
+    expected_order = [
+        "fail-high",
+        "fail-new",
+        "fail-old",
+        "crash-1",
+        "lag-high",
+        "lag-low",
+        "deg-1",
+        "over-1",
+        "run-new",
+        "run-old",
+        "ok-new",
+        "ok-old",
+        "pause-1",
+        "stop-1",
+        "idle-a",
+        "idle-b",
+    ]
+    positions = [rendered.index(f"  {name} ") for name in expected_order]
+    assert positions == sorted(positions), rendered
+    assert render._neg_epoch("") == 0.0  # noqa: SLF001
+    assert render._neg_epoch("not-a-date") == 0.0  # noqa: SLF001
+
+    # `_clip_ansi`: short/narrow pass-through, plain clip, mid-SGR clip with reset, post-SGR clip.
+    assert render._clip_ansi("abcdef", 3) == "abcdef"  # noqa: SLF001
+    assert render._clip_ansi("short", 10) == "short"  # noqa: SLF001
+    assert render._clip_ansi("abcdefghij", 6) == "abcde…"  # noqa: SLF001
+    clipped_mid = render._clip_ansi("  \033[31;1mfailed\033[0m  detail", 7)  # noqa: SLF001
+    assert clipped_mid.endswith("…\033[0m")
+    assert len(render._ANSI_SGR.sub("", clipped_mid)) == 7  # noqa: SLF001
+    clipped_post = render._clip_ansi("  \033[31;1mfailed\033[0m  long detail here", 15)  # noqa: SLF001
+    assert clipped_post.endswith("…\033[0m")
+    assert len(render._ANSI_SGR.sub("", clipped_post)) == 15  # noqa: SLF001
+
+    # `format_live_screen`: normal with recent (max 5) + footer, partial recent trim, zero spare recent, tight row truncation, narrow cols.
+    recent_6 = [f"12:00:0{i}  ok  loop-{i}" for i in range(6)]
+    full_screen = render.format_live_screen(
+        summary,
+        recent=recent_6,
+        footer="Watching ops-brain (4w) · Ctrl+C to stop",
+        color=True,
+        now=now_dt,
+    )
+    assert "RECENT" in full_screen
+    assert "loop-0" not in full_screen
+    assert "loop-5" in full_screen
+    assert "\033[90m" in full_screen
+    assert "Watching ops-brain" in full_screen
+
+    small_summary = {
+        "brain": "mini",
+        "ok": True,
+        "counts": {"notes": 1, "memories": 0, "sources": 0, "loops": 1},
+        "events_seq": 0,
+        "loops": {"a": {"enabled": True, "status": "ok", "trigger": "manual"}},
+    }
+    # Body = 5 lines, footer = 2 lines, RECENT header = 2 lines -> rows=10 leaves spare=1 recent line!
+    trimmed_recent = render.format_live_screen(
+        small_summary, recent=recent_6, footer="foot", color=False, now=now_dt, rows=10
+    )
+    assert "RECENT" in trimmed_recent
+    assert "loop-5" in trimmed_recent
+    assert "loop-4" not in trimmed_recent
+    # rows=8 leaves spare=-1 -> drops RECENT cleanly without truncating body!
+    no_recent = render.format_live_screen(
+        small_summary, recent=recent_6, footer="foot", color=False, now=now_dt, rows=8
+    )
+    assert "RECENT" not in no_recent
+    assert "… (+" not in no_recent
+
+    # Tight rows on 16-loop summary truncates body with explicit overflow hint and clamps cols!
+    tight_screen = render.format_live_screen(
+        summary,
+        recent=recent_6,
+        footer="Watching ops-brain · Ctrl+C to stop",
+        color=True,
+        now=now_dt,
+        cols=36,
+        rows=10,
+    )
+    tight_lines = tight_screen.rstrip("\n").splitlines()
+    assert len(tight_lines) == 10
+    assert "RECENT" not in tight_screen
+    assert "more; run bf status" in tight_screen
+    assert all(len(render._ANSI_SGR.sub("", ln)) <= 36 for ln in tight_lines)  # noqa: SLF001
+
+    # `paint_frame`: plain UTF-8 on non-TTY vs `\033[H` + `\033[K` + `\033[J` on TTY.
+    plain_b = render.paint_frame("line1\nline2\n", tty=False)
+    assert plain_b == b"line1\nline2\n"
+    tty_b = render.paint_frame("line1\nline2\n", tty=True)
+    assert tty_b == b"\033[Hline1\033[K\nline2\033[K\033[J"

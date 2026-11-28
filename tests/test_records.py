@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 from datetime import UTC, datetime
@@ -10,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from bf import engine, index, models, records, schemas, state
+from bf import engine, index, models, proc, records, schemas, state
 from bf.models import FORMAT, MAX_BATCH, NOTES_FILE, Error, InputError, decode
 from bf.storage import Store, private_dir
 
@@ -581,29 +582,35 @@ def test_ingest_atomic_jsonl_write_url_records_and_stderr_logger_edges(brain: St
         "concepts/welcome.md": "note",
     }
 
-    # `make_stderr_logger` handles blank lines, malformed JSON, JSON lists, single-line & multi-line PEM blocks, and exact secrets.
+    # `proc.drain_tail` + `make_stderr_logger` handle blank lines, malformed JSON, JSON lists, single/multi-line PEM blocks, and exact secrets.
     cb = state.make_stderr_logger(brain, "demo", "run-1", secrets=("exact_forwarded_secret_42",))
     dash = b"-" * 5
     pem_hdr = b"".join((dash, b"BEGIN ", b"PRIVATE KEY", dash))
     pem_ftr = b"".join((dash, b"END ", b"PRIVATE KEY", dash))
     pem_rsa_hdr = b"".join((dash, b"BEGIN ", b"RSA PRIVATE KEY", dash))
     pem_rsa_ftr = b"".join((dash, b"END ", b"RSA PRIVATE KEY", dash))
-    for raw in (
-        b"   \n",
-        b"{not-json\n",
-        b"[1,2]\n",
-        b'{"message":"safe exact_forwarded_secret_42","time_iso":"2026-11-20T00:00:00Z","loop":"spoof","run":"spoof"}\n',
-        pem_hdr + b"SECRET1" + pem_ftr + b"\n",
-        pem_rsa_hdr + b"\n",
-        b"LINE2_SECRET\n",
-        pem_rsa_ftr + b" " + pem_hdr + b"\n",
-        b"CHAINED_SECRET\n",
-        pem_ftr + b"\n",
-        pem_hdr + b"\n",
-        b"X" * 17000 + b"\n",
-        b"after pem ok\n",
-    ):
-        cb(raw)
+    stderr_stream = b"".join(
+        (
+            b"   \n",
+            b"{not-json\n",
+            b"[1,2]\n",
+            b'{"message":"safe exact_forwarded_secret_42","time_iso":"2026-11-20T00:00:00Z","loop":"spoof","run":"spoof"}\n',
+            pem_hdr + b"SECRET1" + pem_ftr + b"\n",
+            pem_rsa_hdr + b"\n",
+            b"LINE2_SECRET\n",
+            pem_rsa_ftr + b" " + pem_hdr + b"\n",
+            b"CHAINED_SECRET\n",
+            pem_ftr + b"\n",
+            pem_hdr + b"\n",
+            b"X" * 17000 + b"\n",
+            b"after pem ok\n",
+        )
+    )
+    t_pem, snap_pem = proc.drain_tail(
+        io.BytesIO(stderr_stream), 4096, on_line=cb, secrets=("exact_forwarded_secret_42",)
+    )
+    t_pem.join(timeout=5)
+    assert "after pem ok" in snap_pem()
     logged = brain.read("logs/demo.jsonl").decode()
     for hidden in ("SECRET1", "LINE2_SECRET", "CHAINED_SECRET", "exact_forwarded_secret_42"):
         assert hidden not in logged

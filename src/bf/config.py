@@ -220,27 +220,21 @@ def load_dotenv(store: Store) -> dict[str, str]:
 
 
 def normalize_brain_script(tok: str, brain_root: Path | None = None) -> str:
-    """Return confined brain-relative script path without `.`/`..` segments when `tok` targets a file inside the brain, else `''`."""
-    raw = tok
-    if raw.startswith("{{brain}}/"):
-        raw = raw.removeprefix("{{brain}}/")
-    elif raw.startswith("/"):
-        if brain_root is None:
-            return ""
-        root_str = brain_root.as_posix().rstrip("/")
-        if not raw.startswith(f"{root_str}/"):
-            return ""
-        raw = raw[len(root_str) + 1 :]
-    elif raw.startswith("./"):
-        raw = raw[2:]
-    elif "/" not in raw or raw.startswith("-"):
+    """Return confined brain-relative script path without `.`/`..` segments when `tok` targets a brain file, else `''`."""
+    if not tok or tok.startswith(("-", "http://", "https://", "bf://", "~", "{{state}}")):
         return ""
-    if not raw or any(seg in {"", ".", ".."} for seg in raw.split("/")):
+    raw = _extract_loop_script_target(tok, brain_root)
+    if raw is None and "/" in tok and not tok.startswith("/"):
+        raw = tok
+    if not raw:
         return ""
-    return raw
+    try:
+        return "/".join(relative(raw))
+    except Error:
+        return ""
 
 
-def _extract_loop_script_target(tok: str, brain_root: Path, *, loop_name: str = "") -> str | None:
+def _extract_loop_script_target(tok: str, brain_root: Path | None, *, loop_name: str = "") -> str | None:
     """Return raw brain-relative path string if `tok` targets a path inside the brain (single-pass, non-recursive)."""
     if tok in {"{{brain}}", "{{state}}"}:
         return None
@@ -249,10 +243,10 @@ def _extract_loop_script_target(tok: str, brain_root: Path, *, loop_name: str = 
     if tok.startswith("{{state}}/"):
         relative(tok.removeprefix("{{state}}/"))
         return None
-    root_str = brain_root.as_posix().rstrip("/")
-    state_dir = f"{root_str}/.bf/state/{loop_name}" if loop_name else ""
+    root_str = brain_root.as_posix().rstrip("/") if brain_root is not None else ""
+    state_dir = f"{root_str}/.bf/state/{loop_name}" if (root_str and loop_name) else ""
     cur = tok
-    if "{{" in cur and "}}" in cur:
+    if root_str and "{{" in cur and "}}" in cur:
         preview = {"brain": root_str, "loop": loop_name, "state": state_dir or f"{root_str}/.bf/state/loop"}
         cur = models.PLACEHOLDER_RE.sub(lambda m: preview.get(m[1], m[0]), cur)
         if cur in {root_str, preview["state"]}:
@@ -264,6 +258,8 @@ def _extract_loop_script_target(tok: str, brain_root: Path, *, loop_name: str = 
     if cur.startswith("./"):
         return cur[2:]
     if cur.startswith("/"):
+        if not root_str:
+            return None
         if cur.startswith(f"{root_str}/"):
             return cur[len(root_str) + 1 :]
         collapsed = "/" + cur.lstrip("/")
@@ -278,7 +274,7 @@ def _extract_loop_script_target(tok: str, brain_root: Path, *, loop_name: str = 
         if head in brain_dirs or norm_head in brain_dirs:
             return cur
         segs = cur.split("/")
-        if "." in segs or ".." in segs:
+        if root_str and ("." in segs or ".." in segs):
             joined = posixpath.normpath(posixpath.join(root_str, cur))
             if joined == root_str or joined.startswith(f"{root_str}/"):
                 return cur

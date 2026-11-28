@@ -524,6 +524,7 @@ def sync_source_delta(
     removed_refs: Iterable[str],
     total_count: int,
     reserved: frozenset[str] | None = None,
+    meta_updates: Mapping[str, str] | None = None,
     locked: bool = False,
 ) -> None:
     """Delta-update changed/removed rows and shifted file offsets without re-tokenizing unchanged rows in FTS5."""
@@ -532,13 +533,15 @@ def sync_source_delta(
 
     def _run(con: sqlite3.Connection, rebuilt: bool) -> None:
         if rebuilt:
-            _sync_all_in_tx(con, store, brain_name, reserved=reserved)
+            _sync_all_in_tx(con, store, brain_name, reserved=reserved, meta_updates=meta_updates)
             return
         with con:
             try:
                 st = store.stat(rel_path)
             except FileNotFoundError:
                 _delete_bucket_rows(con, bucket_key)
+                if meta_updates:
+                    con.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", list(meta_updates.items()))
                 return
             row = con.execute(
                 "SELECT mtime_ns, size_bytes, ino FROM sources WHERE source = ?", (bucket_key,)
@@ -549,6 +552,8 @@ def sync_source_delta(
             if not in_sync:
                 with closing(_iter_jsonl_offsets(store, rel_path)) as rows:
                     _insert_records(con, bucket_key, rel_path, st, rows, brain_name)
+                if meta_updates:
+                    con.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", list(meta_updates.items()))
                 return
             changed_refs = {str(obj.get("ref") or "") for _, _, obj in changed_list if obj.get("ref")}
             del_refs = sorted({*rem_list, *changed_refs})
@@ -583,6 +588,8 @@ def sync_source_delta(
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (bucket_key, rel_path, st.st_mtime_ns, st.st_size, st.st_ino, total_count, now_utc()),
             )
+            if meta_updates:
+                con.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", list(meta_updates.items()))
 
     _with_rw_retry(store, brain_name, _run, locked=locked)
 
